@@ -206,7 +206,7 @@ const ROUTES = [
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
   [/^\/needs$/,                                 ()       => { setState("needs"); renderNeeds(); }],
-  [/^\/workspace\/([^/]+)\/logo$/,               ([w])    => renderWsLogo(decodeURIComponent(w))],
+  [/^\/workspace\/([^/]+)\/logo$/,               ([w])    => { let id = w; try { id = decodeURIComponent(w); } catch {} renderWsLogo(id); }],
   [/^\/project\/new$/,                          ()       => renderNewProject()],
   [/^\/project\/([^/]+)\/edit$/,                ([s])    => renderEditProject(s)],
   [/^\/project\/([^/]+)\/delete$/,              ([s])    => renderConfirmDeleteProject(s)],
