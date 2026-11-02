@@ -60,7 +60,8 @@ class Base(unittest.TestCase):
                   mock.patch.object(server.db, "db_exists", return_value=True),
                   mock.patch.object(server.db, "tree", return_value=[]),  # never the real os.db
                   mock.patch.object(server.composio, "catalog", return_value=CAT),
-                  mock.patch.object(server.composio, "accounts", return_value=ACCTS)):
+                  mock.patch.object(server.composio, "accounts", return_value=ACCTS),
+                  mock.patch.object(server.composio, "check_key", return_value=None)):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.tmp.cleanup)
@@ -212,6 +213,31 @@ class IntegrationsApi(Base):
             self.assertEqual(request("GET", "/api/integrations/logo/..%2Fx")[0], 404)
             lg.assert_not_called()
         self.assertEqual(request("GET", "/api/integrations/logo/gmail", cookie=False)[0], 403)
+
+    def test_refused_key_is_not_saved(self):
+        refused = composio.ComposioError("Composio HTTP 401", status=401)
+        with mock.patch.object(server.composio, "check_key", side_effect=refused) as ck:
+            code, data, _, raw = request("POST", "/api/integrations/key", {"api_key": " ck_wrongkind123 "})
+        ck.assert_called_once_with("ck_wrongkind123", self.root)
+        self.assertEqual(code, 400)
+        self.assertIn("project API key", data["error"])
+        self.assertNotIn(b"ck_wrongkind123", raw)
+        self.assertIsNone(integrations.api_key(self.root))
+
+    def test_key_saved_when_composio_unreachable(self):
+        down = composio.ComposioError("Composio unreachable (URLError)")
+        with mock.patch.object(server.composio, "check_key", side_effect=down):
+            self.assertEqual(request("POST", "/api/integrations/key", {"api_key": "ak_x"})[0], 200)
+        self.assertEqual(integrations.api_key(self.root), "ak_x")
+
+    def test_view_says_when_saved_key_is_refused(self):
+        integrations.set_key("ak_x", self.root)
+        with mock.patch.object(server.composio, "accounts",
+                               side_effect=composio.ComposioError("Composio HTTP 401", status=401)):
+            data = request("GET", "/api/integrations")[1]
+        self.assertIn("project API key", data["key_refused"])
+        with mock.patch.object(server.composio, "accounts", side_effect=composio.ComposioError("down")):
+            self.assertNotIn("key_refused", request("GET", "/api/integrations")[1])
 
     def test_key_requires_origin(self):
         self.assertEqual(request("POST", "/api/integrations/key", {"api_key": "ak_x"}, origin=False)[0], 403)
