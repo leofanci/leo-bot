@@ -1219,9 +1219,9 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
     priority = (fields.get("priority") or "").strip()
     existing_ids: set[str] = set()
     if path.exists():
-        for _sec, _chk, _title, fields in _parse_activities(path.read_text(encoding="utf-8")):
-            if fields.get("id"):
-                existing_ids.add(str(fields["id"]))
+        for _sec, _chk, _title, row in _parse_activities(path.read_text(encoding="utf-8")):
+            if row.get("id"):
+                existing_ids.add(str(row["id"]))
     act_id = next_activity_id(existing_ids)
     parts = [title, f"id: {act_id}", f"entity: {entity}"]
     if date:

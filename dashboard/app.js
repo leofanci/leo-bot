@@ -2207,7 +2207,7 @@ async function renderTimeline({ scope = null, head = null } = {}){
   $("#main").querySelectorAll("[data-ev]").forEach(el=>el.onclick=e=>{ e.stopPropagation(); try{showEventPopup(JSON.parse(el.dataset.ev));}catch(_){} });
   $("#main").querySelectorAll("[data-ev]").forEach(el=>el.onkeydown=e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); el.click(); } });
   $("#main").querySelectorAll(".day[data-day]").forEach(el=>el.ondblclick=()=>navigate(`#/day/${el.dataset.day}`));
-  $("#newActBtn").onclick=()=>navigate("#/activity/new");
+  $("#newActBtn").onclick=()=>navigate("#/activity/new",{date:iso(new Date()),from:"calendar"});
   $("#newMsBtn").onclick=()=>navigate("#/milestone/new");
 }
 
@@ -2322,7 +2322,7 @@ async function renderDay(dateStr){
     <div class="scroll"><p class="lead">${items.length} item${items.length===1?"":"s"} scheduled for this day.</p>${body}</div>`;
   $("#dayBack").onclick=()=>navigate("#/calendar");
   $("#dayBackBtn").onclick=()=>navigate("#/calendar");
-  $("#dayAct").onclick=()=>navigate("#/activity/new");
+  $("#dayAct").onclick=()=>navigate("#/activity/new",{date:dateStr,from:"calendar"});
   items.forEach((r,i)=>{ const el=$("#main").querySelector(`[data-day-row="${i}"]`); if(el) el.onclick=dayItemGo(r); });
 }
 const PROFILE_SCROLL = {};  // slug -> last scrollTop of the post list, so back-navigation restores position
@@ -3506,11 +3506,13 @@ async function renderNewActivity(extras={}){
   const pick=extras.entity||(_WS!=="hq"?_WS:"");
   const projectOpts=_TREE.map(p=>`<option value="${esc(p.slug)}"${pick===p.slug?" selected":""}>${esc(p.name)}</option>`).join("");
   const typeOpts=["task","meeting","call","review","launch"].map(t=>`<option>${t}</option>`).join("");
-  $("#main").innerHTML=`${pageHeader("New activity","Operations",`<button class="btn primary" id="na-save">Add activity</button>`)}
+  // From the calendar a date is required (an undated activity lives in Operations, not on the calendar).
+  const onCal=extras.from==="calendar";
+  $("#main").innerHTML=`${pageHeader("New activity",onCal?"Calendar":"Operations",`<button class="btn primary" id="na-save">Add activity</button>`)}
     <div class="scroll"><div class="fpage">
       ${flabel("Title")}${finput("title","",'placeholder="e.g. Record intro video" required')}
       ${flabel("Project")}<select name="entity">${projectOpts}</select>
-      ${flabel("Date")}${finput("date",extras.date||"",'type="date"')}
+      ${flabel(onCal?"Date":"Date (leave empty for an undated task in Operations)")}${finput("date",extras.date||"",onCal?'type="date" required':'type="date"')}
       ${flabel("Start time (optional)")}${finput("time","",'type="time"')}
       ${flabel("End time")}${finput("time_end","",'type="time"')}
       <p class="field-help">One calendar across every workspace. Bots can't book over a timed slot; you can, with a warning.</p>
@@ -3518,10 +3520,11 @@ async function renderNewActivity(extras={}){
     </div></div>`;
   document.getElementById("na-save").onclick=async()=>{
     const data=formVals($("#main"));
+    if(onCal&&!data.date) return toast("✗ Pick a date to put it on the calendar");
     try{
       const out=await jpost("/api/activity/new",data);
       const clash=(out.overlaps||[]).map(o=>`${o.time}-${o.time_end} ${o.title} (${o.entity})`).join(", ");
-      toast(clash?`Added ✓ · overlaps ${clash}`:"Activity added ✓"); history.back();
+      toast(clash?`Added ✓ · overlaps ${clash}`:data.date?"Activity added ✓":"Added to Operations ✓ (no date, so not on the calendar)"); history.back();
     }
     catch(e){ toast("✗ "+e.message); }
   };
