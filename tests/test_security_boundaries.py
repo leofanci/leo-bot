@@ -131,6 +131,13 @@ class HttpBoundaryTest(unittest.TestCase):
         h._send_rpc(200, {"ok": 1}, "m-1")
         self.assertIn(("mcp-session-id", "m-1"), sent)
 
+    def test_no_http_route_stops_the_server(self):
+        # Quit lives in the app's menu bar (Cmd+Q, which SIGTERMs the server);
+        # no page or bot can stop the server over HTTP.
+        here = Path(server.__file__).parent
+        for name in ("server.py", "app.js"):
+            self.assertNotIn("/api/quit", (here / name).read_text(encoding="utf-8"))
+
     def test_json_body_limit_is_enforced_before_read(self):
         h = self.handler({"Content-Length": str(server.MAX_JSON_BYTES + 1)})
         h.rfile = io.BytesIO(b"")

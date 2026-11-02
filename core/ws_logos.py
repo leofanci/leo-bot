@@ -36,9 +36,18 @@ def sniff(data):
     return None
 
 
+def _path(ws, ext, root=None):
+    """`team/logos/<ws>.<ext>`, refused unless it stays inside that folder."""
+    base = os.path.realpath(_dir(root))
+    full = os.path.normpath(os.path.join(base, f"{_ws(ws)}.{ext}"))
+    if not full.startswith(base + os.sep):
+        raise ValueError("invalid workspace")
+    return Path(full)
+
+
 def _find(ws, root=None):
     for ext in TYPES:
-        p = _dir(root) / f"{ws}.{ext}"
+        p = _path(ws, ext, root)
         if p.is_file():
             return p, ext
     return None, None
@@ -62,7 +71,7 @@ def save(ws, data, root=None):
             f.write(data)
         os.chmod(tmp, 0o600)
         remove(ws, root)
-        os.replace(tmp, d / f"{ws}.{ext}")
+        os.replace(tmp, _path(ws, ext, root))
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -90,6 +99,5 @@ def version(ws, root=None):
 
 
 def remove(ws, root=None):
-    ws = _ws(ws)
     for ext in TYPES:
-        (_dir(root) / f"{ws}.{ext}").unlink(missing_ok=True)
+        _path(ws, ext, root).unlink(missing_ok=True)
