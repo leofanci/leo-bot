@@ -249,12 +249,19 @@ class Client(unittest.TestCase):
         with self.patched():
             composio.check_key("ak_candidate", self.root)
         self.assertEqual(self.sent[0].get_header("X-api-key"), "ak_candidate")
-        err = urllib.error.HTTPError(composio.BASE, 401, "no", Message(), io.BytesIO(b""))
+        body = b'{"error":{"message":"Invalid API key: ak_**ther","slug":"APIKey_InvalidAPIKey","status":401}}'
+        err = urllib.error.HTTPError(composio.BASE, 401, "no", Message(), io.BytesIO(body))
         self.replies = [err]
         with self.patched(), self.assertRaises(composio.ComposioError) as cm:
-            composio.check_key("ck_other", self.root)
+            composio.check_key("ak_other", self.root)
         self.assertTrue(composio.is_refused(cm.exception))
-        self.assertNotIn("ck_other", str(cm.exception))
+        self.assertEqual(cm.exception.reason, "APIKey_InvalidAPIKey")
+        self.assertNotIn("ther", str(cm.exception) + cm.exception.reason)  # the masked key never travels
+
+    def test_reason_only_a_plain_slug(self):
+        self.assertIsNone(composio._reason(b'{"error":{"slug":"x y<script>"}}'))
+        self.assertIsNone(composio._reason(b"<html>"))
+        self.assertIsNone(composio._reason(b'{"error":"flat"}'))
 
     def test_link_session_is_never_a_workspace(self):
         with self.patched(), self.assertRaises(composio.ComposioError):

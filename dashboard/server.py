@@ -2169,7 +2169,8 @@ class Handler(BaseHTTPRequestHandler):
                         composio.check_key(key.strip(), ROOT)
                     except composio.ComposioError as e:
                         if composio.is_refused(e):
-                            raise ValueError(BAD_KEY) from None
+                            self.log_message("integrations key refused status=%s reason=%s", e.status, e.reason or "-")
+                            raise ValueError(f"{BAD_KEY} (Composio: {e.reason or e.status})") from None
                         # Composio unreachable: keep it, the panel says it cannot reach Composio.
                     integrations.set_key(key, ROOT)
                     composio._CATALOG.clear()  # the old key's project

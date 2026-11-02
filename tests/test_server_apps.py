@@ -215,12 +215,13 @@ class IntegrationsApi(Base):
         self.assertEqual(request("GET", "/api/integrations/logo/gmail", cookie=False)[0], 403)
 
     def test_refused_key_is_not_saved(self):
-        refused = composio.ComposioError("Composio HTTP 401", status=401)
+        refused = composio.ComposioError("Composio HTTP 401", status=401, reason="APIKey_InvalidAPIKey")
         with mock.patch.object(server.composio, "check_key", side_effect=refused) as ck:
             code, data, _, raw = request("POST", "/api/integrations/key", {"api_key": " ak_otherproject1 "})
         ck.assert_called_once_with("ak_otherproject1", self.root)
         self.assertEqual(code, 400)
         self.assertIn("project API key", data["error"])
+        self.assertIn("(Composio: APIKey_InvalidAPIKey)", data["error"])
         self.assertNotIn(b"ak_otherproject1", raw)
         self.assertIsNone(integrations.api_key(self.root))
 
