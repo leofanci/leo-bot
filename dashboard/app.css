@@ -729,4 +729,5 @@ summary.pf-head::-webkit-details-marker{display:none}
 .integ-ws label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
 .integ-disc{margin-left:auto}
 .integ-bad{color:var(--ui-color-danger)}
+.integ-key-hint{flex-basis:100%;color:var(--ui-color-text-muted);font-size:var(--ui-type-caption)}
 .integ-disc.danger{color:var(--ui-color-danger);border-color:var(--ui-color-danger)}
