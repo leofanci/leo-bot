@@ -232,3 +232,11 @@ def test_no_hardcoded_colors_in_rendered_markup():
     styles = re.findall(r'style="([^"]*)"', js)
     colored = [s for s in styles if re.search(r"#[0-9A-Fa-f]{3,6}\b|rgba?\(", s)]
     assert colored == [], colored[:5]
+
+
+def test_workspace_logo_fills_its_tile():
+    # No global button reset: without padding:0 the browser's default button
+    # padding shrinks the logo and the dark rail shows around it.
+    css = (DASHBOARD / "app.css").read_text(encoding="utf-8")
+    assert ".ws-btn.has-logo,.ws-btn.ws-mark{padding:0;overflow:hidden}" in css
+    assert ".ws-btn img{width:100%;height:100%" in css
