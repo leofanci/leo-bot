@@ -62,7 +62,7 @@ def list_meta():
         except (OSError, json.JSONDecodeError):
             continue
         out.append({k: rec.get(k) for k in ("id", "title", "created", "updated", "turn_count",
-                                            "room", "scope", "tokens", "cost")})
+                                            "room", "scope", "tokens", "cost", "by")})
     return sorted(out, key=lambda r: r.get("updated") or 0, reverse=True)
 
 
@@ -87,20 +87,25 @@ def append_note(chat_id, bot, text):
     save(rec)
 
 
-def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None):
+def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
+                by=None, by_name=None):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
     `meta` = extra reply fields (approval id, tokens, cost) — tokens/cost also
     add up on the chat so threads show their running cost; `extra` = more
-    assistant messages of the same turn (teammates pulled in, lead follow-up)."""
+    assistant messages of the same turn (teammates pulled in, lead follow-up);
+    `by`/`by_name` = an invited person who wrote `user_msg` (core.people id);
+    none = the owner. A new thread remembers its starter in `by`."""
     rec = load(sess.session_id) or {
         "id": sess.session_id,
         "title": title_from(user_msg),
         "created": time.time(),
         "messages": [],
+        **({"by": by} if by else {}),
     }
-    rec["messages"].append({"role": "user", "content": user_msg})
+    rec["messages"].append({"role": "user", "content": user_msg,
+                            **({"by": by, "by_name": by_name} if by else {})})
     if reply:
         msg = {"role": "assistant", "content": reply, "ts": time.time()}
         if bot:

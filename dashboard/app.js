@@ -249,8 +249,11 @@ const ROUTES = [
   [/^\/milestone\/new$/,                        ()       => renderNewMilestone(_NAV_EXTRAS)],
   [/^\/milestone\/([^/]+)\/edit$/,              ([id])   => renderEditMilestone(id, _NAV_EXTRAS)],
 ];
+// What an invited person may open: Team and channel forms (admins).
+const PERSON_ROUTE = /^\/(team|room\/new|room\/[a-z0-9-]+\/edit)$/;
 function parseRoute(hash){
-  const path = (hash||"#/calendar").replace(/^#/,"").replace(/\?.*$/,"");
+  let path = (hash||"#/calendar").replace(/^#/,"").replace(/\?.*$/,"");
+  if (isPerson() && !PERSON_ROUTE.test(path)) path = "/team";
   ROUTE_SEQ += 1;
   $("#main")?.classList.toggle("form-view", /\/(?:new|edit|setup|add|log|generate|revise)$/.test(path));
   CURRENT_POST = null;
@@ -270,7 +273,7 @@ function parseRoute(hash){
   navigate(defaultRoute());
 }
 // Where the canvas opens when nothing else is asked for.
-const defaultRoute = () => (wsProject() ? "#/content" : "#/calendar");
+const defaultRoute = () => (isPerson() ? "#/team" : wsProject() ? "#/content" : "#/calendar");
 function setState(view, extra={}){
   STATE={view, project:extra.project||null, section:extra.section||null,
          profile:extra.profile||null, channelGuidelines:extra.channelGuidelines||null,
@@ -373,7 +376,22 @@ function saveOpen(){
 // A node is open if it's in the OPEN set (persisted). Navigate actions below
 // auto-add the parent to OPEN so navigating to a child keeps it visible,
 // but the user can still manually collapse the parent afterwards.
-async function boot(){ await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+// Who is signed in: the owner, or a person invited into some workspaces
+// (core.people). A person sees only their workspaces' Team and channels.
+let _ME = { kind: "owner", id: "ceo", name: "Owner", ws: {} };
+const isPerson = () => _ME.kind === "person";
+const myRole = (ws = _WS) => isPerson() ? (_ME.ws || {})[ws] || null : "owner";
+async function loadMe(){
+  try { _ME = await api("/api/me"); } catch {}
+  document.body.classList.toggle("as-person", isPerson());
+  const joined = new URLSearchParams(location.search).get("joined");
+  if (joined) {
+    _WS = joined;
+    try { localStorage.setItem("wsId", joined); } catch {}
+    history.replaceState(null, "", location.pathname + location.hash);
+  }
+}
+async function boot(){ await loadMe(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -458,9 +476,9 @@ function renderWsBar(){
     const url = wsLogoUrl(w);
     return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
   }).join("")
-    + `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`;
+    + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`);
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
-  $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
+  if ($("#new-project-btn")) $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
 }
 
 async function switchWorkspace(ws){
@@ -472,7 +490,7 @@ async function switchWorkspace(ws){
   await window.ChatRooms?.enterWorkspace();
   if (changed) {   // new company: back to the conversation, canvas closed but ready on its content
     window.ChatRooms?.hideCanvas();
-    navigate(ws === "hq" ? "#/calendar" : "#/content");
+    navigate(isPerson() ? "#/team" : ws === "hq" ? "#/calendar" : "#/content");
   }
 }
 window.Workspaces = { switchTo: switchWorkspace, current: () => _WS };
@@ -496,47 +514,51 @@ document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenus()
 
 async function renderRail(){
   const skillsP = _SKILLS.length ? Promise.resolve(_SKILLS) : api("/api/skills-index").catch(() => []);
-  const regP = api("/api/id-registry").then(d => { IdReg.load(d); }).catch(() => IdReg.load({}));
+  const person = isPerson();   // an invited person: no ids, tree, posts or approvals (owner-only)
+  const regP = person ? Promise.resolve(IdReg.load({})) : api("/api/id-registry").then(d => { IdReg.load(d); }).catch(() => IdReg.load({}));
   const schP = ensureSchemas();
   const wsP = api("/api/workspaces").then(d => d.workspaces || []).catch(() => [{ id: "hq", name: "HQ", kind: "hq" }]);
-  [_TREE, _POSTS, _SKILLS, , , _WORKSPACES] = await Promise.all([api("/api/tree"), api("/api/posts-index").catch(() => []), skillsP, regP, schP, wsP]);
-  if (!wsById(_WS)) { _WS = "hq"; try { localStorage.setItem("wsId", "hq"); } catch {} }
+  [_TREE, _POSTS, _SKILLS, , , _WORKSPACES] = await Promise.all([
+    person ? [] : api("/api/tree"), person ? [] : api("/api/posts-index").catch(() => []),
+    skillsP, regP, schP, wsP]);
+  if (!wsById(_WS)) { _WS = _WORKSPACES[0]?.id || "hq"; try { localStorage.setItem("wsId", _WS); } catch {} }
   const q = `?ws=${encodeURIComponent(_WS)}`;
   [_BOTS, _ROOMS, _APPROVALS] = await Promise.all([
     api("/api/bots" + q).then(d => d.bots || []).catch(() => []),
     api("/api/rooms" + q).then(d => d.rooms || []).catch(() => []),
-    api("/api/approvals" + q).then(d => d.approvals || []).catch(() => []),
+    person ? [] : api("/api/approvals" + q).then(d => d.approvals || []).catch(() => []),
   ]);
   renderWsBar();
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
   const roomRow = r => {
     const b = r.kind === "dm" ? botById(r.lead) : null;
-    return `<a class="room-row" data-room="${esc(r.id)}">${b ? botAvatar(b) : icon("hash")}<span class="rail-name">${esc(r.name)}</span></a>`;
+    return `<a class="room-row" data-room="${esc(r.id)}"${r.private ? ' title="Private channel"' : ""}>${b ? botAvatar(b) : icon(r.private ? "lock" : "hash")}<span class="rail-name">${esc(r.name)}</span></a>`;
   };
   const section = (key, title, rows, add = "") => `<section class="rail-sec${RAIL_COLLAPSED.has(key) ? " collapsed" : ""}">
       <div class="rail-hdr"><button class="rail-tg" data-rail-tg="${key}" aria-expanded="${!RAIL_COLLAPSED.has(key)}">${icon("chevron")}<span>${title}</span></button>${add}</div>
       <nav class="nav${key === "time" ? "" : " rooms"}">${rows}</nav>
     </section>`;
   const channels = _ROOMS.filter(r => r.kind !== "dm");
+  const manage = myRole() === "owner" || myRole() === "admin";
   const dms = _ROOMS.filter(r => r.kind === "dm");
   $("#rail").innerHTML = `
     <div class="rail-head">
-      <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false">${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b>${icon("chevron")}</button>
+      <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false"${person ? " disabled" : ""}>${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b>${icon("chevron")}</button>
       <button class="rail-ib" id="rail-compose" title="New thread" aria-label="New thread">${icon("compose")}</button>
       <div class="menu brand-menu" id="brand-menu" role="menu"><a id="ws-logo-btn">Workspace logo</a></div>
     </div>
     <div class="rail-scroll">
       <nav class="nav">
-        <a data-view="approvals">${icon("inbox")}<span class="rail-name">Approvals</span>${_APPROVALS.length ? `<span class="badge">${_APPROVALS.length}</span>` : ""}</a>
+        ${person ? "" : `<a data-view="approvals">${icon("inbox")}<span class="rail-name">Approvals</span>${_APPROVALS.length ? `<span class="badge">${_APPROVALS.length}</span>` : ""}</a>
         ${w.id !== "hq" ? `<a data-view="files">${icon("folder")}<span class="rail-name">Files</span></a>` : ""}
-        <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>
+        <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>`}
         <a data-view="team">${icon("users")}<span class="rail-name">Team</span><span class="count">${_BOTS.filter(b => b.active).length}</span></a>
-        ${w.id === "hq" ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>` : ""}
+        ${w.id === "hq" && !person ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>` : ""}
       </nav>
       ${section("channels", "Channels", channels.map(roomRow).join(""),
-        `<button class="add-btn" id="new-room-btn" title="New channel" aria-label="New channel">${icon("plus")}</button>`)}
+        manage ? `<button class="add-btn" id="new-room-btn" title="New channel" aria-label="New channel">${icon("plus")}</button>` : "")}
       ${section("teammates", "Teammates", dms.map(roomRow).join(""))}
-      ${section("time", "Your time", `
+      ${person ? "" : section("time", "Your time", `
         <a data-view="needs">${icon("sun")}<span class="rail-name">Today</span></a>
         <a data-view="calendar">${icon("calendar")}<span class="rail-name">Calendar</span></a>
         <a data-view="operations">${icon("list-check")}<span class="rail-name">Operations</span></a>`)}
@@ -554,7 +576,7 @@ async function renderRail(){
     b.closest(".rail-sec").classList.toggle("collapsed", RAIL_COLLAPSED.has(key));
     b.setAttribute("aria-expanded", String(!RAIL_COLLAPSED.has(key)));
   });
-  $("#new-room-btn").onclick = e => { e.stopPropagation(); closeNav(); window.ChatRooms?.showCanvas(); navigate("#/room/new"); };
+  if ($("#new-room-btn")) $("#new-room-btn").onclick = e => { e.stopPropagation(); closeNav(); window.ChatRooms?.showCanvas(); navigate("#/room/new"); };
   $("#rail-compose").onclick = () => { closeNav(); window.ChatRooms?.newThread(); };
   $("#brand-btn").onclick = e => { e.stopPropagation(); toggleMenu(e.currentTarget, $("#brand-menu")); };
   $("#ws-logo-btn").onclick = () => { closeMenus(); closeNav(); window.ChatRooms?.showCanvas(); navigate(`#/workspace/${encodeURIComponent(w.id)}/logo`); };
@@ -593,7 +615,7 @@ const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === 
 function canvasCrumbs(){
   const p = wsProject();
   const path = (location.hash || "").replace(/^#/, "").replace(/\?.*$/, "");
-  const crumbs = [[p ? p.name : "HQ", defaultRoute()]];
+  const crumbs = [[p ? p.name : (wsById(_WS)?.name || "HQ"), defaultRoute()]];
   const prof = STATE.profile || CURRENT_PROFILE_SLUG;
   let m;
   if (/^\/content\b/.test(path)) crumbs.push(["Content", "#/content"]);
@@ -850,15 +872,22 @@ async function renderFiles(){
 }
 
 // Topic channel form (canvas): name, project, members, lead.
-function renderRoomForm(name){
+async function renderRoomForm(name){
+  const stillOn = routeGuard();
   const existing = name ? roomById(`${_WS}/t-${name}`) : null;
   if (name && !existing) { $("#main").innerHTML = `<div class="scroll"><div class="empty">Channel not found.</div></div>`; return; }
+  if (!["owner", "admin"].includes(myRole())) { $("#main").innerHTML = `<div class="scroll"><div class="empty">Only admins manage channels.</div></div>`; return; }
+  // Private channels: only the owner and the people ticked here see them.
+  const folks = _WS === "hq" ? [] : ((await api(`/api/people?ws=${encodeURIComponent(_WS)}`).catch(() => null))?.people || [])
+    .filter(r => r.role !== "owner");
+  if (!stillOn()) return;
+  const inRoom = new Set(existing?.people || []);
   const active = _BOTS.filter(b => b.active);
   const members = new Set(existing ? existing.members : []);
   const lead = existing ? existing.lead : "cos";
   $("#main").innerHTML = `
     ${pageHeader(existing ? `#${existing.name}` : "New channel", "Back", existing ? `<button class="btn" id="room-del">Delete channel</button>` : "")}
-    <div class="scroll"><form class="form" id="room-form" style="max-width:560px">
+    <div class="scroll"><form class="form fpage" id="room-form">
       ${flabel("Name")}${finput("name", existing?.name || "", 'placeholder="acme-launch" autocomplete="off"')}
       <p class="field-help">Lowercase, digits, dashes. Shows as #name.</p>
       <p class="field-help">In ${esc(wsById(_WS)?.name || "HQ")}: bots here only see this workspace.</p>
@@ -866,6 +895,9 @@ function renderRoomForm(name){
       <div class="chan-checks">${active.map(b => `<label class="chan-check"><input type="checkbox" class="room-member" value="${esc(b.id)}"${members.has(b.id) ? " checked" : ""}> ${botAvatar(b)} ${esc(b.name)}</label>`).join("")}</div>
       ${flabel("Lead")}${fsel("lead", active.map(b => [b.id, b.name]), lead)}
       <p class="field-help">Untagged messages go to the lead only. Members answer when you @tag them.</p>
+      ${_WS === "hq" ? "" : `<label class="chan-check"><input type="checkbox" id="room-private"${existing?.private ? " checked" : ""}> Private channel</label>
+      <p class="field-help">Everyone in the workspace sees an open channel. A private one shows only to the owner and the people ticked below.</p>
+      <div class="chan-checks" id="room-people"${existing?.private ? "" : " hidden"}>${folks.length ? folks.map(r => `<label class="chan-check"><input type="checkbox" class="room-person" value="${esc(r.id)}"${inRoom.has(r.id) || r.you ? " checked" : ""}${r.you ? " disabled" : ""}> ${esc(r.name)} <small>${esc(r.role)}</small></label>`).join("") : `<p class="field-help">Nobody invited yet. Invite people on the Team page.</p>`}</div>`}
       <div style="margin-top:18px;display:flex;gap:8px"><button class="btn primary" type="submit">${existing ? "Save" : "Create channel"}</button></div>
     </form></div>`;
   $("#room-form").onsubmit = async e => {
@@ -873,13 +905,18 @@ function renderRoomForm(name){
     const v = formVals($("#room-form"));
     const picked = [...document.querySelectorAll(".room-member:checked")].map(i => i.value);
     try {
-      const out = await jpost("/api/rooms", { ws: _WS, name: v.name, members: picked, lead: v.lead, replace: existing?.name || null });
+      const priv = !!$("#room-private")?.checked;
+      const ppl = [...document.querySelectorAll(".room-person:checked")].map(i => i.value);
+      const out = await jpost("/api/rooms", { ws: _WS, name: v.name, members: picked, lead: v.lead, replace: existing?.name || null,
+                                              private: priv, people: priv ? ppl : [] });
       await renderRail();
       window.ChatRooms?.select(out.id);
       history.back();
       toast(existing ? "Channel saved ✓" : "Channel created ✓");
     } catch (err) { toast("✗ " + err.message); }
   };
+  const privBox = $("#room-private");
+  if (privBox) privBox.onchange = () => { $("#room-people").hidden = !privBox.checked; };
   const del = $("#room-del");
   if (del) del.onclick = async () => {
     if (!del.classList.contains("armed")) { del.classList.add("armed"); del.textContent = "Click again to delete"; return; }
@@ -1039,10 +1076,46 @@ async function renderOperations(){
 }
 // ── Team: bots as teammates, org chart + on/off. A switched-off bot's skills
 // roll up to its manager (server decides); Chief of Staff is always on.
+// People in this workspace (core.people) above its bots: roles, invites, leave.
+const EXPIRY_LABEL = { "1d": "1 day", "7d": "7 days", "30d": "30 days" };
+function peopleSection(pv, link){
+  if (!pv) return "";
+  const when = ts => ts ? new Date(ts * 1000).toLocaleDateString() : "";
+  const rows = pv.people.map(r => `<div class="post person-row">
+      <span class="av person-av" aria-hidden="true">${esc((r.name || "?")[0].toUpperCase())}</span>
+      <div class="t"><b>${esc(r.name)}</b>${r.you ? ` <small class="inline">you</small>` : ""} <span class="tag">${esc(r.role)}</span>
+        ${r.joined ? `<small>Joined ${esc(when(r.joined))}</small>` : ""}</div>
+      ${r.removable ? `<button class="more" data-person-rm="${esc(r.id)}" data-you="${r.you ? 1 : 0}">${r.you ? "Leave" : "Remove"}</button>` : ""}
+    </div>`).join("");
+  let invite = "";
+  if (pv.can_invite.length) {
+    invite = pv.public_url ? `<div class="invite-box">
+        <label>Role <select id="inv-role">${pv.can_invite.map(r => `<option value="${r}"${r === "member" ? " selected" : ""}>${r}</option>`).join("")}</select></label>
+        <label>Expires after <select id="inv-exp">${Object.entries(EXPIRY_LABEL).map(([k, v]) => `<option value="${k}"${k === "7d" ? " selected" : ""}>${v}</option>`).join("")}</select></label>
+        <button class="btn primary" id="inv-go">Create invite link</button>
+      </div>
+      ${link ? `<div class="invite-link"><input readonly value="${esc(link)}" aria-label="Invite link"><button class="btn" id="inv-copy">Copy</button>
+        <small>Works once. Send it to one person; they open it, type their name and join.</small></div>` : ""}`
+      : `<div class="help">To invite people, ${myRole() === "owner" ? "set the sharing address in HQ, Team first" : "the owner has to set a sharing address first"}.</div>`;
+    const pend = pv.invites || [];
+    if (pend.length) invite += `<div class="invite-pending">${pend.map(i => `<div class="invite-row"><span class="tag">${esc(i.role)}</span>
+        <small>expires ${esc(when(i.expires))}</small><button class="btn sm ghost" data-inv-rm="${esc(i.id)}">Revoke</button></div>`).join("")}</div>`;
+  }
+  return `<section class="team-sec"><h3>People</h3>${invite}<div class="rowc">${rows}</div></section><section class="team-sec"><h3>Bots</h3>`;
+}
+function sharingSection(url){
+  return `<section class="team-sec"><h3>Sharing address</h3>
+    <div class="help">The https address a tunnel gives this machine (Tailscale Serve or Funnel, Cloudflare Tunnel), like https://name.example (no path). Invite links use it. Setup: docs/sharing.md. The terminal stays on this machine only.</div>
+    <form class="share-form" id="share-form"><input name="url" value="${esc(url || "")}" placeholder="https://" aria-label="Sharing address" autocomplete="off">
+      <button class="btn" type="submit">Save</button></form></section>`;
+}
+
 async function renderTeam(){
   const stillOn = routeGuard();
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
+  let pv = null, link = "", share = null;
+  const person = isPerson();
   const draw = () => {
     const wsApps = Object.keys(integ.picked?.[_WS] || {}).sort();  // apps with an account ticked here
     const depth = b => { let d = 0, cur = b; while (cur && cur.reports_to !== "ceo" && d < 5) { cur = botById(cur.reports_to); d++; } return d; };
@@ -1059,8 +1132,8 @@ async function renderTeam(){
           <small>Reports to ${esc(boss)}</small>
           <div class="team-skills">${b.skills.map(s => `<span class="tag">${esc(s)}</span>`).join("")}${covered.map(s => `<span class="tag covered" title="covering">${esc(s)}</span>`).join("")}</div>
           ${coverNote}${offNote}
-          <small class="team-usage">${(() => { const c = costs.bots[b.id]; return c && c.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"} · ${fmtUsage(c.tokens, c.cost)} (est., ${costs.days}d)` : `no replies in ${costs.days}d`; })()}
-            · <a class="mem-toggle" data-mem="${esc(b.id)}">Memory</a></small>
+          ${person ? "" : `<small class="team-usage">${(() => { const c = costs.bots[b.id]; return c && c.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"} · ${fmtUsage(c.tokens, c.cost)} (est., ${costs.days}d)` : `no replies in ${costs.days}d`; })()}
+            · <a class="mem-toggle" data-mem="${esc(b.id)}">Memory</a></small>`}
           <div class="mem-box" hidden></div>
           ${integ.configured && wsApps.length && _WS ? `<div class="app-grants">${wsApps.map(slug => {
             const scope = integ.grants?.[_WS]?.[b.id]?.[slug];
@@ -1069,14 +1142,16 @@ async function renderTeam(){
           }).join("")}</div>` : ""}
         </div>
         ${b.recommended && !b.active ? `<span class="tag">recommended</span>` : ""}
-        ${b.locked ? `<span class="tag">always on</span>` : `<button class="go" data-bot-toggle="${esc(b.id)}" data-on="${b.active ? 1 : 0}">${b.active ? "Switch off" : "Switch on"}</button>`}
+        ${person ? "" : b.locked ? `<span class="tag">always on</span>` : `<button class="go" data-bot-toggle="${esc(b.id)}" data-on="${b.active ? 1 : 0}">${b.active ? "Switch off" : "Switch on"}</button>`}
       </div>`;
     }).join("");
     const t = costs.total || {};
     const grantHelp = !integ.configured || !(integ.connected || []).length ? ""
       : wsApps.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>`
       : `<div class="help">No app account is ticked for this workspace yet. Tick one in HQ, Integrations.</div>`;
-    $("#team-list").innerHTML = grantHelp + `<div class="team-total">${t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>`;
+    $("#team-list").innerHTML = (share !== null ? sharingSection(share) : "") + peopleSection(pv, link) + grantHelp
+      + `<div class="team-total">${!person && t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>${pv ? "</section>" : ""}`;
+    wirePeople();
     $("#team-list").querySelectorAll("[data-mem]").forEach(a => a.onclick = () => toggleMemory(a.closest(".team-row"), a.dataset.mem));
     $("#team-list").querySelectorAll("[data-grant-bot]").forEach(sel => sel.onchange = async () => {
       const bot = sel.dataset.grantBot;
@@ -1094,13 +1169,54 @@ async function renderTeam(){
       } catch (e) { toast("✗ " + e.message); }
     });
   };
+  const wirePeople = () => {
+    const box = $("#team-list");
+    const go = box.querySelector("#inv-go");
+    if (go) go.onclick = async () => {
+      go.disabled = true;
+      try {
+        const out = await jpost("/api/invites", { ws: _WS, role: $("#inv-role").value, expiry: $("#inv-exp").value });
+        pv = out; link = out.link; draw();
+      } catch (e) { toast("✗ " + e.message); go.disabled = false; }
+    };
+    const copy = box.querySelector("#inv-copy");
+    if (copy) copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(link); toast("Invite link copied ✓"); }
+      catch { box.querySelector(".invite-link input").select(); }
+    };
+    box.querySelectorAll("[data-inv-rm]").forEach(b => b.onclick = async () => {
+      try { pv = await jpost("/api/invites/revoke", { ws: _WS, id: b.dataset.invRm }); link = ""; draw(); }
+      catch (e) { toast("✗ " + e.message); }
+    });
+    box.querySelectorAll("[data-person-rm]").forEach(b => b.onclick = async () => {
+      const you = b.dataset.you === "1";
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = you ? "Click again to leave" : "Click again to remove"; return; }
+      try {
+        const out = await jpost("/api/people/remove", { ws: _WS, id: b.dataset.personRm });
+        if (out.left) { location.href = "/"; return; }
+        pv = out; draw(); toast("Removed ✓");
+      } catch (e) { toast("✗ " + e.message); }
+    });
+    const form = box.querySelector("#share-form");
+    if (form) form.onsubmit = async e => {
+      e.preventDefault();
+      try { share = (await jpost("/api/sharing", { url: form.url.value })).public_url || ""; draw(); toast("Sharing address saved ✓"); }
+      catch (err) { toast("✗ " + err.message); }
+    };
+  };
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · ${esc(_WS === "hq" ? "holding" : wsById(_WS)?.kind || "")}</div><h1 class="title">Team</h1></div></div>
-    <div class="scroll"><div class="help">Who works in this workspace. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.</div><div id="team-list"></div></div>`;
+    <div class="scroll"><div class="help">${person
+      ? "Who works in this workspace: people and bots. Tag a bot with @handle in chat."
+      : `Who works in this workspace: ${_WS === "hq" ? "the bots (people join project workspaces, never HQ)" : "people you invited and the bots"}. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.`}</div><div id="team-list"></div></div>`;
   $("#team-list").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
   if (!_BOTS.length) _BOTS = (await api(`/api/bots?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).bots || [];
-  costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
-  integ = await api("/api/integrations").catch(() => integ);
+  pv = _WS === "hq" ? null : await api(`/api/people?ws=${encodeURIComponent(_WS)}`).catch(() => null);
+  if (!person) {
+    costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
+    integ = await api("/api/integrations").catch(() => integ);
+    if (_WS === "hq") share = (await api("/api/sharing").catch(() => ({}))).public_url || "";
+  }
   if (stillOn()) draw();
 }
 
@@ -3728,7 +3844,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (!room) { roomTitleEl.textContent = "# general"; return; }
     const lead = botById(room.lead);
     roomTitleEl.textContent = room.kind === "dm" ? room.name : `# ${room.name}`;
-    roomEditBtn.hidden = room.kind !== "topic";
+    roomEditBtn.hidden = room.kind !== "topic" || !["owner", "admin"].includes(myRole());
     input.placeholder = room.kind === "dm"
       ? `Message ${room.name}…`
       : `Message #${room.name} (untagged → ${lead?.name || "lead"}, @ to tag)`;
@@ -3780,6 +3896,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   // ── saved chats: each is its own claude session (server chat_store) ─────
   // Active chat id survives reloads; its transcript is loaded from the server.
   let activeChatId = null;
+  let seenCount = -1;   // messages of the open thread last shown from the server (pollThread)
   let threadUsage = { tokens: 0, cost: 0 };   // running total of the open thread
   const chatListEl = document.getElementById("chat-list");
   const chatTitleEl = document.getElementById("chat-title");
@@ -3798,7 +3915,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach(m => {
       history.push(m);
-      const b = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts);
+      const b = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name);
       if (m.role === "assistant") decorateReply(b.closest(".msg"), m);
     });
     renderAppCards();
@@ -3825,6 +3942,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (seq !== chatSeq) return;
     if (!rec) { setActiveChat(null); showChat([]); return; }
     setActiveChat(rec.id, rec.title, rec.scope && rec.scope[0]); showChat(rec.messages);
+    seenCount = (rec.messages || []).length;
     threadUsage = { tokens: rec.tokens || 0, cost: rec.cost || 0 };
     statusEl.textContent = "Ready";
   }
@@ -3882,6 +4000,27 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (e.key === "Escape" && !chatListEl.hidden) chatListEl.hidden = true;
   });
   function newThread(){ chatListEl.hidden = true; newChat(); }
+  // Others write in shared threads too: re-read the open one while idle.
+  let polling = false;
+  async function pollThread(){
+    if (polling || busy || !activeChatId || document.visibilityState !== "visible") return;
+    polling = true;
+    const id = activeChatId, seq = chatSeq;
+    try {
+      const rec = await fetch(`/api/chats/${encodeURIComponent(id)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+      if (!rec || busy || id !== activeChatId || seq !== chatSeq) return;
+      const msgs = rec.messages || [];
+      if (msgs.length !== seenCount) {
+        seenCount = msgs.length;
+        const atEnd = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 40;
+        const keep = stream.scrollTop;
+        showChat(msgs);
+        if (!atEnd) stream.scrollTop = keep;
+        threadUsage = { tokens: rec.tokens || 0, cost: rec.cost || 0 };
+      }
+    } finally { polling = false; }
+  }
+  setInterval(pollThread, 5000);
   document.getElementById("chat-new").onclick = newThread;
   // Pre-saved-chats builds kept one transcript in localStorage; drop it.
   try { localStorage.removeItem("chatHistory"); localStorage.removeItem("chatSessionId"); } catch {}
@@ -3932,6 +4071,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       termSock.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
   }
   function toggleTerminal(){
+    if (isPerson()) return;   // the terminal is the owner's, on this machine only
     const panel = document.getElementById("term-panel");
     const opening = panel.classList.toggle("open");
     document.getElementById("term-close").textContent = opening ? "close" : "open ⌃`";
@@ -4210,12 +4350,23 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
 
   // One left-aligned row per message. Returns the body element (.b), which
   // streaming fills; the row is its closest(".msg").
-  function addMsg(role, text, bot, askedBy, ts){
+  // Who wrote a user message: `by` = an invited person (none = the owner).
+  function senderOf(by, byName){
+    const me = isPerson() ? _ME.id : "ceo";
+    const who = by || "ceo";
+    if (who === me) return { initial: "Y", name: "You" };
+    const name = who === "ceo" ? "Owner" : (byName || "Teammate");
+    return { initial: name[0].toUpperCase(), name };
+  }
+  function addMsg(role, text, bot, askedBy, ts, by, byName){
     const div = document.createElement("div");
     div.className = "msg " + (role === "user" ? "me" : "ai");
     div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>`;
     div.querySelector("time").textContent = clock(ts);
-    if (role === "user") paintSender(div, { avatar: `<span class="av">Y</span>`, name: "You" });
+    if (role === "user") {
+      const who = senderOf(by, byName);
+      paintSender(div, { avatar: `<span class="av">${esc(who.initial)}</span>`, name: who.name });
+    }
     else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", null, askedBy);
     const bubble = div.querySelector(".b");
     setMsgContent(bubble, role, text);

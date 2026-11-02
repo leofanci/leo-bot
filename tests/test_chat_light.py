@@ -10,7 +10,7 @@ APP_HTML = ROOT / "dashboard" / "app.html"
 def test_message_row_structure():
     js = APP_JS.read_text(encoding="utf-8")
     assert 'class="msg-main"' in js and 'class="mh"' in js
-    assert "function addMsg(role, text, bot, askedBy, ts)" in js
+    assert "function addMsg(role, text, bot, askedBy, ts, by, byName)" in js
 
 
 def test_usage_moves_to_tooltip_and_steps_vanish_when_done():

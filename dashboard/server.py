@@ -14,6 +14,7 @@ import argparse
 import base64
 import binascii
 import hmac
+import html
 import json
 import os
 import re
@@ -44,7 +45,7 @@ import deliverables      # noqa: E402
 from core import bots    # noqa: E402
 from core import rooms   # noqa: E402
 from core import approvals  # noqa: E402
-from core import app_rules, composio, integrations, ws_logos  # noqa: E402
+from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
@@ -81,7 +82,11 @@ RAIL = CHAT_RAIL
 # the printed URL. A plain GET / (another local account, a port scanner) gets
 # nothing. See do_GET "/" and write_token_file().
 TOKEN_FILE = HERE / ".auth-token"
-_TOKEN_IN_LOG = re.compile(r"([?&]token=)[^&\s\"]*")
+_TOKEN_IN_LOG = re.compile(r"([?&]token=|/join/)[^&\s\"?]*")
+# An invited person's device cookie (core.people); the owner keeps AUTH_COOKIE.
+MEMBER_COOKIE = "myos_member"
+MEMBER_MAX_AGE = 365 * 86400
+OWNER = {"kind": "owner"}
 _MCP_SESSION_RE = re.compile(r"[\x21-\x7e]{1,256}")  # visible ASCII, as MCP specifies
 LOGIN_REQUIRED_HTML = (
     b"<!doctype html><meta charset=utf-8><title>myOS</title>"
@@ -951,6 +956,9 @@ def get_chat_session(project_scope=None, chat_id=None, new=False):
     """
     global _CHAT, _CHAT_SCOPE
     scope = project_scope or None
+    if chat_id:
+        with _SLOTS_LOCK:
+            _release_elsewhere(chat_id, bots.CEO)
     if new:
         if _CHAT is not None:
             _CHAT.close()
@@ -976,6 +984,117 @@ def get_chat_session(project_scope=None, chat_id=None, new=False):
         _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
         _CHAT_SCOPE = scope
     return _CHAT
+
+
+# Invited people each get their own active-thread slot (same rules as the
+# owner's _CHAT above), so two people talk with bots at once. A thread held in
+# another slot is handed over (closed there, resumed here) when not mid-reply.
+_PERSON_CHATS = {}   # pid -> [session, scope]
+_SLOTS_LOCK = threading.Lock()
+_BUSY = set()        # chat ids with a turn in flight
+_BUSY_LOCK = threading.Lock()
+BUSY_MSG = "Someone is replying in this thread. Try again when it finishes."
+
+
+def _release_elsewhere(chat_id, holder):
+    """Close every slot but `holder`'s that holds `chat_id` (stale state otherwise)."""
+    global _CHAT, _CHAT_SCOPE
+    if not chat_id:
+        return
+    if holder != bots.CEO and _CHAT is not None and getattr(_CHAT, "session_id", None) == chat_id:
+        _CHAT.close()
+        _CHAT = _CHAT_SCOPE = None
+    for pid, slot in list(_PERSON_CHATS.items()):
+        if pid != holder and getattr(slot[0], "session_id", None) == chat_id:
+            slot[0].close()
+            del _PERSON_CHATS[pid]
+
+
+def person_chat_session(pid, project_scope=None, chat_id=None, new=False):
+    """get_chat_session for an invited person: their own slot."""
+    with _SLOTS_LOCK:
+        _release_elsewhere(chat_id, pid)
+        slot = _PERSON_CHATS.get(pid)
+        cur, cur_scope = (slot or [None, None])
+        scope = project_scope or None
+        if not new and chat_id and cur is not None and getattr(cur, "session_id", None) == chat_id \
+                and cur_scope in (scope, None):
+            _PERSON_CHATS[pid] = [cur, scope]
+            return cur
+        if cur is not None:
+            cur.close()
+        rec = chat_store.load(chat_id) if (chat_id and not new) else None
+        rec_scope = tuple(rec["scope"]) if rec and rec.get("scope") else None
+        sess = (chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
+                if rec and rec_scope in (scope, None)
+                else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL))
+        _PERSON_CHATS[pid] = [sess, scope]
+        return sess
+
+
+def stop_person_chat(pid):
+    slot = _PERSON_CHATS.get(pid)
+    if slot:
+        slot[0].close()
+    extra = _EXTRA.get(pid)
+    if extra is not None:
+        extra.close()
+
+
+def _mark_busy(chat_id):
+    """True when this request now owns the thread's turn; False: someone else's."""
+    if not chat_id:
+        return True
+    with _BUSY_LOCK:
+        if chat_id in _BUSY:
+            return False
+        _BUSY.add(chat_id)
+        return True
+
+
+def _unmark_busy(chat_id):
+    with _BUSY_LOCK:
+        _BUSY.discard(chat_id)
+
+
+def _speaker_note(viewer, ws):
+    """Line before an invited person's message so bots know who is talking."""
+    role = (viewer.get("ws") or {}).get(ws, "member")
+    return (f"[From {viewer.get('name') or 'a teammate'}, invited {role} of this workspace, "
+            "not the CEO. Answer them directly.]\n")
+
+
+def _viewer_role(viewer, ws):
+    """"owner", "admin", "member" or None for `viewer` in workspace `ws`."""
+    if not viewer:
+        return None
+    if viewer.get("kind") == "owner":
+        return "owner"
+    return (viewer.get("ws") or {}).get(ws)
+
+
+def _room_for_chat(rec, team, ws, projects):
+    ids = {r["id"] for r in rooms.list_rooms(team, ws, ROOT)}
+    spaces = {w["id"] for w in _workspaces(projects)}
+    rid = rooms.room_of_chat(rec, ids, spaces)
+    return rooms.get_room(rid, team, ROOT) if rooms.split_id(rid)[0] == ws else None
+
+
+def _people_view(ws, viewer):
+    """Team page People: owner first, then who joined; invites for who may send them."""
+    role = _viewer_role(viewer, ws)
+    me = bots.CEO if viewer.get("kind") == "owner" else viewer.get("id")
+    rows = [{"id": bots.CEO, "name": "Owner", "role": "owner"}] + people.people_in(ROOT, ws)
+    for r in rows:
+        r["you"] = r["id"] == me
+        r["removable"] = (not r["you"] and r["role"] != "owner" and people.can_remove(role, r["role"])) \
+            or (r["you"] and r["role"] != "owner")
+    out = {"ws": ws, "role": role, "people": rows,
+           "can_invite": [x for x in people.ROLES if people.can_invite(role, x)] if ws != bots.HQ else [],
+           "public_url": people.public_url(ROOT)}
+    if out["can_invite"]:
+        out["invites"] = people.pending_invites(ROOT, ws)
+    return out
 
 
 # ── Connected apps (Composio). The relay is the only route a bot can reach;
@@ -1202,17 +1321,57 @@ class Handler(BaseHTTPRequestHandler):
 
     def _expected_origins(self):
         port = self.server.server_address[1]
-        return {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        public = people.public_url(ROOT)
+        return {f"http://127.0.0.1:{port}", f"http://localhost:{port}"} | ({public} if public else set())
+
+    def _local_host(self):
+        port = self.server.server_address[1]
+        return self.headers.get("Host", "") in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    def _public_host(self):
+        """True when the request came in on the sharing address (a tunnel)."""
+        host = people.public_host(ROOT)
+        if not host:
+            return False
+        ok = {host} if ":" in host else {host, host + ":443"}
+        return self.headers.get("Host", "").lower() in ok
 
     def _valid_host(self):
         # Tests construct a handler without a network peer; real HTTP handlers
         # always have client_address and must pass the checks below.
         if not hasattr(self, "client_address"):
             return True
-        port = self.server.server_address[1]
-        return self.headers.get("Host", "") in {
-            f"127.0.0.1:{port}", f"localhost:{port}",
-        }
+        return self._local_host() or self._public_host()
+
+    def _cookie(self, name):
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except Exception:  # malformed cookies are simply unauthenticated
+            return None
+        value = jar.get(name)
+        return value.value if value else None
+
+    def _person(self):
+        """The invited person behind the member cookie (core.people view) or None."""
+        p = people.person_by_token(ROOT, self._cookie(MEMBER_COOKIE))
+        return {"kind": "person", **p} if p and p["ws"] else None
+
+    def _person_authorized(self, *, require_origin=False):
+        """Same Host/Origin/fetch-site rules as _authorized, for a member cookie."""
+        if not hasattr(self, "client_address") or not self._valid_host():
+            return None
+        origin = self.headers.get("Origin", "")
+        if (require_origin and not origin) or (origin and origin not in self._expected_origins()):
+            return None
+        if self.headers.get("Sec-Fetch-Site", "") not in {"", "same-origin", "none"}:
+            return None
+        return self._person()
+
+    def _member_cookie(self, token):
+        secure = "; Secure" if self._public_host() else ""
+        return (f"{MEMBER_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; "
+                f"Max-Age={MEMBER_MAX_AGE}{secure}")
 
     def _valid_cookie(self):
         if not hasattr(self, "client_address"):
@@ -1293,8 +1452,249 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, integrations.public(ROOT))
         return self._send(404, {"error": "unknown endpoint"})
 
+    # -- invited people (core.people): join page, their routes, invites ------ #
+    def _page(self, code, title, body_html):
+        doc = ("<!doctype html><html lang=en><meta charset=utf-8>"
+               "<meta name=viewport content='width=device-width,initial-scale=1'>"
+               f"<title>{html.escape(title)}</title><link rel=stylesheet href='/ui-tokens.css'><style>"
+               "body{font:15px/1.45 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;"
+               "background:var(--ui-color-canvas);color:var(--ui-color-text)}"
+               "main{background:var(--ui-color-surface);border:1px solid var(--ui-color-border);border-radius:14px;"
+               "padding:32px;width:min(380px,90vw)}h1{font-size:22px;margin:0 0 6px}"
+               "p{margin:0 0 18px;color:var(--ui-color-text-muted)}"
+               "input{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border:1px solid var(--ui-color-border);"
+               "border-radius:10px;margin:0 0 12px;background:var(--ui-color-canvas);color:inherit}"
+               "button{font:inherit;font-weight:600;width:100%;padding:10px;border:0;border-radius:10px;"
+               "background:var(--ui-color-accent);color:var(--ui-color-surface);cursor:pointer}"
+               f"</style><main>{body_html}</main></html>").encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(doc)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(doc)
+
+    def _join_page(self, code):
+        inv = people.invite_for(ROOT, code)
+        if not inv:
+            return self._page(410, "Invite expired", "<h1>This invite link no longer works</h1>"
+                              "<p>It expired, was revoked or was already used. Ask for a new one.</p>")
+        name = next((w["name"] for w in _workspaces(db.tree() if db.db_exists() else []) if w["id"] == inv["ws"]),
+                    inv["ws"])
+        if self._valid_cookie():
+            return self._page(200, "Invite", f"<h1>{html.escape(name)}</h1><p>You own this myOS. "
+                              "Send this link to the person you are inviting; it works once.</p>")
+        known = self._person()
+        field = ("" if known else
+                 f"<input name=name maxlength={people.NAME_MAX} required autofocus placeholder='Your name' autocomplete=name>")
+        hello = f"Joining as {html.escape(known['name'])}. " if known else ""
+        return self._page(200, f"Join {name}", f"<h1>Join {html.escape(name)}</h1>"
+                          f"<p>{hello}You are invited as {html.escape(inv['role'])}. You will chat with the team "
+                          f"and its bots in this workspace.</p><form method=post action='/join/{html.escape(code, quote=True)}'>"
+                          f"{field}<button>Join</button></form>")
+
+    def _join_post(self, code):
+        origin = self.headers.get("Origin", "")
+        if not self._valid_host() or (origin not in self._expected_origins()):
+            return self._send(403, {"error": "forbidden"})
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            length = -1
+        if not 0 <= length <= 4096:
+            return self._send(400, {"error": "bad request"})
+        form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        try:
+            inv = people.invite_for(ROOT, code)
+            _, token = people.join(ROOT, code, (form.get("name") or [""])[0], token=self._cookie(MEMBER_COOKIE))
+        except ValueError as e:
+            return self._page(400, "Invite", f"<h1>Could not join</h1><p>{html.escape(str(e))}</p>")
+        self.send_response(303)
+        self.send_header("Location", f"/?joined={inv['ws']}" if inv else "/")
+        self.send_header("Set-Cookie", self._member_cookie(token))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _people_post(self, path, body, viewer):
+        """Invites and removals; owner and admins (core.people rules)."""
+        projects = db.tree()
+        ws = _known_ws(body.get("ws"), projects)
+        role = _viewer_role(viewer, ws) if ws else None
+        if not ws or not role:
+            return self._send(403, {"error": "forbidden"})
+        if path == "/api/invites":
+            want = body.get("role")
+            if not people.can_invite(role, want) or ws == bots.HQ:
+                return self._send(403, {"error": "you cannot invite with that role"})
+            base = people.public_url(ROOT)
+            if not base:
+                raise ValueError("set the sharing address first (HQ, Team)")
+            rec, code = people.create_invite(ROOT, ws=ws, role=want, expiry=body.get("expiry") or "7d",
+                                             by=viewer.get("id") or bots.CEO)
+            return self._send(200, {"invite": rec, "link": f"{base}/join/{code}", **_people_view(ws, viewer)})
+        if path == "/api/invites/revoke":
+            if role not in ("owner", "admin"):
+                return self._send(403, {"error": "forbidden"})
+            people.revoke_invite(ROOT, str(body.get("id") or ""), ws=ws)
+            return self._send(200, _people_view(ws, viewer))
+        if path == "/api/people/remove":
+            pid = str(body.get("id") or "")
+            target = next((r for r in people.people_in(ROOT, ws) if r["id"] == pid), None)
+            if not target:
+                raise LookupError("not in this workspace")
+            if pid != viewer.get("id") and not people.can_remove(role, target["role"]):
+                return self._send(403, {"error": "you cannot remove them"})
+            people.remove(ROOT, ws, pid)
+            for t in rooms._load_topics(ws, ROOT):  # a private channel forgets them too
+                if pid in (t.get("people") or []):
+                    rooms.save_topic(ws, t["name"], t.get("members"), t.get("lead"), ROOT, replace=t["name"],
+                                     private=True, people=[x for x in t["people"] if x != pid])
+            return self._send(200, _people_view(ws, viewer) if pid != viewer.get("id") else {"left": ws})
+        return self._send(404, {"error": "unknown endpoint"})
+
+    def _rooms_post(self, path, body, viewer):
+        """Create/edit/delete a topic channel: owner, or an admin of the workspace."""
+        projects = db.tree()
+        if viewer.get("kind") == "owner":
+            ws, record = _resolve_workspace(body.get("ws"), projects)
+        else:
+            ws = _known_ws(body.get("ws"), projects)
+            if not ws or _viewer_role(viewer, ws) != "admin":
+                return self._send(403, {"error": "only admins manage channels"})
+            record = next((p for p in projects if p.get("slug") == ws), None)
+        team = bots.team(ROOT, ws, record)
+        target = body.get("name") if path == "/api/rooms/delete" else body.get("replace")
+        if target and viewer.get("kind") != "owner":
+            old = rooms.get_room(f"{ws}/t-{target}", team, ROOT)
+            if not old or not rooms.can_see(old, viewer):
+                return self._send(403, {"error": "forbidden"})
+        if path == "/api/rooms/delete":
+            rooms.delete_topic(ws, str(body.get("name") or ""), ROOT)
+            return self._send(200, {"ok": True})
+        members = body.get("members") or []
+        picked = body.get("people") or []
+        if not isinstance(members, list) or not isinstance(picked, list):
+            raise ValueError("members must be a list")
+        private = bool(body.get("private")) and ws != bots.HQ
+        allowed = {r["id"] for r in people.people_in(ROOT, ws)}
+        picked = [x for x in picked if x in allowed]
+        if private and viewer.get("kind") == "person" and viewer["id"] not in picked:
+            picked.insert(0, viewer["id"])  # an admin never locks themself out
+        old = body.get("replace") or None
+        room_id = rooms.save_topic(ws, body.get("name"), members, body.get("lead"), ROOT,
+                                   replace=old, private=private, people=picked)
+        if old and room_id != f"{ws}/t-{old}":
+            for rec in chat_store.records():  # renamed: its threads follow it
+                if rec.get("room") == f"{ws}/t-{old}":
+                    rec["room"] = room_id
+                    chat_store.save(rec)
+            approvals.move_room(f"{ws}/t-{old}", room_id, ROOT)
+        listed = rooms.list_rooms(team, ws, ROOT)
+        return self._send(200, {"id": room_id, "rooms": [r for r in listed if rooms.can_see(r, viewer)]})
+
+    def _person_get(self, path, person):
+        """The only reads an invited person gets, each bound to their workspaces."""
+        qs = parse_qs(urlparse(self.path).query)
+        q = lambda k: (qs.get(k) or [None])[0]  # noqa: E731
+        projects = db.tree()
+        mine = lambda w: w if w in person["ws"] and _known_ws(w, projects) else None  # noqa: E731
+        try:
+            if path == "/api/me":
+                return self._send(200, {k: person[k] for k in ("kind", "id", "name", "ws")})
+            if path == "/api/schemas":
+                return self._send(200, schemas_for_api())
+            if path == "/api/skills-index":
+                return self._send(200, _skills_index())
+            if path == "/api/workspaces":
+                return self._send(200, {"workspaces": [w for w in _workspaces(projects) if mine(w["id"])]})
+            if path.startswith("/api/workspace-logo/"):
+                ws = mine(path[len("/api/workspace-logo/"):])
+                return self._send_ws_logo(ws) if ws else self._send(404, {"error": "no logo"})
+            if path in ("/api/bots", "/api/rooms", "/api/people", "/api/chats"):
+                ws = mine(q("ws") or rooms.split_id(q("room"))[0])
+                if not ws:
+                    return self._send(403, {"error": "forbidden"})
+                team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
+                if path == "/api/bots":
+                    return self._send(200, {"ws": ws, "bots": team.to_api()})
+                if path == "/api/people":
+                    return self._send(200, _people_view(ws, person))
+                listed = rooms.list_rooms(team, ws, ROOT)
+                if path == "/api/rooms":
+                    return self._send(200, {"ws": ws, "rooms": [r for r in listed if rooms.can_see(r, person)]})
+                room = next((r for r in listed if r["id"] == q("room")), None)
+                if not rooms.can_see(room, person):
+                    return self._send(403, {"error": "forbidden"})
+                ids, spaces = {r["id"] for r in listed}, {w["id"] for w in _workspaces(projects)}
+                chats = [c for c in chat_store.list_meta()
+                         if rooms.room_of_chat(c, ids, spaces) == room["id"] and rooms.chat_visible(c, room, person)]
+                return self._send(200, {"chats": chats})
+            if path.startswith("/api/chats/"):
+                rec = chat_store.load(path[len("/api/chats/"):])
+                ws = mine(_chat_workspace(rec)) if rec else None
+                if ws:
+                    team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
+                    if rooms.chat_visible(rec, _room_for_chat(rec, team, ws, projects), person):
+                        return self._send(200, rec)
+                return self._send(404, {"error": "chat not found"})
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        return self._send(403, {"error": "forbidden"})
+
+    def _person_post(self, path, person):
+        """The only writes an invited person gets."""
+        try:
+            body = self._read_json()
+            if path == "/api/ask":
+                return self._handle_ask(body, person)
+            if path == "/api/chat-stop":
+                stop_person_chat(person["id"])
+                return self._send(200, {"ok": True})
+            if path == "/api/chat-reset":  # new thread: drop their active session only
+                with _SLOTS_LOCK:
+                    slot = _PERSON_CHATS.pop(person["id"], None)
+                if slot:
+                    slot[0].close()
+                return self._send(200, {"ok": True})
+            if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
+                return self._people_post(path, body, person)
+            if path in ("/api/rooms", "/api/rooms/delete"):
+                return self._rooms_post(path, body, person)
+        except LookupError as e:
+            return self._send(404, {"error": str(e)})
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            return self._send(500, {"error": "internal error"})
+        return self._send(403, {"error": "forbidden"})
+
     # -- AI chat (drives a persistent guard-railed ChatSession via SSE) --- #
-    def _handle_ask(self, body):
+    def _handle_ask(self, body, viewer=OWNER):
+        """One chat turn. An invited person (`viewer`) may post only into a room
+        and thread they can see; a thread mid-reply refuses a second turn."""
+        if viewer.get("kind") != "owner":
+            projects = db.tree()
+            ws = rooms.split_id(body.get("room_id"))[0]
+            if ws not in viewer["ws"] or not _known_ws(ws, projects):
+                return self._send(403, {"error": "forbidden"})
+            team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
+            if not rooms.can_see(rooms.get_room(str(body.get("room_id")), team, ROOT), viewer):
+                return self._send(403, {"error": "forbidden"})
+            rec = chat_store.load(body["chat_id"]) if body.get("chat_id") else None
+            if rec and not (_chat_workspace(rec) == ws
+                            and rooms.chat_visible(rec, _room_for_chat(rec, team, ws, projects), viewer)):
+                return self._send(403, {"error": "forbidden"})
+            body = {**body, "project_slug": None}
+        chat_id = body.get("chat_id") if isinstance(body.get("chat_id"), str) else None
+        if not _mark_busy(chat_id):
+            return self._send(409, {"error": BUSY_MSG})
+        try:
+            return self._ask_turn(body, viewer)
+        finally:
+            _unmark_busy(chat_id)
+
+    def _ask_turn(self, body, viewer):
         messages = body.get("messages", [])
         if not messages or messages[-1].get("role") != "user":
             return self._send(400, {"error": "no user message"})
@@ -1321,7 +1721,9 @@ class Handler(BaseHTTPRequestHandler):
         chat_id = body.get("chat_id") or None
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
-        sess = get_chat_session(project_scope, chat_id, new=not chat_id)
+        person = viewer if viewer.get("kind") == "person" else None
+        sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id) if person
+                else get_chat_session(project_scope, chat_id, new=not chat_id))
         if chat_id:
             answer = body.get("approval")
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
@@ -1337,7 +1739,9 @@ class Handler(BaseHTTPRequestHandler):
         may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
         # An app request is not a content write: decided before the write gate, and
         # its only approval path is the held app action (no skill, no APPROVAL line).
-        app_grant = integrations.effective_grant(ws, bot_id, ROOT) if integrations.api_key(ROOT) else {}
+        # An invited person's turn never reaches the owner's connected apps.
+        app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
+                     if integrations.api_key(ROOT) and not person else {})
         app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
         if app_turn:
             skill = explicit = suggest = None
@@ -1462,7 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
         if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
             workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
         text = compose_turn_prompt(
-            user_msg=user_msg,
+            user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
             skill=skill,
             session=sess,
@@ -1542,11 +1946,12 @@ class Handler(BaseHTTPRequestHandler):
                        else chat_session.CHAT_MODEL)
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, c_skill)
-            _EXTRA["sess"] = c
+            slot = person["id"] if person else "sess"
+            _EXTRA[slot] = c
             try:
                 return run(c, prompt, c_model, c_web, msg)
             finally:
-                _EXTRA["sess"] = None
+                _EXTRA[slot] = None
 
         # The turn token lives for this request: the lead and its follow-up run
         # get it, a consulted teammate never does; revoked in the finally below.
@@ -1634,7 +2039,8 @@ class Handler(BaseHTTPRequestHandler):
                         sess, project_scope, user_msg, head["content"], bot=bot_id,
                         room=(room or {}).get("id"),
                         meta={k: v for k, v in head.items() if k not in ("bot", "content")},
-                        extra=[m for m in msgs[1:] if m.get("content")])
+                        extra=[m for m in msgs[1:] if m.get("content")],
+                        by=person["id"] if person else None, by_name=person["name"] if person else None)
                 except (OSError, ValueError):
                     traceback.print_exc()
             try:
@@ -1710,7 +2116,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._valid_host():
             return self._send(403, {"error": "forbidden"})
         if path == "/ws/terminal" and self.headers.get("Upgrade", "").lower() == "websocket":
-            if not self._authorized(require_origin=True):
+            # Full-trust terminal: this machine only, never over the sharing address.
+            if not self._local_host() or not self._authorized(require_origin=True):
                 return self._send(403, {"error": "forbidden"})
             return self._handle_terminal_ws()
         if path == "/healthz":
@@ -1736,7 +2143,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
-            if not self._valid_cookie():
+            owner = self._valid_cookie()
+            if not owner and not self._person():
                 return self._send(403, LOGIN_REQUIRED_HTML, "text/html; charset=utf-8")
             # no-store on the shell too: it embeds ?v=<mtime> asset URLs, so if the
             # webview caches app.html it keeps loading stale CSS/JS forever. Always
@@ -1746,13 +2154,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header(
-                "Set-Cookie",
-                f"{AUTH_COOKIE}={AUTH_TOKEN}; HttpOnly; SameSite=Strict; Path=/",
-            )
+            if owner:
+                self.send_header(
+                    "Set-Cookie",
+                    f"{AUTH_COOKIE}={AUTH_TOKEN}; HttpOnly; SameSite=Strict; Path=/",
+                )
             self.end_headers()
             self.wfile.write(data)
             return
+
+        if path.startswith("/join/"):
+            return self._join_page(path[len("/join/"):])
 
         if path in ("/ui-tokens.css", "/app.css", "/app.js", "/os-ids.js", "/post-copy.js", "/content-view.js", "/logo.svg"):
             f = HERE / path.lstrip("/")
@@ -1781,11 +2193,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == APPS_RELAY_PATH:
             return self._send(405, {"error": "method not allowed"})  # no server-sent stream
         if not self._authorized():
+            person = None if self._valid_cookie() else self._person_authorized()
+            if person and db.db_exists():
+                return self._person_get(path, person)
             return self._send(403, {"error": "forbidden"})
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
         try:
+            if path == "/api/me":
+                return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner"})
+            if path in ("/api/people", "/api/sharing"):
+                if path == "/api/sharing":
+                    return self._send(200, {"public_url": people.public_url(ROOT)})
+                ws = _known_ws((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                if not ws:
+                    raise ValueError("unknown workspace")
+                return self._send(200, _people_view(ws, OWNER))
             if path == "/api/chat-session":
                 if _CHAT is None:
                     return self._send(200, {"session_id": None, "turn_count": 0, "fresh": True})
@@ -1796,9 +2220,12 @@ class Handler(BaseHTTPRequestHandler):
                 if room:
                     projects = db.tree()
                     ws, record = _resolve_workspace(rooms.split_id(room)[0], projects)
-                    ids = {r["id"] for r in rooms.list_rooms(bots.team(ROOT, ws, record), ws, ROOT)}
+                    listed = rooms.list_rooms(bots.team(ROOT, ws, record), ws, ROOT)
+                    ids = {r["id"] for r in listed}
                     spaces = {w["id"] for w in _workspaces(projects)}
-                    chats = [c for c in chats if rooms.room_of_chat(c, ids, spaces) == room]
+                    here = next((r for r in listed if r["id"] == room), None)
+                    chats = [c for c in chats if rooms.room_of_chat(c, ids, spaces) == room
+                             and (here is None or rooms.chat_visible(c, here, OWNER))]
                 return self._send(200, {"chats": chats})
             if path.startswith("/api/chats/"):
                 rec = chat_store.load(path[len("/api/chats/"):])
@@ -1918,10 +2345,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == APPS_RELAY_PATH:  # the only route without the dashboard cookie
             return self._handle_apps_relay()
+        if path.startswith("/join/"):  # the invite form (no cookie yet)
+            return self._join_post(path[len("/join/"):])
         if not self._authorized():
+            person = None if self._valid_cookie() else self._person_authorized(require_origin=True)
+            if person and db.db_exists():
+                return self._person_post(path, person)
             return self._send(403, {"error": "forbidden"})
         try:
             body = self._read_json()
+            if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
+                return self._people_post(path, body, OWNER)
+            if path == "/api/sharing":
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._send(200, {"public_url": people.set_public_url(ROOT, body.get("url"))})
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})
@@ -2257,24 +2695,7 @@ class Handler(BaseHTTPRequestHandler):
                 approvals.resolve_chat(str(body.get("chat") or ""), "rejected", ROOT)
                 return self._send(200, {"ok": True})
             if path in ("/api/rooms", "/api/rooms/delete"):
-                ws, record = _resolve_workspace(body.get("ws"), db.tree())
-                if path == "/api/rooms/delete":
-                    rooms.delete_topic(ws, str(body.get("name") or ""), ROOT)
-                    return self._send(200, {"ok": True})
-                members = body.get("members") or []
-                if not isinstance(members, list):
-                    raise ValueError("members must be a list")
-                old = body.get("replace") or None
-                room_id = rooms.save_topic(ws, body.get("name"), members, body.get("lead"), ROOT,
-                                           replace=old)
-                if old and room_id != f"{ws}/t-{old}":
-                    for rec in chat_store.records():  # renamed: its threads follow it
-                        if rec.get("room") == f"{ws}/t-{old}":
-                            rec["room"] = room_id
-                            chat_store.save(rec)
-                    approvals.move_room(f"{ws}/t-{old}", room_id, ROOT)
-                return self._send(200, {"id": room_id, "rooms": rooms.list_rooms(
-                    bots.team(ROOT, ws, record), ws, ROOT)})
+                return self._rooms_post(path, body, OWNER)
             if path.startswith("/api/bots/") and path.endswith("/active"):
                 bot_id = path[len("/api/bots/"):-len("/active")]
                 ws, record = _resolve_workspace(body.get("ws"), db.tree())
@@ -2338,6 +2759,8 @@ class Handler(BaseHTTPRequestHandler):
                     _CHAT = None
                     _CHAT_SCOPE = None
                 return self._send(200, {"ok": chat_store.delete(chat_id)})
+        except LookupError as exc:
+            return self._send(404, {"error": str(exc)})
         except fileops.ActionError as exc:
             return self._send(400, {"ok": False, "error": str(exc)})
         except (TypeError, ValueError) as exc:
