@@ -917,6 +917,12 @@ def _costs(ws, projects, days=30):
     return {"days": days, "bots": per_bot, "total": total}
 
 
+def _known_ws(value, projects):
+    """The workspace id from our own list that equals `value` (None if none):
+    file paths are built from that, never from the request."""
+    return next((w["id"] for w in _workspaces(projects) if w["id"] == value), None)
+
+
 def _workspaces(projects):
     """Workspace list; `logo` is the uploaded image's version token (None: default look)."""
     spaces = ([{"id": bots.HQ, "name": "HQ", "kind": "hq"}]
@@ -1153,8 +1159,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_ws_logo(self, ws):
         """A workspace's uploaded logo. Type sniffed at save; sandboxed like app logos."""
-        projects = db.tree() if db.db_exists() else []
-        got = ws_logos.get(ws, ROOT) if ws in {w["id"] for w in _workspaces(projects)} else None
+        ws = _known_ws(ws, db.tree() if db.db_exists() else [])
+        got = ws_logos.get(ws, ROOT) if ws else None
         if not got:
             return self._send(404, {"error": "no logo"})
         raw, ctype = got
@@ -1916,10 +1922,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         try:
             body = self._read_json()
-            if path == "/api/quit":
-                self._send(200, {"ok": True})
-                threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
-                return
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})
@@ -2281,8 +2283,8 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/api/workspace-logo", "/api/workspace-logo/remove"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
-                ws = body.get("ws")
-                if ws not in {w["id"] for w in _workspaces(db.tree())}:
+                ws = _known_ws(body.get("ws"), db.tree())
+                if not ws:
                     raise ValueError("unknown workspace")
                 if path.endswith("/remove"):
                     ws_logos.remove(ws, ROOT)
@@ -2383,7 +2385,7 @@ def main():
         chat_session.remove_bot_tmpdir()
         remove_token_file()
 
-    # /api/quit raises SIGTERM on this PID; clean up children before exiting.
+    # Quitting myOS.app (Cmd+Q) sends SIGTERM to this PID; clean up children before exiting.
     signal.signal(signal.SIGTERM, lambda *a: (_shutdown_children(), sys.exit(0)))
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)

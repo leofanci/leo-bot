@@ -523,7 +523,7 @@ async function renderRail(){
     <div class="rail-head">
       <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false">${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b>${icon("chevron")}</button>
       <button class="rail-ib" id="rail-compose" title="New thread" aria-label="New thread">${icon("compose")}</button>
-      <div class="menu brand-menu" id="brand-menu" role="menu"><a id="ws-logo-btn">Workspace logo</a><a id="quit-btn">Quit myOS</a></div>
+      <div class="menu brand-menu" id="brand-menu" role="menu"><a id="ws-logo-btn">Workspace logo</a></div>
     </div>
     <div class="rail-scroll">
       <nav class="nav">
@@ -558,7 +558,6 @@ async function renderRail(){
   $("#rail-compose").onclick = () => { closeNav(); window.ChatRooms?.newThread(); };
   $("#brand-btn").onclick = e => { e.stopPropagation(); toggleMenu(e.currentTarget, $("#brand-menu")); };
   $("#ws-logo-btn").onclick = () => { closeMenus(); closeNav(); window.ChatRooms?.showCanvas(); navigate(`#/workspace/${encodeURIComponent(w.id)}/logo`); };
-  $("#quit-btn").onclick = () => { fetch("/api/quit", {method:"POST"}).catch(()=>{}); setTimeout(()=>window.close(), 350); };
   window.ChatRooms?.refresh();
   highlight();
 }
