@@ -170,3 +170,13 @@ def test_profile_redraws_keep_the_channel_filter():
     js = APP_JS.read_text(encoding="utf-8")
     assert "let CHAN_FILTER = initChanFilter || PROFILE_CHAN[slug] || null;" in js
     assert "CHAN_FILTER = PROFILE_CHAN[slug] =" in js
+
+
+def test_calendar_add_activity_carries_a_date():
+    # An activity without a date lands in Operations, not on the calendar:
+    # the calendar and day "+ Activity" buttons pass a date and require one.
+    js = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text(encoding="utf-8")
+    assert 'navigate("#/activity/new",{date:iso(new Date()),from:"calendar"})' in js
+    assert 'navigate("#/activity/new",{date:dateStr,from:"calendar"})' in js
+    assert 'onCal?\'type="date" required\'' in js
+    assert 'navigate("#/activity/new");' not in js.split("function renderOperations")[0].split("async function renderTimeline")[-1]
