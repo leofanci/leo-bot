@@ -54,8 +54,8 @@ everything, so Composio used the most recently connected account of each app.
 - A cut-off Composio reply counts as unreachable: an Approve says it may have
   run instead of staying "running".
 - Logos: fetched server-side without the API key, https only, every resolved
-  address public, no redirects, image types only, 256 KB cap, cached per
-  process. Served with `sandbox` CSP so an SVG opened directly runs nothing.
+  address public, TLS verified, no redirects, image types only, 256 KB cap,
+  cached per process (capped). Served with `sandbox` CSP so an SVG opened directly runs nothing.
 
 ## Not in this round
 
