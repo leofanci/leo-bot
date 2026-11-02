@@ -8,8 +8,10 @@ after a timeout can send an email twice.
 Response shapes follow Composio's v3.1 docs (Oct 2026); each endpoint parses in
 one `_parse_*` helper so a live check can correct it in one place.
 """
+import http.client
 import ipaddress
 import json
+import re
 import socket
 import time
 import urllib.error
@@ -27,7 +29,12 @@ _CATALOG = {}  # {"at": ts, "items": [...]}: one install, one Composio project
 LOGO_MAX_BYTES = 256 * 1024
 LOGO_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
               "image/x-icon", "image/vnd.microsoft.icon")
-_LOGOS = {}  # slug -> (bytes, content type); one process, a few hundred apps at most
+_LOGOS = {}  # slug -> (bytes, content type) or None; capped below
+LOGO_CACHE_MAX = 1000
+# Account names come from the provider (a display name anyone in a shared
+# workspace may set) and are quoted into the bot's prompt: plain text only.
+_LABEL_DROP_RE = re.compile(r"[^\w .@+'-]+")
+LABEL_MAX = 60
 
 
 class ComposioError(Exception):
@@ -74,7 +81,8 @@ def _send(method, url, body, root, headers=None):
             return resp.status, resp.headers, resp.read()
     except urllib.error.HTTPError as e:
         raise ComposioError(f"Composio HTTP {e.code}", status=e.code) from None
-    except (urllib.error.URLError, OSError) as e:  # TimeoutError is an OSError
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as e:  # TimeoutError is an OSError
+        # A cut-off reply (IncompleteRead) is "unreachable" too: an execute may have run.
         raise ComposioError(f"Composio unreachable ({type(e).__name__})") from None
 
 
@@ -98,12 +106,12 @@ def _pin(accounts):
     return json.dumps(accounts, sort_keys=True)
 
 
-def _session_body(user_id, ws, accounts):
+def _session_body(user_id, accounts=None):
     body = {"user_id": user_id,
             "manage_connections": {"enable": False},
             "workbench": {"enable": False}}
-    if ws == integrations.LINK_WS:
-        # Only makes connect links: several accounts per app may be added.
+    if accounts is None:
+        # The link-only session: several accounts per app may be added.
         body["toolkits"] = {"disable": sorted(app_rules.BLOCKED_TOOLKITS)}
         body["multi_account"] = {"enable": True, "max_accounts_per_toolkit": integrations.MAX_ACCOUNTS,
                                  "require_explicit_selection": True}
@@ -119,20 +127,31 @@ def _session_body(user_id, ws, accounts):
     return body
 
 
-def ensure_session(pid, ws, root=bots.ROOT):
-    """The person's locked-down session for one workspace, remade when its picks change."""
-    _key(root)
-    accounts = {} if ws == integrations.LINK_WS else integrations.accounts_for(ws, root)
-    if ws != integrations.LINK_WS and not accounts:
-        raise ComposioError("no app account is picked for this workspace")
-    pin = _pin(accounts)
-    saved = integrations.session(pid, ws, root)
+def _session(pid, key, accounts, root):
+    pin = _pin(accounts or {})
+    saved = integrations.session(pid, key, root)
     if saved.get("session_id") and saved.get("pin") == pin and trusted_mcp_url(saved.get("mcp_url")):
         return {"session_id": saved["session_id"], "mcp_url": saved["mcp_url"]}
     user_id = integrations.person(pid, root)["composio_user_id"]
-    sess = _parse_session(_json("POST", "/tool_router/session", _session_body(user_id, ws, accounts), root))
-    integrations.save_session(pid, ws, sess["session_id"], sess["mcp_url"], pin, root)
+    sess = _parse_session(_json("POST", "/tool_router/session", _session_body(user_id, accounts), root))
+    integrations.save_session(pid, key, sess["session_id"], sess["mcp_url"], pin, root)
     return sess
+
+
+def ensure_session(pid, ws, root=bots.ROOT):
+    """The person's locked-down session for one workspace, remade when its picks change."""
+    _key(root)
+    if ws == integrations.LINK_WS:  # never a bot's: it is pinned to nothing
+        raise ComposioError("not a workspace")
+    accounts = integrations.accounts_for(ws, root)
+    if not accounts:
+        raise ComposioError("no app account is picked for this workspace")
+    return _session(pid, ws, accounts, root)
+
+
+def _link_session(pid, root):
+    _key(root)
+    return _session(pid, integrations.LINK_WS, None, root)
 
 
 def reset_session(pid, ws, root=bots.ROOT):
@@ -173,7 +192,7 @@ def catalog(root=bots.ROOT):
 
 def connect_link(pid, toolkit, root=bots.ROOT):
     """{"url", "account_id"}: a link that adds one more account of this app."""
-    sid = ensure_session(pid, integrations.LINK_WS, root)["session_id"]
+    sid = _link_session(pid, root)["session_id"]
     data = _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/link", {"toolkit": toolkit}, root)
     url = data.get("redirect_url") or data.get("url")
     if not url:
@@ -182,12 +201,16 @@ def connect_link(pid, toolkit, root=bots.ROOT):
     return {"url": url, "account_id": account if integrations.is_account_id(account) else None}
 
 
+def clean_label(value):
+    return " ".join(_LABEL_DROP_RE.sub(" ", value).split())[:LABEL_MAX] if isinstance(value, str) else ""
+
+
 def _label(item):
     val = (item.get("state") or {}).get("val") or {}
     for v in (item.get("alias"), val.get("displayName") if isinstance(val, dict) else None,
               item.get("word_id"), item.get("id")):
-        if isinstance(v, str) and v.strip():
-            return v.strip()[:80]
+        if clean_label(v):
+            return clean_label(v)
     return ""
 
 
@@ -268,8 +291,10 @@ def logo(slug, root=bots.ROOT):
                 raw = resp.read(LOGO_MAX_BYTES + 1)
             if ctype in LOGO_TYPES and len(raw) <= LOGO_MAX_BYTES:
                 got = (raw, ctype)
-        except (urllib.error.URLError, OSError, ValueError):
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
             pass
+    if len(_LOGOS) >= LOGO_CACHE_MAX:
+        _LOGOS.clear()
     _LOGOS[slug] = got  # a miss is remembered too: the panel shows the letter instead
     return got
 

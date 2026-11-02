@@ -149,6 +149,19 @@ def forget_account(account_id, root=bots.ROOT):
     _update(root, fn)
 
 
+def forget_workspace(ws, root=bots.ROOT):
+    """A deleted project: a new one with the same slug starts with no apps."""
+    if ws in (bots.HQ, LINK_WS):
+        return
+
+    def fn(d):
+        (d.get("accounts") or {}).pop(ws, None)
+        (d.get("grants") or {}).pop(ws, None)
+        for row in (d.get("people") or {}).values():
+            (row.get("sessions") or {}).pop(ws, None)
+    _update(root, fn)
+
+
 def set_label(account_id, label, root=bots.ROOT):
     def fn(d):
         row = (d.get("known") or {}).get(account_id)

@@ -47,6 +47,12 @@ everything, so Composio used the most recently connected account of each app.
   panel polls for.
 - The relay re-reads the workspace's ticks on every call, like grants. Reads
   carry `account` only when there is a choice; held writes always store it.
+- Account names come from the provider and are quoted into the bot's turn, so
+  they are cut to plain text (letters, digits, space, `. @ + ' -`, 60 chars).
+- Deleting a project drops its ticks, grants and sessions, so a new project
+  with the same slug starts with no apps.
+- A cut-off Composio reply counts as unreachable: an Approve says it may have
+  run instead of staying "running".
 - Logos: fetched server-side without the API key, https only, every resolved
   address public, no redirects, image types only, 256 KB cap, cached per
   process. Served with `sandbox` CSP so an SVG opened directly runs nothing.

@@ -2039,7 +2039,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.update_project(slug, body)})
             if path.startswith("/api/project/") and path.endswith("/delete"):
                 slug = path[len("/api/project/"):-len("/delete")]
-                return self._send(200, {"ok": True, **fileops.delete_project(slug)})
+                out = fileops.delete_project(slug)
+                integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
+                return self._send(200, {"ok": True, **out})
             if path.startswith("/api/project/") and path.endswith("/intake/new"):
                 proj = path[len("/api/project/"):-len("/intake/new")]
                 return self._send(200, {"ok": True, **fileops.create_intake(proj)})
