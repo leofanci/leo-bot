@@ -1216,9 +1216,10 @@ async function renderIntegrations(){
     if (!stillOn()) return;
     const box = $("#integ");
     if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
-    const keyForm = `<form class="integ-key"><input name="k" type="password" autocomplete="off" placeholder="Composio API key" aria-label="Composio API key">
+    const keyForm = `<form class="integ-key"><input name="k" type="password" autocomplete="off" placeholder="Composio project API key (ak_…)" aria-label="Composio project API key">
       <button class="btn sm primary" type="submit">Save</button>
-      <a class="link-btn" href="https://composio.dev" target="_blank" rel="noopener">Get a free key</a></form>`;
+      <a class="link-btn" href="https://docs.composio.dev/reference/authenticating-to-composio" target="_blank" rel="noopener">Where to find it</a>
+      <small class="integ-key-hint">Composio dashboard, Platform, your project, Settings, API Keys. Not the consumer MCP key (ck_).</small></form>`;
     const keyRow = d.configured && !replacing
       ? `<div class="post integ-keyrow"><div class="t"><b>Composio</b><small>${d.key_refused ? `<span class="integ-bad">${esc(d.key_refused)}</span>` : `Configured · saved ${esc(new Date((d.saved || 0) * 1000).toLocaleDateString())}${d.offline ? " · can't reach Composio right now" : ""}`}</small></div>
           <button class="go" data-key="replace">Replace</button><button class="more" data-key="remove">Remove</button></div>`

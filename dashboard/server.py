@@ -997,8 +997,10 @@ def _grants_view():
     return view
 
 
-BAD_KEY = ("Composio refused this key. Use the project API key: Composio dashboard, Settings, "
-           "Project Settings, API Keys (it usually starts with ak_).")
+BAD_KEY = ("Composio refused this key. Use the project API key: Composio dashboard, Platform, "
+           "your project, Settings, API Keys (it usually starts with ak_).")
+CONSUMER_KEY = ("That is Composio's consumer MCP key (ck_), which this API does not accept. Use the project "
+                "API key: Composio dashboard, Platform, your project, Settings, API Keys (it usually starts with ak_).")
 
 
 def _integrations_view():
@@ -2161,6 +2163,8 @@ class Handler(BaseHTTPRequestHandler):
                     key = body.get("api_key")
                     if not isinstance(key, str) or not key.strip():
                         raise ValueError("api_key required")
+                    if key.strip().startswith("ck_"):
+                        raise ValueError(CONSUMER_KEY)
                     try:
                         composio.check_key(key.strip(), ROOT)
                     except composio.ComposioError as e:

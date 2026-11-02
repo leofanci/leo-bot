@@ -217,11 +217,20 @@ class IntegrationsApi(Base):
     def test_refused_key_is_not_saved(self):
         refused = composio.ComposioError("Composio HTTP 401", status=401)
         with mock.patch.object(server.composio, "check_key", side_effect=refused) as ck:
-            code, data, _, raw = request("POST", "/api/integrations/key", {"api_key": " ck_wrongkind123 "})
-        ck.assert_called_once_with("ck_wrongkind123", self.root)
+            code, data, _, raw = request("POST", "/api/integrations/key", {"api_key": " ak_otherproject1 "})
+        ck.assert_called_once_with("ak_otherproject1", self.root)
         self.assertEqual(code, 400)
         self.assertIn("project API key", data["error"])
-        self.assertNotIn(b"ck_wrongkind123", raw)
+        self.assertNotIn(b"ak_otherproject1", raw)
+        self.assertIsNone(integrations.api_key(self.root))
+
+    def test_consumer_key_named_and_never_sent(self):
+        with mock.patch.object(server.composio, "check_key") as ck:
+            code, data, _, raw = request("POST", "/api/integrations/key", {"api_key": "ck_consumerkey9"})
+        ck.assert_not_called()
+        self.assertEqual(code, 400)
+        self.assertIn("consumer MCP key", data["error"])
+        self.assertNotIn(b"ck_consumerkey9", raw)
         self.assertIsNone(integrations.api_key(self.root))
 
     def test_key_saved_when_composio_unreachable(self):
