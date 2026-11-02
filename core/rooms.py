@@ -11,6 +11,10 @@ A project workspace's rooms are bound to that project; nothing in one
 workspace is visible from another. Topic channels are stored per workspace
 (team/rooms.json for HQ, projects/<slug>/team/rooms.json otherwise).
 
+A topic channel may be private: then only the owner and the people listed in
+its `people` (core.people ids) see it. #general is open to everyone in the
+workspace. DM threads belong to the person who started them (chat `by`).
+
 A room costs nothing by itself: untagged messages go to ONE bot (the lead),
 members answer only when tagged, and the persona's team list shrinks to them.
 """
@@ -53,7 +57,8 @@ def list_rooms(team, ws, root=bots.ROOT):
         if lead not in members:
             members.insert(0, lead)
         out.append({"id": f"{ws}/t-{t['name']}", "kind": "topic", "name": t["name"],
-                    "members": members, "lead": lead})
+                    "members": members, "lead": lead, "private": bool(t.get("private")),
+                    "people": [p for p in t.get("people") or [] if isinstance(p, str)]})
     for b in team.ordered():
         if b.active:
             out.append({"id": f"{ws}/dm-{b.id}", "kind": "dm", "name": b.name,
@@ -68,8 +73,33 @@ def get_room(room_id, team, root=bots.ROOT):
     return next((r for r in list_rooms(team, ws, root) if r["id"] == room_id), None)
 
 
-def save_topic(ws, name, members, lead, root=bots.ROOT, *, replace=None):
-    """Create a topic channel in workspace `ws`, or update `replace` (its current name)."""
+def can_see(room, viewer):
+    """`viewer`: {"kind": "owner"} or {"kind": "person", "id": pid}. Private topic
+    channels show only to the owner and their listed people."""
+    if not room:
+        return False
+    if (viewer or {}).get("kind") == "owner":
+        return True
+    if (viewer or {}).get("kind") != "person":
+        return False
+    return not room.get("private") or viewer.get("id") in (room.get("people") or [])
+
+
+def chat_visible(rec, room, viewer):
+    """A saved thread `rec` listed under `room`: the room must be visible, and a
+    DM thread belongs to whoever started it (no `by` = the owner's)."""
+    if not can_see(room, viewer):
+        return False
+    if room.get("kind") != "dm":
+        return True
+    starter = (rec or {}).get("by") or bots.CEO
+    me = bots.CEO if viewer.get("kind") == "owner" else viewer.get("id")
+    return starter == me
+
+
+def save_topic(ws, name, members, lead, root=bots.ROOT, *, replace=None, private=False, people=()):
+    """Create a topic channel in workspace `ws`, or update `replace` (its current name).
+    `private` + `people` (person ids) limit who sees it; the owner always does."""
     name = (name or "").strip().lower()
     if not _NAME_RE.match(name):
         raise ValueError("channel name: lowercase letters, digits, dashes (max 40)")
@@ -85,6 +115,9 @@ def save_topic(ws, name, members, lead, root=bots.ROOT, *, replace=None):
     if any(r["name"] == name for r in rows) and name != replace:
         raise ValueError(f"#{name} already exists")
     row = {"name": name, "members": members, "lead": lead}
+    if private:
+        row["private"] = True
+        row["people"] = [p for p in dict.fromkeys(people or []) if isinstance(p, str) and p]
     if replace:
         if not any(r["name"] == replace for r in rows):
             raise ValueError(f"unknown channel: #{replace}")

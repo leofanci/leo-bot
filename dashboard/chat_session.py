@@ -100,6 +100,7 @@ SECRET_FILE_GLOBS = [
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
     ".auth-token",  # dashboard login token (server.TOKEN_FILE)
     "integrations.json",  # Composio key + sessions (core.integrations)
+    "people.json", "invites.json", "access.json",  # invited people (core.people)
 ]
 
 

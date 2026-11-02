@@ -29,7 +29,8 @@ def test_focus_expands_card_beyond_page_size():
 
 def test_workspace_switch_lands_on_content():
     js = APP_JS.read_text(encoding="utf-8")
-    assert 'navigate(ws === "hq" ? "#/calendar" : "#/content")' in js
+    # the owner lands on Content (HQ: Calendar); an invited person on Team
+    assert 'navigate(isPerson() ? "#/team" : ws === "hq" ? "#/calendar" : "#/content")' in js
 
 
 def test_content_view_has_empty_states():
