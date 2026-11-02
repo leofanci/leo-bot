@@ -38,9 +38,22 @@ LABEL_MAX = 60
 
 
 class ComposioError(Exception):
-    def __init__(self, message, status=None):
+    def __init__(self, message, status=None, reason=None):
         super().__init__(message)
         self.status = status
+        self.reason = reason  # Composio's error slug (e.g. APIKey_InvalidAPIKey), never its message
+
+
+_REASON_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
+
+
+def _reason(raw):
+    """The error slug from a Composio error body. Its message can quote part of the key: dropped."""
+    try:
+        slug = (json.loads(raw.decode(errors="replace")).get("error") or {}).get("slug")
+    except (ValueError, AttributeError):
+        return None
+    return slug if isinstance(slug, str) and _REASON_RE.fullmatch(slug) else None
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -80,7 +93,11 @@ def _send(method, url, body, root, headers=None, key=None):
         with _opener.open(req, timeout=TIMEOUT) as resp:
             return resp.status, resp.headers, resp.read()
     except urllib.error.HTTPError as e:
-        raise ComposioError(f"Composio HTTP {e.code}", status=e.code) from None
+        try:
+            reason = _reason(e.read(4096))
+        except (OSError, http.client.HTTPException):
+            reason = None
+        raise ComposioError(f"Composio HTTP {e.code}", status=e.code, reason=reason) from None
     except (urllib.error.URLError, OSError, http.client.HTTPException) as e:  # TimeoutError is an OSError
         # A cut-off reply (IncompleteRead) is "unreachable" too: an execute may have run.
         raise ComposioError(f"Composio unreachable ({type(e).__name__})") from None
