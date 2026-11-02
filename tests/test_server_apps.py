@@ -15,6 +15,7 @@ PORT = 8765
 ORIGIN = f"http://127.0.0.1:{PORT}"
 CAT = [{"slug": s, "name": s, "logo": None, "auth": "managed"}
        for s in ("gmail", "googlecalendar", "googledrive", "instagram")]
+ACCTS = [{"id": "ca_g1", "toolkit": "gmail", "label": "work"}]
 
 
 def request(method, path, body=None, *, cookie=True, origin=True, host=f"127.0.0.1:{PORT}", headers=None):
@@ -59,10 +60,11 @@ class Base(unittest.TestCase):
                   mock.patch.object(server.db, "db_exists", return_value=True),
                   mock.patch.object(server.db, "tree", return_value=[]),  # never the real os.db
                   mock.patch.object(server.composio, "catalog", return_value=CAT),
-                  mock.patch.object(server.composio, "connections", return_value={"gmail"})):
+                  mock.patch.object(server.composio, "accounts", return_value=ACCTS)):
             p.start()
             self.addCleanup(p.stop)
         self.addCleanup(self.tmp.cleanup)
+        integrations.note_known(ACCTS, self.root)  # joins HQ, as a first connect does
 
 
 class Relay(Base):
@@ -117,6 +119,55 @@ class IntegrationsApi(Base):
         self.assertEqual((data["configured"], data["connected"]), (True, ["gmail"]))
         self.assertTrue(any("instagram" in g["apps"] for g in data["pinned"]))
         self.assertEqual(data["grants"]["hq"]["cos"], {"gmail": "read"})
+        self.assertEqual(data["accounts"], ACCTS)
+        self.assertEqual(data["picked"], {"hq": {"gmail": ["ca_g1"]}})
+        self.assertEqual(data["workspaces"], [{"id": "hq", "name": "HQ"}])
+
+    def test_offline_view_keeps_last_accounts(self):
+        integrations.set_key("ak_x", self.root)
+        with mock.patch.object(server.composio, "accounts", side_effect=composio.ComposioError("down")):
+            data = request("GET", "/api/integrations")[1]
+        self.assertTrue(data["offline"])
+        self.assertEqual(data["accounts"], ACCTS)
+
+    def test_pick_account_for_a_project(self):
+        tree = [{"slug": "acme", "name": "Acme"}]
+        with mock.patch.object(server.db, "tree", return_value=tree):
+            code, data, _, _ = request("POST", "/api/integrations/accounts",
+                                       {"ws": "acme", "account": "ca_g1", "on": True})
+            self.assertEqual((code, data["picked"]), (200, {"gmail": ["ca_g1"]}))
+            self.assertEqual(request("POST", "/api/integrations/accounts",
+                                     {"ws": "acme", "account": "ca_g1", "on": True}, origin=False)[0], 403)
+            self.assertEqual(request("POST", "/api/integrations/accounts",
+                                     {"ws": "gone", "account": "ca_g1", "on": True})[0], 400)
+            self.assertEqual(request("POST", "/api/integrations/accounts",
+                                     {"ws": "acme", "account": "ca_nope", "on": True})[0], 400)
+            view = request("GET", "/api/integrations")[1]
+        self.assertEqual(view["picked"]["acme"], {"gmail": ["ca_g1"]})
+        self.assertEqual(integrations.accounts_for("hq", self.root), {"gmail": ["ca_g1"]})  # both now
+
+    def test_rename_account(self):
+        with mock.patch.object(server.composio, "rename_account") as ren:
+            code, data, _, _ = request("POST", "/api/integrations/rename", {"account": "ca_g1", "alias": "Sales"})
+            self.assertEqual(code, 200)
+            ren.assert_called_once_with("ca_g1", "Sales", self.root)
+            for bad in ({"account": "ca_g1", "alias": ""}, {"account": "ca_g1", "alias": "<b>x</b>"},
+                        {"account": "ca_nope", "alias": "ok"}):
+                self.assertEqual(request("POST", "/api/integrations/rename", bad)[0], 400, bad)
+        self.assertEqual(integrations.known(self.root)["ca_g1"]["label"], "Sales")
+
+    def test_logo_served_from_this_origin_sandboxed(self):
+        integrations.set_key("ak_x", self.root)
+        with mock.patch.object(server.composio, "logo", return_value=(b"<svg/>", "image/svg+xml")):
+            code, _, hdrs, raw = request("GET", "/api/integrations/logo/gmail")
+        self.assertEqual((code, raw, hdrs["Content-Type"]), (200, b"<svg/>", "image/svg+xml"))
+        self.assertIn("sandbox", hdrs["Content-Security-Policy"])
+        with mock.patch.object(server.composio, "logo", return_value=None):
+            self.assertEqual(request("GET", "/api/integrations/logo/gmail")[0], 404)
+        with mock.patch.object(server.composio, "logo") as lg:
+            self.assertEqual(request("GET", "/api/integrations/logo/..%2Fx")[0], 404)
+            lg.assert_not_called()
+        self.assertEqual(request("GET", "/api/integrations/logo/gmail", cookie=False)[0], 403)
 
     def test_key_requires_origin(self):
         self.assertEqual(request("POST", "/api/integrations/key", {"api_key": "ak_x"}, origin=False)[0], 403)
@@ -136,9 +187,10 @@ class IntegrationsApi(Base):
 
     def test_connect_returns_url(self):
         integrations.set_key("ak_x", self.root)
-        with mock.patch.object(server.composio, "connect_link", return_value="https://backend.composio.dev/l/1"):
+        link = {"url": "https://backend.composio.dev/l/1", "account_id": "ca_new"}
+        with mock.patch.object(server.composio, "connect_link", return_value=link):
             code, data, _, _ = request("POST", "/api/integrations/connect", {"toolkit": "gmail"})
-        self.assertEqual((code, data["url"]), (200, "https://backend.composio.dev/l/1"))
+        self.assertEqual((code, data), (200, link))
 
     def test_grants_unknown_workspace_400(self):
         # An unknown workspace must not fall back to HQ and grant an HQ bot apps.
@@ -170,8 +222,8 @@ class Approve(Base):
             again = request("POST", self.path + "/approve", {})[0]
         self.assertEqual((code, data["status"]), (200, "done"))
         self.assertEqual(again, 409)
-        ex.assert_called_once_with("ceo", "GMAIL_SEND_EMAIL", {"recipient_email": "a@example.com", "body": "hi"},
-                                   self.root)
+        ex.assert_called_once_with("ceo", "hq", "GMAIL_SEND_EMAIL",
+                                   {"recipient_email": "a@example.com", "body": "hi"}, "ca_g1", self.root)
         notes = server.chat_store.load(self.chat)["messages"]
         self.assertEqual(notes[-1], {**notes[-1], "role": "assistant", "bot": "cos", "content": "Sent."})
 
@@ -195,10 +247,35 @@ class Approve(Base):
         self.assertEqual(approvals.get(self.rec["id"], self.root)["status"], "pending")
 
     def test_approve_refused_when_not_connected(self):
-        with mock.patch.object(server.composio, "connections", return_value=set()), \
+        with mock.patch.object(server.composio, "accounts", return_value=[]), \
                 mock.patch.object(server.composio, "execute") as ex:
             self.assertEqual(request("POST", self.path + "/approve", {})[0], 409)
         ex.assert_not_called()
+
+    def test_approve_refused_when_account_unpicked(self):
+        # The card named this account: it never runs on another one instead.
+        integrations.note_known(ACCTS + [{"id": "ca_g2", "toolkit": "gmail", "label": "other"}], self.root)
+        rec = approvals.add_app_action(self.root, ws="hq", room="hq/general", chat=self.chat, bot="cos",
+                                       person="ceo", toolkit="gmail", slug="GMAIL_SEND_EMAIL",
+                                       arguments={}, account="ca_g1")
+        self.assertEqual(rec["preview"]["fields"][0], ["Account", "work"])
+        integrations.set_account("hq", "ca_g1", False, self.root)
+        with mock.patch.object(server.composio, "execute") as ex:
+            self.assertEqual(request("POST", f"/api/approvals/{rec['id']}/approve", {})[0], 409)
+        ex.assert_not_called()
+
+    def test_approve_runs_on_the_held_account(self):
+        two = ACCTS + [{"id": "ca_g2", "toolkit": "gmail", "label": "other"}]
+        integrations.note_known(two, self.root)
+        rec = approvals.add_app_action(self.root, ws="hq", room="hq/general", chat=self.chat, bot="cos",
+                                       person="ceo", toolkit="gmail", slug="GMAIL_SEND_EMAIL",
+                                       arguments={}, account="ca_g2")
+        with mock.patch.object(server.composio, "accounts", return_value=two), \
+                mock.patch.object(server.composio, "execute", return_value={"result_type": "failed",
+                                                                            "error": "quota"}) as ex:
+            data = request("POST", f"/api/approvals/{rec['id']}/approve", {})[1]
+        self.assertEqual(ex.call_args[0][4], "ca_g2")
+        self.assertEqual((data["status"], data["result"]), ("failed", "Failed: quota"))
 
     def test_approve_refused_without_key(self):
         integrations.remove_key(self.root)
@@ -210,7 +287,7 @@ class Approve(Base):
         edited = {"recipient_email": "z@example.com", "body": "edited"}
         with mock.patch.object(server.composio, "execute", return_value={"successful": True}) as ex:
             request("POST", self.path + "/approve", {"arguments": edited})
-        self.assertEqual(ex.call_args[0][2], edited)
+        self.assertEqual(ex.call_args[0][3], edited)
 
     def test_approve_timeout_marks_failed(self):
         with mock.patch.object(server.composio, "execute",
@@ -302,6 +379,23 @@ class Turn(Base):
                 mock.patch.object(server.chat_session, "ChatSession", make("mate")):
             h._handle_ask({"messages": [{"role": "user", "content": text}]})
         return seen, lead, sink.getvalue().decode()
+
+    def test_project_without_picked_account_has_no_app_turn(self):
+        tree = [{"slug": "acme", "name": "Acme"}]
+        integrations.set_grant("acme", "cos", {"gmail": "write"}, self.root)
+        with mock.patch.object(server.db, "tree", return_value=tree):
+            self.assertEqual(server.integrations.effective_grant("acme", "cos", self.root), {})
+            integrations.set_account("acme", "ca_g1", True, self.root)
+            self.assertEqual(server.integrations.effective_grant("acme", "cos", self.root), {"gmail": "write"})
+
+    def test_accounts_note_lists_only_this_workspace(self):
+        integrations.note_known(ACCTS + [{"id": "ca_g2", "toolkit": "gmail", "label": "side"}], self.root)
+        integrations.set_account("hq", "ca_g2", False, self.root)
+        integrations.set_account("acme", "ca_g2", True, self.root)
+        note = server._apps_accounts_note("hq", {"gmail": "write"})
+        self.assertIn('"ca_g1" (work)', note)
+        self.assertNotIn("ca_g2", note)
+        self.assertEqual(server._apps_accounts_note("demo", {"gmail": "write"}), "")
 
     def test_app_turn_flags(self):
         seen, lead, out = self.run_turn("draft a reply to the thread in my inbox")

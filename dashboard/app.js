@@ -1035,6 +1035,7 @@ async function renderTeam(){
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
   const draw = () => {
+    const wsApps = Object.keys(integ.picked?.[_WS] || {}).sort();  // apps with an account ticked here
     const depth = b => { let d = 0, cur = b; while (cur && cur.reports_to !== "ceo" && d < 5) { cur = botById(cur.reports_to); d++; } return d; };
     const rows = _BOTS.map(b => {
       const own = new Set(b.skills);
@@ -1052,9 +1053,9 @@ async function renderTeam(){
           <small class="team-usage">${(() => { const c = costs.bots[b.id]; return c && c.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"} · ${fmtUsage(c.tokens, c.cost)} (est., ${costs.days}d)` : `no replies in ${costs.days}d`; })()}
             · <a class="mem-toggle" data-mem="${esc(b.id)}">Memory</a></small>
           <div class="mem-box" hidden></div>
-          ${integ.configured && integ.connected.length && _WS ? `<div class="app-grants">${integ.connected.map(slug => {
+          ${integ.configured && wsApps.length && _WS ? `<div class="app-grants">${wsApps.map(slug => {
             const scope = integ.grants?.[_WS]?.[b.id]?.[slug];
-            return `<label>${esc(integ.apps_meta?.[slug]?.name || slug)} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
+            return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(integ.apps_meta?.[slug]?.name || slug)} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
               ${["", "read", "write"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
           }).join("")}</div>` : ""}
         </div>
@@ -1063,7 +1064,9 @@ async function renderTeam(){
       </div>`;
     }).join("");
     const t = costs.total || {};
-    const grantHelp = integ.configured && integ.connected.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>` : "";
+    const grantHelp = !integ.configured || !(integ.connected || []).length ? ""
+      : wsApps.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>`
+      : `<div class="help">No app account is ticked for this workspace yet. Tick one in HQ, Integrations.</div>`;
     $("#team-list").innerHTML = grantHelp + `<div class="team-total">${t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>`;
     $("#team-list").querySelectorAll("[data-mem]").forEach(a => a.onclick = () => toggleMemory(a.closest(".team-row"), a.dataset.mem));
     $("#team-list").querySelectorAll("[data-grant-bot]").forEach(sel => sel.onchange = async () => {
@@ -1085,6 +1088,7 @@ async function renderTeam(){
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · ${esc(_WS === "hq" ? "holding" : wsById(_WS)?.kind || "")}</div><h1 class="title">Team</h1></div></div>
     <div class="scroll"><div class="help">Who works in this workspace. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.</div><div id="team-list"></div></div>`;
+  $("#team-list").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
   if (!_BOTS.length) _BOTS = (await api(`/api/bots?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).bots || [];
   costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
   integ = await api("/api/integrations").catch(() => integ);
@@ -1140,7 +1144,18 @@ function grantLabel(scope){
   return scope === "write" ? "Read + write" : scope === "read" ? "Read" : "Off";
 }
 function appStatusLabel(app, connected){
-  return connected ? "Connected" : app && app.auth === "own_app" ? "Needs setup" : "Connect";
+  const n = connected === true ? 1 : +connected || 0;
+  return n > 1 ? `${n} accounts` : n ? "Connected" : app && app.auth === "own_app" ? "Needs setup" : "Connect";
+}
+// The app's logo through this server (no outside image host), over its first letter.
+function appLogoHtml(slug, meta){
+  const m = meta || {};
+  const letter = String(m.name || slug || "?").trim().charAt(0).toUpperCase() || "?";
+  return `<span class="integ-logo" aria-hidden="true">${esc(letter)}${m.logo
+    ? `<img src="/api/integrations/logo/${encodeURIComponent(slug)}" alt="" loading="lazy">` : ""}</span>`;
+}
+function acctPicked(picked, ws, slug, id){
+  return ((picked?.[ws]?.[slug]) || []).includes(id);
 }
 function appCardHtml(a){
   const p = a.preview || { title: a.action?.slug || "App action", fields: [] };
@@ -1194,6 +1209,8 @@ async function renderIntegrations(){
     <div class="scroll"><div class="help">Connect your own apps through your Composio account. Bots read freely; anything else waits for your Approve. Switch apps on per bot in Team.</div><div id="integ"></div></div>`;
   if (_WS !== "hq") { $("#integ").innerHTML = `<div class="empty">Integrations live in HQ.</div>`; return; }
   let polls = 0, replacing = false;
+  // A logo that fails to load leaves its letter showing (error events do not bubble).
+  $("#integ").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
   const draw = async () => {
     const d = await api("/api/integrations").catch(e => ({ error: e.message }));
     if (!stillOn()) return;
@@ -1206,15 +1223,21 @@ async function renderIntegrations(){
       ? `<div class="post integ-keyrow"><div class="t"><b>Composio</b><small>Configured · saved ${esc(new Date((d.saved || 0) * 1000).toLocaleDateString())}${d.offline ? " · can't reach Composio right now" : ""}</small></div>
           <button class="go" data-key="replace">Replace</button><button class="more" data-key="remove">Remove</button></div>`
       : keyForm;
-    const connected = new Set(d.connected || []);
+    const accts = slug => (d.accounts || []).filter(a => a.toolkit === slug);
+    const acctRow = (slug, a) => `<div class="integ-acct">
+        <span class="integ-acct-name" data-rename="${esc(a.id)}" title="Rename" tabindex="0">${esc(a.label || a.id)}</span>
+        <span class="integ-ws">${(d.workspaces || []).map(w => `<label><input type="checkbox" data-pick="${esc(a.id)}" data-ws="${esc(w.id)}"${acctPicked(d.picked, w.id, slug, a.id) ? " checked" : ""}> ${esc(w.name)}</label>`).join("")}</span></div>`;
     const appRow = (slug, meta) => {
       const m = meta || d.apps_meta?.[slug] || { slug, name: slug };
-      const on = connected.has(slug);
-      return `<div class="integ-row"><span class="t"><b>${esc(m.name || slug)}</b>${slug === "google_maps" ? `<small>Google bills Maps per request.</small>` : ""}</span>
-        ${on || m.auth === "own_app" ? `<span class="tag">${esc(appStatusLabel(m, on))}</span>` : ""}
-        ${on ? "" : `<button class="btn sm" data-connect="${esc(slug)}">${m.auth === "own_app" ? "Set up" : "Connect"}</button>`}</div>`;
+      const mine = accts(slug);
+      const n = mine.length;
+      return `<div class="integ-app"><div class="integ-row">${appLogoHtml(slug, m)}<span class="t"><b>${esc(m.name || slug)}</b>${slug === "google_maps" ? `<small>Google bills Maps per request.</small>` : ""}</span>
+        ${n || m.auth === "own_app" ? `<span class="tag">${esc(appStatusLabel(m, n))}</span>` : ""}
+        <button class="btn sm" data-connect="${esc(slug)}">${n ? "Add account" : m.auth === "own_app" ? "Set up" : "Connect"}</button></div>
+        ${mine.map(a => acctRow(slug, a)).join("")}</div>`;
     };
     box.innerHTML = keyRow + (d.configured ? `
+      <div class="help">Each account is connected once. Tick the workspaces that may use it: a project sees only the accounts ticked for it.</div>
       ${(d.pinned || []).map(g => `<section class="integ-group"><h3>${esc(g.group)}</h3>${g.apps.map(s => appRow(s)).join("")}</section>`).join("")}
       <section class="integ-group"><h3>All apps</h3><input class="integ-q" type="search" placeholder="Search Composio apps" aria-label="Search Composio apps"><div class="integ-hits"></div></section>` : "");
     const keyEl = box.querySelector(".integ-key");
@@ -1229,19 +1252,61 @@ async function renderIntegrations(){
     });
     const wireConnect = root => root.querySelectorAll("[data-connect]").forEach(b => b.onclick = async () => {
       try {
-        const { url } = await jpost("/api/integrations/connect", { toolkit: b.dataset.connect });
+        const slug = b.dataset.connect, before = accts(slug).length;
+        const { url, account_id } = await jpost("/api/integrations/connect", { toolkit: slug });
         window.open(url, "_blank", "noopener");
         b.textContent = "Waiting…"; b.disabled = true;
         polls = 0;
         const tick = async () => {
           if (!stillOn() || ++polls > 100) return;  // 3 s × 100 = 5 min
           const s = await api("/api/integrations").catch(() => null);
-          if (s?.connected?.includes(b.dataset.connect)) return draw();
+          const now = (s?.accounts || []).filter(a => a.toolkit === slug);
+          if (account_id ? now.some(a => a.id === account_id) : now.length > before) return draw();
           setTimeout(tick, 3000);
         };
         setTimeout(tick, 3000);
       } catch (err) { toast("✗ " + err.message); }
     });
+    const wireAccounts = root => {
+      root.querySelectorAll("[data-pick]").forEach(cb => cb.onchange = async () => {
+        cb.disabled = true;
+        try {
+          const r = await jpost("/api/integrations/accounts", { ws: cb.dataset.ws, account: cb.dataset.pick, on: cb.checked });
+          (d.picked ||= {})[r.ws] = r.picked;
+        } catch (err) { cb.checked = !cb.checked; toast("✗ " + err.message); }
+        cb.disabled = false;
+      });
+      root.querySelectorAll("[data-rename]").forEach(el => {
+        const edit = () => {
+          const id = el.dataset.rename, old = el.textContent;
+          const input = document.createElement("input");
+          input.className = "integ-acct-input";
+          input.value = old; input.maxLength = 40; input.setAttribute("aria-label", "Account name");
+          let done = false;
+          const finish = async save => {
+            if (done) return;
+            done = true;
+            const name = input.value.trim();
+            if (save && name && name !== old) {
+              try {
+                const r = await jpost("/api/integrations/rename", { account: id, alias: name });
+                const a = (d.accounts || []).find(x => x.id === id);
+                if (a) a.label = r.label;
+                el.textContent = r.label;
+              } catch (err) { toast("✗ " + err.message); }
+            }
+            input.replaceWith(el);
+          };
+          input.onkeydown = e => { if (e.key === "Enter") finish(true); if (e.key === "Escape") finish(false); };
+          input.onblur = () => finish(true);
+          el.replaceWith(input);
+          input.focus(); input.select();
+        };
+        el.onclick = edit;
+        el.onkeydown = e => { if (e.key === "Enter") edit(); };
+      });
+    };
+    wireAccounts(box);
     wireConnect(box);
     const q = box.querySelector(".integ-q");
     if (q) {
@@ -1251,6 +1316,7 @@ async function renderIntegrations(){
         const hits = box.querySelector(".integ-hits");
         hits.innerHTML = r.apps.map(a => appRow(a.slug, a)).join("") || `<div class="empty">No app matches.</div>`;
         wireConnect(hits);
+        wireAccounts(hits);
       }, 250); };
     }
   };

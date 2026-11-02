@@ -55,6 +55,8 @@ class Gate(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         integrations.set_grant("hq", "cos", {"gmail": "write", "googledrive": "read"}, self.root)
+        integrations.note_known([{"id": "ca_g1", "toolkit": "gmail", "label": "work"},
+                                 {"id": "ca_d1", "toolkit": "googledrive", "label": "drive"}], self.root)
         self.up = FakeUpstream()
 
     def tearDown(self):
@@ -152,6 +154,52 @@ class Gate(unittest.TestCase):
         reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
         self.assertIn("not available", text_of(reply))
 
+    def second_gmail(self):
+        known = [{"id": a, **r} for a, r in integrations.known(self.root).items()]
+        integrations.note_known(known + [{"id": "ca_g2", "toolkit": "gmail", "label": "personal"}], self.root)
+
+    def test_no_account_picked_refused(self):
+        integrations.set_account("hq", "ca_g1", False, self.root)
+        reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}},
+                                  {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}))
+        self.assertIn("gmail has no account picked in this workspace", text_of(reply))
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(approvals.pending(self.root), [])
+
+    def test_one_account_is_the_pin(self):
+        # One account: nothing extra travels, the held write still names it.
+        read = {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}
+        self.handle(multi(read, {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}))
+        self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"tools": [read]})
+        rec = approvals.pending(self.root)[0]
+        self.assertEqual(rec["action"]["account"], "ca_g1")
+        self.assertEqual(rec["preview"]["fields"][0], ["Account", "work"])
+
+    def test_several_accounts_need_a_choice(self):
+        self.second_gmail()
+        reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
+        out = text_of(reply)
+        self.assertIn('"ca_g1" (work)', out)
+        self.assertIn('"ca_g2" (personal)', out)
+        self.assertEqual(self.up.frames, [])
+        self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}, "account": "ca_g2"}))
+        self.assertEqual(self.up.frames[-1]["params"]["arguments"]["tools"],
+                         [{"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}, "account": "ca_g2"}])
+        self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}, "account": "ca_g2"}))
+        self.assertEqual(approvals.pending(self.root)[0]["action"]["account"], "ca_g2")
+
+    def test_account_of_another_workspace_refused(self):
+        self.second_gmail()
+        integrations.set_account("hq", "ca_g2", False, self.root)
+        integrations.set_account("acme", "ca_g2", True, self.root)
+        reply = self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}, "account": "ca_g2"}))
+        self.assertIn('gmail accounts: "ca_g1" (work). This call was not performed.', text_of(reply))
+        self.assertEqual(approvals.pending(self.root), [])
+
+    def test_non_string_account_unreadable(self):
+        reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}, "account": ["ca_g1"]}))
+        self.assertIn("could not be read", text_of(reply))
+
 
 class ComposioUpstreamRetry(unittest.TestCase):
     def test_resets_session_once_on_404(self):
@@ -166,12 +214,12 @@ class ComposioUpstreamRetry(unittest.TestCase):
             if url == "u1":
                 raise composio.ComposioError("gone", status=404)
             return {"result": {}}, None
-        with mock.patch.object(composio, "ensure_session", side_effect=lambda p, r: next(sessions)), \
+        with mock.patch.object(composio, "ensure_session", side_effect=lambda p, ws, r: next(sessions)), \
                 mock.patch.object(composio, "reset_session") as reset, \
                 mock.patch.object(composio, "forward", side_effect=fwd):
-            reply, _ = apps_relay.ComposioUpstream("ceo", root).forward({"id": 1}, None)
+            reply, _ = apps_relay.ComposioUpstream("ceo", "acme", root).forward({"id": 1}, None)
         self.assertEqual(seen, ["u1", "u2"])
-        reset.assert_called_once()
+        reset.assert_called_once_with("ceo", "acme", root)
         self.assertEqual(reply, {"result": {}})
 
 

@@ -23,7 +23,7 @@ import time
 import uuid
 from pathlib import Path
 
-from core import app_preview, bots
+from core import app_preview, bots, integrations
 
 MARKER_RE = re.compile(r"^[ \t>*_-]*APPROVAL:[*_ \t]*(.+?)[ \t*_]*$", re.M)
 SUMMARY_MAX = 200
@@ -144,12 +144,14 @@ def _housekeep(rows):
     return changed
 
 
-def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments):
-    """Hold one app tool call for an Approve click."""
+def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments, account=None):
+    """Hold one app tool call for an Approve click, on the account it will run as."""
+    label = (integrations.known(root).get(account) or {}).get("label") if account else None
     rec = {"id": uuid.uuid4().hex[:12], "kind": APP, "ws": ws, "room": room, "chat": chat,
            "bot": bot, "person": person, "status": "pending", "created": time.time(),
-           "action": {"toolkit": toolkit, "slug": slug, "arguments": arguments},
-           "preview": app_preview.build(slug, arguments, toolkit)}
+           "action": {"toolkit": toolkit, "slug": slug, "arguments": arguments,
+                      "account": account, "account_label": label or account},
+           "preview": app_preview.build(slug, arguments, toolkit, account=label or account)}
     with LOCK:
         rows = load(root)
         rows.append(rec)
@@ -208,5 +210,6 @@ def edit_arguments(aid, arguments, root=bots.ROOT):
     def fn(r):
         _need(r, "pending")
         r["action"]["arguments"] = arguments
-        r["preview"] = app_preview.build(r["action"]["slug"], arguments, r["action"].get("toolkit"))
+        r["preview"] = app_preview.build(r["action"]["slug"], arguments, r["action"].get("toolkit"),
+                                         account=r["action"].get("account_label"))
     return _mutate_app(aid, root, fn)

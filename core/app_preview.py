@@ -46,13 +46,15 @@ def _title(slug, toolkit):
     return f"{tk.replace('_', ' ').capitalize()}: {action.replace('_', ' ').lower()}"
 
 
-def build(slug, arguments, toolkit=None):
-    """{"title", "fields": [[label, value], ...]} for one held tool call."""
+def build(slug, arguments, toolkit=None, account=None):
+    """{"title", "fields": [[label, value], ...]} for one held tool call; the
+    account it runs as comes first, so two Gmails never get mixed up."""
     title, spec = TAILORED.get(slug, (None, []))
     title = title or _title(slug, toolkit)
+    head = [["Account", account]] if account else []
     if not isinstance(arguments, dict):
-        return {"title": title, "fields": [["Arguments", _fmt(arguments)]]}
-    fields, used = [], set()
+        return {"title": title, "fields": head + [["Arguments", _fmt(arguments)]]}
+    fields, used = list(head), set()
     for label, keys in spec:
         for k in keys:
             if k in arguments and arguments[k] not in (None, "", []):

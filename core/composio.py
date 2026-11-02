@@ -8,7 +8,9 @@ after a timeout can send an email twice.
 Response shapes follow Composio's v3.1 docs (Oct 2026); each endpoint parses in
 one `_parse_*` helper so a live check can correct it in one place.
 """
+import ipaddress
 import json
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -20,7 +22,12 @@ BASE = "https://backend.composio.dev/api/v3.1"
 TIMEOUT = 30
 CATALOG_TTL = 3600
 CATALOG_MAX_PAGES = 20
+ACCOUNTS_MAX_PAGES = 10
 _CATALOG = {}  # {"at": ts, "items": [...]}: one install, one Composio project
+LOGO_MAX_BYTES = 256 * 1024
+LOGO_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
+              "image/x-icon", "image/vnd.microsoft.icon")
+_LOGOS = {}  # slug -> (bytes, content type); one process, a few hundred apps at most
 
 
 class ComposioError(Exception):
@@ -87,24 +94,50 @@ def _parse_session(data):
     return {"session_id": sid, "mcp_url": url}
 
 
-def ensure_session(pid, root=bots.ROOT):
-    """The person's locked-down session, created once and reused."""
-    _key(root)
-    row = integrations.person(pid, root)
-    if row.get("session_id") and trusted_mcp_url(row.get("mcp_url")):
-        return {"session_id": row["session_id"], "mcp_url": row["mcp_url"]}
-    body = {"user_id": row["composio_user_id"],
-            "toolkits": {"disable": sorted(app_rules.BLOCKED_TOOLKITS)},
+def _pin(accounts):
+    return json.dumps(accounts, sort_keys=True)
+
+
+def _session_body(user_id, ws, accounts):
+    body = {"user_id": user_id,
             "manage_connections": {"enable": False},
             "workbench": {"enable": False}}
-    sess = _parse_session(_json("POST", "/tool_router/session", body, root))
-    integrations.save_session(pid, sess["session_id"], sess["mcp_url"], root)
+    if ws == integrations.LINK_WS:
+        # Only makes connect links: several accounts per app may be added.
+        body["toolkits"] = {"disable": sorted(app_rules.BLOCKED_TOOLKITS)}
+        body["multi_account"] = {"enable": True, "max_accounts_per_toolkit": integrations.MAX_ACCOUNTS,
+                                 "require_explicit_selection": True}
+        return body
+    # A workspace sees only its picked accounts: toolkits outside the pin are off,
+    # so Composio never falls back to another account of the same person.
+    body["toolkits"] = {"enable": sorted(accounts)}
+    body["connected_accounts"] = {tk: list(ids) for tk, ids in sorted(accounts.items())}
+    most = max(len(ids) for ids in accounts.values())
+    if most > 1:
+        body["multi_account"] = {"enable": True, "max_accounts_per_toolkit": max(2, most),
+                                 "require_explicit_selection": True}
+    return body
+
+
+def ensure_session(pid, ws, root=bots.ROOT):
+    """The person's locked-down session for one workspace, remade when its picks change."""
+    _key(root)
+    accounts = {} if ws == integrations.LINK_WS else integrations.accounts_for(ws, root)
+    if ws != integrations.LINK_WS and not accounts:
+        raise ComposioError("no app account is picked for this workspace")
+    pin = _pin(accounts)
+    saved = integrations.session(pid, ws, root)
+    if saved.get("session_id") and saved.get("pin") == pin and trusted_mcp_url(saved.get("mcp_url")):
+        return {"session_id": saved["session_id"], "mcp_url": saved["mcp_url"]}
+    user_id = integrations.person(pid, root)["composio_user_id"]
+    sess = _parse_session(_json("POST", "/tool_router/session", _session_body(user_id, ws, accounts), root))
+    integrations.save_session(pid, ws, sess["session_id"], sess["mcp_url"], pin, root)
     return sess
 
 
-def reset_session(pid, root=bots.ROOT):
+def reset_session(pid, ws, root=bots.ROOT):
     """Forget a gone session (401/404); connections live on the Composio user."""
-    integrations.forget_session(pid, root)
+    integrations.forget_session(pid, ws, root)
 
 
 def _auth_kind(item):
@@ -139,30 +172,99 @@ def catalog(root=bots.ROOT):
 
 
 def connect_link(pid, toolkit, root=bots.ROOT):
-    sid = ensure_session(pid, root)["session_id"]
+    """{"url", "account_id"}: a link that adds one more account of this app."""
+    sid = ensure_session(pid, integrations.LINK_WS, root)["session_id"]
     data = _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/link", {"toolkit": toolkit}, root)
     url = data.get("redirect_url") or data.get("url")
     if not url:
         raise ComposioError("Composio returned no connect link")
-    return url
+    account = data.get("connected_account_id")
+    return {"url": url, "account_id": account if integrations.is_account_id(account) else None}
 
 
-def _parse_connections(data):
-    return {i["slug"] for i in data.get("items") or []
-            if isinstance(i, dict) and i.get("slug")
-            and ((i.get("connected_account") or {}).get("status") == "ACTIVE")}
+def _label(item):
+    val = (item.get("state") or {}).get("val") or {}
+    for v in (item.get("alias"), val.get("displayName") if isinstance(val, dict) else None,
+              item.get("word_id"), item.get("id")):
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:80]
+    return ""
 
 
-def connections(pid, root=bots.ROOT):
-    sid = ensure_session(pid, root)["session_id"]
-    return _parse_connections(_json("GET", f"/tool_router/session/{urllib.parse.quote(sid)}/toolkits", None, root))
+def _parse_accounts_page(data):
+    rows = []
+    for i in data.get("items") or []:
+        if not isinstance(i, dict) or i.get("status") != "ACTIVE" or i.get("is_disabled"):
+            continue
+        tk = (i.get("toolkit") or {}).get("slug")
+        if integrations.is_account_id(i.get("id")) and isinstance(tk, str) and tk \
+                and tk not in app_rules.BLOCKED_TOOLKITS:
+            rows.append({"id": i["id"], "toolkit": tk, "label": _label(i)})
+    return rows, data.get("next_cursor")
 
 
-def execute(pid, slug, arguments, root=bots.ROOT):
-    """Run one approved tool call, exactly once."""
-    sid = ensure_session(pid, root)["session_id"]
-    return _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/execute",
-                 {"tool_slug": slug, "arguments": arguments or {}}, root)
+def accounts(pid, root=bots.ROOT):
+    """Every ACTIVE account of the person, oldest first: [{"id", "toolkit", "label"}]."""
+    user_id = integrations.person(pid, root)["composio_user_id"]
+    rows, cursor = [], None
+    for _ in range(ACCOUNTS_MAX_PAGES):
+        q = {"user_ids": user_id, "statuses": "ACTIVE", "limit": "100",
+             "order_by": "created_at", "order_direction": "asc", **({"cursor": cursor} if cursor else {})}
+        page, cursor = _parse_accounts_page(_json("GET", "/connected_accounts?" + urllib.parse.urlencode(q), None, root))
+        rows += page
+        if not cursor:
+            break
+    return rows
+
+
+def rename_account(account_id, alias, root=bots.ROOT):
+    if not integrations.is_account_id(account_id):
+        raise ComposioError("bad account")
+    _json("PATCH", f"/connected_accounts/{urllib.parse.quote(account_id)}", {"alias": alias}, root)
+
+
+def execute(pid, ws, slug, arguments, account=None, root=bots.ROOT):
+    """Run one approved tool call, exactly once, on one picked account."""
+    sid = ensure_session(pid, ws, root)["session_id"]
+    body = {"tool_slug": slug, "arguments": arguments or {}}
+    if account:
+        body["account"] = account
+    return _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/execute", body, root)
+
+
+def _public_host(host):
+    """Every address the name resolves to is on the public internet."""
+    try:
+        infos = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
+    except (OSError, UnicodeError):
+        return False
+    return bool(infos) and all(ipaddress.ip_address(i[4][0].split("%")[0]).is_global for i in infos)
+
+
+_logo_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def logo(slug, root=bots.ROOT):
+    """(bytes, content type) of an app's logo, fetched without the key, or None."""
+    if slug in _LOGOS:
+        return _LOGOS[slug]
+    url = next((a.get("logo") for a in catalog(root) if a["slug"] == slug), None)
+    try:
+        u = urllib.parse.urlsplit(url if isinstance(url, str) else "")
+    except ValueError:
+        u = urllib.parse.urlsplit("")
+    got = None
+    if u.scheme == "https" and u.hostname and _public_host(u.hostname):
+        try:
+            with _logo_opener.open(urllib.request.Request(url), timeout=10) as resp:
+                ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                raw = resp.read(LOGO_MAX_BYTES + 1)
+            if ctype in LOGO_TYPES and len(raw) <= LOGO_MAX_BYTES:
+                got = (raw, ctype)
+        except (urllib.error.URLError, OSError, ValueError):
+            pass
+    _LOGOS[slug] = got  # a miss is remembered too: the panel shows the letter instead
+    return got
 
 
 def _parse_rpc(raw, ctype):
