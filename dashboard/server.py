@@ -44,7 +44,7 @@ import deliverables      # noqa: E402
 from core import bots    # noqa: E402
 from core import rooms   # noqa: E402
 from core import approvals  # noqa: E402
-from core import app_rules, composio, integrations  # noqa: E402
+from core import app_rules, composio, integrations, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
@@ -918,9 +918,13 @@ def _costs(ws, projects, days=30):
 
 
 def _workspaces(projects):
-    return ([{"id": bots.HQ, "name": "HQ", "kind": "hq"}]
-            + [{"id": p["slug"], "name": p.get("name") or p["slug"], "kind": p.get("kind") or "venture"}
-               for p in projects])
+    """Workspace list; `logo` is the uploaded image's version token (None: default look)."""
+    spaces = ([{"id": bots.HQ, "name": "HQ", "kind": "hq"}]
+              + [{"id": p["slug"], "name": p.get("name") or p["slug"], "kind": p.get("kind") or "venture"}
+                 for p in projects])
+    for w in spaces:
+        w["logo"] = ws_logos.version(w["id"], ROOT)
+    return spaces
 
 
 _CHAT = None
@@ -1144,6 +1148,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "private, max-age=86400")
         self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_ws_logo(self, ws):
+        """A workspace's uploaded logo. Type sniffed at save; sandboxed like app logos."""
+        projects = db.tree() if db.db_exists() else []
+        got = ws_logos.get(ws, ROOT) if ws in {w["id"] for w in _workspaces(projects)} else None
+        if not got:
+            return self._send(404, {"error": "no logo"})
+        raw, ctype = got
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -1802,6 +1821,8 @@ class Handler(BaseHTTPRequestHandler):
                     (parse_qs(urlparse(self.path).query).get("q") or [""])[0]))
             if path.startswith("/api/integrations/logo/"):
                 return self._send_logo(path[len("/api/integrations/logo/"):])
+            if path.startswith("/api/workspace-logo/"):
+                return self._send_ws_logo(path[len("/api/workspace-logo/"):])
             if path in ("/api/approvals", "/api/costs", "/api/memory"):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
@@ -2049,6 +2070,7 @@ class Handler(BaseHTTPRequestHandler):
                 slug = path[len("/api/project/"):-len("/delete")]
                 out = fileops.delete_project(slug)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
+                ws_logos.remove(out["slug"], ROOT)
                 return self._send(200, {"ok": True, **out})
             if path.startswith("/api/project/") and path.endswith("/intake/new"):
                 proj = path[len("/api/project/"):-len("/intake/new")]
@@ -2256,6 +2278,23 @@ class Handler(BaseHTTPRequestHandler):
                 ws, record = _resolve_workspace(body.get("ws"), db.tree())
                 team = bots.set_active(bot_id, bool(body.get("active")), ROOT, ws, record)
                 return self._send(200, {"ws": ws, "bots": team.to_api()})
+            if path in ("/api/workspace-logo", "/api/workspace-logo/remove"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                ws = body.get("ws")
+                if ws not in {w["id"] for w in _workspaces(db.tree())}:
+                    raise ValueError("unknown workspace")
+                if path.endswith("/remove"):
+                    ws_logos.remove(ws, ROOT)
+                    return self._send(200, {"ok": True, "logo": None})
+                encoded = body.get("data")
+                if not isinstance(encoded, str) or len(encoded) > ws_logos.MAX_BYTES * 2:
+                    raise ValueError("logo too large (max 512 KB)")
+                try:
+                    data = base64.b64decode(encoded, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError("invalid base64 image") from exc
+                return self._send(200, {"ok": True, "logo": ws_logos.save(ws, data, ROOT)})
             if path == "/api/upload-temp":
                 encoded = body.get("data", "")
                 if not isinstance(encoded, str):

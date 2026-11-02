@@ -3,14 +3,15 @@
   <desc id="logo-desc">Two soft system layers orbiting a central point.</desc>
   <defs>
     <linearGradient id="kernel-bg" x1="160" y1="96" x2="864" y2="928" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#D86A47"/>
-      <stop offset="1" stop-color="#A53A24"/>
+      <stop stop-color="#6366F1"/>
+      <stop offset=".55" stop-color="#4F46E5"/>
+      <stop offset="1" stop-color="#3730A3"/>
     </linearGradient>
   </defs>
   <rect width="1024" height="1024" rx="228" fill="url(#kernel-bg)"/>
-  <g fill="none" stroke="#FFFFFF" stroke-linecap="round">
-    <circle cx="512" cy="512" r="260" stroke-width="84" stroke-dasharray="1190 444" transform="rotate(-38 512 512)"/>
-    <circle cx="512" cy="512" r="142" stroke-width="74" stroke-dasharray="655 237" transform="rotate(108 512 512)" opacity=".76"/>
+  <g fill="none" stroke-linecap="round">
+    <circle cx="512" cy="512" r="260" stroke="#FFFFFF" stroke-width="84" stroke-dasharray="1190 444" transform="rotate(-38 512 512)"/>
+    <circle cx="512" cy="512" r="142" stroke="#C7D2FE" stroke-width="74" stroke-dasharray="655 237" transform="rotate(108 512 512)"/>
   </g>
   <circle cx="512" cy="512" r="54" fill="#FFFFFF"/>
 </svg>

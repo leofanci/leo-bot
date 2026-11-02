@@ -52,6 +52,8 @@
   --ui-color-terminal-hover: rgba(255, 255, 255, .11);
   --ui-color-terminal-control: rgba(255, 255, 255, .08);
   --ui-color-toast: rgba(23, 24, 28, .94);
+  /* Behind logos in both themes: most marks are dark ink on transparent. */
+  --ui-color-logo-bg: #FFFFFF;
 
   /* Post status: always dot + label, never color alone. */
   --ui-status-idea: #8A5A00;
