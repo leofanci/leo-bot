@@ -206,6 +206,7 @@ const ROUTES = [
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
   [/^\/needs$/,                                 ()       => { setState("needs"); renderNeeds(); }],
+  [/^\/workspace\/([^/]+)\/logo$/,               ([w])    => renderWsLogo(decodeURIComponent(w))],
   [/^\/project\/new$/,                          ()       => renderNewProject()],
   [/^\/project\/([^/]+)\/edit$/,                ([s])    => renderEditProject(s)],
   [/^\/project\/([^/]+)\/delete$/,              ([s])    => renderConfirmDeleteProject(s)],
@@ -446,9 +447,17 @@ function wsBadge(w){
   return ((words[0] || "")[0] + ((words[1] || "")[0] || (words[0] || "")[1] || "")).toUpperCase();
 }
 
+// Uploaded workspace logo (versioned so a new upload shows at once); HQ falls
+// back to the myOS mark, a project to its initials.
+const wsLogoUrl = w => w?.logo ? `/api/workspace-logo/${encodeURIComponent(w.id)}?v=${encodeURIComponent(w.logo)}`
+  : (w?.id === "hq" ? "/logo.svg" : null);
+
 function renderWsBar(){
   const bar = $("#ws-bar"); if (!bar) return;
-  bar.innerHTML = _WORKSPACES.map(w => `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.id === "hq" ? " hq" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}">${esc(wsBadge(w))}</button>`).join("")
+  bar.innerHTML = _WORKSPACES.map(w => {
+    const url = wsLogoUrl(w);
+    return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
+  }).join("")
     + `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`;
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
   $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
@@ -512,9 +521,9 @@ async function renderRail(){
   const dms = _ROOMS.filter(r => r.kind === "dm");
   $("#rail").innerHTML = `
     <div class="rail-head">
-      <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false"><img class="mark" src="/logo.svg" alt=""><b>${esc(w.name)}</b>${icon("chevron")}</button>
+      <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false">${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b>${icon("chevron")}</button>
       <button class="rail-ib" id="rail-compose" title="New thread" aria-label="New thread">${icon("compose")}</button>
-      <div class="menu brand-menu" id="brand-menu" role="menu"><a id="quit-btn">Quit myOS</a></div>
+      <div class="menu brand-menu" id="brand-menu" role="menu"><a id="ws-logo-btn">Workspace logo</a><a id="quit-btn">Quit myOS</a></div>
     </div>
     <div class="rail-scroll">
       <nav class="nav">
@@ -548,6 +557,7 @@ async function renderRail(){
   $("#new-room-btn").onclick = e => { e.stopPropagation(); closeNav(); window.ChatRooms?.showCanvas(); navigate("#/room/new"); };
   $("#rail-compose").onclick = () => { closeNav(); window.ChatRooms?.newThread(); };
   $("#brand-btn").onclick = e => { e.stopPropagation(); toggleMenu(e.currentTarget, $("#brand-menu")); };
+  $("#ws-logo-btn").onclick = () => { closeMenus(); closeNav(); window.ChatRooms?.showCanvas(); navigate(`#/workspace/${encodeURIComponent(w.id)}/logo`); };
   $("#quit-btn").onclick = () => { fetch("/api/quit", {method:"POST"}).catch(()=>{}); setTimeout(()=>window.close(), 350); };
   window.ChatRooms?.refresh();
   highlight();
@@ -2972,6 +2982,7 @@ async function renderEditProject(slug){
       ${flabel("Status")}${fsel("status",[["idea","Idea"],["prototype","Prototype"],["live","Live"],["revenue","Revenue"]],e.status||"idea")}
       ${flabel("Hours / week")}${finput("hours_per_week",String(e.hours_per_week??0),'type="number" min="0"')}
       ${localFolderField(e.local_folder||"",Boolean(e.local_folder))}
+      ${flabel("Logo")}<p class="help"><a class="text-link" id="ep2-logo">Change logo</a></p>
       <p class="help">Slug <b>${esc(slug)}</b> is fixed — it's the identity used across files.</p>
     </div></div>`;
   wireLocalFolderControls($("#main"),slug);
@@ -2981,6 +2992,56 @@ async function renderEditProject(slug){
     catch(e){ toast("✗ "+e.message); }
   };
   document.getElementById("ep2-del").onclick=()=>renderConfirmDeleteProject(slug);
+  document.getElementById("ep2-logo").onclick=()=>navigate(`#/workspace/${encodeURIComponent(slug)}/logo`);
+}
+
+// ── Workspace logo ───────────────────────────────────────────────────────────
+// The picked image is redrawn on a 256px canvas and sent as PNG: small, square,
+// and free of camera metadata (EXIF location) whatever the source file held.
+const LOGO_PX = 256;
+function logoPng(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const c = document.createElement("canvas"); c.width = c.height = LOGO_PX;
+      const k = Math.min(LOGO_PX / img.naturalWidth, LOGO_PX / img.naturalHeight);
+      const w = img.naturalWidth * k, h = img.naturalHeight * k;
+      c.getContext("2d").drawImage(img, (LOGO_PX - w) / 2, (LOGO_PX - h) / 2, w, h);
+      resolve(c.toDataURL("image/png").split(",")[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("not an image this browser can read")); };
+    img.src = url;
+  });
+}
+
+async function renderWsLogo(id){
+  try { _WORKSPACES = (await api("/api/workspaces")).workspaces || _WORKSPACES; } catch {}
+  const w = wsById(id);
+  if (!w) { $("#main").innerHTML = `${pageHeader("Workspace logo", "Back")}<div class="scroll"><div class="fpage"><p class="help">Unknown workspace.</p></div></div>`; return; }
+  const url = wsLogoUrl(w);
+  $("#main").innerHTML = `${pageHeader("Workspace logo", w.name)}
+    <div class="scroll"><div class="fpage">
+      <div class="logo-edit">
+        ${url ? `<img class="logo-preview" src="${esc(url)}" alt="">` : `<span class="logo-preview t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}
+        <div class="logo-actions">
+          <label class="btn primary">${icon("plus")} Upload image<input type="file" id="logo-file" accept="image/png,image/jpeg,image/webp" hidden></label>
+          ${w.logo ? `<button class="btn" id="logo-remove">${w.id === "hq" ? "Use the myOS logo" : "Remove"}</button>` : ""}
+        </div>
+      </div>
+      <p class="help">PNG, JPEG or WebP. Shown in the workspace bar and at the top of the sidebar, resized to ${LOGO_PX}px square. ${w.id === "hq" ? "Without one, HQ shows the myOS logo." : "Without one, the project shows its initials."}</p>
+    </div></div>`;
+  const done = async msg => { toast(msg); await renderRail(); renderWsLogo(id); };
+  $("#logo-file").onchange = async e => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try { await jpost("/api/workspace-logo", { ws: w.id, data: await logoPng(file) }); await done("Logo updated ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+  };
+  $("#logo-remove")?.addEventListener("click", async () => {
+    try { await jpost("/api/workspace-logo/remove", { ws: w.id }); await done("Logo removed"); }
+    catch (err) { toast("✗ " + err.message); }
+  });
 }
 
 // ── Project section artifacts (files → reindex → IDs stay in sync) ───────────

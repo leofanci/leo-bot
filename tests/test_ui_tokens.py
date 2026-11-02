@@ -162,9 +162,16 @@ def test_kernel_logo_is_wired_into_dashboard_shell():
 
     assert logo.read_text(encoding="utf-8").startswith("<svg")
     assert '<link rel="icon" href="/logo.svg" type="image/svg+xml">' in html
-    assert '<img class="mark" src="/logo.svg" alt="">' in app_js
+    assert '(w?.id === "hq" ? "/logo.svg" : null)' in app_js  # HQ's default workspace logo
+    assert 'class="mark" src="${esc(wsLogoUrl(w))}"' in app_js
     assert '"/logo.svg"' in server
     assert '"image/svg+xml"' in server
+
+
+def test_kernel_logo_follows_graphite_indigo_palette():
+    logo = (DASHBOARD / "logo.svg").read_text(encoding="utf-8").upper()
+    assert "#4F46E5" in logo or "#4338CA" in logo   # indigo accent
+    assert "#D86A47" not in logo and "#A53A24" not in logo  # old rust
 
 
 def _tokens():
