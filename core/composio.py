@@ -223,6 +223,13 @@ def rename_account(account_id, alias, root=bots.ROOT):
     _json("PATCH", f"/connected_accounts/{urllib.parse.quote(account_id)}", {"alias": alias}, root)
 
 
+def disconnect_account(account_id, root=bots.ROOT):
+    """Delete the connection in Composio: the app's access for it ends there."""
+    if not integrations.is_account_id(account_id):
+        raise ComposioError("bad account")
+    _json("DELETE", f"/connected_accounts/{urllib.parse.quote(account_id)}", None, root)
+
+
 def execute(pid, ws, slug, arguments, account=None, root=bots.ROOT):
     """Run one approved tool call, exactly once, on one picked account."""
     sid = ensure_session(pid, ws, root)["session_id"]

@@ -2164,6 +2164,17 @@ class Handler(BaseHTTPRequestHandler):
                     ws = _strict_ws(body.get("ws"))
                     integrations.set_account(ws, body.get("account"), bool(body.get("on")), ROOT)
                     return self._send(200, {"ws": ws, "picked": integrations.accounts_for(ws, ROOT)})
+                if path == "/api/integrations/disconnect":
+                    account = body.get("account")
+                    if account not in integrations.known(ROOT):
+                        raise ValueError("unknown account: reload Integrations")
+                    try:
+                        composio.disconnect_account(account, ROOT)
+                    except composio.ComposioError as e:
+                        if e.status != 404:  # already gone in Composio: forget it here too
+                            return self._send(502, {"ok": False, "error": str(e)})
+                    integrations.forget_account(account, ROOT)
+                    return self._send(200, {"account": account, "disconnected": True})
                 if path == "/api/integrations/rename":
                     account, alias = body.get("account"), str(body.get("alias") or "").strip()
                     if account not in integrations.known(ROOT):

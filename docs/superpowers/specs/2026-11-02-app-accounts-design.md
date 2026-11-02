@@ -15,7 +15,9 @@ everything, so Composio used the most recently connected account of each app.
   loads an outside image host, so the CSP stays `img-src 'self'`.
 - **Several accounts per app.** Integrations (HQ) shows each connected account
   under its app, with an "Add account" button, up to 10 per app. A click on the
-  account name renames it (Composio alias).
+  account name renames it (Composio alias). Disconnect (two clicks, no
+  browser dialog) deletes the connection in Composio and drops the account
+  from every workspace; a held action on it is then refused on Approve.
 - **Accounts per workspace.** Each account row has a checkbox per workspace (HQ
   and every project). A newly connected account joins HQ, where it was
   connected. A project gets an account only when it is ticked for it, never
@@ -51,8 +53,6 @@ everything, so Composio used the most recently connected account of each app.
 
 ## Not in this round
 
-- Disconnecting an account from the panel (Composio's dashboard does it; the
-  next listing drops it everywhere).
 - Live check: the `GET /connected_accounts` parsing, `account` in
   multi-execute items and the execute body follow Composio's v3.1 reference and
   are verified on first real use, like round 1's `_parse_*` helpers.

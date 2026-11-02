@@ -137,6 +137,18 @@ def note_known(rows, root=bots.ROOT):
     return known
 
 
+def forget_account(account_id, root=bots.ROOT):
+    """Drop a disconnected account from the known list and every workspace's ticks."""
+    def fn(d):
+        (d.get("known") or {}).pop(account_id, None)
+        for picks in (d.get("accounts") or {}).values():
+            for tk in list(picks):
+                picks[tk] = [i for i in picks[tk] if i != account_id]
+                if not picks[tk]:
+                    del picks[tk]
+    _update(root, fn)
+
+
 def set_label(account_id, label, root=bots.ROOT):
     def fn(d):
         row = (d.get("known") or {}).get(account_id)
