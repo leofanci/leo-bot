@@ -1220,7 +1220,7 @@ async function renderIntegrations(){
       <button class="btn sm primary" type="submit">Save</button>
       <a class="link-btn" href="https://composio.dev" target="_blank" rel="noopener">Get a free key</a></form>`;
     const keyRow = d.configured && !replacing
-      ? `<div class="post integ-keyrow"><div class="t"><b>Composio</b><small>Configured · saved ${esc(new Date((d.saved || 0) * 1000).toLocaleDateString())}${d.offline ? " · can't reach Composio right now" : ""}</small></div>
+      ? `<div class="post integ-keyrow"><div class="t"><b>Composio</b><small>${d.key_refused ? `<span class="integ-bad">${esc(d.key_refused)}</span>` : `Configured · saved ${esc(new Date((d.saved || 0) * 1000).toLocaleDateString())}${d.offline ? " · can't reach Composio right now" : ""}`}</small></div>
           <button class="go" data-key="replace">Replace</button><button class="more" data-key="remove">Remove</button></div>`
       : keyForm;
     const accts = slug => (d.accounts || []).filter(a => a.toolkit === slug);

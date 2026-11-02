@@ -997,6 +997,10 @@ def _grants_view():
     return view
 
 
+BAD_KEY = ("Composio refused this key. Use the project API key: Composio dashboard, Settings, "
+           "Project Settings, API Keys (it usually starts with ak_).")
+
+
 def _integrations_view():
     workspaces = _workspaces(db.tree())
     view = {**integrations.public(ROOT), "pinned": PINNED, "connected": [], "accounts": [],
@@ -1005,8 +1009,10 @@ def _integrations_view():
     if view["configured"]:
         try:
             integrations.note_known(composio.accounts(bots.CEO, ROOT), ROOT)
-        except composio.ComposioError:
+        except composio.ComposioError as e:
             view["offline"] = True  # the accounts below are the last ones Composio listed
+            if composio.is_refused(e):
+                view["key_refused"] = BAD_KEY
         known = integrations.known(ROOT)
         view["accounts"] = [{"id": aid, **row} for aid, row in known.items()]
         view["connected"] = sorted({row["toolkit"] for row in known.values()})
@@ -2152,7 +2158,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 if path == "/api/integrations/key":
-                    integrations.set_key(body.get("api_key"), ROOT)
+                    key = body.get("api_key")
+                    if not isinstance(key, str) or not key.strip():
+                        raise ValueError("api_key required")
+                    try:
+                        composio.check_key(key.strip(), ROOT)
+                    except composio.ComposioError as e:
+                        if composio.is_refused(e):
+                            raise ValueError(BAD_KEY) from None
+                        # Composio unreachable: keep it, the panel says it cannot reach Composio.
+                    integrations.set_key(key, ROOT)
+                    composio._CATALOG.clear()  # the old key's project
                     return self._send(200, integrations.public(ROOT))
                 if path == "/api/integrations/connect":
                     toolkit = str(body.get("toolkit") or "")

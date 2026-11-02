@@ -244,6 +244,18 @@ class Client(unittest.TestCase):
         with self.assertRaises(composio.ComposioError):
             composio.rename_account("../x", "work", self.root)
 
+    def test_check_key_uses_the_given_key(self):
+        self.replies = [FakeResp({"items": []})]
+        with self.patched():
+            composio.check_key("ak_candidate", self.root)
+        self.assertEqual(self.sent[0].get_header("X-api-key"), "ak_candidate")
+        err = urllib.error.HTTPError(composio.BASE, 401, "no", Message(), io.BytesIO(b""))
+        self.replies = [err]
+        with self.patched(), self.assertRaises(composio.ComposioError) as cm:
+            composio.check_key("ck_other", self.root)
+        self.assertTrue(composio.is_refused(cm.exception))
+        self.assertNotIn("ck_other", str(cm.exception))
+
     def test_link_session_is_never_a_workspace(self):
         with self.patched(), self.assertRaises(composio.ComposioError):
             composio.ensure_session("ceo", integrations.LINK_WS, self.root)

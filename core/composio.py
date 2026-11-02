@@ -67,11 +67,11 @@ def _key(root):
     return key
 
 
-def _send(method, url, body, root, headers=None):
+def _send(method, url, body, root, headers=None, key=None):
     """(status, headers, raw body). Errors never carry request headers."""
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("x-api-key", _key(root))
+    req.add_header("x-api-key", key or _key(root))
     if data is not None:
         req.add_header("Content-Type", "application/json")
     for k, v in (headers or {}).items():
@@ -92,6 +92,15 @@ def _json(method, path, body, root):
         return json.loads(raw.decode() or "{}")
     except ValueError:
         raise ComposioError("Composio returned invalid JSON") from None
+
+
+def check_key(key, root=bots.ROOT):
+    """One cheap read with this key (not the saved one); ComposioError on refusal."""
+    _send("GET", BASE + "/toolkits?limit=1", None, root, key=key)
+
+
+def is_refused(err):
+    return isinstance(err, ComposioError) and err.status in (401, 403)
 
 
 def _parse_session(data):
