@@ -1155,7 +1155,8 @@ async function renderTeam(){
     $("#team-list").querySelectorAll("[data-mem]").forEach(a => a.onclick = () => toggleMemory(a.closest(".team-row"), a.dataset.mem));
     $("#team-list").querySelectorAll("[data-grant-bot]").forEach(sel => sel.onchange = async () => {
       const bot = sel.dataset.grantBot;
-      const apps = { ...(integ.grants?.[_WS]?.[bot] || {}) };
+      // No prototype: an app slug is only ever a plain key here.
+      const apps = Object.assign(Object.create(null), integ.grants?.[_WS]?.[bot] || {});
       if (sel.value) apps[sel.dataset.grantApp] = sel.value; else delete apps[sel.dataset.grantApp];
       try {
         const r = await jpost("/api/integrations/grants", { ws: _WS, bot, apps });

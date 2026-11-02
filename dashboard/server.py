@@ -1597,7 +1597,8 @@ class Handler(BaseHTTPRequestHandler):
         qs = parse_qs(urlparse(self.path).query)
         q = lambda k: (qs.get(k) or [None])[0]  # noqa: E731
         projects = db.tree()
-        mine = lambda w: w if w in person["ws"] and _known_ws(w, projects) else None  # noqa: E731
+        # Paths are built from our own workspace list's id, never the request's.
+        mine = lambda w: _known_ws(w, projects) if w in person["ws"] else None  # noqa: E731
         try:
             if path == "/api/me":
                 return self._send(200, {k: person[k] for k in ("kind", "id", "name", "ws")})
@@ -1675,8 +1676,8 @@ class Handler(BaseHTTPRequestHandler):
         and thread they can see; a thread mid-reply refuses a second turn."""
         if viewer.get("kind") != "owner":
             projects = db.tree()
-            ws = rooms.split_id(body.get("room_id"))[0]
-            if ws not in viewer["ws"] or not _known_ws(ws, projects):
+            ws = _known_ws(rooms.split_id(body.get("room_id"))[0], projects)
+            if not ws or ws not in viewer["ws"]:
                 return self._send(403, {"error": "forbidden"})
             team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
             if not rooms.can_see(rooms.get_room(str(body.get("room_id")), team, ROOT), viewer):
