@@ -90,6 +90,18 @@ class Store(unittest.TestCase):
         self.assertNotIn("ca_1", integrations.known(self.root))
         self.assertEqual(integrations.assigned(self.root), {"hq": {"gmail": ["ca_2"]}, "acme": {}})
 
+    def test_forget_workspace(self):
+        integrations.note_known([{"id": "ca_1", "toolkit": "gmail", "label": "a"}], self.root)
+        integrations.set_account("acme", "ca_1", True, self.root)
+        integrations.set_grant("acme", "cos", {"gmail": "write"}, self.root)
+        integrations.save_session("ceo", "acme", "s1", "https://mcp.acme.example/x", "{}", self.root)
+        integrations.forget_workspace("acme", self.root)
+        self.assertEqual(integrations.accounts_for("acme", self.root), {})
+        self.assertEqual(integrations.grant("acme", "cos", self.root), {})
+        self.assertEqual(integrations.session("ceo", "acme", self.root), {})
+        integrations.forget_workspace("hq", self.root)  # HQ is never forgotten
+        self.assertEqual(integrations.accounts_for("hq", self.root), {"gmail": ["ca_1"]})
+
     def test_account_cap(self):
         integrations.note_known([{"id": f"ca_{i}", "toolkit": "gmail", "label": str(i)}
                                  for i in range(integrations.MAX_ACCOUNTS + 1)], self.root)

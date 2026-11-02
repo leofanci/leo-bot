@@ -180,6 +180,26 @@ class IntegrationsApi(Base):
             self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_g1"})[0], 200)
         self.assertEqual(integrations.accounts_for("hq", self.root), {})
 
+    def test_rename_requires_origin(self):
+        with mock.patch.object(server.composio, "rename_account") as ren:
+            self.assertEqual(request("POST", "/api/integrations/rename",
+                                     {"account": "ca_g1", "alias": "x"}, origin=False)[0], 403)
+        ren.assert_not_called()
+
+    def test_deleted_project_leaves_no_apps_behind(self):
+        integrations.set_account("acme", "ca_g1", True, self.root)
+        integrations.set_grant("acme", "cos", {"gmail": "write"}, self.root)
+        with mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme", "deleted": True}):
+            self.assertEqual(request("POST", "/api/project/acme/delete", {})[0], 200)
+        self.assertEqual(integrations.accounts_for("acme", self.root), {})
+        self.assertEqual(integrations.grant("acme", "cos", self.root), {})
+
+    def test_refused_project_delete_keeps_apps(self):
+        integrations.set_account("acme", "ca_g1", True, self.root)
+        with mock.patch.object(server.fileops, "delete_project", side_effect=server.fileops.ActionError("in use")):
+            self.assertNotEqual(request("POST", "/api/project/acme/delete", {})[0], 200)
+        self.assertEqual(integrations.accounts_for("acme", self.root), {"gmail": ["ca_g1"]})
+
     def test_logo_served_from_this_origin_sandboxed(self):
         integrations.set_key("ak_x", self.root)
         with mock.patch.object(server.composio, "logo", return_value=(b"<svg/>", "image/svg+xml")):
@@ -319,6 +339,12 @@ class Approve(Base):
             code, data, _, _ = request("POST", self.path + "/approve", {})
         self.assertEqual((code, data["status"]), (200, "failed"))
         self.assertEqual(data["result"], approvals.STALE_NOTE)
+
+    def test_approve_cut_off_reply_marks_failed_may_have_run(self):
+        with mock.patch.object(server.composio, "execute",
+                               side_effect=composio.ComposioError("Composio unreachable (IncompleteRead)")):
+            data = request("POST", self.path + "/approve", {})[1]
+        self.assertEqual((data["status"], data["result"]), ("failed", approvals.STALE_NOTE))
 
     def test_approve_unsuccessful_marks_failed(self):
         with mock.patch.object(server.composio, "execute", return_value={"successful": False, "error": "bad to"}):
