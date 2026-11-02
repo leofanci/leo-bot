@@ -74,7 +74,11 @@ def calls_in(name, args):
         slug = item.get("tool_slug") if isinstance(item, dict) else None
         if not isinstance(slug, str) or not slug:
             return None
-        out.append({"tool_slug": slug, "arguments": item.get("arguments") or {}})
+        account = item.get("account")
+        if account is not None and not isinstance(account, str):
+            return None
+        out.append({"tool_slug": slug, "arguments": item.get("arguments") or {},
+                    **({"account": account} if account else {})})
     return out
 
 

@@ -43,10 +43,57 @@ class Store(unittest.TestCase):
         self.assertNotIn("ceo", a)
         self.assertEqual(integrations.person("ceo", self.root)["composio_user_id"], a)
 
-    def test_save_session(self):
-        integrations.save_session("ceo", "sess1", "https://mcp.acme.example/x", self.root)
-        row = integrations.person("ceo", self.root)
-        self.assertEqual((row["session_id"], row["mcp_url"]), ("sess1", "https://mcp.acme.example/x"))
+    def test_sessions_are_per_workspace(self):
+        integrations.save_session("ceo", "hq", "sess1", "https://mcp.acme.example/x", "{}", self.root)
+        integrations.save_session("ceo", "acme", "sess2", "https://mcp.acme.example/y", "{}", self.root)
+        self.assertEqual(integrations.session("ceo", "hq", self.root)["session_id"], "sess1")
+        self.assertEqual(integrations.session("ceo", "acme", self.root)["session_id"], "sess2")
+        integrations.forget_session("ceo", "hq", self.root)
+        self.assertEqual(integrations.session("ceo", "hq", self.root), {})
+        self.assertEqual(integrations.session("ceo", "acme", self.root)["session_id"], "sess2")
+
+    def test_new_accounts_join_hq_only_once(self):
+        rows = [{"id": "ca_1", "toolkit": "gmail", "label": "work"}]
+        integrations.note_known(rows, self.root)
+        self.assertEqual(integrations.accounts_for("hq", self.root), {"gmail": ["ca_1"]})
+        self.assertEqual(integrations.accounts_for("acme", self.root), {})  # never automatic
+        integrations.set_account("hq", "ca_1", False, self.root)
+        integrations.note_known(rows, self.root)  # seen before: HQ's choice stands
+        self.assertEqual(integrations.accounts_for("hq", self.root), {})
+
+    def test_pick_accounts_per_workspace(self):
+        integrations.note_known([{"id": "ca_1", "toolkit": "gmail", "label": "a"},
+                                 {"id": "ca_2", "toolkit": "gmail", "label": "b"},
+                                 {"id": "ca_3", "toolkit": "gmail", "label": "c"}], self.root)
+        integrations.set_account("acme", "ca_1", True, self.root)
+        integrations.set_account("demo", "ca_2", True, self.root)
+        integrations.set_account("demo", "ca_3", True, self.root)
+        integrations.set_account("demo", "ca_3", True, self.root)  # twice is once
+        self.assertEqual(integrations.accounts_for("acme", self.root), {"gmail": ["ca_1"]})
+        self.assertEqual(integrations.accounts_for("demo", self.root), {"gmail": ["ca_2", "ca_3"]})
+        for bad in ("ca_9", "../x", None):
+            with self.assertRaises(ValueError):
+                integrations.set_account("acme", bad, True, self.root)
+
+    def test_gone_account_is_not_used(self):
+        integrations.note_known([{"id": "ca_1", "toolkit": "gmail", "label": "a"}], self.root)
+        integrations.set_account("acme", "ca_1", True, self.root)
+        integrations.note_known([], self.root)  # revoked in Composio
+        self.assertEqual(integrations.accounts_for("acme", self.root), {})
+        self.assertEqual(integrations.assigned(self.root)["acme"], {"gmail": ["ca_1"]})
+
+    def test_account_cap(self):
+        integrations.note_known([{"id": f"ca_{i}", "toolkit": "gmail", "label": str(i)}
+                                 for i in range(integrations.MAX_ACCOUNTS + 1)], self.root)
+        with self.assertRaises(ValueError):
+            integrations.set_account("hq", f"ca_{integrations.MAX_ACCOUNTS}", True, self.root)
+
+    def test_effective_grant_needs_an_account(self):
+        integrations.set_grant("acme", "cos", {"gmail": "write", "slack": "read"}, self.root)
+        self.assertEqual(integrations.effective_grant("acme", "cos", self.root), {})
+        integrations.note_known([{"id": "ca_1", "toolkit": "gmail", "label": "a"}], self.root)
+        integrations.set_account("acme", "ca_1", True, self.root)
+        self.assertEqual(integrations.effective_grant("acme", "cos", self.root), {"gmail": "write"})
 
     def test_default_and_explicit_empty_grant(self):
         self.assertEqual(integrations.grant("hq", "cos", self.root),
@@ -68,11 +115,11 @@ class Store(unittest.TestCase):
 
     def test_remove_key_drops_sessions_keeps_grants(self):
         integrations.set_key("ak_testkey", self.root)
-        integrations.save_session("ceo", "sess1", "https://mcp.acme.example/x", self.root)
+        integrations.save_session("ceo", "hq", "sess1", "https://mcp.acme.example/x", "{}", self.root)
         integrations.set_grant("acme", "social", {"instagram": "read"}, self.root)
         integrations.remove_key(self.root)
         self.assertIsNone(integrations.api_key(self.root))
-        self.assertNotIn("session_id", integrations.person("ceo", self.root))
+        self.assertNotIn("sessions", integrations.person("ceo", self.root))
         self.assertEqual(integrations.grant("acme", "social", self.root), {"instagram": "read"})
 
 

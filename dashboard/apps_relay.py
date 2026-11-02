@@ -2,12 +2,13 @@
 
 An app turn's `claude -p` gets one HTTP MCP server pointing back at the
 dashboard (POST /api/internal/apps/mcp) with a per-request turn token. The
-relay forwards to the person's Composio session, adding the key, and gates
-every call:
+relay forwards to the person's Composio session for that workspace (pinned
+to the accounts the workspace picked), adding the key, and gates every call:
 
   tools/list   only the search, schema and multi-execute meta tools
   tools/call   each app tool inside a multi-execute: read -> runs now,
-               not a read on a write grant -> held in Approvals, else refused
+               not a read on a write grant -> held in Approvals, else refused;
+               with several accounts of one app, the call names one of them
 
 The bot's body is never forwarded as is: reads are rebuilt into a fresh
 multi-execute, so extra fields (workbench sync, ...) never reach Composio.
@@ -27,6 +28,9 @@ PASS_THROUGH = ("COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS")
 HELD = "Held for approval ({id}): {title}. It has not run. Tell the user it is waiting in Approvals."
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
+NO_ACCOUNT = '"{slug}": {toolkit} has no account picked in this workspace. This call was not performed.'
+PICK_ACCOUNT = ('"{slug}": set "account" on the tool to one of this workspace\'s {toolkit} accounts: '
+                '{choices}. This call was not performed.')
 
 
 class Tokens:
@@ -69,20 +73,38 @@ class Upstream:
 
 
 class ComposioUpstream(Upstream):
-    def __init__(self, person, root=bots.ROOT):
-        self.person, self.root = person, root
+    def __init__(self, person, ws, root=bots.ROOT):
+        self.person, self.ws, self.root = person, ws, root
 
     def forward(self, frame, mcp_session_id):
-        sess = composio.ensure_session(self.person, self.root)
+        sess = composio.ensure_session(self.person, self.ws, self.root)
         try:
             return composio.forward(sess["mcp_url"], frame, mcp_session_id, self.root)
         except composio.ComposioError as e:
             if e.status not in (401, 404):
                 raise
         # The session is gone (nothing ran): make a new one and send once more.
-        composio.reset_session(self.person, self.root)
-        sess = composio.ensure_session(self.person, self.root)
+        composio.reset_session(self.person, self.ws, self.root)
+        sess = composio.ensure_session(self.person, self.ws, self.root)
         return composio.forward(sess["mcp_url"], frame, None, self.root)
+
+
+def choices_text(ids, root=bots.ROOT):
+    known = integrations.known(root)
+    return ", ".join(f'"{i}" ({(known.get(i) or {}).get("label") or i})' for i in ids)
+
+
+def pick_account(call, toolkit, picks, root=bots.ROOT):
+    """(account id or None, refusal or None) for one call on a workspace's picks."""
+    ids = picks.get(toolkit) or []
+    if not ids:
+        return None, NO_ACCOUNT.format(slug=call["tool_slug"], toolkit=toolkit)
+    asked = call.get("account")
+    if len(ids) == 1 and asked in (None, "", ids[0]):
+        return ids[0], None
+    if asked in ids:
+        return asked, None
+    return None, PICK_ACCOUNT.format(slug=call["tool_slug"], toolkit=toolkit, choices=choices_text(ids, root))
 
 
 def _error(rid, code, message):
@@ -107,19 +129,26 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
     if calls is None:
         return _text(rid, [UNREADABLE], True), sid
     grant = integrations.grant(ctx["ws"], ctx["bot"], root)  # re-read: grants change mid-turn
+    picks = integrations.accounts_for(ctx["ws"], root)  # and so do a workspace's accounts
     cat = list(catalog if catalog is not None else [a["slug"] for a in composio.catalog(root)])
     reads, notes = [], []
     for c in calls:
         verdict, tk = app_rules.decide(c["tool_slug"], grant, cat)
-        if verdict == "read":
-            reads.append(c)
-        elif verdict == "hold":
+        if verdict == "refuse":
+            notes.append(REFUSED.format(slug=c["tool_slug"]))
+            continue
+        account, refusal = pick_account(c, tk, picks, root)
+        if refusal:
+            notes.append(refusal)
+        elif verdict == "read":
+            # The account travels only when there is a choice: one account is the pin.
+            reads.append({"tool_slug": c["tool_slug"], "arguments": c["arguments"],
+                          **({"account": account} if len(picks[tk]) > 1 else {})})
+        else:
             rec = approvals.add_app_action(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
                                            bot=ctx["bot"], person=ctx["person"], toolkit=tk,
-                                           slug=c["tool_slug"], arguments=c["arguments"])
+                                           slug=c["tool_slug"], arguments=c["arguments"], account=account)
             notes.append(HELD.format(id=rec["id"], title=rec["preview"]["title"]))
-        else:
-            notes.append(REFUSED.format(slug=c["tool_slug"]))
     if not reads:
         return _text(rid, notes, not any(n.startswith("Held") for n in notes)), sid
     rebuilt = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",

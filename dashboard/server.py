@@ -998,16 +998,46 @@ def _grants_view():
 
 
 def _integrations_view():
-    view = {**integrations.public(ROOT), "pinned": PINNED, "connected": [], "grants": _grants_view(),
-            "apps_meta": {}}
+    workspaces = _workspaces(db.tree())
+    view = {**integrations.public(ROOT), "pinned": PINNED, "connected": [], "accounts": [],
+            "grants": _grants_view(), "apps_meta": {},
+            "workspaces": [{"id": w["id"], "name": w["name"]} for w in workspaces]}
     if view["configured"]:
         try:
-            view["connected"] = sorted(composio.connections(bots.CEO, ROOT))
+            integrations.note_known(composio.accounts(bots.CEO, ROOT), ROOT)
+        except composio.ComposioError:
+            view["offline"] = True  # the accounts below are the last ones Composio listed
+        known = integrations.known(ROOT)
+        view["accounts"] = [{"id": aid, **row} for aid, row in known.items()]
+        view["connected"] = sorted({row["toolkit"] for row in known.values()})
+        try:
             pinned = {s for g in PINNED for s in g["apps"]} | set(view["connected"])
             view["apps_meta"] = {a["slug"]: a for a in composio.catalog(ROOT) if a["slug"] in pinned}
         except composio.ComposioError:
             view["offline"] = True
+    view["picked"] = {w["id"]: integrations.accounts_for(w["id"], ROOT) for w in workspaces}
     return view
+
+
+def _apps_accounts_note(ws, grant):
+    """Which account ids this workspace's bot may name, per granted app."""
+    picks = integrations.accounts_for(ws, ROOT)
+    lines = [f"- {tk}: {apps_relay.choices_text(picks[tk], ROOT)}" for tk in sorted(grant) if tk in picks]
+    if not lines:
+        return ""
+    return ("## App accounts in this workspace\n" + "\n".join(lines)
+            + '\nWhere an app lists several, set "account" to one id on each tool in the multi-execute;'
+              " if the user did not say which, ask.")
+
+
+def _strict_ws(value):
+    ws, _ = _resolve_workspace(value, db.tree())
+    if ws != (value or bots.HQ):  # never fall back to HQ for a grant or a pick
+        raise ValueError(f"unknown workspace: {value}")
+    return ws
+
+
+_ALIAS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._@+-]{0,39}")
 
 
 def _catalog_search(q):
@@ -1036,21 +1066,28 @@ def _approve_app_action(aid, arguments=None):
         raise _AppRefused("Composio is not configured")
     try:
         catalog = [a["slug"] for a in composio.catalog(ROOT)]
-        connected = composio.connections(rec["person"], ROOT)
+        live = {r["id"] for r in composio.accounts(rec["person"], ROOT)}
     except composio.ComposioError as e:
         raise _AppRefused(str(e)) from None
     verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog)
     if verdict != "hold":
         raise _AppRefused(f"{rec['bot']} may no longer do this")
-    if toolkit not in connected:
-        raise _AppRefused(f"{toolkit} is not connected")
+    picks = integrations.accounts_for(rec["ws"], ROOT).get(toolkit) or []
+    account = action.get("account")
+    if account is None and len(picks) == 1:
+        account = picks[0]  # held before accounts were tracked: only one could run it
+    if not account or account not in picks:
+        raise _AppRefused(f"that {toolkit} account is no longer picked for this workspace")
+    if account not in live:
+        raise _AppRefused(f"that {toolkit} account is not connected")
     try:
         approvals.claim(aid, ROOT)
     except ValueError as e:
         raise _AppRefused(str(e)) from None
     try:
-        out = composio.execute(rec["person"], action["slug"], action["arguments"], ROOT)
-        if isinstance(out, dict) and out.get("successful") is False:
+        out = composio.execute(rec["person"], rec["ws"], action["slug"], action["arguments"], account, ROOT)
+        if isinstance(out, dict) and (out.get("successful") is False
+                                      or out.get("result_type") in ("failed", "blocked")):
             status, line = "failed", f"Failed: {out.get('error') or 'the app refused it'}"
         else:
             sent = any(w in action["slug"] for w in ("_SEND", "_REPLY"))
@@ -1082,6 +1119,26 @@ class Handler(BaseHTTPRequestHandler):
         super().end_headers()
 
     # -- helpers ----------------------------------------------------------- #
+    def _send_logo(self, slug):
+        """An app logo from this origin: no third-party image host in the CSP,
+        and an SVG opened on its own runs nothing (sandbox, no script)."""
+        got = None
+        if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", slug) and integrations.api_key(ROOT):
+            try:
+                got = composio.logo(slug, ROOT)
+            except composio.ComposioError:
+                got = None
+        if not got:
+            return self._send(404, {"error": "no logo"})
+        raw, ctype = got
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def _send(self, code, body, ctype="application/json"):
         payload = body if isinstance(body, (bytes, bytearray)) else json.dumps(body).encode()
         self.send_response(code)
@@ -1185,7 +1242,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": -32700, "message": "parse error"}})
         try:
             reply, sid = apps_relay.handle(frame, ctx, self.headers.get("mcp-session-id"),
-                                           apps_relay.ComposioUpstream(ctx["person"], ROOT), ROOT)
+                                           apps_relay.ComposioUpstream(ctx["person"], ctx["ws"], ROOT), ROOT)
         except composio.ComposioError as e:
             rid = frame.get("id") if isinstance(frame, dict) else None
             return self._send_rpc(200, {"jsonrpc": "2.0", "id": rid,
@@ -1247,7 +1304,7 @@ class Handler(BaseHTTPRequestHandler):
         may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
         # An app request is not a content write: decided before the write gate, and
         # its only approval path is the held app action (no skill, no APPROVAL line).
-        app_grant = integrations.grant(ws, bot_id, ROOT) if integrations.api_key(ROOT) else {}
+        app_grant = integrations.effective_grant(ws, bot_id, ROOT) if integrations.api_key(ROOT) else {}
         app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
         if app_turn:
             skill = explicit = suggest = None
@@ -1369,6 +1426,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ask the user to relink the app folder."
             )
 
+        if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
+            workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
         text = compose_turn_prompt(
             user_msg=user_msg,
             context=context,
@@ -1733,6 +1792,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/integrations/catalog":
                 return self._send(200, _catalog_search(
                     (parse_qs(urlparse(self.path).query).get("q") or [""])[0]))
+            if path.startswith("/api/integrations/logo/"):
+                return self._send_logo(path[len("/api/integrations/logo/"):])
             if path in ("/api/approvals", "/api/costs", "/api/memory"):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
@@ -2096,13 +2157,27 @@ class Handler(BaseHTTPRequestHandler):
                     if toolkit in app_rules.BLOCKED_TOOLKITS or not re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", toolkit):
                         raise ValueError(f"{toolkit or 'that app'} cannot be connected")
                     try:
-                        return self._send(200, {"url": composio.connect_link(bots.CEO, toolkit, ROOT)})
+                        return self._send(200, composio.connect_link(bots.CEO, toolkit, ROOT))
                     except composio.ComposioError as e:
                         return self._send(502, {"ok": False, "error": str(e)})
+                if path == "/api/integrations/accounts":
+                    ws = _strict_ws(body.get("ws"))
+                    integrations.set_account(ws, body.get("account"), bool(body.get("on")), ROOT)
+                    return self._send(200, {"ws": ws, "picked": integrations.accounts_for(ws, ROOT)})
+                if path == "/api/integrations/rename":
+                    account, alias = body.get("account"), str(body.get("alias") or "").strip()
+                    if account not in integrations.known(ROOT):
+                        raise ValueError("unknown account: reload Integrations")
+                    if not _ALIAS_RE.fullmatch(alias):
+                        raise ValueError("a name is 1-40 letters, digits, spaces or . _ @ + -")
+                    try:
+                        composio.rename_account(account, alias, ROOT)
+                    except composio.ComposioError as e:
+                        return self._send(502, {"ok": False, "error": str(e)})
+                    integrations.set_label(account, alias, ROOT)
+                    return self._send(200, {"account": account, "label": alias})
                 if path == "/api/integrations/grants":
-                    ws, _ = _resolve_workspace(body.get("ws"), db.tree())
-                    if ws != (body.get("ws") or bots.HQ):  # never fall back to HQ for a grant
-                        raise ValueError(f"unknown workspace: {body.get('ws')}")
+                    ws = _strict_ws(body.get("ws"))
                     bot_id = str(body.get("bot") or "")
                     if bot_id not in bots.load_defs():
                         raise ValueError(f"unknown bot: {bot_id}")

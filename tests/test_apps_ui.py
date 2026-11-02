@@ -36,6 +36,28 @@ class Helpers(unittest.TestCase):
                               '[appStatusLabel({auth:"managed"}, true), appStatusLabel({auth:"managed"}, false),'
                               ' appStatusLabel({auth:"own_app"}, false), appStatusLabel({auth:"api_key"}, false)]'),
                          ["Connected", "Connect", "Needs setup", "Connect"])
+        self.assertEqual(_run(["appStatusLabel"], '[appStatusLabel({}, 1), appStatusLabel({}, 3), appStatusLabel({}, 0)]'),
+                         ["Connected", "3 accounts", "Connect"])
+
+    def test_app_logo_is_local_with_letter_fallback(self):
+        esc = "function esc(s){return String(s).replace(/[&<>\"']/g, c => '&#' + c.charCodeAt(0) + ';')}\n"
+        script = esc + _fn("appLogoHtml") + (
+            '\nprocess.stdout.write(JSON.stringify([appLogoHtml("gmail", {name:"Gmail", logo:"https://x.example/g.png"}),'
+            ' appLogoHtml("slack", {name:"Slack"}), appLogoHtml("a b", {name:"<i>", logo:"y"})]));')
+        with_logo, letter_only, odd = json.loads(subprocess.run(["node", "-e", script], capture_output=True,
+                                                                text=True, check=True).stdout)
+        self.assertIn('src="/api/integrations/logo/gmail"', with_logo)
+        self.assertNotIn("x.example", with_logo)  # never the outside URL
+        self.assertIn(">G<img", with_logo)
+        self.assertNotIn("<img", letter_only)
+        self.assertIn("/api/integrations/logo/a%20b", odd)
+        self.assertNotIn("<i>", odd)
+
+    def test_acct_picked(self):
+        self.assertEqual(_run(["acctPicked"], '[acctPicked({acme:{gmail:["ca_1"]}}, "acme", "gmail", "ca_1"),'
+                                             ' acctPicked({acme:{gmail:["ca_1"]}}, "demo", "gmail", "ca_1"),'
+                                             ' acctPicked(undefined, "acme", "gmail", "ca_1")]'),
+                         [True, False, False])
 
 
 class Guards(unittest.TestCase):
