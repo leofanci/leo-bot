@@ -82,6 +82,14 @@ class Store(unittest.TestCase):
         self.assertEqual(integrations.accounts_for("acme", self.root), {})
         self.assertEqual(integrations.assigned(self.root)["acme"], {"gmail": ["ca_1"]})
 
+    def test_forget_account_everywhere(self):
+        integrations.note_known([{"id": "ca_1", "toolkit": "gmail", "label": "a"},
+                                 {"id": "ca_2", "toolkit": "gmail", "label": "b"}], self.root)
+        integrations.set_account("acme", "ca_1", True, self.root)
+        integrations.forget_account("ca_1", self.root)
+        self.assertNotIn("ca_1", integrations.known(self.root))
+        self.assertEqual(integrations.assigned(self.root), {"hq": {"gmail": ["ca_2"]}, "acme": {}})
+
     def test_account_cap(self):
         integrations.note_known([{"id": f"ca_{i}", "toolkit": "gmail", "label": str(i)}
                                  for i in range(integrations.MAX_ACCOUNTS + 1)], self.root)

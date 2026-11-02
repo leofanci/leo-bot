@@ -156,6 +156,30 @@ class IntegrationsApi(Base):
                 self.assertEqual(request("POST", "/api/integrations/rename", bad)[0], 400, bad)
         self.assertEqual(integrations.known(self.root)["ca_g1"]["label"], "Sales")
 
+    def test_disconnect_account(self):
+        tree = [{"slug": "acme", "name": "Acme"}]
+        with mock.patch.object(server.db, "tree", return_value=tree):
+            request("POST", "/api/integrations/accounts", {"ws": "acme", "account": "ca_g1", "on": True})
+        with mock.patch.object(server.composio, "disconnect_account") as dc:
+            self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_g1"}, origin=False)[0], 403)
+            dc.assert_not_called()
+            self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_nope"})[0], 400)
+            code, data, _, _ = request("POST", "/api/integrations/disconnect", {"account": "ca_g1"})
+        self.assertEqual((code, data["disconnected"]), (200, True))
+        dc.assert_called_once_with("ca_g1", self.root)
+        self.assertEqual(integrations.accounts_for("hq", self.root), {})
+        self.assertEqual(integrations.accounts_for("acme", self.root), {})
+
+    def test_disconnect_failure_keeps_account(self):
+        with mock.patch.object(server.composio, "disconnect_account",
+                               side_effect=composio.ComposioError("Composio HTTP 500", status=500)):
+            self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_g1"})[0], 502)
+        self.assertEqual(integrations.accounts_for("hq", self.root), {"gmail": ["ca_g1"]})
+        with mock.patch.object(server.composio, "disconnect_account",
+                               side_effect=composio.ComposioError("Composio HTTP 404", status=404)):
+            self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_g1"})[0], 200)
+        self.assertEqual(integrations.accounts_for("hq", self.root), {})
+
     def test_logo_served_from_this_origin_sandboxed(self):
         integrations.set_key("ak_x", self.root)
         with mock.patch.object(server.composio, "logo", return_value=(b"<svg/>", "image/svg+xml")):

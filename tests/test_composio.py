@@ -244,6 +244,15 @@ class Client(unittest.TestCase):
         with self.assertRaises(composio.ComposioError):
             composio.rename_account("../x", "work", self.root)
 
+    def test_disconnect_deletes_in_composio(self):
+        self.replies = [FakeResp({})]
+        with self.patched():
+            composio.disconnect_account("ca_g1", self.root)
+        self.assertEqual(self.sent[0].get_method(), "DELETE")
+        self.assertTrue(self.sent[0].full_url.endswith("/connected_accounts/ca_g1"))
+        with self.assertRaises(composio.ComposioError):
+            composio.disconnect_account("../x", self.root)
+
 
 class Logo(unittest.TestCase):
     def setUp(self):

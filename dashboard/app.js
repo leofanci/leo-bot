@@ -1226,7 +1226,8 @@ async function renderIntegrations(){
     const accts = slug => (d.accounts || []).filter(a => a.toolkit === slug);
     const acctRow = (slug, a) => `<div class="integ-acct">
         <span class="integ-acct-name" data-rename="${esc(a.id)}" title="Rename" tabindex="0">${esc(a.label || a.id)}</span>
-        <span class="integ-ws">${(d.workspaces || []).map(w => `<label><input type="checkbox" data-pick="${esc(a.id)}" data-ws="${esc(w.id)}"${acctPicked(d.picked, w.id, slug, a.id) ? " checked" : ""}> ${esc(w.name)}</label>`).join("")}</span></div>`;
+        <span class="integ-ws">${(d.workspaces || []).map(w => `<label><input type="checkbox" data-pick="${esc(a.id)}" data-ws="${esc(w.id)}"${acctPicked(d.picked, w.id, slug, a.id) ? " checked" : ""}> ${esc(w.name)}</label>`).join("")}</span>
+        <button class="btn sm ghost integ-disc" data-disconnect="${esc(a.id)}">Disconnect</button></div>`;
     const appRow = (slug, meta) => {
       const m = meta || d.apps_meta?.[slug] || { slug, name: slug };
       const mine = accts(slug);
@@ -1237,7 +1238,7 @@ async function renderIntegrations(){
         ${mine.map(a => acctRow(slug, a)).join("")}</div>`;
     };
     box.innerHTML = keyRow + (d.configured ? `
-      <div class="help">Each account is connected once. Tick the workspaces that may use it: a project sees only the accounts ticked for it.</div>
+      <div class="help">Each account is connected once. Tick the workspaces that may use it: a project sees only the accounts ticked for it. Disconnect removes it from Composio and from every workspace.</div>
       ${(d.pinned || []).map(g => `<section class="integ-group"><h3>${esc(g.group)}</h3>${g.apps.map(s => appRow(s)).join("")}</section>`).join("")}
       <section class="integ-group"><h3>All apps</h3><input class="integ-q" type="search" placeholder="Search Composio apps" aria-label="Search Composio apps"><div class="integ-hits"></div></section>` : "");
     const keyEl = box.querySelector(".integ-key");
@@ -1268,6 +1269,22 @@ async function renderIntegrations(){
       } catch (err) { toast("✗ " + err.message); }
     });
     const wireAccounts = root => {
+      // Two clicks: the first arms the button for a few seconds, the second disconnects.
+      root.querySelectorAll("[data-disconnect]").forEach(b => b.onclick = async () => {
+        if (!b.dataset.armed) {
+          b.dataset.armed = "1"; b.textContent = "Click again to disconnect"; b.classList.add("danger");
+          setTimeout(() => { if (b.isConnected && !b.disabled) { delete b.dataset.armed; b.textContent = "Disconnect"; b.classList.remove("danger"); } }, 4000);
+          return;
+        }
+        b.disabled = true; b.textContent = "Disconnecting…";
+        try {
+          await jpost("/api/integrations/disconnect", { account: b.dataset.disconnect });
+          draw();
+        } catch (err) {
+          toast("✗ " + err.message);
+          b.disabled = false; delete b.dataset.armed; b.textContent = "Disconnect"; b.classList.remove("danger");
+        }
+      });
       root.querySelectorAll("[data-pick]").forEach(cb => cb.onchange = async () => {
         cb.disabled = true;
         try {
