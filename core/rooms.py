@@ -14,6 +14,8 @@ workspace is visible from another. Topic channels are stored per workspace
 A topic channel may be private: then only the owner and the people listed in
 its `people` (core.people ids) see it. #general is open to everyone in the
 workspace. DM threads belong to the person who started them (chat `by`).
+A thread an invited person can see is "shared": its bot turns get no file,
+shell or app tools, only the osctl relay (dashboard/os_relay.py).
 
 A room costs nothing by itself: untagged messages go to ONE bot (the lead),
 members answer only when tagged, and the persona's team list shrinks to them.
@@ -87,12 +89,23 @@ def can_see(room, viewer):
 
 def chat_visible(rec, room, viewer):
     """A saved thread `rec` listed under `room`: the room must be visible, and a
-    DM thread belongs to whoever started it (no `by` = the owner's)."""
+    DM thread belongs to whoever started it (no `by` = the owner's).
+
+    A person sees a thread only in the room it was started in: a thread whose
+    channel was deleted or whose bot was switched off falls back to #general
+    (room_of_chat) for the owner, never for people. Nor do they see a thread
+    that read a connected app (the owner's mail, calendar...: `apps_used`), or
+    one with any turn that ran with full tools (`shared` false: its session
+    holds what those turns read)."""
     if not can_see(room, viewer):
         return False
-    if room.get("kind") != "dm":
+    rec = rec or {}
+    if viewer.get("kind") == "person" and (rec.get("room") != room.get("id") or rec.get("apps_used")
+                                           or not rec.get("shared")):
+        return False
+    if room.get("kind") != "dm" and not (split_id(rec.get("room"))[1] or "").startswith("dm-"):
         return True
-    starter = (rec or {}).get("by") or bots.CEO
+    starter = rec.get("by") or bots.CEO
     me = bots.CEO if viewer.get("kind") == "owner" else viewer.get("id")
     return starter == me
 

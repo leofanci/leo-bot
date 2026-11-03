@@ -126,6 +126,11 @@ WEB_TOOLS = ["WebSearch", "WebFetch"]
 # env, never in argv (`ps` shows argv to every local user).
 APPS_MCP_PATH = "/api/internal/apps/mcp"
 APPS_TOKEN_ENV = "MYOS_APPS_TOKEN"
+# A shared thread (an invited person can see it): no Bash/Read/Glob/Grep at all,
+# because Claude Code runs read-only tools and shell reads (cat, `< file`) on any
+# path without asking. Its one myOS tool is the osctl relay (os_relay.py).
+OS_MCP_PATH = "/api/internal/os/mcp"
+OS_TOKEN_ENV = "MYOS_OS_TOKEN"
 # Set on every turn of a thread that has read an app: osctl then refuses the
 # commands that send text off the machine (research-signal), like web-off does.
 APPS_USED_ENV = "MYOS_APPS_USED"
@@ -153,10 +158,17 @@ def remove_bot_tmpdir():
             _BOT_TMPDIR = None
 
 
+def _mcp_server(port, path, env):
+    return {"type": "http", "url": f"http://127.0.0.1:{port}{path}",
+            "headers": {"Authorization": "Bearer ${" + env + "}"}}
+
+
 def apps_mcp_config(port):
-    return json.dumps({"mcpServers": {"apps": {
-        "type": "http", "url": f"http://127.0.0.1:{port}{APPS_MCP_PATH}",
-        "headers": {"Authorization": "Bearer ${" + APPS_TOKEN_ENV + "}"}}}})
+    return json.dumps({"mcpServers": {"apps": _mcp_server(port, APPS_MCP_PATH, APPS_TOKEN_ENV)}})
+
+
+def os_mcp_config(port):
+    return json.dumps({"mcpServers": {"os": _mcp_server(port, OS_MCP_PATH, OS_TOKEN_ENV)}})
 
 # No turn cap: a chat persists via --resume until the user deletes it.
 # Full state snapshot + skill body inject on session start only (server); resume
@@ -191,10 +203,14 @@ class ChatSession:
         # MYOS_WORKSPACE; deny_dirs are other workspaces' folders (no Read/Grep).
         self.workspace = None
         self.deny_dirs = ()
+        self.deny_files = ()  # single files, same rule (stores with every workspace)
         self.readonly = False  # a consulted teammate: osctl refuses every write
         # Once a thread has read an app, its context holds that data: web tools
         # stay off for good there (no "read mail, leak it via a search" path).
         self.apps_used = False
+        # Set by the server per turn: an invited person can see this thread, so
+        # the turn gets only the osctl relay (+ web as usual). See OS_MCP_PATH.
+        self.shared = False
 
     @classmethod
     def restore(cls, repo_dir, rail, rec, **kw):
@@ -220,7 +236,7 @@ class ChatSession:
         }
 
     def _base_cmd(self, with_web=False, model=None, workspace_dir=None,
-                  file_search_mode=False, web_domains=(), apps_port=None):
+                  file_search_mode=False, web_domains=(), apps_port=None, os_port=None):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
         # the routed skill's body into the prompt instead), so we always pass
         # --disable-slash-commands + --setting-sources "" — zero skill-discovery
@@ -236,31 +252,38 @@ class ChatSession:
         # Changing model/tools per turn is safe across --resume: the session is
         # restored from disk by id and context is preserved (verified). Do NOT use
         # --bare — it changes auth behavior.
-        tools = (list(BASE_TOOLS)
-                 + (APP_TOOLS if workspace_dir and file_search_mode else [])
-                 + (WEB_TOOLS if with_web else []))
-        allowed_tools = (list(BASE_ALLOWED_TOOLS)
+        if self.shared:  # no file, shell or app tools: the osctl relay only
+            workspace_dir = file_search_mode = apps_port = None
+        tools = ((WEB_TOOLS if with_web else []) if self.shared else
+                 (list(BASE_TOOLS)
+                  + (APP_TOOLS if workspace_dir and file_search_mode else [])
+                  + (WEB_TOOLS if with_web else [])))
+        allowed_tools = (([] if self.shared else list(BASE_ALLOWED_TOOLS))
                          + (APP_ALLOWED_TOOLS
                             if workspace_dir and file_search_mode else [])
                          + (WEB_ALLOWED_TOOLS if with_web else [])
                          + (web_fetch_rules(web_domains) if with_web else [])
-                         + (["mcp__apps"] if apps_port else []))
+                         + (["mcp__apps"] if apps_port else [])
+                         + (["mcp__os"] if self.shared and os_port else []))
+        mcp = (apps_mcp_config(apps_port) if apps_port
+               else os_mcp_config(os_port) if self.shared and os_port else None)
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(self.repo_dir)
         if workspace_dir and file_search_mode:
             denied += [f"Read(/{workspace_dir}/**/{g})" for g in SECRET_FILE_GLOBS]
         denied += [f"Read(/{d}/**)" for d in self.deny_dirs]
+        denied += [f"Read(/{f})" for f in self.deny_files]
         cmd = [self.claude_bin, "-p",
                "--output-format", "stream-json",
                "--include-partial-messages",
                "--verbose",
                "--model", model or self.model,
                "--system-prompt", self.rail,
-               "--tools", *tools,
-               "--allowedTools", *allowed_tools,
+               "--tools", *(tools or [""]),
+               "--allowedTools", *(allowed_tools or [""]),
                "--disallowedTools", *denied,
                "--strict-mcp-config",
-               *(["--mcp-config", apps_mcp_config(apps_port)] if apps_port else []),
+               *(["--mcp-config", mcp] if mcp else []),
                "--disable-slash-commands",
                "--setting-sources", "",
                "--restricted",
@@ -274,7 +297,8 @@ class ChatSession:
         return cmd
 
     def ask(self, text, with_web=False, model=None, workspace_dir=None,
-            file_search_mode=False, web_domains=(), apps_token=None, apps_port=None):
+            file_search_mode=False, web_domains=(), apps_token=None, apps_port=None,
+            os_token=None, os_port=None):
         """Run one turn; yield (kind, payload) events. Each turn is its own
         `claude -p` invocation, resumed by session id so context persists.
         `with_web` adds the WebSearch/WebFetch tools for this turn;
@@ -286,14 +310,17 @@ class ChatSession:
         body on fresh session start only (no turn cap — session never auto-resets)."""
         proc = subprocess.Popen(
             self._base_cmd(with_web, model, workspace_dir, file_search_mode,
-                           web_domains, apps_port=apps_port if apps_token else None),
+                           web_domains, apps_port=apps_port if apps_token else None,
+                           os_port=os_port if os_token else None),
             cwd=self.repo_dir,
-            env={**{k: v for k, v in os.environ.items() if k not in (APPS_TOKEN_ENV, APPS_USED_ENV)},
+            env={**{k: v for k, v in os.environ.items()
+                    if k not in (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV)},
                  "MYOS_WORKSPACE": self.workspace or "hq",
                  "CLAUDE_CODE_TMPDIR": bot_tmpdir(),
                  **({"MYOS_READONLY": "1"} if self.readonly else {}),
                  **({APPS_USED_ENV: "1"} if self.apps_used else {}),
-                 **({APPS_TOKEN_ENV: apps_token} if apps_token else {})},
+                 **({APPS_TOKEN_ENV: apps_token} if apps_token else {}),
+                 **({OS_TOKEN_ENV: os_token} if os_token else {})},
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1)
         self._started = True

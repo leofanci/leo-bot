@@ -62,7 +62,8 @@ def list_meta():
         except (OSError, json.JSONDecodeError):
             continue
         out.append({k: rec.get(k) for k in ("id", "title", "created", "updated", "turn_count",
-                                            "room", "scope", "tokens", "cost", "by")})
+                                            "room", "scope", "tokens", "cost", "by",
+                                            "shared", "apps_used")})
     return sorted(out, key=lambda r: r.get("updated") or 0, reverse=True)
 
 
@@ -88,7 +89,7 @@ def append_note(chat_id, bot, text):
 
 
 def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
-                by=None, by_name=None):
+                by=None, by_name=None, shared=False):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
@@ -96,13 +97,17 @@ def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, ex
     add up on the chat so threads show their running cost; `extra` = more
     assistant messages of the same turn (teammates pulled in, lead follow-up);
     `by`/`by_name` = an invited person who wrote `user_msg` (core.people id);
-    none = the owner. A new thread remembers its starter in `by`."""
+    none = the owner. A new thread remembers its starter in `by`.
+    `shared` = this turn ran locked down (an invited person can see the thread);
+    the chat keeps `shared` only while every turn did, so a thread with any
+    full-tool history (file reads in its session) never reaches people."""
     rec = load(sess.session_id) or {
         "id": sess.session_id,
         "title": title_from(user_msg),
         "created": time.time(),
         "messages": [],
         **({"by": by} if by else {}),
+        "shared": bool(shared),
     }
     rec["messages"].append({"role": "user", "content": user_msg,
                             **({"by": by, "by_name": by_name} if by else {})})
@@ -128,6 +133,7 @@ def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, ex
         "skill_explicit": sess._skill_explicit,
         "last_bot": getattr(sess, "_last_bot", None),
         "apps_used": bool(getattr(sess, "apps_used", False)),
+        "shared": bool(rec.get("shared")) and bool(shared),
     })
     if room and not rec.get("room"):
         rec["room"] = room

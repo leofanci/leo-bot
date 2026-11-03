@@ -102,7 +102,41 @@ class Sharing(Base):
         self.assertEqual(code, 403)
 
 
+    def test_terminal_refused_through_a_tunnel_that_rewrites_host(self):
+        ws_h = {"Upgrade": "websocket", "Sec-WebSocket-Key": "x"}
+        for extra, origin in (({"X-Forwarded-For": "100.64.0.9"}, None), ({}, f"https://{PUBLIC}")):
+            code, _, _ = request("GET", "/ws/terminal", owner=True, origin=origin, headers={**ws_h, **extra})
+            self.assertEqual(code, 403, extra or origin)
+
+    def test_relays_answer_this_machine_only(self):
+        tok = server.os_relay.TOKENS.mint({"ws": "acme", "readonly": False})
+        self.addCleanup(server.os_relay.TOKENS.revoke, tok)
+        init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        auth = {"Authorization": f"Bearer {tok}"}
+        code, data, _ = request("POST", server.OS_RELAY_PATH, init, origin="", headers=auth)
+        self.assertEqual((code, data["result"]["serverInfo"]["name"]), (200, "myos"))
+        for host, extra in ((PUBLIC, {}), (LOCAL, {"CF-Connecting-IP": "203.0.113.5"})):
+            self.assertEqual(request("POST", server.OS_RELAY_PATH, init, host=host, origin="",
+                                     headers={**auth, **extra})[0], 403)
+        self.assertEqual(request("POST", server.OS_RELAY_PATH, init, origin="",
+                                 headers={"Authorization": "Bearer nope"})[0], 403)
+        apps_tok = server.apps_relay.TOKENS.mint({"ws": "acme", "bot": "cos", "person": "ceo"})
+        self.addCleanup(server.apps_relay.TOKENS.revoke, apps_tok)
+        self.assertEqual(request("POST", server.OS_RELAY_PATH, init, origin="",
+                                 headers={"Authorization": f"Bearer {apps_tok}"})[0], 403)  # separate stores
+        self.assertEqual(request("POST", server.APPS_RELAY_PATH, init, origin="",
+                                 headers={"Authorization": f"Bearer {apps_tok}", "X-Forwarded-For": "1.2.3.4"})[0],
+                         403)
+
+
 class InviteAndJoin(Base):
+    def test_cookie_is_secure_behind_a_tunnel_that_rewrites_host(self):
+        _, code = people.create_invite(self.root, ws="acme", role="member", by="ceo")
+        status, _, headers = request("POST", f"/join/{code}", raw=b"name=Pat", ctype="application/x-www-form-urlencoded",
+                                     origin=f"https://{PUBLIC}", headers={"X-Forwarded-Proto": "https"})
+        self.assertEqual(status, 303)
+        self.assertIn("; Secure", headers["Set-Cookie"])
+
     def test_owner_invites_and_person_joins(self):
         code, data, _ = request("POST", "/api/invites", {"ws": "acme", "role": "admin"}, owner=True)
         self.assertEqual(code, 200)
@@ -223,7 +257,8 @@ class Scoped(Base):
         self.assertEqual(self.get("/api/chats?room=acme/t-deals")[0], 403)
 
         owner_dm = {"id": "11111111-1111-1111-1111-111111111111", "room": "acme/dm-cos", "messages": []}
-        mine = {"id": "22222222-2222-2222-2222-222222222222", "room": "acme/dm-cos", "by": self.pid, "messages": []}
+        mine = {"id": "22222222-2222-2222-2222-222222222222", "room": "acme/dm-cos", "by": self.pid,
+                "shared": True, "messages": []}
         secret = {"id": "33333333-3333-3333-3333-333333333333", "room": "acme/t-deals", "messages": []}
         for rec in (owner_dm, mine, secret):
             server.chat_store.save(rec)
@@ -246,10 +281,105 @@ class Scoped(Base):
         self.assertNotIn("deals", [r["name"] for r in self.get("/api/rooms?ws=acme")[1]["rooms"]])
 
 
+def fake_session(seen):
+    class Sess:
+        session_id = "66666666-6666-6666-6666-666666666666"
+        _turn_count, _last_skill, _skill_explicit, apps_used = 0, None, False, False
+        workspace = deny_dirs = None
+
+        def is_fresh(self):
+            return True
+
+        def note_skill(self, *a, **k):
+            pass
+
+        def ask(self, prompt, **kw):
+            seen["prompt"], seen["kw"], seen["shared"] = prompt, kw, getattr(self, "shared", None)
+            seen["live"] = server.os_relay.TOKENS.lookup(kw.get("os_token")) is not None
+            yield ("delta", "hi")
+            yield ("done", {})
+    return Sess()
+
+
 class Ask(Base):
     def setUp(self):
         super().setUp()
         self.pid, self.tok = self.join()
+
+    def owner_ask(self, room, seen):
+        body = {"messages": [{"role": "user", "content": "hello team"}], "room_id": room}
+        with mock.patch.object(server, "get_chat_session", return_value=fake_session(seen)):
+            return request("POST", "/api/ask", body, owner=True)
+
+    def test_member_turn_gets_only_the_osctl_relay(self):
+        seen = {}
+        with mock.patch.object(server, "person_chat_session", return_value=fake_session(seen)):
+            self.assertEqual(self.ask()[0], 200)
+        self.assertTrue(seen["shared"])
+        self.assertTrue(seen["live"])  # a live token during the run...
+        self.assertIsNone(server.os_relay.TOKENS.lookup(seen["kw"]["os_token"]))  # ...revoked after
+        self.assertEqual(seen["kw"]["os_port"], PORT)
+        self.assertIn("## Shared thread", seen["prompt"])
+
+    def test_owner_turn_is_shared_where_a_person_can_read_it(self):
+        rooms.save_topic("acme", "deals", ["cos"], "cos", self.root, private=True, people=[])
+        for room, shared in (("acme/general", True), ("acme/dm-cos", False), ("acme/t-deals", False)):
+            seen = {}
+            with mock.patch.object(server.integrations, "api_key", return_value="ak_x"), \
+                    mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": "write"}), \
+                    mock.patch.object(server, "_needs_apps", side_effect=lambda m, g, e: bool(g)):
+                self.assertEqual(self.owner_ask(room, seen)[0], 200)
+            self.assertEqual(bool(seen["shared"]), shared, room)
+            self.assertEqual("apps_token" in seen["kw"], not shared, room)
+            self.assertEqual("os_token" in seen["kw"], shared, room)
+
+    def test_no_people_no_shared_threads(self):
+        people.remove(self.root, "acme", self.pid)
+        seen = {}
+        self.assertEqual(self.owner_ask("acme/general", seen)[0], 200)
+        self.assertFalse(seen["shared"])
+
+    def test_threads_remember_whether_every_turn_was_shared(self):
+        seen = {}
+        with mock.patch.object(server, "person_chat_session", return_value=fake_session(seen)):
+            self.ask()
+        cid = fake_session({}).session_id
+        self.assertTrue(server.chat_store.load(cid)["shared"])
+        rec = server.chat_store.load(cid)
+        rec["room"] = "acme/dm-cos"  # the owner continues it with full tools (a DM)
+        rec["by"] = "ceo"
+        server.chat_store.save(rec)
+        body = {"messages": [{"role": "user", "content": "hi"}], "room_id": "acme/dm-cos", "chat_id": cid}
+        with mock.patch.object(server, "get_chat_session", return_value=fake_session(seen)):
+            self.assertEqual(request("POST", "/api/ask", body, owner=True)[0], 200)
+        self.assertFalse(server.chat_store.load(cid)["shared"])  # never shared again
+
+    def test_listing_hides_threads_that_read_an_app(self):
+        rec = {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "room": "acme/general", "shared": True,
+               "apps_used": True, "messages": []}
+        server.chat_store.save(rec)
+        listed = request("GET", "/api/chats?room=acme/general", member=self.tok, host=PUBLIC)[1]["chats"]
+        self.assertEqual(listed, [])
+
+    def test_old_owner_thread_in_general_is_not_reachable(self):
+        rec = {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "room": "acme/general", "messages": []}
+        server.chat_store.save(rec)
+        self.assertEqual(self.ask(chat_id=rec["id"])[0], 403)
+        self.assertEqual(request("GET", f"/api/chats/{rec['id']}", member=self.tok, host=PUBLIC)[0], 404)
+
+    def test_thread_must_be_asked_in_its_own_room(self):
+        rooms.save_topic("acme", "launch", ["cos"], "cos", self.root)
+        rec = {"id": "88888888-8888-8888-8888-888888888888", "room": "acme/t-launch", "messages": []}
+        server.chat_store.save(rec)
+        self.assertEqual(self.ask("acme/general", chat_id=rec["id"])[0], 403)
+
+    def test_member_never_gets_the_owner_folder_path(self):
+        rec = {"id": "99999999-9999-9999-9999-999999999999", "room": "acme/general",
+               "scope": ["acme", "/somewhere/app"], "shared": True, "messages": []}
+        server.chat_store.save(rec)
+        listed = request("GET", "/api/chats?room=acme/general", member=self.tok, host=PUBLIC)[1]["chats"]
+        self.assertNotIn("scope", listed[0])
+        self.assertNotIn("scope", request("GET", f"/api/chats/{rec['id']}", member=self.tok, host=PUBLIC)[1])
 
     def ask(self, room="acme/general", chat_id=None, tok=None):
         body = {"messages": [{"role": "user", "content": "hello team"}], "room_id": room}
@@ -271,7 +401,7 @@ class Ask(Base):
         self.assertEqual(self.ask("acme/dm-cos", chat_id=rec["id"])[0], 403)
 
     def test_busy_thread_refused(self):
-        rec = {"id": "55555555-5555-5555-5555-555555555555", "room": "acme/general", "messages": []}
+        rec = {"id": "55555555-5555-5555-5555-555555555555", "room": "acme/general", "shared": True, "messages": []}
         server.chat_store.save(rec)
         server._BUSY.add(rec["id"])
         self.addCleanup(server._BUSY.discard, rec["id"])

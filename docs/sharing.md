@@ -15,11 +15,17 @@ workspace (never HQ) as **admin** or **member**:
 | Chat with people and bots in channels they can see | yes | yes | yes |
 | Content, Files, Calendar, Approvals, Integrations, terminal | yes | no | no |
 
-Bots answering an invited person never use your connected apps (mail,
-calendar, socials), and they see only that workspace's files, plus its linked
-app folder if you linked one. On the shared calendar, other workspaces show
-only as busy time. The terminal only
-opens on this machine, never over the shared address.
+**Shared threads are locked down.** Any thread an invited person can see
+(#general, open channels, private channels you added them to, their own DMs
+with a bot) runs without a shell, file access or connected apps, for your
+messages there too. The bot's only tool is myOS itself (osctl), run by the
+server inside that workspace: it can read and save that workspace's content,
+but not your other workspaces, your files, your keys, bot memory or your mail.
+Bots can still answer from a summary of the project's linked app code. For
+mail, calendar or anything on your machine, use a DM with a bot or a private
+channel with no people in it. On the shared calendar, other workspaces show
+only as busy time. The terminal only opens on this machine, never over the
+shared address.
 
 ## 1. Pick a tunnel
 
@@ -70,8 +76,16 @@ that cookie at once.
 ## Notes
 
 - Private channels show only to you and the people ticked in the channel form.
-  DM threads with a bot belong to whoever started them.
+  Adding someone to a channel shows them its existing threads, except threads
+  that read a connected app: those stay yours.
+- DM threads with a bot belong to whoever started them. When a channel is
+  deleted or a bot is switched off, its threads move to #general for you only.
 - Two people can talk with bots at the same time in different threads. A
   thread that is mid-reply asks the other person to wait.
+- What invited people save through a bot (intake, memos, posts) is read by
+  bots on your own turns later, like any document a teammate edits. Check it
+  before acting on it.
 - Every bot reply runs on your own Claude account, so invited people spend your
   usage.
+- Owner login works over the sharing address too, but the address travels
+  through the tunnel provider. Prefer this machine for owner work.
