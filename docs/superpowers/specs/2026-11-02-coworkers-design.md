@@ -87,13 +87,27 @@ HQ (the holding) cannot be invited into.
 - **Concurrency.** One live Claude session per thread (pool, LRU-closed when
   idle, cap 8). A second message into a thread that is mid-reply gets
   "Someone is replying in this thread". Stop stops only that thread's turn.
-- **Member bot turns** never get connected apps (no app MCP, no app grant),
-  whatever the bot's grant. Web rules unchanged. Workspace isolation unchanged
-  (osctl `MYOS_WORKSPACE`, Read denied for other workspaces and secrets; the
-  project's linked app folder stays readable, other workspaces show on the
-  calendar only as busy time).
+- **Shared threads.** A thread an invited person can see (the room is not a
+  DM and some person passes `can_see`, or the speaker is a person) runs with
+  no built-in file or shell tools and no connected apps, whoever speaks.
+  Claude Code runs read-only tools and read-only shell commands (Read, `cat`,
+  `osctl ... < file`) on any path without asking, so a Bash/Read toolset
+  cannot be scoped to one workspace. The turn instead gets one HTTP MCP server
+  on the dashboard (`/api/internal/os/mcp`, per-request token, this machine
+  only) whose single tool runs osctl with the token's workspace and
+  `MYOS_SHARED`: `remember` refused, `read-file` only under `projects/<ws>/`
+  and the public docs folders. Web rules unchanged. The linked app's TokenSave
+  summary is still injected by the server.
   Saving through a bot ("yes" on an approval in the thread) works for members:
   it writes only that workspace's files.
+- **Visibility follows the recorded room.** A person sees a thread only in the
+  room stored on it (never via the #general fallback for deleted channels or
+  switched-off bots) and never a thread with `apps_used`. Chats sent to a
+  person drop `scope` (it holds the linked folder path).
+- **Local only.** Terminal and both bot relays require a local Host, a local
+  or absent Origin and no proxy headers (`X-Forwarded-*`, `Forwarded`,
+  `CF-*`, `Tailscale-*`), since a tunnel may rewrite Host. Cookies get
+  `Secure` when the request came through the sharing address.
 - **Refresh.** An open thread re-fetches every 5 s while idle and the tab is
   visible; the rail re-fetches threads of the open room on the same tick.
 - **Removal** deletes the membership; a person with no workspaces left is

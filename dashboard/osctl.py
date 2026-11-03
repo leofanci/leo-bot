@@ -47,8 +47,16 @@ _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-cata
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV).
 _NETWORK_CMDS = {"research-signal"}
-# Repo areas that hold every workspace's data at once (calendar via get-busy).
-_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db")
+# Repo areas that hold every workspace's data at once (calendar via get-busy),
+# or the owner's own machine state (session notes, indexes, logs).
+_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db", ".remember/",
+                     ".superpowers/", ".tokensave/", ".claude/", ".git/", "dashboard/vendor/")
+_PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".log")
+# A shared thread (os_relay: an invited person can see it). Bot memory steers the
+# owner's own later turns, so it is not written from here; files read only from
+# this workspace's folder and the public repo docs.
+_SHARED_BLOCKED = {"remember"}
+_SHARED_READ_PREFIXES = ("skills/", "docs/", "templates/", "prompts/", "bots/")
 # Args whose value names an existing entity (create commands mint new slugs,
 # which resolve to no owner and pass).
 _OWNER_ARGS = ("project", "entity", "profile", "product", "slug", "id", "channel")
@@ -109,11 +117,14 @@ def _guard(args, ws):
             rel = (root / path).resolve().relative_to(root).as_posix().lower()
         except ValueError:
             raise fileops.ActionError("that file is outside this workspace") from None
-        if rel.startswith(_PRIVATE_PREFIXES):
+        if rel.startswith(_PRIVATE_PREFIXES) or rel.endswith(_PRIVATE_SUFFIXES):
             raise fileops.ActionError("that file holds every workspace's data; not readable here")
         parts = rel.split("/")
         if parts[0] == "projects" and len(parts) > 1 and parts[1] != ws.lower():
             raise fileops.ActionError("that file belongs to another workspace")
+        if os.environ.get("MYOS_SHARED") and not (
+                rel.startswith(f"projects/{ws.lower()}/") or rel.startswith(_SHARED_READ_PREFIXES)):
+            raise fileops.ActionError("in a shared thread only this workspace's files are readable")
 
 
 def _emit(obj, ok=True):
@@ -865,6 +876,12 @@ def main(argv=None):
         if os.environ.get(chat_session.APPS_USED_ENV) and args.cmd in _NETWORK_CMDS:
             raise fileops.ActionError(f"{args.cmd} is off here: this thread read a connected app")
         ws = _workspace()
+        if os.environ.get("MYOS_SHARED"):
+            if not ws:
+                raise fileops.ActionError("a shared thread runs inside one project workspace")
+            if args.cmd in _SHARED_BLOCKED:
+                raise fileops.ActionError(f"{args.cmd} is not available in a thread invited people "
+                                          "can see; ask the owner to do it in a DM with the bot")
         if ws:
             _guard(args, ws)
         result = args._run(args)

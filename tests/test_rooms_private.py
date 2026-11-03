@@ -45,18 +45,41 @@ class Private(unittest.TestCase):
 
     def test_dm_threads_belong_to_their_starter(self):
         dm = self.room("acme/dm-cos")
-        self.assertTrue(rooms.chat_visible({"by": "p-pat"}, dm, PAT))
-        self.assertFalse(rooms.chat_visible({"by": "p-pat"}, dm, SAM))
-        self.assertFalse(rooms.chat_visible({"by": "p-pat"}, dm, OWNER))
-        self.assertTrue(rooms.chat_visible({}, dm, OWNER))  # threads from before people existed
-        self.assertFalse(rooms.chat_visible({}, dm, PAT))
+        rid = "acme/dm-cos"
+        self.assertTrue(rooms.chat_visible({"by": "p-pat", "room": rid, "shared": True}, dm, PAT))
+        self.assertFalse(rooms.chat_visible({"by": "p-pat", "room": rid}, dm, SAM))
+        self.assertFalse(rooms.chat_visible({"by": "p-pat", "room": rid}, dm, OWNER))
+        self.assertTrue(rooms.chat_visible({"room": rid}, dm, OWNER))  # threads from before people existed
+        self.assertFalse(rooms.chat_visible({"room": rid}, dm, PAT))
 
     def test_topic_threads_are_shared_with_whoever_sees_the_channel(self):
         rid = rooms.save_topic("acme", "deals", ["cos"], "cos", self.root, private=True, people=["p-pat"])
         r = self.room(rid)
-        self.assertTrue(rooms.chat_visible({"by": "ceo"}, r, PAT))
-        self.assertFalse(rooms.chat_visible({"by": "p-pat"}, r, SAM))
+        self.assertTrue(rooms.chat_visible({"by": "ceo", "room": rid, "shared": True}, r, PAT))
+        self.assertFalse(rooms.chat_visible({"by": "p-pat", "room": rid}, r, SAM))
 
+    def test_fallback_threads_never_reach_people(self):
+        general = self.room("acme/general")
+        gone_channel = {"room": "acme/t-deals"}  # its private channel was deleted
+        gone_dm = {"room": "acme/dm-cmo", "by": "p-pat"}  # its bot was switched off
+        for rec in (gone_channel, gone_dm, {}):
+            self.assertFalse(rooms.chat_visible(rec, general, PAT), rec)
+            self.assertFalse(rooms.chat_visible(rec, general, SAM), rec)
+        self.assertTrue(rooms.chat_visible(gone_channel, general, OWNER))
+        self.assertFalse(rooms.chat_visible(gone_dm, general, OWNER))  # still Pat's DM
+
+    def test_threads_that_read_an_app_stay_the_owners(self):
+        general = self.room("acme/general")
+        rec = {"room": "acme/general", "apps_used": True, "shared": True}
+        self.assertFalse(rooms.chat_visible(rec, general, PAT))
+        self.assertTrue(rooms.chat_visible(rec, general, OWNER))
+
+    def test_threads_with_full_tool_history_stay_the_owners(self):
+        general = self.room("acme/general")
+        for rec in ({"room": "acme/general"}, {"room": "acme/general", "shared": False}):
+            self.assertFalse(rooms.chat_visible(rec, general, PAT))  # from before sharing, or a DM-power turn
+            self.assertTrue(rooms.chat_visible(rec, general, OWNER))
+        self.assertTrue(rooms.chat_visible({"room": "acme/general", "shared": True}, general, PAT))
 
 if __name__ == "__main__":
     unittest.main()
