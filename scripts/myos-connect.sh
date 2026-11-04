@@ -9,7 +9,7 @@
 set -euo pipefail
 
 TARGET="${1:-}"
-PORT="${2:-8765}"
+PORT="${2:-8766}"
 MYOS_USER="${MYOS_USER:-myos}"
 if [ -z "$TARGET" ]; then
   echo "Usage: scripts/myos-connect.sh user@server [port]" >&2

@@ -9,7 +9,7 @@
 set -euo pipefail
 
 MYOS_USER="${MYOS_USER:-myos}"
-MYOS_PORT="${MYOS_PORT:-8765}"
+MYOS_PORT="${MYOS_PORT:-8766}"  # not 8765, so it never collides with myOS on your own Mac
 MYOS_REPO="${MYOS_REPO:-}"
 MYOS_BRANCH="${MYOS_BRANCH:-main}"
 

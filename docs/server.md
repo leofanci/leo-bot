@@ -24,8 +24,8 @@ ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/
 ```
 
 This creates a `myos` user, puts the code in its home folder, installs Claude Code
-and starts a service that restarts on its own. myOS listens on `127.0.0.1` only, so
-nothing is open to the internet yet. Read the script first if you like: it is short.
+and starts a service that restarts on its own. myOS listens on `127.0.0.1:8766` only,
+so nothing is open to the internet yet. Read the script first if you like: it is short.
 
 ## 2. Log in to Claude (optional)
 
@@ -68,7 +68,7 @@ On a server you have one more option, your own domain with Caddy:
 
 ```
 myos.example {
-    reverse_proxy 127.0.0.1:8765
+    reverse_proxy 127.0.0.1:8766
 }
 ```
 

@@ -30,7 +30,8 @@ shared address.
 ## 1. Pick a tunnel
 
 Your machine has to be awake and myOS running for people to reach it. For
-always-on access, run myOS on a small server instead and use the same steps.
+always-on access, run myOS on a small server instead ([docs/server.md](server.md)) and
+use the same steps with port 8766.
 
 **Tailscale Serve** (only people on your tailnet, or people you share the
 machine with in Tailscale):
