@@ -46,13 +46,12 @@ def save(rec):
 
 
 def delete(chat_id):
-    path = _path(chat_id)
-    prefix = f"{path.stem}."
+    prefix = f"{_path(chat_id).stem}."
     for extra in CHATS_DIR.iterdir() if CHATS_DIR.is_dir() else ():  # api engine history
         if extra.name.startswith(prefix) and extra.name.endswith(".jsonl"):
             extra.unlink(missing_ok=True)
     try:
-        path.unlink()
+        _path(chat_id).unlink()
         return True
     except FileNotFoundError:
         return False
