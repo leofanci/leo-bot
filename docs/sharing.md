@@ -85,7 +85,9 @@ that cookie at once.
 - What invited people save through a bot (intake, memos, posts) is read by
   bots on your own turns later, like any document a teammate edits. Check it
   before acting on it.
-- Every bot reply runs on your own Claude account, so invited people spend your
-  usage.
+- Your own messages run on this machine's Claude Code login or an API key. Invited
+  people's messages only ever run on an API key you pick in HQ, Engines, billed to
+  that key. Until you pick one, bots tell them so and nothing is spent. Each reply
+  shows what it ran on.
 - Owner login works over the sharing address too, but the address travels
   through the tunnel provider. Prefer this machine for owner work.

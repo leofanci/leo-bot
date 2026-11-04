@@ -301,10 +301,31 @@ def fake_session(seen):
     return Sess()
 
 
+class FakeApiEngine:
+    id, label, kind = "api:demo", "Demo API", "api"
+
+    def resolve_model(self, model):
+        return model
+
+
 class Ask(Base):
     def setUp(self):
         super().setUp()
         self.pid, self.tok = self.join()
+        # Invited people run on the workspace's API key engine.
+        picked = mock.patch.object(server.engine_registry, "pick", return_value=FakeApiEngine())
+        picked.start()
+        self.addCleanup(picked.stop)
+
+    def test_member_turn_without_an_api_engine_is_told_and_spends_nothing(self):
+        seen = {}
+        with mock.patch.object(server.engine_registry, "pick",
+                               side_effect=server.EngineRefused(server.engine_registry.NO_PEOPLE_ENGINE)), \
+                mock.patch.object(server, "person_chat_session", return_value=fake_session(seen)):
+            code, data, _ = self.ask()
+        self.assertEqual(code, 200)
+        self.assertNotIn("prompt", seen)  # no model turn
+        self.assertIn(b"no API key", data)
 
     def owner_ask(self, room, seen):
         body = {"messages": [{"role": "user", "content": "hello team"}], "room_id": room}
