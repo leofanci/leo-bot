@@ -198,6 +198,15 @@ ENGINE_ID = "claude-code"
 _LOST_RE = re.compile(r"no conversation found", re.I)
 
 
+def _failure_text(text):
+    """What a failed `claude -p` said, or what to do when it said nothing useful."""
+    text = str(text or "").strip()[:500]
+    if not text or re.search(r"not logged in|please run /login|invalid api key", text, re.I):
+        return ("Claude Code is not logged in on this machine. Run `claude auth login` here, "
+                "or pick an API key in HQ, Engines.")
+    return text
+
+
 class ClaudeCodeEngine(Engine):
     id = ENGINE_ID
     label = "Claude Code"
@@ -302,6 +311,7 @@ class ClaudeCodeEngine(Engine):
             return
         session._started = True
         session._proc = proc
+        said = ""
         proc.stdin.write(text + "\n")
         proc.stdin.close()
         try:
@@ -314,6 +324,8 @@ class ClaudeCodeEngine(Engine):
                 except json.JSONDecodeError:
                     continue
                 kind, payload = parse_event(obj)
+                if kind == "done":
+                    said = payload.get("result") or said
                 if kind:
                     yield (kind, payload)
             proc.wait()
@@ -322,7 +334,7 @@ class ClaudeCodeEngine(Engine):
                 if was_started and _LOST_RE.search(err):
                     session._started = False
                     raise SessionLost(err)
-                yield ("error", err)
+                yield ("error", _failure_text(err or said))
         finally:
             for stream in (proc.stdout, proc.stderr):
                 try:

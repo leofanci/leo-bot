@@ -28,6 +28,10 @@ TUNNEL=$!
 trap 'kill "$TUNNEL" 2>/dev/null || true' EXIT INT TERM
 
 for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! kill -0 "$TUNNEL" 2>/dev/null; then
+    echo "Could not open the connection. Is something on this laptop already using port $PORT?" >&2
+    exit 1
+  fi
   if curl -s -o /dev/null --connect-timeout 1 "http://127.0.0.1:$PORT/"; then break; fi
   sleep 1
 done

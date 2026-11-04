@@ -106,6 +106,14 @@ class ClaudeDriver(unittest.TestCase):
         sess._started = True
         self.assertEqual(list(sess.ask("hi"))[-1][0], "error")
 
+    def test_logged_out_says_what_to_do(self):
+        out = '{"type":"result","subtype":"success","is_error":true,"result":"Not logged in \\u00b7 Please run /login"}'
+        bin_ = self.stub(f"cat <<'X'\n{out}\nX\nexit 1\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        last = list(sess.ask("hi"))[-1]
+        self.assertEqual(last[0], "error")
+        self.assertIn("claude auth login", last[1])
+
     def test_turn_env_names_the_engine_and_is_never_inherited(self):
         os.environ["MYOS_ENGINE"] = "api:leak"
         self.addCleanup(os.environ.pop, "MYOS_ENGINE", None)
