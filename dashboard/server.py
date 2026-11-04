@@ -50,6 +50,8 @@ import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
+from dashboard.engines import api as engine_api, config as engine_config, registry as engine_registry  # noqa: E402
+from dashboard.engines.base import EngineRefused  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
 from core.ids import (  # noqa: E402
@@ -917,6 +919,55 @@ def _workspace_deny_files(ws):
     return tuple(str(f) for f in (ROOT / "os.db", HERE / "os.db", HERE / "data.db"))
 
 
+API_NOTE = (
+    "## Your tools\n"
+    "This bot runs on an API key, not a command line. Your myOS tool is `osctl`: put the words that follow "
+    "`python3 -m dashboard.osctl` in `args`, one per item, and a long body in `stdin`. There is no shell. "
+    "Read files with `read_file`.")
+_API_APP_SESSIONS = {}  # apps turn token -> MCP session id (api engine only)
+
+
+def _apps_rpc(token, method, params):
+    """The apps relay for the api engine: same gate as a bot's MCP call."""
+    ctx = apps_relay.TOKENS.lookup(token)
+    if ctx is None:
+        raise ValueError("this turn's apps access has ended")
+    upstream = apps_relay.ComposioUpstream(ctx["person"], ctx["ws"], ROOT)
+    sid = _API_APP_SESSIONS.get(token)
+    if sid is None:
+        _, sid = apps_relay.handle(
+            {"jsonrpc": "2.0", "id": 0, "method": "initialize",
+             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                        "clientInfo": {"name": "myos", "version": "1"}}}, ctx, None, upstream, ROOT)
+        apps_relay.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, ctx, sid, upstream, ROOT)
+        _API_APP_SESSIONS[token] = sid
+    reply, sid = apps_relay.handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                                   ctx, sid, upstream, ROOT)
+    return reply or {}
+
+
+def _apps_list(token):
+    return ((_apps_rpc(token, "tools/list", {}).get("result") or {}).get("tools")) or []
+
+
+def _apps_call(token, name, arguments):
+    reply = _apps_rpc(token, "tools/call", {"name": name, "arguments": arguments})
+    if reply.get("error"):
+        return str(reply["error"].get("message") or "failed"), True
+    result = reply.get("result") or {}
+    text = "\n".join(b.get("text", "") for b in result.get("content") or [] if isinstance(b, dict))
+    return text or "(empty)", bool(result.get("isError"))
+
+
+engine_api.set_backends(osctl=os_relay.run_osctl, osctl_clean=os_relay.clean_args,
+                        apps_list=_apps_list, apps_call=_apps_call)
+
+
+def _engines_view():
+    return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT),
+            "ws_list": [w for w in _workspaces(db.tree()) if w["id"] != bots.HQ]}
+
+
 def _shared_room(ws, room):
     """True when an invited person can see `room` (not a DM): its turns then run
     with the osctl relay only, whoever speaks (chat_session.OS_MCP_PATH)."""
@@ -1517,6 +1568,28 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, integrations.public(ROOT))
         return self._send(404, {"error": "unknown endpoint"})
 
+    def _engines_post(self, path, body):
+        """HQ, Engines: owner only (the caller checked)."""
+        if path == "/api/engines/provider":
+            engine_config.upsert_provider(body, ROOT)
+        elif path == "/api/engines/provider/remove":
+            engine_config.remove_provider(str(body.get("id") or ""), ROOT)
+        elif path == "/api/engines/choice":
+            name, value, scope = body.get("name"), body.get("value"), body.get("scope")
+            if value and name != "terminal":
+                engine = engine_registry.get(str(value), ROOT)  # only an engine that exists
+                if name == "people" and engine.kind != "api":
+                    raise ValueError("invited people run on an API key")
+            engine_config.set_choice(name, value, str(scope) if scope else None, ROOT)
+        elif path == "/api/engines/test":
+            engine = engine_registry.get(str(body.get("id") or ""), ROOT)
+            if engine.kind != "api":
+                return self._send(200, {"error": None if engine.status()["ok"] else engine.status()["detail"]})
+            return self._send(200, {"error": engine.test()})
+        else:
+            return self._send(404, {"error": "unknown endpoint"})
+        return self._send(200, _engines_view())
+
     # -- invited people (core.people): join page, their routes, invites ------ #
     def _page(self, code, title, body_html):
         doc = ("<!doctype html><html lang=en><meta charset=utf-8>"
@@ -1760,6 +1833,17 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _unmark_busy(chat_id)
 
+    def _sse_message(self, text):
+        """A zero-model reply: one line in the thread, no model turn spent."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.wfile.write(f"data: {json.dumps({'delta': text})}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
+
     def _ask_turn(self, body, viewer):
         messages = body.get("messages", [])
         if not messages or messages[-1].get("role") != "user":
@@ -1803,6 +1887,10 @@ class Handler(BaseHTTPRequestHandler):
             team, user_msg, sess,
             default_bot=(room or {}).get("lead") or bots.ROOT_BOT,
             dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None)
+        try:
+            sess.engine = engine = engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared)
+        except EngineRefused as e:
+            return self._sse_message(str(e))
         explicit = skill if routed else None
         suggest = _suggest_skill(user_msg) if not explicit else None
         # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
@@ -1937,6 +2025,8 @@ class Handler(BaseHTTPRequestHandler):
             workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
         if shared:
             workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
+        elif engine.kind == "api":
+            workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -1952,6 +2042,12 @@ class Handler(BaseHTTPRequestHandler):
             only_project=(project_slug or None),
             suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
         )
+        # What crosses between engines: the thread's visible messages, never a transcript.
+        saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
+        sess.recap = chat_store.recap(saved_rec)
+        missed = chat_store.recap(saved_rec, engine.id)
+        if missed:
+            text = f"{missed}\n\n{text}"
         sess.note_skill(skill, explicit=bool(explicit))
         if hasattr(sess, "note_bot"):
             sess.note_bot(bot_id)
@@ -1985,6 +2081,8 @@ class Handler(BaseHTTPRequestHandler):
         def run(s_, prompt_, model_, web_, msg, **kw):
             """Stream one bot run into `msg` (content + usage)."""
             parts, fin, failed = [], {}, False
+            eng = getattr(s_, "engine", None)
+            model_ = eng.resolve_model(model_) if eng else model_
             for kind, payload in s_.ask(prompt_, with_web=web_, model=model_,
                                         web_domains=web_domains, **kw):
                 if kind == "delta":
@@ -1998,9 +2096,13 @@ class Handler(BaseHTTPRequestHandler):
                     failed = True
                 elif kind == "done":
                     fin = payload or {}
-            msg.update(tokens=fin.get("tokens") or None, cost=fin.get("cost"), model=model_)
+            msg.update(tokens=fin.get("tokens") or None, cost=fin.get("cost"), model=model_,
+                       engine=eng.id if eng else None, engine_label=eng.label if eng else None,
+                       account=(person["id"] if person and eng and eng.kind == "runner"
+                                else "workspace" if person else "owner"))
             if msg["tokens"] or msg["cost"]:
-                emit({"usage": {"tokens": msg["tokens"], "cost": msg["cost"], "model": model_}})
+                emit({"usage": {"tokens": msg["tokens"], "cost": msg["cost"], "model": model_,
+                                "engine": msg["engine"], "engine_label": msg["engine_label"]}})
             if failed:
                 raise _RunFailed
             return msg["content"]
@@ -2010,6 +2112,8 @@ class Handler(BaseHTTPRequestHandler):
             c = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
             c.workspace, c.deny_dirs, c.deny_files, c.readonly = ws, sess.deny_dirs, sess.deny_files, True
             c.shared = shared
+            c.ephemeral = True
+            c.engine = engine_registry.pick(ROOT, ws, b2, invited=bool(person), shared=shared)
             c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
             own = team.skills_of(b2)
             c_skill = _suggest_skill(question, among=own)
@@ -2023,7 +2127,8 @@ class Handler(BaseHTTPRequestHandler):
             _EXTRA[slot] = c
             c_kw = {}
             if shared:  # its own read-only token, revoked when it answers
-                c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used}),
+                c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
+                                                          "engine": c.engine.id}),
                         "os_port": self.server.server_address[1]}
             try:
                 return run(c, prompt, c_model, c_web, msg, **c_kw)
@@ -2042,7 +2147,8 @@ class Handler(BaseHTTPRequestHandler):
                             "room": (room or {}).get("id"), "person": bots.CEO}),
                        "apps_port": self.server.server_address[1]}
         if shared:
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used}),
+            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
+                                                         "engine": engine.id}),
                        "os_port": self.server.server_address[1]}
         try:
             # Tell the client which saved chat this turn belongs to (a scope
@@ -2114,6 +2220,7 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if apps_kw.get("apps_token"):
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
+                _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)
             if apps_kw.get("os_token"):
                 os_relay.TOKENS.revoke(apps_kw["os_token"])
             if isinstance(getattr(sess, "session_id", None), str):
@@ -2155,7 +2262,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-        term = terminal_session.TerminalSession(cmd=["claude"], cwd=str(ROOT))
+        term = terminal_session.TerminalSession(cmd=engine_registry.terminal_cmd(ROOT), cwd=str(ROOT))
         term.start(on_output)
 
         buf = b""
@@ -2332,6 +2439,8 @@ class Handler(BaseHTTPRequestHandler):
                     (parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 files = deliverables.list_files(ROOT, ws, db.tree(), db.posts()) if record else []
                 return self._send(200, {"ws": ws, "files": files})
+            if path == "/api/engines":
+                return self._send(200, _engines_view())
             if path == "/api/integrations":
                 return self._send(200, _integrations_view())
             if path == "/api/integrations/catalog":
@@ -2704,6 +2813,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0)
                 return self._send(200, {"lines": text.splitlines() if text else []})
+            if path.startswith("/api/engines/"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._engines_post(path, body)
             if path.startswith("/api/integrations/") or (
                     path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject"))):
                 if not self._authorized(require_origin=True):

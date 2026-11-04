@@ -10,7 +10,7 @@ import subprocess  # noqa: F401
 import tempfile  # noqa: F401
 import uuid
 
-from dashboard.engines.base import SessionLost, TurnPolicy, TurnTokens
+from dashboard.engines.base import EngineRefused, SessionLost, TurnPolicy, TurnTokens
 from dashboard.engines.claude_code import (  # noqa: F401  (the server and osctl read these here)
     APP_ALLOWED_TOOLS, APP_TOOLS, APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, BASE_ALLOWED_TOOLS,
     BASE_TOOLS, CHAT_MODEL, ENGINE_ENV, ESCALATED_MODEL, OS_MCP_PATH, OS_TOKEN_ENV, SECRET_FILE_GLOBS,
@@ -114,6 +114,9 @@ class ChatSession:
             for ev in self.engine.turn(self, prompt, policy, model, tokens):
                 failed = failed or ev[0] == "error"
                 yield ev
+        except EngineRefused as e:
+            failed = True
+            yield ("error", str(e))
         if failed:
             return
         self._turn_count += 1

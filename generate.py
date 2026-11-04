@@ -109,20 +109,16 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     skills. Brief/voice text is untrusted input, so it must not be able to steer
     the model into running commands, reading files or fetching URLs.
     """
-    cmd = ["claude", "-p", prompt, "--output-format", "json",
-           "--tools", "", "--strict-mcp-config", "--setting-sources", "",
-           "--disable-slash-commands", "--no-session-persistence"]
-    if model:
-        cmd += ["--model", model]
-    proc = subprocess.run(
-        cmd,
-        input=stdin_text,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        raise JobError(f"claude exited {proc.returncode}: {proc.stderr.strip()[:500]}")
-    return proc.stdout
+    from dashboard.engines.registry import for_job  # the engine its turn runs on (MYOS_ENGINE)
+
+    try:
+        engine = for_job()
+        out = engine.complete(prompt, stdin_text, model)
+    except Exception as e:  # noqa: BLE001  EngineRefused, a provider error, a failed CLI
+        raise JobError(str(e)) from None
+    if engine.kind == "api":
+        return json.dumps({"type": "result", "subtype": "success", "result": out})
+    return out
 
 
 def extract_result(stdout: str) -> str:

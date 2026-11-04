@@ -202,6 +202,7 @@ const ROUTES = [
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
   [/^\/integrations$/,                          ()       => { setState("integrations"); renderIntegrations(); }],
+  [/^\/engines$/,                               ()       => { setState("engines"); renderEngines(); }],
   [/^\/files$/,                                 ()       => { setState("files"); renderFiles(); }],
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
@@ -553,7 +554,8 @@ async function renderRail(){
         ${w.id !== "hq" ? `<a data-view="files">${icon("folder")}<span class="rail-name">Files</span></a>` : ""}
         <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>`}
         <a data-view="team">${icon("users")}<span class="rail-name">Team</span><span class="count">${_BOTS.filter(b => b.active).length}</span></a>
-        ${w.id === "hq" && !person ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>` : ""}
+        ${w.id === "hq" && !person ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>
+        <a data-view="engines">${icon("layers")}<span class="rail-name">Engines</span></a>` : ""}
       </nav>
       ${section("channels", "Channels", channels.map(roomRow).join(""),
         manage ? `<button class="add-btn" id="new-room-btn" title="New channel" aria-label="New channel">${icon("plus")}</button>` : "")}
@@ -605,7 +607,7 @@ const KIND_META = {
   roadmap: ["map", "Roadmap", "Roadmap"], plan: ["route", "Go-to-market", "Go-to-market plan"],
   content: ["calendar", "Content", "Content plan"], brief: ["compose", "Post briefs", "Post brief"], voice: ["mic", "Voice", "Voice"],
 };
-const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", integrations: "Integrations", calendar: "Calendar", needs: "Today", operations: "Operations" };
+const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", integrations: "Integrations", engines: "Engines", calendar: "Calendar", needs: "Today", operations: "Operations" };
 const profileName = slug => _TREE.flatMap(p => p.profiles).find(x => x.slug === slug)?.name || slug;
 // "Instagram, TikTok": the channels of a deliverable's profile.
 const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === d.profile)?.channels || [])
@@ -994,6 +996,7 @@ async function refreshViews(){
   if (v === "team") return renderTeam();
   if (v === "approvals") return renderApprovals();
   if (v === "integrations") return renderIntegrations();
+  if (v === "engines") return renderEngines();
   if (v === "files") return renderFiles();
   if (v === "section") return renderProjectSection(STATE.project, STATE.section);
   if (v === "profile") return onProfileList(STATE.profile) ? renderProfile(STATE.profile) : undefined;
@@ -1326,6 +1329,91 @@ function wireAppCard(el, a){
     el.querySelector(".app-fields").replaceWith(form);
     e.currentTarget.remove();
   };
+}
+
+// HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
+// key. Invited people only ever run on an API key.
+async function renderEngines(){
+  const stillOn = routeGuard();
+  $("#main").innerHTML = `
+    <div class="topbar"><div><div class="crumbs">HQ · settings</div><h1 class="title">Engines</h1></div></div>
+    <div class="scroll"><div class="help">What runs your bots. Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div></div>`;
+  if (_WS !== "hq") { $("#eng").innerHTML = `<div class="empty">Engines live in HQ.</div>`; return; }
+  let adding = null;
+  const draw = async () => {
+    const d = await api("/api/engines").catch(e => ({ error: e.message }));
+    if (!stillOn()) return;
+    const box = $("#eng");
+    if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+    const usable = (d.engines || []).filter(e => e.ok);
+    const opts = (cur, list, blank) => `<option value="">${esc(blank)}</option>` + list.map(e =>
+      `<option value="${esc(e.id)}"${e.id === cur ? " selected" : ""}>${esc(e.label)}</option>`).join("");
+    const apiOnly = usable.filter(e => e.kind === "api");
+    const rows = (d.engines || []).map(e => {
+      const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
+      return `<div class="post"><div class="t"><b>${esc(e.label)}</b><small>${esc(e.detail || "")}${p ? ` · fast: ${esc(p.models?.fast || "-")} · strong: ${esc(p.models?.strong || "-")}` : ""}</small></div>
+        <span class="tag">${e.ok ? "ready" : "not ready"}</span>
+        <button class="go" data-test="${esc(e.id)}">Test</button>
+        ${p ? `<button class="go" data-edit="${esc(p.id)}">Edit</button><button class="more" data-remove="${esc(p.id)}">Remove</button>` : ""}</div>`;
+    }).join("");
+    const presets = Object.entries(d.presets || {});
+    const form = adding === null ? `<div class="add-prov">${presets.map(([k, v]) => `<button class="btn sm" data-add="${esc(k)}">Add ${esc(v.name)}</button>`).join("")}<button class="btn sm ghost" data-add="custom">Add other</button></div>`
+      : (() => {
+        const old = (d.providers || []).find(x => x.id === adding) || {};
+        const pre = d.presets?.[adding] || {};
+        const custom = adding === "custom";
+        const f = { ...pre, ...old };
+        return `<form class="integ-key eng-form">
+          ${custom ? `<input name="id" placeholder="Short id (lowercase, e.g. deepseek)" aria-label="Short id" required>
+          <input name="name" placeholder="Name" aria-label="Name">
+          <select name="format" aria-label="Format"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic</option></select>
+          <input name="base_url" placeholder="Base URL" aria-label="Base URL" required>` : `<b>${esc(f.name || adding)}</b>`}
+          <input name="key" type="password" autocomplete="off" placeholder="${old.key_hint ? `Key ending ${esc(old.key_hint)} (leave empty to keep)` : f.no_key ? "No key needed" : "API key"}" aria-label="API key">
+          <input name="fast" placeholder="Fast model" aria-label="Fast model" value="${esc(f.models?.fast || "")}">
+          <input name="strong" placeholder="Strong model" aria-label="Strong model" value="${esc(f.models?.strong || "")}">
+          <button class="btn sm primary" type="submit">Save</button><button class="btn sm ghost" type="button" data-cancel>Cancel</button></form>`;
+      })();
+    box.innerHTML = `<section class="integ-group"><h3>Engines</h3>${rows}${form}</section>
+      <section class="integ-group"><h3>Who runs on what</h3>
+        <div class="eng-choice"><label>Your messages <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
+        <div class="eng-choice"><label>Invited people <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
+          <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
+        ${(d.ws_list || []).map(w => `<div class="eng-choice"><label>${esc(w.name)} <select data-choice="workspaces" data-scope="${esc(w.id)}">${opts(d.workspaces?.[w.id], usable, "Same as your messages")}</select></label></div>`).join("")}
+        <div class="eng-choice"><label>Terminal <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
+      </section>`;
+    box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
+    box.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { adding = b.dataset.edit; draw(); });
+    box.querySelector("[data-cancel]")?.addEventListener("click", () => { adding = null; draw(); });
+    box.querySelectorAll("[data-remove]").forEach(b => b.onclick = async () => {
+      if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "Click again to remove"; return; }
+      try { await jpost("/api/engines/provider/remove", { id: b.dataset.remove }); draw(); } catch (err) { toast("✗ " + err.message); }
+    });
+    box.querySelectorAll("[data-test]").forEach(b => b.onclick = async () => {
+      b.disabled = true; b.textContent = "Testing…";
+      try {
+        const r = await jpost("/api/engines/test", { id: b.dataset.test });
+        toast(r.error ? "✗ " + r.error : "✓ Working");
+      } catch (err) { toast("✗ " + err.message); }
+      b.disabled = false; b.textContent = "Test";
+    });
+    box.querySelectorAll("[data-choice]").forEach(sel => sel.onchange = async () => {
+      try { await jpost("/api/engines/choice", { name: sel.dataset.choice, value: sel.value, scope: sel.dataset.scope || null }); }
+      catch (err) { toast("✗ " + err.message); draw(); }
+    });
+    const formEl = box.querySelector(".eng-form");
+    if (formEl) formEl.onsubmit = async e => {
+      e.preventDefault();
+      const v = n => formEl.elements[n]?.value || "";
+      const custom = adding === "custom";
+      try {
+        await jpost("/api/engines/provider", { id: custom ? v("id") : adding, key: v("key"),
+          ...(custom ? { name: v("name"), format: v("format"), base_url: v("base_url"), no_key: !v("key") } : {}),
+          models: { fast: v("fast"), strong: v("strong") } });
+        adding = null; draw();
+      } catch (err) { toast("✗ " + err.message); }
+    };
+  };
+  draw();
 }
 
 async function renderIntegrations(){
@@ -4318,7 +4406,15 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     main.querySelector(".deliv-list")?.remove();
     main.querySelector(".approval-bar")?.remove();
     const usage = fmtUsage(m.tokens, m.cost);
-    div.querySelector(".mh time").title = usage ? `${usage} (tokens · estimated cost)` : "";
+    const via = m.engine_label ? `via ${m.engine_label}` : "";
+    div.querySelector(".mh time").title = [usage && `${usage} (tokens · estimated cost)`, via].filter(Boolean).join(" · ");
+    main.querySelector(".msg-via")?.remove();
+    if (via && m.engine !== "claude-code") {
+      const tag = document.createElement("small");
+      tag.className = "msg-via";
+      tag.textContent = via;
+      main.appendChild(tag);
+    }
     const botId = typeof m.bot === "object" ? m.bot?.id : m.bot;
     if (m.deliverables?.length) {
       const box = document.createElement("div");
@@ -4755,6 +4851,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.deliverables) replyAt(obj.msg).meta.deliverables = obj.deliverables;
             if (obj.usage) {
               turnMeta.tokens = obj.usage.tokens; turnMeta.cost = obj.usage.cost;
+              turnMeta.engine = obj.usage.engine; turnMeta.engine_label = obj.usage.engine_label;
               threadUsage.tokens += obj.usage.tokens || 0; threadUsage.cost += obj.usage.cost || 0;
             }
             if (obj.clean !== undefined) {

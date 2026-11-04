@@ -760,3 +760,13 @@ img.logo-preview{background:var(--ui-color-logo-bg)}
 img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .logo-actions{display:flex;flex-wrap:wrap;gap:var(--ui-space-2)}
 .logo-actions label.btn{cursor:pointer}
+
+/* HQ, Engines */
+.add-prov{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
+.eng-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
+.eng-form input,.eng-form select{min-width:0;flex:1 1 180px}
+.eng-choice{margin:10px 0}
+.eng-choice label{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.eng-choice select{max-width:100%}
+.eng-choice small{display:block;color:var(--ui-color-text-muted);margin-top:4px}
+.msg-via{display:block;color:var(--ui-color-text-muted);font-size:11px;margin-top:4px}

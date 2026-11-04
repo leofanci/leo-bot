@@ -77,9 +77,13 @@ def clean_args(arguments):
 def env_for(ctx):
     """The child's environment: the token's workspace, never a caller's."""
     drop = {chat_session.APPS_TOKEN_ENV, chat_session.APPS_USED_ENV, chat_session.OS_TOKEN_ENV,
-            "MYOS_WORKSPACE", "MYOS_READONLY", SHARED_ENV}
+            chat_session.ENGINE_ENV, "MYOS_WORKSPACE", "MYOS_READONLY", SHARED_ENV}
     env = {k: v for k, v in os.environ.items() if k not in drop}
-    env.update({"MYOS_WORKSPACE": ctx["ws"], SHARED_ENV: "1"})
+    env["MYOS_WORKSPACE"] = ctx["ws"]
+    if ctx.get("shared", True):  # an owner's private turn on the api engine sets it False
+        env[SHARED_ENV] = "1"
+    if ctx.get("engine"):  # a generate-* job runs on the engine its turn runs on
+        env[chat_session.ENGINE_ENV] = ctx["engine"]
     if ctx.get("readonly"):
         env["MYOS_READONLY"] = "1"
     if ctx.get("apps_used"):

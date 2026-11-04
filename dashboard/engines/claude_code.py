@@ -107,6 +107,7 @@ SECRET_FILE_GLOBS = [
     ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc",
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
     ".auth-token",  # dashboard login token (server.TOKEN_FILE)
+    "engines.json",  # API keys (dashboard.engines.config)
     "integrations.json",  # Composio key + sessions (core.integrations)
     "people.json", "invites.json", "access.json",  # invited people (core.people)
 ]
@@ -287,14 +288,18 @@ class ClaudeCodeEngine(Engine):
     def turn(self, session, text, policy, model, tokens):
         """One `claude -p` invocation, resumed by session id so context persists."""
         was_started = session._started
-        proc = subprocess.Popen(
-            self.build_cmd(session, policy, model,
-                           apps_port=tokens.apps_port if tokens.apps_token else None,
-                           os_port=tokens.os_port if tokens.os_token else None),
-            cwd=session.repo_dir,
-            env=self.turn_env(policy, tokens),
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1)
+        try:
+            proc = subprocess.Popen(
+                self.build_cmd(session, policy, model,
+                               apps_port=tokens.apps_port if tokens.apps_token else None,
+                               os_port=tokens.os_port if tokens.os_token else None),
+                cwd=session.repo_dir,
+                env=self.turn_env(policy, tokens),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1)
+        except FileNotFoundError:
+            yield ("error", "Claude Code is not installed on this machine. Install it, or pick an API key in HQ, Engines.")
+            return
         session._started = True
         session._proc = proc
         proc.stdin.write(text + "\n")
