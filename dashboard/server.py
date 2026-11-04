@@ -70,7 +70,32 @@ from core.ids import (  # noqa: E402
 
 APP_HTML = HERE / "app.html"
 AUTH_COOKIE = "myos_auth"
-AUTH_TOKEN = secrets.token_urlsafe(32)
+# "mac" (default) or "server" (set by scripts/server-setup.sh): gates Mac-only features.
+DEPLOYMENT = "server" if os.environ.get("MYOS_DEPLOYMENT") == "server" else "mac"
+OWNER_TOKEN_FILE = ROOT / "team" / "owner-token"
+
+
+def _owner_token(deployment=None, path=None):
+    """Per run on a Mac (the app re-reads it). On a server the owner's login link and
+    cookie must survive restarts, so it is kept, owner-only, in gitignored team/."""
+    if (deployment or DEPLOYMENT) != "server":
+        return secrets.token_urlsafe(32)
+    path = Path(path or OWNER_TOKEN_FILE)
+    try:
+        saved = path.read_text().strip()
+        if len(saved) >= 32:
+            return saved
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    return token
+
+
+AUTH_TOKEN = _owner_token()
 MAX_JSON_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 MAX_WS_PAYLOAD = 1024 * 1024
@@ -188,8 +213,8 @@ def _app_html_bytes() -> bytes:
 
 def pick_local_folder() -> dict:
     """Show the macOS folder chooser and return its absolute POSIX path."""
-    if sys.platform != "darwin":
-        raise fileops.ActionError("the folder chooser is currently available on macOS")
+    if DEPLOYMENT == "server" or sys.platform != "darwin":
+        raise fileops.ActionError("myOS is on a server: type the folder's path on that server")
     result = subprocess.run(
         ["/usr/bin/osascript", "-e",
          'POSIX path of (choose folder with prompt "Choose the app folder to link")'],
@@ -206,6 +231,8 @@ def pick_local_folder() -> dict:
 
 def open_local_folder(path: str) -> None:
     """Open a validated linked directory in the platform file manager."""
+    if DEPLOYMENT == "server":
+        raise fileops.ActionError("myOS is on a server: there is no file manager to open")
     if sys.platform == "darwin":
         command = ["/usr/bin/open", path]
     elif sys.platform.startswith("linux"):
@@ -2394,7 +2421,7 @@ class Handler(BaseHTTPRequestHandler):
 
         try:
             if path == "/api/me":
-                return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner"})
+                return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner", "deployment": DEPLOYMENT})
             if path in ("/api/people", "/api/sharing"):
                 if path == "/api/sharing":
                     return self._send(200, {"public_url": people.public_url(ROOT)})
