@@ -770,3 +770,4 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .eng-choice select{max-width:100%}
 .eng-choice small{display:block;color:var(--ui-color-text-muted);margin-top:4px}
 .msg-via{display:block;color:var(--ui-color-text-muted);font-size:11px;margin-top:4px}
+.runner-cmd{white-space:pre-wrap;word-break:break-all;background:var(--ui-color-surface);border:1px solid var(--ui-color-border);border-radius:8px;padding:10px;font-size:12px}

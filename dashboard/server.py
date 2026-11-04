@@ -52,6 +52,8 @@ import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
+from dashboard.engines.runner import RunnerEngine  # noqa: E402
+from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
 from core.ids import (  # noqa: E402
@@ -121,6 +123,8 @@ FORWARD_HEADERS = ("X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "
                    "X-Real-IP", "CF-Connecting-IP", "CF-Ray", "Tailscale-User-Login",
                    "Tailscale-Funnel-Request")
 OS_RELAY_PATH = chat_session.OS_MCP_PATH
+RUNNER_PREFIX = "/api/runner/"
+RUNNER_OS_PATH = "/api/runner/os/mcp"
 _MCP_SESSION_RE = re.compile(r"[\x21-\x7e]{1,256}")  # visible ASCII, as MCP specifies
 LOGIN_REQUIRED_HTML = (
     b"<!doctype html><meta charset=utf-8><title>myOS</title>"
@@ -1570,6 +1574,56 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": -32000, "message": f"Connected apps unavailable: {e}"}})
         return self._send_rpc(202 if reply is None else 200, reply, sid)
 
+    def _runner_from(self, token):
+        """The runner behind a token, while its person still belongs here."""
+        rec = runners.verify(ROOT, token) if self._valid_host() else None
+        if rec and rec["owner"] != "owner" and not people.get(ROOT, rec["owner"]):
+            return None
+        return rec
+
+    def _handle_runner(self, path):
+        """A runner's own calls. The os relay also needs that turn's token, minted for its person."""
+        if path == RUNNER_OS_PATH:
+            rec = self._runner_from(self.headers.get("X-Runner-Token", ""))
+            auth = self.headers.get("Authorization", "")
+            ctx = os_relay.TOKENS.lookup(auth[7:]) if auth.startswith("Bearer ") else None
+            if rec is None or ctx is None or ctx.get("runner_owner") != rec["owner"]:
+                return self._send(403, {"error": "forbidden"})
+            try:
+                frame = self._read_json()
+            except ValueError:
+                return self._send_rpc(400, {"jsonrpc": "2.0", "id": None,
+                                            "error": {"code": -32700, "message": "parse error"}})
+            reply = os_relay.handle(frame, ctx, ROOT)
+            return self._send_rpc(202 if reply is None else 200, reply)
+        auth = self.headers.get("Authorization", "")
+        rec = self._runner_from(auth[7:]) if auth.startswith("Bearer ") else None
+        if rec is None:
+            return self._send(403, {"error": "forbidden"})
+        try:
+            body = self._read_json()
+        except ValueError:
+            return self._send(400, {"error": "bad request"})
+        if path == "/api/runner/next":
+            return self._send(200, {"job": runners.HUB.next(rec["id"], rec["owner"])})
+        if path.startswith("/api/runner/events/"):
+            turn_id = path[len("/api/runner/events/"):]
+            events = body.get("events") if isinstance(body.get("events"), list) else []
+            stop = runners.HUB.events(rec["id"], turn_id, events, end=bool(body.get("end")))
+            return self._send(200, {"cancel": stop})
+        return self._send(404, {"error": "unknown endpoint"})
+
+    def _runners_post(self, path, body, owner):
+        """Create or delete the caller's own runner tokens (owner or invited person)."""
+        if path == "/api/runners":
+            rid, token = runners.create(ROOT, owner, body.get("name"))
+            return self._send(200, {"id": rid, "token": token, "runners": runners.list_for(ROOT, owner)})
+        if path == "/api/runners/revoke":
+            if not runners.revoke(ROOT, str(body.get("id") or ""), owner):
+                return self._send(404, {"error": "no such runner"})
+            return self._send(200, {"runners": runners.list_for(ROOT, owner)})
+        return self._send(404, {"error": "unknown endpoint"})
+
     def _handle_os_relay(self):
         """A shared thread's bot runs osctl (os_relay): turn token, this machine only."""
         auth = self.headers.get("Authorization", "")
@@ -1710,6 +1764,8 @@ class Handler(BaseHTTPRequestHandler):
             if pid != viewer.get("id") and not people.can_remove(role, target["role"]):
                 return self._send(403, {"error": "you cannot remove them"})
             people.remove(ROOT, ws, pid)
+            if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
+                runners.revoke_owner(ROOT, pid)
             for t in rooms._load_topics(ws, ROOT):  # a private channel forgets them too
                 if pid in (t.get("people") or []):
                     rooms.save_topic(ws, t["name"], t.get("members"), t.get("lead"), ROOT, replace=t["name"],
@@ -1767,6 +1823,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/me":
                 return self._send(200, {k: person[k] for k in ("kind", "id", "name", "ws")})
+            if path == "/api/runners":
+                return self._send(200, {"runners": runners.list_for(ROOT, person["id"])})
             if path == "/api/schemas":
                 return self._send(200, schemas_for_api())
             if path == "/api/skills-index":
@@ -1813,6 +1871,8 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if path == "/api/ask":
                 return self._handle_ask(body, person)
+            if path in ("/api/runners", "/api/runners/revoke"):
+                return self._runners_post(path, body, person["id"])
             if path == "/api/chat-stop":
                 stop_person_chat(person["id"])
                 return self._send(200, {"ok": True})
@@ -1914,10 +1974,6 @@ class Handler(BaseHTTPRequestHandler):
             team, user_msg, sess,
             default_bot=(room or {}).get("lead") or bots.ROOT_BOT,
             dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None)
-        try:
-            sess.engine = engine = engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared)
-        except EngineRefused as e:
-            return self._sse_message(str(e))
         explicit = skill if routed else None
         suggest = _suggest_skill(user_msg) if not explicit else None
         # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
@@ -1932,6 +1988,19 @@ class Handler(BaseHTTPRequestHandler):
             skill = explicit = suggest = None
             may_write = False
             sess.apps_used = True
+
+        # The sender's own Mac when it is connected (apps stay on the server). A runner
+        # turn is locked down like a shared one: the Mac is not the workspace.
+        sender = person["id"] if person else "owner"
+        try:
+            engine = (RunnerEngine(sender, person["name"] if person else None)
+                      if not app_turn and runners.HUB.online(sender)
+                      else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared))
+        except EngineRefused as e:
+            return self._sse_message(str(e))
+        sess.engine = engine
+        locked = shared or engine.kind == "runner"
+        sess.shared = locked
 
         if (_WRITE_TURN_RE.search(user_msg or "")
                 and not app_turn
@@ -2030,7 +2099,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         file_search_mode = bool(
-            workspace_dir and not shared
+            workspace_dir and not locked
             and (wants_file_search
                  or (wants_app_context and not graph_context))
         )
@@ -2050,7 +2119,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
             workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
-        if shared:
+        if locked:
             workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
         elif engine.kind == "api":
             workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
@@ -2138,9 +2207,10 @@ class Handler(BaseHTTPRequestHandler):
             """A teammate answers once, read-only, in its own fresh session."""
             c = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
             c.workspace, c.deny_dirs, c.deny_files, c.readonly = ws, sess.deny_dirs, sess.deny_files, True
-            c.shared = shared
+            c.shared = locked
             c.ephemeral = True
-            c.engine = engine_registry.pick(ROOT, ws, b2, invited=bool(person), shared=shared)
+            c.engine = engine if engine.kind == "runner" else engine_registry.pick(
+                ROOT, ws, b2, invited=bool(person), shared=shared)
             c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
             own = team.skills_of(b2)
             c_skill = _suggest_skill(question, among=own)
@@ -2153,9 +2223,9 @@ class Handler(BaseHTTPRequestHandler):
             slot = person["id"] if person else "sess"
             _EXTRA[slot] = c
             c_kw = {}
-            if shared:  # its own read-only token, revoked when it answers
+            if locked:  # its own read-only token, revoked when it answers
                 c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
-                                                          "engine": c.engine.id}),
+                                                          "engine": c.engine.id, "runner_owner": sender}),
                         "os_port": self.server.server_address[1]}
             try:
                 return run(c, prompt, c_model, c_web, msg, **c_kw)
@@ -2173,9 +2243,9 @@ class Handler(BaseHTTPRequestHandler):
                            {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
                             "room": (room or {}).get("id"), "person": bots.CEO}),
                        "apps_port": self.server.server_address[1]}
-        if shared:
+        if locked:
             apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
-                                                         "engine": engine.id}),
+                                                         "engine": engine.id, "runner_owner": sender}),
                        "os_port": self.server.server_address[1]}
         try:
             # Tell the client which saved chat this turn belongs to (a scope
@@ -2468,6 +2538,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ws": ws, "files": files})
             if path == "/api/engines":
                 return self._send(200, _engines_view())
+            if path == "/api/runners":
+                return self._send(200, {"runners": runners.list_for(ROOT, "owner")})
             if path == "/api/integrations":
                 return self._send(200, _integrations_view())
             if path == "/api/integrations/catalog":
@@ -2568,6 +2640,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_apps_relay()
         if path == OS_RELAY_PATH:
             return self._handle_os_relay()
+        if path.startswith(RUNNER_PREFIX):  # a person's Mac: runner token, no cookie
+            return self._handle_runner(path)
         if path.startswith("/join/"):  # the invite form (no cookie yet)
             return self._join_post(path[len("/join/"):])
         if not self._authorized():
@@ -2844,6 +2918,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._engines_post(path, body)
+            if path in ("/api/runners", "/api/runners/revoke"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._runners_post(path, body, "owner")
             if path.startswith("/api/integrations/") or (
                     path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject"))):
                 if not self._authorized(require_origin=True):
