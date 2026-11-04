@@ -52,7 +52,9 @@ def parse_event(obj):
 # Hostnames typed by the user. Bare names need a real-looking TLD so file names
 # like notes.md / app.py are not mistaken for hosts.
 _URL_HOST_RE = re.compile(r"https?://([a-z0-9.-]+\.[a-z]{2,})", re.I)
-_BARE_HOST_RE = re.compile(r"(?<![\w@/.-])((?:[a-z0-9-]+\.)+[a-z]{2,})(?![\w.-])", re.I)
+_HOST_RUN_RE = re.compile(r"[a-z0-9.-]+", re.I)  # linear scan; each run is then checked whole
+_BARE_HOST_RE = re.compile(r"(?:[a-z0-9-]+\.)+[a-z]{2,}", re.I)
+_HOST_MAX = 253
 _FILE_EXTS = frozenset({
     "md", "py", "js", "ts", "json", "txt", "csv", "html", "css", "sh", "yml",
     "yaml", "toml", "lock", "log", "sql", "png", "jpg", "jpeg", "gif", "pdf",
@@ -63,7 +65,12 @@ def user_web_domains(text):
     """Hosts the user explicitly named in their message (lowercased, www. stripped)."""
     text = (text or "")[:20000]  # bodies may be huge; hosts are typed near the top
     hosts = {h.lower() for h in _URL_HOST_RE.findall(text)}
-    for h in _BARE_HOST_RE.findall(text):
+    for m in _HOST_RUN_RE.finditer(text):
+        h = m.group()
+        before, after = text[m.start() - 1:m.start()], text[m.end():m.end() + 1]
+        if (len(h) > _HOST_MAX or not _BARE_HOST_RE.fullmatch(h)
+                or before in ("@", "/", "_") or after == "_"):
+            continue
         if h.rsplit(".", 1)[-1].lower() not in _FILE_EXTS:
             hosts.add(h.lower())
     return sorted({h[4:] if h.startswith("www.") else h for h in hosts})

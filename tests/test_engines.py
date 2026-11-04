@@ -68,6 +68,18 @@ class Interface(unittest.TestCase):
         self.assertEqual(sess.engine.prompts, ["hi", "RECAP\n\nhi"])
 
 
+class TypedHosts(unittest.TestCase):
+    def test_hosts_found_and_lookalikes_skipped(self):
+        got = cs.user_web_domains("see www.acme.example and https://docs.example/x, notes.md, me@example.com, a/b.example")
+        self.assertEqual(got, ["acme.example", "docs.example"])
+
+    def test_long_dash_run_stays_fast(self):
+        import time
+        start = time.time()
+        cs.user_web_domains("-" * 20000 + " a" + "-" * 19000)
+        self.assertLess(time.time() - start, 0.5)
+
+
 class ClaudeDriver(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
