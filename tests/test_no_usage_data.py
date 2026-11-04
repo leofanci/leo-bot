@@ -108,6 +108,8 @@ PUBLIC_NETWORK_HOSTS = {
     b"docs.composio.dev",  # "Where to find it" link for the project API key (Integrations panel)
     # API engine provider presets (dashboard/engines/config.py).
     b"api.anthropic.com", b"api.openai.com", b"openrouter.ai",
+    # Server install (scripts/server-setup.sh, docs/server.md).
+    b"claude.ai",
 }
 
 

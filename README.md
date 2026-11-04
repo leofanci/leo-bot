@@ -72,6 +72,10 @@ your global Claude Code skills directory first:
 cp -r skills/* ~/.claude/skills/
 ```
 
+### Always on: run it on a server
+
+Run myOS on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (HQ, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
+
 ### Dashboard (macOS app)
 
 The app's launcher binary is not committed: build it from source once after cloning. With the repo hooks enabled (`git config core.hooksPath .githooks`), every pull or checkout that changes the app's source rebuilds it automatically.
