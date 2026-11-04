@@ -197,6 +197,35 @@ class AcpEngine(Engine):
                     pass
             session._proc = None
 
+    def probe(self, timeout=15):
+        """The Test button: does it really speak ACP? An error string, or None."""
+        try:
+            proc = subprocess.Popen([self.agent["command"], *self.agent.get("args", [])],
+                                    env={k: os.environ[k] for k in _ENV_KEEP if k in os.environ},
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        except OSError as e:
+            return f"{self.label} could not start: {e}"
+        timer = threading.Timer(timeout, proc.kill)
+        timer.start()
+        try:
+            proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                         "params": {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}}}) + "\n")
+            proc.stdin.flush()
+            for line in proc.stdout:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and msg.get("id") == 1:
+                    return None if "result" in msg else f"{self.label} refused the connection."
+        except (OSError, ValueError):
+            pass
+        finally:
+            timer.cancel()
+            proc.kill()
+            proc.wait()
+        return f"{self.label} did not answer. Its installed version may be too old to speak ACP: update it."
+
     def status(self):
         path = shutil.which(self.agent["command"])
         return {"id": self.id, "label": self.label, "kind": self.kind, "installed": bool(path), "ok": bool(path),

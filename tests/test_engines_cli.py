@@ -106,10 +106,11 @@ log = os.environ.get("ACP_LOG")
 def send(o): print(json.dumps({"jsonrpc": "2.0", **o}), flush=True)
 for line in sys.stdin:
     m = json.loads(line)
-    open(log, "a").write(line)
+    if log:
+        open(log, "a").write(line)
     method, rid = m.get("method"), m.get("id")
     if method == "initialize":
-        open(log, "a").write(json.dumps({"env_token": os.environ.get("MYOS_OS_TOKEN"), "env_key": os.environ.get("ANTHROPIC_API_KEY")}) + "\n")
+        log and open(log, "a").write(json.dumps({"env_token": os.environ.get("MYOS_OS_TOKEN"), "env_key": os.environ.get("ANTHROPIC_API_KEY")}) + "\n")
         send({"id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
     elif method in ("session/new",):
         send({"id": rid, "result": {"sessionId": "s-1"}})
@@ -197,6 +198,11 @@ class AcpDriver(Base):
         last = list(s.ask("hi"))[-1]
         self.assertIn("update it", last[1])
         self.assertTrue(s.is_fresh())
+
+    def test_test_button_tells_a_real_agent_from_an_old_one(self):
+        self.assertIsNone(self.engine.probe())
+        old = acp.AcpEngine({"id": "old", "name": "Old", "command": self.stub("old2", "pass\n"), "args": []})
+        self.assertIn("update it", old.probe())
 
     def test_missing_binary_is_an_error(self):
         s = self.session(acp.AcpEngine({"id": "x", "command": "/no/such/bin", "args": []}))

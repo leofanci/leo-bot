@@ -1675,6 +1675,8 @@ class Handler(BaseHTTPRequestHandler):
             engine_config.set_choice(name, value, str(scope) if scope else None, ROOT)
         elif path == "/api/engines/test":
             engine = engine_registry.get(str(body.get("id") or ""), ROOT)
+            if hasattr(engine, "probe"):
+                return self._send(200, {"error": engine.probe()})
             if engine.kind != "api":
                 status = engine.status()
                 return self._send(200, {"error": None if status["ok"] else status["detail"]})
