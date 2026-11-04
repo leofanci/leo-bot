@@ -40,10 +40,10 @@ ACP). Behavior is borrowed, no code.
   no file, shell or app tools, only osctl bound to the workspace.
 - An engines screen (HQ → Settings → Engines): detects installed CLIs and
   whether each is logged in, stores API keys, picks defaults.
-- Optional, off by default: on a team server, each person connects their own
-  engine account and their turns run on it.
+- Optional, off by default: on a team server, each person adds their own API
+  key and their turns run on it.
 - Runners: the workspace lives on a server, and a person's own Mac runs the
-  turns of the bots assigned to them, on their own login (section 10).
+  turns that person sends, on their own login (section 10).
 
 ## Non-goals
 
@@ -65,7 +65,9 @@ ACP). Behavior is borrowed, no code.
   live.
 - API keys or per-person engine tokens readable by any bot turn, listed in any
   API response, or written to a tracked file.
-- One person's turn billed to another person's account without it being
+- One person's message answered on another person's subscription, ever.
+- myOS storing a subscription token, or reusing a CLI's login outside that CLI.
+- One person's turn billed to another person's API key without it being
   visible in the thread.
 
 ## Current state (what is hard-wired to Claude Code)
@@ -147,6 +149,7 @@ myOS runs the loop: send messages plus tool schemas, stream the reply, run the
 tools the model calls, send results, repeat. Stdlib `urllib` with streaming
 reads (the repo has no third-party Python dependencies; keep it that way).
 
+- **API keys only.** This driver never reads or reuses a CLI's login.
 - **Providers:** a provider is `{name, format: "anthropic"|"openai", base_url,
   key_ref, models: {fast, strong}}`. Presets: Anthropic, OpenAI, OpenRouter,
   Ollama (local, no key). Custom entries allowed.
@@ -238,6 +241,9 @@ where that equals the owner running the CLI in their own terminal:
   logged in, else the first configured API provider). Bot setting `engine`
   overrides it.
 - Stored in the workspace's existing team settings.
+- An invited person's message never runs on the owner's subscription. It runs
+  on that person's runner, or on an API key engine. With neither, the bot says
+  so and names the setting.
 
 ### 6a. Engine per run, sessions per engine (design call)
 
@@ -283,40 +289,30 @@ shared later, so a thread-wide engine cannot hold.
 - Keys reach the api driver in memory only, never via env of a child process
   that also runs model-written commands.
 
-### 8. Engine accounts per person (team servers, off by default)
+### 8. API keys per person (team servers, off by default)
 
-- Setting `person_accounts: false`. When on, an invited person can connect
-  their own engine account on their profile:
-  - claude-code: the person runs `claude setup-token` on their own computer
-    and pastes the token. myOS stores it in
-    `team/accounts/<person-id>/claude/` and runs their turns with
-    `CLAUDE_CONFIG_DIR` pointing there.
-  - codex: per-person `CODEX_HOME` under `team/accounts/<person-id>/codex/`.
-    Login method on a headless server: builder verifies the device-code flow.
-  - api: their own key, stored per person like the owner's keys.
+- Setting `person_keys: false`. When on, an invited person can add their own
+  API key on their profile. It is stored per person like the owner's keys, under
+  `team/accounts/<person-id>/`.
+- Subscriptions are not connected here. A person who wants to use their own
+  subscription uses a runner (section 10), where they sign in on their own
+  machine through the CLI's own flow and myOS never touches the login.
 - `team/accounts/` is 0700, and every account dir is denied to every turn
   (Read deny rules for claude-code, path check for api, osctl private prefix).
-- Scope: claude-code and api accounts only. Every turn an invited person
-  sends is shared, so a person's account only ever runs on a `shared_safe`
-  engine. Codex/ACP person accounts come only if one of them becomes
-  shared-safe. (Design call.)
 - **Who pays:** a turn runs on the account of the person who sent the message.
-  No account connected: the workspace engine. Owner turns: the owner's.
+  No key or runner: the workspace's API key engine, if the owner set one. Owner
+  turns: the owner's.
 - Indirect runs follow the sender: a consulted teammate and every
   `generate-*` job started inside a turn run on the sender's account (on the
   teammate bot's engine when it is shared-safe, else the shared engine). The
   server puts an account **reference** in the turn's osctl ctx
   (`MYOS_ACCOUNT=<person-id|owner|workspace>`, set by `os_relay.env_for`,
-  never by the model); `generate.py` resolves it to the account dir or key
-  itself. No secret value travels through osctl args or a model-visible env.
+  never by the model); `generate.py` resolves it to the key itself. No secret value travels through osctl args or a model-visible env.
   Their messages carry the same account label.
 - Every bot message records `engine_id` and `account` (owner / person id /
   workspace). The thread shows a small label, e.g. "via profile-a's Codex".
-- Before connecting, the person sees: "Your token is stored on this server.
-  Its admin can access it." One-click disconnect deletes the dir.
-- Personal subscription tokens are for the person's own use: the screen links
-  the provider's terms. A hosted myOS would turn this setting off and offer
-  API keys only.
+- Before adding a key, the person sees: "Your key is stored on this server.
+  Its admin can access it." One-click removal deletes it.
 
 ### 9. generate.py and the terminal
 
@@ -334,16 +330,18 @@ shared later, so a thread-wide engine cannot hold.
 
 A team server (VPS) holds the workspace: channels, people, files, osctl. A
 **runner** is myOS on a person's own Mac, connected out to that server, that
-runs turns for the bots assigned to that person on that person's own engine
-login. No tunnel, and each subscription only ever serves its owner. Prior art:
+runs the turns that person sends, on that person's own engine login. No tunnel,
+and each subscription only ever serves its owner. Prior art:
 Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
 
 - **Connecting:** on their profile, a person (owner or invited) creates a
   runner token, shown once, stored hashed in `team/runners.json` (gitignored).
   On their Mac: `python3 -m dashboard.runner --server https://<host>
   --token-file <path>`. The runner uses the same engine drivers as the server.
-- **Assignment:** bot setting `runner: <person-id>`. A turn for that bot goes
-  to that person's runner when it is online.
+- **Routing:** a turn goes to the runner of the person who sent the message,
+  never to anyone else's. Consulted teammates and jobs started inside that turn
+  stay on the same runner. A bot is not assigned to a runner: any bot can answer
+  on the sender's login.
 - **Who may see what:** the server leases a turn to person X's runner only if
   X can see the thread (`chat_visible` with X as viewer). The runner never
   receives anything X could not read in the dashboard.
@@ -366,11 +364,12 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
   lives on the runner's Mac; the chat record's `engines` map (6a) stores
   `{engine_id, runner: person-id, session}`. Another runner or the server
   picking the thread up starts fresh with the recap.
-- **Offline:** if the assigned runner is offline, the turn runs on the
-  workspace's shared engine, or, when none is set, the bot replies
-  "<name>'s runner is offline".
-- **Who pays:** the runner owner's login. Messages carry the label "via
-  <name>'s Mac".
+- **Offline:** if the sender's runner is offline, the turn runs on an API key
+  engine (the person's own, or the workspace's), or, when there is none, the bot
+  replies "your runner is offline". Routines have no sender at the keyboard, so
+  they run on the workspace's API key engine.
+- **Who pays:** the sender's own login. Messages carry the label "via <name>'s
+  Mac".
 - **Revoking:** deleting the token on the profile ends the runner's lease at
   once; leased turns in flight are cancelled.
 
@@ -378,10 +377,10 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
 
 | # | Case | Workspace lives | Engine runs | Whose login |
 |---|---|---|---|---|
-| 1 | Local | owner's Mac | owner's Mac | owner's |
-| 2 | Server + runners | VPS | each person's Mac (section 10) | each person's own |
-| 3 | All on a server | VPS | VPS | logged in on the VPS, or API key |
-| 4 | Hosted myOS (later, separate design) | one container per customer | customer's container, or their runner | customer's subscription or key, or myOS credits |
+| 1 | Local | owner's Mac | owner's Mac | owner's for their own turns; API key for invited people |
+| 2 | Server + runners | VPS | each sender's Mac (section 10) | each sender's own; API key fallback |
+| 3 | All on a server | VPS | VPS | API key; the owner's subscription only for the owner's own turns |
+| 4 | Hosted myOS (later, separate design) | one container per customer | customer's container, or their runner | customer's own sign-in or key; myOS credits only through the api driver |
 
 Case 4 is not built here. These rules keep it open and cost little now:
 
@@ -393,7 +392,7 @@ Case 4 is not built here. These rules keep it open and cost little now:
   `account` (6a). Metering per account is what a credits provider would bill
   from later.
 - A credits provider ("myOS Cloud") is one more api-driver provider entry; no
-  special path.
+  special path. Provider terms get read when this is designed.
 - Each person-facing label names the account that paid.
 
 Moving a workspace between machines (export/import), one dashboard showing
@@ -408,15 +407,16 @@ Each step is its own PR, tests green, merged before the next.
 1. Engine interface + claude-code driver (pure refactor, no behavior change).
 2. api driver: Anthropic format first, then OpenAI-compatible. Engines screen
    with keys. Workspace/bot engine settings, shared engine setting. Per-run
-   usage metering.
+   usage metering. Invited people's messages stop running on the owner's
+   subscription login.
 3. generate.py and terminal through the engine layer.
 4. Server packaging (Docker image, VPS guide, owner login on a server): its
    own design, before runners.
 5. Runners.
 6. codex driver, with the live lockdown probe recorded in the PR.
 7. acp driver.
-8. Engine accounts per person (runners cover most of this need; build only if
-   case 3 teams ask for it).
+8. API keys per person (runners cover most of this need; build only if case 3
+   teams ask for it).
 
 ## Security checklist (every driver)
 
