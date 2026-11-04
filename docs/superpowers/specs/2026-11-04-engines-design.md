@@ -374,19 +374,49 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
 - **Revoking:** deleting the token on the profile ends the runner's lease at
   once; leased turns in flight are cancelled.
 
+### 11. Deployment cases this layer must serve
+
+| # | Case | Workspace lives | Engine runs | Whose login |
+|---|---|---|---|---|
+| 1 | Local | owner's Mac | owner's Mac | owner's |
+| 2 | Server + runners | VPS | each person's Mac (section 10) | each person's own |
+| 3 | All on a server | VPS | VPS | logged in on the VPS, or API key |
+| 4 | Hosted myOS (later, separate design) | one container per customer | customer's container, or their runner | customer's subscription or key, or myOS credits |
+
+Case 4 is not built here. These rules keep it open and cost little now:
+
+- `deployment: "mac" | "server"` gates every Mac-only feature (folder
+  chooser, opening Finder, `myOS.app`, full-disk engines), not only engines.
+- Every secret lives in one place per data root (`engines.json`,
+  `integrations.json`, `team/`), never in code or env baked into an image.
+- Each `done` event's tokens and cost are stored per run with `engine_id` and
+  `account` (6a). Metering per account is what a credits provider would bill
+  from later.
+- A credits provider ("myOS Cloud") is one more api-driver provider entry; no
+  special path.
+- Each person-facing label names the account that paid.
+
+Moving a workspace between machines (export/import), one dashboard showing
+local and remote workspaces, HQ and the calendar across machines, and owner
+login on a public server are separate designs, listed here so they are not
+forgotten.
+
 ## Order of work
 
 Each step is its own PR, tests green, merged before the next.
 
 1. Engine interface + claude-code driver (pure refactor, no behavior change).
 2. api driver: Anthropic format first, then OpenAI-compatible. Engines screen
-   with keys. Workspace/bot engine settings, shared engine setting.
+   with keys. Workspace/bot engine settings, shared engine setting. Per-run
+   usage metering.
 3. generate.py and terminal through the engine layer.
-4. codex driver, with the live lockdown probe recorded in the PR.
-5. acp driver.
-6. Engine accounts per person.
-7. Runners (needs a myOS deployable on a server; the Docker/VPS packaging is
-   its own design and may land before this step).
+4. Server packaging (Docker image, VPS guide, owner login on a server): its
+   own design, before runners.
+5. Runners.
+6. codex driver, with the live lockdown probe recorded in the PR.
+7. acp driver.
+8. Engine accounts per person (runners cover most of this need; build only if
+   case 3 teams ask for it).
 
 ## Security checklist (every driver)
 
