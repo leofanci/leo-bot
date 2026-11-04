@@ -192,6 +192,12 @@ class AcpDriver(Base):
         s.shared = True
         self.assertEqual(list(s.ask("hi"))[-1][0], "error")
 
+    def test_a_failed_start_stays_fresh_and_says_to_update(self):
+        s = self.session(acp.AcpEngine({"id": "old", "name": "Old", "command": self.stub("old", "pass\n"), "args": []}))
+        last = list(s.ask("hi"))[-1]
+        self.assertIn("update it", last[1])
+        self.assertTrue(s.is_fresh())
+
     def test_missing_binary_is_an_error(self):
         s = self.session(acp.AcpEngine({"id": "x", "command": "/no/such/bin", "args": []}))
         self.assertIn("could not start", list(s.ask("hi"))[-1][1])

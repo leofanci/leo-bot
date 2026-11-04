@@ -69,6 +69,9 @@ class CodexEngine(Engine):
     def resolve_model(self, model):
         return None if model in ("haiku", "sonnet", None) else model  # the login's own default
 
+    def is_fresh(self, session):
+        return not (session.engine_state.get(self.id) or {}).get("session")
+
     def build_cmd(self, session, policy, model, tokens):
         state = session.engine_state.get(self.id) or {}
         cmd = [self.codex_bin, "exec"]

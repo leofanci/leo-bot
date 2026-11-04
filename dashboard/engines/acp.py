@@ -67,6 +67,9 @@ class AcpEngine(Engine):
     def resolve_model(self, model):
         return None  # the agent's own configured model
 
+    def is_fresh(self, session):
+        return not (session.engine_state.get(self.id) or {}).get("session")
+
     def _spawn(self, session):
         env = {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
         return subprocess.Popen([self.agent["command"], *self.agent.get("args", [])], cwd=session.repo_dir, env=env,
@@ -137,7 +140,7 @@ class AcpEngine(Engine):
                                                                  "terminal": False}}):
                 init = ev[1] if ev[0] == "_result" else init
             if not init or init.get("error"):
-                yield ("error", f"{self.label} did not start: {((init or {}).get('error') or {}).get('message', 'no reply')}")
+                yield ("error", f"{self.label} did not start. Its installed version may be too old to speak ACP: update it.")
                 return
             mcp = []
             if tokens.os_token and tokens.os_port:
