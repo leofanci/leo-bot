@@ -37,6 +37,8 @@ class TurnTokens:
     apps_port: int = None
     os_token: str = None
     os_port: int = None
+    os_url: str = None        # a runner: osctl is on the server, over HTTPS
+    runner_token: str = None
 
 
 class Engine:

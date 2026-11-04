@@ -107,7 +107,8 @@ SECRET_FILE_GLOBS = [
     ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc",
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
     ".auth-token", "owner-token",  # dashboard login token (server.TOKEN_FILE, OWNER_TOKEN_FILE)
-    "engines.json",  # API keys (dashboard.engines.config)
+    "engines.json", "runners.json",  # API keys (dashboard.engines.config), runner token hashes
+    ".myos-runner-token", ".myos-runner-sessions.json",  # a runner's own files on a person's Mac
     "integrations.json",  # Composio key + sessions (core.integrations)
     "people.json", "invites.json", "access.json",  # invited people (core.people)
 ]
@@ -140,6 +141,7 @@ APPS_TOKEN_ENV = "MYOS_APPS_TOKEN"
 # path without asking. Its one myOS tool is the osctl relay (os_relay.py).
 OS_MCP_PATH = "/api/internal/os/mcp"
 OS_TOKEN_ENV = "MYOS_OS_TOKEN"
+RUNNER_TOKEN_ENV = "MYOS_RUNNER_TOKEN"
 # Set on every turn of a thread that has read an app: osctl then refuses the
 # commands that send text off the machine (research-signal), like web-off does.
 APPS_USED_ENV = "MYOS_APPS_USED"
@@ -178,8 +180,12 @@ def apps_mcp_config(port):
     return json.dumps({"mcpServers": {"apps": _mcp_server(port, APPS_MCP_PATH, APPS_TOKEN_ENV)}})
 
 
-def os_mcp_config(port):
-    return json.dumps({"mcpServers": {"os": _mcp_server(port, OS_MCP_PATH, OS_TOKEN_ENV)}})
+def os_mcp_config(port, url=None):
+    server = _mcp_server(port, OS_MCP_PATH, OS_TOKEN_ENV)
+    if url:  # a runner: the relay is on the server, and it also asks who this runner is
+        server["url"] = url
+        server["headers"]["X-Runner-Token"] = "${" + RUNNER_TOKEN_ENV + "}"
+    return json.dumps({"mcpServers": {"os": server}})
 
 # No turn cap: a chat persists via --resume until the user deletes it.
 # Full state snapshot + skill body inject on session start only (server); resume
@@ -220,7 +226,7 @@ class ClaudeCodeEngine(Engine):
     def is_fresh(self, session):
         return not session._started
 
-    def build_cmd(self, session, policy, model, apps_port=None, os_port=None):
+    def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
         # the routed skill's body into the prompt instead), so we always pass
         # --disable-slash-commands + --setting-sources "": zero skill-discovery
@@ -251,9 +257,9 @@ class ClaudeCodeEngine(Engine):
                          + (WEB_ALLOWED_TOOLS if with_web else [])
                          + (web_fetch_rules(web_domains) if with_web else [])
                          + (["mcp__apps"] if apps_port else [])
-                         + (["mcp__os"] if shared and os_port else []))
+                         + (["mcp__os"] if shared and (os_port or os_url) else []))
         mcp = (apps_mcp_config(apps_port) if apps_port
-               else os_mcp_config(os_port) if shared and os_port else None)
+               else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(session.repo_dir)
         if workspace_dir and file_search_mode:
@@ -284,7 +290,7 @@ class ClaudeCodeEngine(Engine):
         return cmd
 
     def turn_env(self, policy, tokens):
-        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV)
+        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 "MYOS_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(),
@@ -292,7 +298,8 @@ class ClaudeCodeEngine(Engine):
                 **({"MYOS_READONLY": "1"} if policy.readonly else {}),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
-                **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {})}
+                **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
+                **({RUNNER_TOKEN_ENV: tokens.runner_token} if tokens.runner_token else {})}
 
     def turn(self, session, text, policy, model, tokens):
         """One `claude -p` invocation, resumed by session id so context persists."""
@@ -301,7 +308,8 @@ class ClaudeCodeEngine(Engine):
             proc = subprocess.Popen(
                 self.build_cmd(session, policy, model,
                                apps_port=tokens.apps_port if tokens.apps_token else None,
-                               os_port=tokens.os_port if tokens.os_token else None),
+                               os_port=tokens.os_port if tokens.os_token else None,
+                               os_url=tokens.os_url if tokens.os_token else None),
                 cwd=session.repo_dir,
                 env=self.turn_env(policy, tokens),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -1212,7 +1212,8 @@ async function renderTeam(){
     <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · ${esc(_WS === "hq" ? "holding" : wsById(_WS)?.kind || "")}</div><h1 class="title">Team</h1></div></div>
     <div class="scroll"><div class="help">${person
       ? "Who works in this workspace: people and bots. Tag a bot with @handle in chat."
-      : `Who works in this workspace: ${_WS === "hq" ? "the bots (people join project workspaces, never HQ)" : "people you invited and the bots"}. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.`}</div><div id="team-list"></div></div>`;
+      : `Who works in this workspace: ${_WS === "hq" ? "the bots (people join project workspaces, never HQ)" : "people you invited and the bots"}. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.`}</div><div id="team-list"></div>${person ? `<div id="team-runners"></div>` : ""}</div>`;
+  if (person) drawRunners($("#team-runners"), stillOn);
   $("#team-list").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
   if (!_BOTS.length) _BOTS = (await api(`/api/bots?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).bots || [];
   pv = _WS === "hq" ? null : await api(`/api/people?ws=${encodeURIComponent(_WS)}`).catch(() => null);
@@ -1331,14 +1332,37 @@ function wireAppCard(el, a){
   };
 }
 
+// A person's own Mac as a runner: their messages run there, on their own login.
+async function drawRunners(box, stillOn = () => true){
+  const d = await api("/api/runners").catch(() => ({ runners: [] }));
+  if (!stillOn() || !box.isConnected) return;
+  box.innerHTML = `<section class="integ-group"><h3>Use your own Mac</h3>
+    <div class="help">Connect your Mac and your messages here run on it, on your own Claude login. Bots there can only use myOS: no files, no shell.</div>
+    ${(d.runners || []).map(r => `<div class="post"><div class="t"><b>${esc(r.name)}</b><small>${r.online ? "online" : "offline"}</small></div><button class="more" data-runner-off="${esc(r.id)}">Remove</button></div>`).join("")}
+    <button class="btn sm" data-runner-add>Connect a Mac</button><div class="runner-new"></div></section>`;
+  box.querySelector("[data-runner-add]").onclick = async () => {
+    try {
+      const r = await jpost("/api/runners", { name: "My Mac" });
+      const cmd = `printf %s '${r.token}' > ~/.myos-runner-token && chmod 600 ~/.myos-runner-token\npython3 -m dashboard.runner --server ${location.origin} --token-file ~/.myos-runner-token`;
+      await drawRunners(box, stillOn);
+      box.querySelector(".runner-new").innerHTML = `<div class="help">On your Mac, inside a my-os checkout, with Claude Code logged in. This is shown once.</div><pre class="runner-cmd"></pre>`;
+      box.querySelector(".runner-cmd").textContent = cmd;
+    } catch (err) { toast("✗ " + err.message); }
+  };
+  box.querySelectorAll("[data-runner-off]").forEach(b => b.onclick = async () => {
+    try { await jpost("/api/runners/revoke", { id: b.dataset.runnerOff }); drawRunners(box, stillOn); } catch (err) { toast("✗ " + err.message); }
+  });
+}
+
 // HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
 // key. Invited people only ever run on an API key.
 async function renderEngines(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">HQ · settings</div><h1 class="title">Engines</h1></div></div>
-    <div class="scroll"><div class="help">What runs your bots. Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div></div>`;
+    <div class="scroll"><div class="help">What runs your bots. Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   if (_WS !== "hq") { $("#eng").innerHTML = `<div class="empty">Engines live in HQ.</div>`; return; }
+  drawRunners($("#eng-runners"), stillOn);
   let adding = null;
   const draw = async () => {
     const d = await api("/api/engines").catch(e => ({ error: e.message }));

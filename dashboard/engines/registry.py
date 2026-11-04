@@ -52,7 +52,15 @@ def pick(root, ws, bot, invited=False, shared=False):
 def for_job(root=config.ROOT):
     """The engine for a generate.py job: the one its turn ran on, else the default."""
     data = config.load(root)
-    engine = get(os.environ.get(ENGINE_ENV) or default_id(data), root)
+    wanted = os.environ.get(ENGINE_ENV) or default_id(data)
+    if wanted.startswith("runner:"):  # jobs run on the server: never another person's login
+        if wanted == "runner:owner":
+            wanted = default_id(data)
+        elif data.get("people"):
+            wanted = data["people"]
+        else:
+            raise EngineRefused(NO_PEOPLE_ENGINE)
+    engine = get(wanted, root)
     if "complete" in engine.supports:
         return engine
     return get(data.get("people") or ENGINE_ID, root)  # a CLI that keeps a shell never runs a job
