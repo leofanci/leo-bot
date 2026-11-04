@@ -3,18 +3,32 @@ import os
 import shutil
 
 from dashboard.engines import config
+from dashboard.engines.acp import AcpEngine
 from dashboard.engines.api import ApiEngine
 from dashboard.engines.base import EngineRefused
 from dashboard.engines.claude_code import ENGINE_ENV, ENGINE_ID, ClaudeCodeEngine
+from dashboard.engines.codex import ENGINE_ID as CODEX_ID, CodexEngine
 
 NO_PEOPLE_ENGINE = ("This workspace has no API key for invited people yet, so bots can't answer here. "
                     "The owner can set one in HQ, Engines.")
 NO_SHARED_ENGINE = "{label} can't run in a thread invited people can see. Pick an engine for people in HQ, Engines."
 
 
+def on_server():
+    return os.environ.get("MYOS_DEPLOYMENT") == "server"
+
+
 def get(engine_id, root=config.ROOT):
     if engine_id == ENGINE_ID:
         return ClaudeCodeEngine()
+    if engine_id == CODEX_ID or (isinstance(engine_id, str) and engine_id.startswith("acp:")):
+        if on_server():  # their tools can reach any file the server's user can
+            raise EngineRefused("This engine can read any file on the machine, so it only runs on your own Mac.")
+        if engine_id == CODEX_ID:
+            return CodexEngine()
+        agent = next((a for a in config.load(root)["acp_agents"] if a["id"] == engine_id[4:]), None)
+        if agent:
+            return AcpEngine(agent)
     if isinstance(engine_id, str) and engine_id.startswith("api:"):
         provider = config.provider(engine_id[4:], root)
         if provider:
@@ -31,8 +45,9 @@ def default_id(data):
     return f"api:{data['providers'][0]['id']}"
 
 
-def pick(root, ws, bot, invited=False, shared=False):
-    """The engine for one run. An invited person's message never runs on the owner's login."""
+def pick(root, ws, bot, invited=False, shared=False, apps=False):
+    """The engine for one run. An invited person's message never runs on the owner's login.
+    A full-disk engine runs only the owner's private threads, with no connected apps."""
     data = config.load(root)
     if invited:
         if not data.get("people"):
@@ -46,6 +61,12 @@ def pick(root, ws, bot, invited=False, shared=False):
         if not data.get("people"):
             raise EngineRefused(NO_SHARED_ENGINE.format(label=engine.label))
         return get(data["people"], root)
+    if apps and "apps" not in engine.supports:
+        fallback = data.get("default") if data.get("default") not in (None, "", engine.id) else ENGINE_ID
+        other = get(fallback, root)
+        if "apps" not in other.supports:
+            raise EngineRefused(f"{engine.label} can't use connected apps. Tag a bot on another engine.")
+        return other
     return engine
 
 
@@ -68,9 +89,12 @@ def for_job(root=config.ROOT):
 
 def statuses(root=config.ROOT):
     """One row per engine for the engines screen."""
+    data = config.load(root)
     rows = [ClaudeCodeEngine().status()]
-    for p in config.load(root)["providers"]:
-        rows.append(ApiEngine(p, root).status())
+    if not on_server():
+        rows.append(CodexEngine().status())
+        rows += [AcpEngine(a).status() for a in data["acp_agents"]]
+    rows += [ApiEngine(p, root).status() for p in data["providers"]]
     return rows
 
 

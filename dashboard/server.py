@@ -950,6 +950,11 @@ def _workspace_deny_files(ws):
     return tuple(str(f) for f in (ROOT / "os.db", HERE / "os.db", HERE / "data.db"))
 
 
+CLI_NOTE = (
+    "## Your tools\n"
+    "Your myOS tool is the `osctl` tool from the `os` server: put the words that follow "
+    "`python3 -m dashboard.osctl` in `args`, one per item, and a long body in `stdin`. All myOS reads and "
+    "writes go through it.")
 API_NOTE = (
     "## Your tools\n"
     "This bot runs on an API key, not a command line. Your myOS tool is `osctl`: put the words that follow "
@@ -995,7 +1000,7 @@ engine_api.set_backends(osctl=os_relay.run_osctl, osctl_clean=os_relay.clean_arg
 
 
 def _engines_view():
-    return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT),
+    return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
             "ws_list": [w for w in _workspaces(db.tree()) if w["id"] != bots.HQ]}
 
 
@@ -1655,6 +1660,12 @@ class Handler(BaseHTTPRequestHandler):
             engine_config.upsert_provider(body, ROOT)
         elif path == "/api/engines/provider/remove":
             engine_config.remove_provider(str(body.get("id") or ""), ROOT)
+        elif path == "/api/engines/acp":  # it names a program to start: this machine only, never a server
+            if not self._local_request() or DEPLOYMENT == "server":
+                return self._send(403, {"error": "add CLI agents on the machine running myOS"})
+            engine_config.upsert_acp(body, ROOT)
+        elif path == "/api/engines/acp/remove":
+            engine_config.remove_acp(str(body.get("id") or ""), ROOT)
         elif path == "/api/engines/choice":
             name, value, scope = body.get("name"), body.get("value"), body.get("scope")
             if value and name != "terminal":
@@ -1664,8 +1675,11 @@ class Handler(BaseHTTPRequestHandler):
             engine_config.set_choice(name, value, str(scope) if scope else None, ROOT)
         elif path == "/api/engines/test":
             engine = engine_registry.get(str(body.get("id") or ""), ROOT)
+            if hasattr(engine, "probe"):
+                return self._send(200, {"error": engine.probe()})
             if engine.kind != "api":
-                return self._send(200, {"error": None if engine.status()["ok"] else engine.status()["detail"]})
+                status = engine.status()
+                return self._send(200, {"error": None if status["ok"] else status["detail"]})
             return self._send(200, {"error": engine.test()})
         else:
             return self._send(404, {"error": "unknown endpoint"})
@@ -1995,7 +2009,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             engine = (RunnerEngine(sender, person["name"] if person else None)
                       if not app_turn and runners.HUB.online(sender)
-                      else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared))
+                      else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared,
+                                                apps=bool(app_turn)))
         except EngineRefused as e:
             return self._sse_message(str(e))
         sess.engine = engine
@@ -2123,6 +2138,8 @@ class Handler(BaseHTTPRequestHandler):
             workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
         elif engine.kind == "api":
             workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
+        elif engine.full_disk:
+            workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -2223,9 +2240,10 @@ class Handler(BaseHTTPRequestHandler):
             slot = person["id"] if person else "sess"
             _EXTRA[slot] = c
             c_kw = {}
-            if locked:  # its own read-only token, revoked when it answers
+            if locked or c.engine.full_disk:  # its own read-only token, revoked when it answers
                 c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
-                                                          "engine": c.engine.id, "runner_owner": sender}),
+                                                          "engine": c.engine.id, "runner_owner": sender,
+                                                          "shared": locked}),
                         "os_port": self.server.server_address[1]}
             try:
                 return run(c, prompt, c_model, c_web, msg, **c_kw)
@@ -2243,9 +2261,10 @@ class Handler(BaseHTTPRequestHandler):
                            {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
                             "room": (room or {}).get("id"), "person": bots.CEO}),
                        "apps_port": self.server.server_address[1]}
-        if locked:
+        if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
-                                                         "engine": engine.id, "runner_owner": sender}),
+                                                         "engine": engine.id, "runner_owner": sender,
+                                                         "shared": locked}),
                        "os_port": self.server.server_address[1]}
         try:
             # Tell the client which saved chat this turn belongs to (a scope
