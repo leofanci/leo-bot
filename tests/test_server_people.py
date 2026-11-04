@@ -302,7 +302,7 @@ def fake_session(seen):
 
 
 class FakeApiEngine:
-    id, label, kind = "api:demo", "Demo API", "api"
+    id, label, kind, full_disk = "api:demo", "Demo API", "api", False
 
     def resolve_model(self, model):
         return model

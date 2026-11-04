@@ -1378,10 +1378,14 @@ async function renderEngines(){
       return `<div class="post"><div class="t"><b>${esc(e.label)}</b><small>${esc(e.detail || "")}${p ? ` · fast: ${esc(p.models?.fast || "-")} · strong: ${esc(p.models?.strong || "-")}` : ""}</small></div>
         <span class="tag">${e.ok ? "ready" : "not ready"}</span>
         <button class="go" data-test="${esc(e.id)}">Test</button>
-        ${p ? `<button class="go" data-edit="${esc(p.id)}">Edit</button><button class="more" data-remove="${esc(p.id)}">Remove</button>` : ""}</div>`;
+        ${p ? `<button class="go" data-edit="${esc(p.id)}">Edit</button><button class="more" data-remove="${esc(p.id)}">Remove</button>` : ""}
+        ${e.acp ? `<button class="more" data-remove-acp="${esc(e.id.slice(4))}">Remove</button>` : ""}</div>`;
     }).join("");
     const presets = Object.entries(d.presets || {});
-    const form = adding === null ? `<div class="add-prov">${presets.map(([k, v]) => `<button class="btn sm" data-add="${esc(k)}">Add ${esc(v.name)}</button>`).join("")}<button class="btn sm ghost" data-add="custom">Add other</button></div>`
+    const acpMine = (d.acp_agents || []).map(a => a.id);
+    const acpAdd = d.deployment === "server" ? "" : Object.entries(d.acp_presets || {}).filter(([k]) => !acpMine.includes(k))
+      .map(([k, v]) => `<button class="btn sm" data-add-acp="${esc(k)}">Add ${esc(v.name)}</button>`).join("");
+    const form = adding === null ? `<div class="add-prov">${presets.map(([k, v]) => `<button class="btn sm" data-add="${esc(k)}">Add ${esc(v.name)}</button>`).join("")}<button class="btn sm ghost" data-add="custom">Add other</button>${acpAdd}</div>`
       : (() => {
         const old = (d.providers || []).find(x => x.id === adding) || {};
         const pre = d.presets?.[adding] || {};
@@ -1411,6 +1415,12 @@ async function renderEngines(){
     box.querySelectorAll("[data-remove]").forEach(b => b.onclick = async () => {
       if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "Click again to remove"; return; }
       try { await jpost("/api/engines/provider/remove", { id: b.dataset.remove }); draw(); } catch (err) { toast("✗ " + err.message); }
+    });
+    box.querySelectorAll("[data-add-acp]").forEach(b => b.onclick = async () => {
+      try { await jpost("/api/engines/acp", { id: b.dataset.addAcp }); draw(); } catch (err) { toast("✗ " + err.message); }
+    });
+    box.querySelectorAll("[data-remove-acp]").forEach(b => b.onclick = async () => {
+      try { await jpost("/api/engines/acp/remove", { id: b.dataset.removeAcp }); draw(); } catch (err) { toast("✗ " + err.message); }
     });
     box.querySelectorAll("[data-test]").forEach(b => b.onclick = async () => {
       b.disabled = true; b.textContent = "Testing…";

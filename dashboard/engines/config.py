@@ -4,6 +4,7 @@
  "default": "claude-code" | "api:<id>" | ...,      the owner's turns
  "people": "api:<id>" | "",                        invited people, and shared threads an engine cannot serve
  "workspaces": {slug: engine id}, "bots": {"slug/bot": engine id},
+ "acp_agents": [{id, name, command, args}],
  "terminal": "shell" | "claude" | "codex"}
 
 Keys never leave this module except to the api driver: public() shows the last
@@ -33,6 +34,13 @@ PRESETS = {
 }
 
 
+# ACP agents people commonly have: name, command, args.
+ACP_PRESETS = {
+    "opencode": {"name": "OpenCode", "command": "opencode", "args": ["acp"]},
+    "gemini": {"name": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"]},
+}
+
+
 def _file(root):
     return Path(root) / "team" / "engines.json"
 
@@ -45,6 +53,7 @@ def load(root=ROOT):
     if not isinstance(data, dict):
         data = {}
     data["providers"] = [p for p in data.get("providers") or [] if isinstance(p, dict) and p.get("id")]
+    data["acp_agents"] = [a for a in data.get("acp_agents") or [] if isinstance(a, dict) and a.get("id")]
     for key in ("workspaces", "bots"):
         data[key] = data.get(key) if isinstance(data.get(key), dict) else {}
     return data
@@ -94,15 +103,42 @@ def upsert_provider(fields, root=ROOT):
     return row
 
 
-def remove_provider(provider_id, root=ROOT):
+def upsert_acp(fields, root=ROOT):
+    """A CLI agent, from a preset or a command of your own. The server allows this from this machine only."""
+    aid = str(fields.get("id") or "").strip().lower()
+    if not _ID_RE.match(aid):
+        raise ValueError("id: lowercase letters, digits and dashes")
+    preset = ACP_PRESETS.get(aid, {})
+    command = str(fields.get("command") or preset.get("command") or "").strip()
+    args = fields.get("args") if isinstance(fields.get("args"), list) else preset.get("args") or []
+    if not command or not all(isinstance(a, str) for a in args):
+        raise ValueError("command required")
+    row = {"id": aid, "name": str(fields.get("name") or preset.get("name") or aid)[:60], "command": command, "args": args}
     data = load(root)
-    data["providers"] = [p for p in data["providers"] if p["id"] != provider_id]
-    gone = f"api:{provider_id}"
+    data["acp_agents"] = [a for a in data["acp_agents"] if a["id"] != aid] + [row]
+    save(data, root)
+    return row
+
+
+def remove_acp(agent_id, root=ROOT):
+    data = load(root)
+    data["acp_agents"] = [a for a in data["acp_agents"] if a["id"] != agent_id]
+    _clear_engine(data, f"acp:{agent_id}")
+    save(data, root)
+
+
+def _clear_engine(data, gone):
     for key in ("default", "people"):
         if data.get(key) == gone:
             data[key] = ""
     for key in ("workspaces", "bots"):
         data[key] = {k: v for k, v in data[key].items() if v != gone}
+
+
+def remove_provider(provider_id, root=ROOT):
+    data = load(root)
+    data["providers"] = [p for p in data["providers"] if p["id"] != provider_id]
+    _clear_engine(data, f"api:{provider_id}")
     save(data, root)
 
 
@@ -138,6 +174,7 @@ def public(root=ROOT):
                      "key_hint": key[-4:] if key else "", "no_key": not key})
     return {"providers": rows, "default": data.get("default") or "", "people": data.get("people") or "",
             "workspaces": data["workspaces"], "bots": data["bots"],
-            "terminal": data.get("terminal") or "shell",
+            "terminal": data.get("terminal") or "shell", "acp_agents": data["acp_agents"],
+            "acp_presets": ACP_PRESETS,
             "presets": {k: {f: v.get(f) for f in ("name", "format", "base_url", "models", "no_key")}
                         for k, v in PRESETS.items()}}
