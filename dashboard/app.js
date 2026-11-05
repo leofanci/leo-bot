@@ -1163,7 +1163,8 @@ async function renderTeam(){
       if (sel.value) apps[sel.dataset.grantApp] = sel.value; else delete apps[sel.dataset.grantApp];
       try {
         const r = await jpost("/api/integrations/grants", { ws: _WS, bot, apps });
-        ((integ.grants ||= {})[_WS] ||= {})[bot] = r.apps;
+        // New objects with own keys: a name like __proto__ can't reach Object.prototype.
+        integ.grants = { ...integ.grants, [_WS]: { ...integ.grants?.[_WS], [bot]: r.apps } };
       } catch (e) { toast("✗ " + e.message); draw(); }
     });
     $("#team-list").querySelectorAll("[data-bot-toggle]").forEach(btn => btn.onclick = async () => {
