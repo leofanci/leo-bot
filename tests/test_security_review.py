@@ -14,11 +14,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import runners
+from core import bots, runners
 from dashboard import fileops, osctl, runner as runner_client, tokensave_bridge
 from dashboard.engines import acp, api, api_tools, config, registry
 from dashboard.engines.base import EngineRefused, TurnPolicy, TurnTokens, drain
 from dashboard.engines.claude_code import ClaudeCodeEngine
+from tests import test_server_people as sp
+
+
+server = sp.server
 
 
 class Tmp(unittest.TestCase):
@@ -498,6 +502,103 @@ class _NoCache:
 
     def cache_clear(self):
         pass
+
+
+class PrivateMemoryStaysPrivate(Tmp):
+    """Like a DM: what the owner tells a bot privately never reaches a thread people can see."""
+
+    def setUp(self):
+        super().setUp()
+        (self.root / "projects" / "demo").mkdir(parents=True)
+        bots.remember("cmo", "PRIVATE-NOTE fire the agency", "demo", self.root)
+        bots.remember("cmo", "TEAM-NOTE launch is in March", "demo", self.root, shared=True)
+
+    def test_the_two_memories_never_mix(self):
+        self.assertIn("PRIVATE-NOTE", bots.read_memory("cmo", "demo", self.root))
+        self.assertNotIn("TEAM-NOTE", bots.read_memory("cmo", "demo", self.root))
+        self.assertIn("TEAM-NOTE", bots.read_memory("cmo", "demo", self.root, shared=True))
+        self.assertNotIn("PRIVATE-NOTE", bots.read_memory("cmo", "demo", self.root, shared=True))
+
+    def test_forgetting_touches_only_its_own_memory(self):
+        line = bots.read_memory("cmo", "demo", self.root, tail=0, shared=True)
+        self.assertFalse(bots.forget("cmo", line, "demo", self.root))
+        self.assertTrue(bots.forget("cmo", line, "demo", self.root, shared=True))
+        self.assertIn("PRIVATE-NOTE", bots.read_memory("cmo", "demo", self.root))
+
+    def test_hq_has_no_team_memory(self):
+        with self.assertRaises(ValueError):
+            bots.memory_path("cmo", None, self.root, shared=True)
+        self.assertEqual(bots.read_memory("cmo", None, self.root, shared=True), "")
+
+    def prompt(self, shared, readonly=False):
+        team = bots.team(self.root, "demo", {"slug": "demo"})
+        with mock.patch.object(server, "ROOT", self.root):
+            return server._bot_block(team, "cmo", None, "demo", fresh=True, shared=shared, readonly=readonly)
+
+    def test_a_shared_prompt_carries_only_the_team_memory(self):
+        text = self.prompt(shared=True)
+        self.assertIn("TEAM-NOTE", text)
+        self.assertNotIn("PRIVATE-NOTE", text)
+        self.assertNotIn("remember --bot", text)
+
+    def test_a_private_prompt_carries_only_the_private_memory(self):
+        text = self.prompt(shared=False)
+        self.assertIn("PRIVATE-NOTE", text)
+        self.assertNotIn("TEAM-NOTE", text)
+
+    def test_a_consulted_teammate_in_a_shared_thread_too(self):
+        team = bots.team(self.root, "demo", {"slug": "demo"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._teammate_prompt(team, "cmo", None, "q", "said", [], "demo", None, shared=True)
+        self.assertIn("TEAM-NOTE", text)
+        self.assertNotIn("PRIVATE-NOTE", text)
+
+
+TRAVERSAL = ("../x", "../../x", "../../../x", "../../../../x", "..", "../..", "/etc/passwd", "a/b", "a\\b", ".",
+             "a\x00b", "a\nb", "..%2fx", "x y", "demo/../../x", "\u2025/x", "\uff0e\uff0e/x")
+
+
+class PathsStayInside(Tmp):
+    """The code scanner flags these paths and cannot see their validators, so its alerts are
+    dismissed: these tests are what watches them instead."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.root / "data"
+        (self.data / "projects" / "demo").mkdir(parents=True)
+        (self.data / "projects" / "demo" / "project.md").write_text("---\nname: d\n---\n")
+        (self.root / "x.md").write_text("CANARY")
+        (self.data / "x.md").write_text("CANARY")
+        (self.data / "projects" / "x.md").write_text("CANARY")
+        self.before = self.tree()
+        for target, name, value in ((fileops, "ROOT", self.data), (fileops, "reindex", lambda: None)):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tree(self):
+        return sorted((str(p), p.read_text() if p.is_file() else "") for p in self.root.rglob("*"))
+
+    def test_memory_refuses_every_traversal(self):
+        for bad in TRAVERSAL:
+            for shared in (False, True):
+                for args in ((bad, "demo"), ("cos", bad)):
+                    with self.assertRaises(ValueError, msg=repr(args)):
+                        bots.memory_path(args[0], args[1], self.data, shared)
+                    self.assertEqual(bots.read_memory(args[0], args[1], self.data, tail=0, shared=shared), "", repr(args))
+                    with self.assertRaises(ValueError, msg=repr(args)):
+                        bots.remember(args[0], "x", args[1], self.data, shared=shared)
+        self.assertEqual(self.tree(), self.before)
+
+    def test_project_writers_refuse_every_traversal(self):
+        calls = (lambda v: fileops.create_project(v, {}), lambda v: fileops.update_project(v, {"name": "n"}),
+                 lambda v: fileops.create_profile("demo", v, {}), lambda v: fileops.create_profile(v, "ok-slug", {}),
+                 lambda v: fileops.create_product("demo", v, {}), lambda v: fileops.create_product(v, "ok-slug", {}))
+        for bad in TRAVERSAL + ("x" * 300,):
+            for call in calls:
+                with self.assertRaises(fileops.ActionError, msg=repr(bad)):
+                    call(bad)
+        self.assertEqual(self.tree(), self.before)
 
 
 class LinkedAppCode(unittest.TestCase):

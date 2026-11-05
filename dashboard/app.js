@@ -1593,21 +1593,32 @@ async function renderIntegrations(){
 async function toggleMemory(row, botId){
   const box = row.querySelector(".mem-box");
   if (!box.hidden) { box.hidden = true; return; }
-  const draw = lines => {
-    box.innerHTML = `${lines.length ? lines.map(l => `<div class="mem-line"><span>${esc(l.replace(/^- /, ""))}</span><button class="cl-del" data-mem-del="${esc(l)}" title="Forget">✕</button></div>`).join("") : `<div class="mem-empty">Nothing remembered in this workspace yet.</div>`}
-      <form class="mem-add"><input name="text" placeholder="Add a fact this bot should remember here…" maxlength="300"><button class="btn" type="submit">Add</button></form>`;
-    box.querySelectorAll("[data-mem-del]").forEach(b => b.onclick = async () => {
-      try { draw((await jpost("/api/memory/delete", { ws: _WS, bot: botId, line: b.dataset.memDel })).lines); } catch (e) { toast("✗ " + e.message); }
-    });
-    box.querySelector(".mem-add").onsubmit = async e => {
+  // A project workspace has two: your DMs' private one, and what the team's threads can see.
+  const scopes = _WS === "hq" ? [["", "", "Add a fact this bot should remember here…"]] : [
+    ["", "Private: your DMs and channels with no people. Nobody you invite sees this.", "Add a private fact…"],
+    ["team", "Team: channels with people, and invited people's own DMs. Anyone there can get the bot to repeat this.", "Add a fact for the team…"],
+  ];
+  box.innerHTML = scopes.map((_, i) => `<div class="mem-scope" data-i="${i}"></div>`).join("");
+  const draw = (el, [scope, head, hint], lines) => {
+    el.innerHTML = `${head ? `<div class="mem-head">${esc(head)}</div>` : ""}${lines.length ? lines.map(l => `<div class="mem-line"><span>${esc(l.replace(/^- /, ""))}</span><button class="cl-del" data-mem-del="${esc(l)}" title="Forget">✕</button></div>`).join("") : `<div class="mem-empty">Nothing remembered here yet.</div>`}
+      <form class="mem-add"><input name="text" placeholder="${esc(hint)}" maxlength="300"><button class="btn" type="submit">Add</button></form>`;
+    const redraw = async (url, extra) => {
+      try { draw(el, [scope, head, hint], (await jpost(url, { ws: _WS, bot: botId, scope, ...extra })).lines); } catch (e) { toast("✗ " + e.message); }
+    };
+    el.querySelectorAll("[data-mem-del]").forEach(b => b.onclick = () => redraw("/api/memory/delete", { line: b.dataset.memDel }));
+    el.querySelector(".mem-add").onsubmit = e => {
       e.preventDefault();
       const text = e.target.text.value.trim(); if (!text) return;
-      try { draw((await jpost("/api/memory", { ws: _WS, bot: botId, text })).lines); } catch (err) { toast("✗ " + err.message); }
+      redraw("/api/memory", { text });
     };
   };
   box.hidden = false;
-  try { draw((await api(`/api/memory?ws=${encodeURIComponent(_WS)}&bot=${encodeURIComponent(botId)}`)).lines || []); }
-  catch (e) { toast("✗ " + e.message); }
+  await Promise.all(scopes.map(async (sc, i) => {
+    try {
+      const d = await api(`/api/memory?ws=${encodeURIComponent(_WS)}&bot=${encodeURIComponent(botId)}&scope=${encodeURIComponent(sc[0])}`);
+      draw(box.querySelector(`[data-i="${i}"]`), sc, d.lines || []);
+    } catch (e) { toast("✗ " + e.message); }
+  }));
 }
 
 

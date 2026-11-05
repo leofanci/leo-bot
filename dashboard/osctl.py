@@ -52,9 +52,9 @@ _NETWORK_CMDS = {"research-signal"}
 _PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db", ".remember/",
                      ".superpowers/", ".tokensave/", ".claude/", ".git/", "dashboard/vendor/")
 _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".log")
-# A shared thread (os_relay: an invited person can see it). Bot memory steers the
-# owner's own later turns, so it is not written from here; files read only from
-# this workspace's folder and the public repo docs.
+# A shared thread (os_relay: an invited person can see it). It reads the team memory,
+# never the private memory of the owner's DMs, and the owner alone writes either from
+# outside it; files read only from this workspace's folder and the public repo docs.
 _SHARED_BLOCKED = {"remember"}
 _SHARED_READ_PREFIXES = ("skills/", "docs/", "templates/", "prompts/", "bots/")
 # Args whose value names an existing entity (create commands mint new slugs,
@@ -127,6 +127,8 @@ def _guard(args, ws):
         if os.environ.get("MYOS_SHARED") and not (
                 rel.startswith(f"projects/{ws.lower()}/") or rel.startswith(_SHARED_READ_PREFIXES)):
             raise fileops.ActionError("in a shared thread only this workspace's files are readable")
+        if os.environ.get("MYOS_SHARED") and rel.startswith(f"projects/{ws.lower()}/team/"):
+            raise fileops.ActionError("bot memory is not readable as a file here")
 
 
 def _no_local_folder(value):
@@ -288,7 +290,8 @@ def _build_parser():
     p = sub.add_parser("get-memory", help="Read a bot's memory (per project, or HQ)")
     p.add_argument("--bot", required=True)
     p.add_argument("--project")
-    p.set_defaults(_run=lambda a: {"memory": bots.read_memory(a.bot, a.project, tail=0)})
+    p.set_defaults(_run=lambda a: {"memory": bots.read_memory(a.bot, a.project, tail=0,
+                                                              shared=bool(os.environ.get("MYOS_SHARED")))})
 
     p = sub.add_parser("create-experiment", help="Create strategy/experiments/<stem>.json")
     p.add_argument("--project", required=True)
@@ -894,7 +897,7 @@ def main(argv=None):
                 raise fileops.ActionError("a shared thread runs inside one project workspace")
             if args.cmd in _SHARED_BLOCKED:
                 raise fileops.ActionError(f"{args.cmd} is not available in a thread invited people "
-                                          "can see; ask the owner to do it in a DM with the bot")
+                                          "can see; the owner adds what the team should remember in Team")
         if ws:
             _guard(args, ws)
         result = args._run(args)

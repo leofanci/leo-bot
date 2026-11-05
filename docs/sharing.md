@@ -20,9 +20,13 @@ workspace (never HQ) as **admin** or **member**:
 with a bot) runs without a shell, file access or connected apps, for your
 messages there too. The bot's only tool is myOS itself (osctl), run by the
 server inside that workspace: it can read and save that workspace's content,
-but not your other workspaces, your files, your keys or your mail. It can read that
-workspace's bot memory, including lines saved in your own DMs with its bots, but
-can't add to it: keep private notes in HQ.
+but not your other workspaces, your files, your keys or your mail.
+
+**What you tell a bot privately stays private.** Each bot has two memories in a
+workspace. Its private memory is for your DMs and channels with no people, and it
+never reaches a shared thread. Its team memory is what shared threads use. Only you
+add to team memory, in Team, under the bot's Memory. Everyone in those threads can
+get a bot to repeat what's in it.
 Bots can still answer from an outline of the project's linked app (names and
 structure, never its source code). For
 mail, calendar or anything on your machine, use a DM with a bot or a private
