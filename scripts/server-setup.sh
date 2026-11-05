@@ -80,6 +80,16 @@ systemctl daemon-reload
 systemctl enable myos >/dev/null 2>&1
 systemctl restart myos
 
+up=""
+for _ in $(seq 1 30); do
+  if curl -fsS -o /dev/null "http://127.0.0.1:$MYOS_PORT/healthz"; then up=1; break; fi
+  sleep 1
+done
+if [ -z "$up" ]; then
+  echo "myOS did not start. See why with: journalctl -u myos -n 50" >&2
+  exit 1
+fi
+
 echo
 echo "myOS is running on this server, on 127.0.0.1:$MYOS_PORT."
 echo

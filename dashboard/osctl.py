@@ -98,8 +98,8 @@ def _guard(args, ws):
         raise fileops.ActionError(f"{args.cmd} is only available in HQ")
     if args.cmd in ("remember", "get-memory") and not args.project:
         args.project = ws  # a company's bot keeps memory in its company, never in HQ
-    if args.cmd == "create-milestone" and not args.entity:
-        args.entity = ws  # same for its milestones
+    if args.cmd in ("create-milestone", "mark-done") and not args.entity:
+        args.entity = ws  # same for its milestones and activities
     own = _owners()
     for name, value in vars(args).items():
         if not (name in _OWNER_ARGS or name.endswith("_id")):
@@ -129,7 +129,18 @@ def _guard(args, ws):
             raise fileops.ActionError("in a shared thread only this workspace's files are readable")
 
 
+def _no_local_folder(value):
+    """A shared thread never learns where the owner keeps the linked app on this machine."""
+    if isinstance(value, dict):
+        return {k: _no_local_folder(v) for k, v in value.items() if k != "local_folder"}
+    if isinstance(value, list):
+        return [_no_local_folder(v) for v in value]
+    return value
+
+
 def _emit(obj, ok=True):
+    if os.environ.get("MYOS_SHARED"):
+        obj = _no_local_folder(obj)
     print(json.dumps({"ok": ok, **obj}, ensure_ascii=False))
     return 0 if ok else 1
 

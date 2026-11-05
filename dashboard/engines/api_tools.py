@@ -38,6 +38,8 @@ _PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db", ".re
 _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".log")
 _HOME_PRIVATE = (".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config")
 SEARCH_TIMEOUT = 20
+MAX_PATTERN_CHARS = 1000
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _SKIP_TAGS = (b"script", b"style", b"noscript")
 # A model's regex runs in its own process: re holds the GIL, so a catastrophic
 # pattern here would freeze every request on the server. This one can be killed.
@@ -145,6 +147,8 @@ def search_files(glob, pattern, root, policy):
     if not policy.workspace_dir:
         raise ToolError("no linked app folder this turn")
     base = Path(policy.workspace_dir).resolve()
+    if len(str(glob or "")) > MAX_PATTERN_CHARS or len(str(pattern or "")) > MAX_PATTERN_CHARS:
+        raise ToolError("that search is too long")
     if pattern:
         try:
             re.compile(pattern)
@@ -191,8 +195,12 @@ def _grep(pattern, names):
 
 def _is_public_ip(raw):
     addr = ipaddress.ip_address(str(raw).split("%")[0])
-    mapped = getattr(addr, "ipv4_mapped", None)
-    return (mapped or addr).is_global and not addr.is_multicast
+    # IPv6 forms that carry an IPv4 address: judge the one inside.
+    inner = [getattr(addr, "ipv4_mapped", None), getattr(addr, "sixtofour", None),
+             (getattr(addr, "teredo", None) or (None, None))[1]]
+    if addr.version == 6 and addr in _NAT64:
+        inner.append(ipaddress.ip_address(int(addr) & 0xffffffff))
+    return all(a.is_global and not a.is_multicast for a in [addr] + [i for i in inner if i is not None])
 
 
 def _public_host(host):
@@ -289,7 +297,8 @@ def _strip_tags(raw):
             break
         out.append(raw[i:lt])
         gt = raw.find(b">", lt)
-        if gt < 0:
+        if gt < 0:  # a stray "<", not a tag: the words after it are still the page
+            out.append(raw[lt + 1:])
             break
         i = gt + 1
         name = lower[lt + 1:lt + 12]

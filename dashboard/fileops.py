@@ -990,6 +990,7 @@ def create_project(slug: str, fields: dict) -> dict:
     project_dir = projects_dir / slug
     if project_dir.exists():
         raise ActionError(f"project '{slug}' already exists")
+    _need_free_slug(slug)
     name = _one_line(fields.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or "venture", "kind")
     priority = _priority(fields.get("priority") or "primary")
@@ -1184,7 +1185,8 @@ def mark_activity_done(title: str, entity_slug: str) -> dict:
         if not line.startswith("- [ ] "):
             continue
         parts = [p.strip() for p in line[6:].split(" — ")]
-        if title and parts[0] == title and f"entity: {entity_slug}" in parts[1:]:
+        no_entity = not entity_slug and not any(p.startswith("entity:") for p in parts[1:])  # a hand-written row
+        if title and parts[0] == title and (no_entity or f"entity: {entity_slug}" in parts[1:]):
             lines[i] = "- [x] " + line[6:]
             n += 1
     if n == 0:
@@ -1757,9 +1759,19 @@ def create_phase(project_slug: str, name: str, goal: str = "", timebox: str = ""
             "project": project_slug, "name": name}
 
 
-def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
+def _bare_phase_id(project_slug: str, phase_id: str, phases: list) -> str:
+    """The phase's own id, also from the composed id create-phase hands out (pr1.sec07.ph1)."""
     phase_id = (phase_id or "").strip()
+    if "." in phase_id:
+        for p in phases:
+            if _composed_id(lk_phase(project_slug, p["id"])) == phase_id:
+                return p["id"]
+    return phase_id
+
+
+def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
     phases = gtm_store.load_phases(ROOT, project_slug)
+    phase_id = _bare_phase_id(project_slug, phase_id, phases)
     match = next((p for p in phases if p["id"] == phase_id), None)
     if match is None:
         raise ActionError(f"phase '{phase_id}' not found")
@@ -1773,8 +1785,8 @@ def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
 
 
 def delete_phase(project_slug: str, phase_id: str) -> dict:
-    phase_id = (phase_id or "").strip()
     phases = gtm_store.load_phases(ROOT, project_slug)
+    phase_id = _bare_phase_id(project_slug, phase_id, phases)
     if not any(p["id"] == phase_id for p in phases):
         raise ActionError(f"phase '{phase_id}' not found")
     phases = [p for p in phases if p["id"] != phase_id]

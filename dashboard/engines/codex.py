@@ -111,8 +111,11 @@ class CodexEngine(Engine):
             return
         session._proc = proc
         stderr = drain(proc.stderr)
-        proc.stdin.write(text + "\n")
-        proc.stdin.close()
+        try:
+            proc.stdin.write(text + "\n")
+            proc.stdin.close()
+        except BrokenPipeError:  # it died at once: its own error, read below, is what to show
+            pass
         errors = []
         try:
             for line in proc.stdout:

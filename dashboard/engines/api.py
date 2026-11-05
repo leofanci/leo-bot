@@ -57,6 +57,14 @@ def friendly_status(status, name):
     return f"{name} returned an error ({status})."
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):  # urllib would resend the API key to the new host
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 class _Cancel:
     """What ChatSession.close() terminates mid-turn."""
 
@@ -237,7 +245,7 @@ class ApiEngine(Engine):
             if cancel is not None and cancel.stopped:
                 raise ProviderError("stopped")
             try:
-                return urllib.request.urlopen(req, timeout=READ_TIMEOUT)
+                return _OPENER.open(req, timeout=READ_TIMEOUT)
             except urllib.error.HTTPError as e:
                 detail = ""
                 try:

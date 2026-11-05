@@ -195,9 +195,12 @@ def main(argv=None):
     except ValueError as e:
         sys.exit(str(e))
     token_file = Path(args.token_file).expanduser()
-    if token_file.stat().st_mode & 0o077:
-        sys.exit(f"{token_file} can be read by other users. Run: chmod 600 {token_file}")
-    token = token_file.read_text().strip()
+    try:
+        if token_file.stat().st_mode & 0o077:
+            sys.exit(f"{token_file} can be read by other users. Run: chmod 600 {token_file}")
+        token = token_file.read_text().strip()
+    except OSError as e:
+        sys.exit(f"Could not read the token file: {e}")
     client = Client(server, token)
     engine = ClaudeCodeEngine(args.claude_bin)
     status = engine.status()
