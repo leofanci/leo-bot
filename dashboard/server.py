@@ -50,6 +50,7 @@ import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
+from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
@@ -1005,6 +1006,7 @@ engine_api.set_backends(osctl=os_relay.run_osctl, osctl_clean=os_relay.clean_arg
 
 def _engines_view():
     return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
+            "cloud": deployment_settings.view()["cloud"],
             "ws_list": [w for w in _workspaces(db.tree()) if w["id"] != bots.HQ]}
 
 

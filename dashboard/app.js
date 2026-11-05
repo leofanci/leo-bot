@@ -1357,6 +1357,21 @@ async function drawRunners(box, stillOn = () => true){
 
 // HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
 // key. Invited people only ever run on an API key.
+// Where this myOS runs, and how to move it to a server of your own (docs/server.md).
+function deploymentSection(where){
+  const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
+  if (where === "server") return `<section class="integ-group"><h3>Where myOS runs</h3>
+    <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. Guide: docs/server.md.</div>
+    ${cmd("journalctl -u myos -f")}</section>`;
+  return `<section class="integ-group"><h3>Where myOS runs</h3>
+    <div class="help">On this Mac, so bots stop when it sleeps or quits. To keep them always on, run myOS on a server of your own. Run these from a my-os checkout on this Mac, one at a time, after replacing your-server. Guide: docs/server.md.</div>
+    ${cmd(SERVER_STEPS.join("\n"))}</section>`;
+}
+const SERVER_STEPS = [
+  `ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
+  "scripts/myos-connect.sh root@your-server",
+  "scripts/sync-to-server.sh root@your-server",
+];
 async function renderEngines(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
@@ -1402,7 +1417,7 @@ async function renderEngines(){
           <input name="strong" placeholder="Strong model" aria-label="Strong model" value="${esc(f.models?.strong || "")}">
           <button class="btn sm primary" type="submit">Save</button><button class="btn sm ghost" type="button" data-cancel>Cancel</button></form>`;
       })();
-    box.innerHTML = `<section class="integ-group"><h3>Engines</h3>${rows}${form}</section>
+    box.innerHTML = `${deploymentSection(d.deployment)}<section class="integ-group"><h3>Engines</h3>${rows}${form}</section>
       <section class="integ-group"><h3>Who runs on what</h3>
         <div class="eng-choice"><label>Your messages <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
         <div class="eng-choice"><label>Invited people <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
