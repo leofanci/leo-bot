@@ -554,6 +554,53 @@ class PrivateMemoryStaysPrivate(Tmp):
         self.assertNotIn("PRIVATE-NOTE", text)
 
 
+TRAVERSAL = ("../x", "../../x", "../../../x", "../../../../x", "..", "../..", "/etc/passwd", "a/b", "a\\b", ".",
+             "a\x00b", "a\nb", "..%2fx", "x y", "demo/../../x", "\u2025/x", "\uff0e\uff0e/x")
+
+
+class PathsStayInside(Tmp):
+    """The code scanner flags these paths and cannot see their validators, so its alerts are
+    dismissed: these tests are what watches them instead."""
+
+    def setUp(self):
+        super().setUp()
+        self.data = self.root / "data"
+        (self.data / "projects" / "demo").mkdir(parents=True)
+        (self.data / "projects" / "demo" / "project.md").write_text("---\nname: d\n---\n")
+        (self.root / "x.md").write_text("CANARY")
+        (self.data / "x.md").write_text("CANARY")
+        (self.data / "projects" / "x.md").write_text("CANARY")
+        self.before = self.tree()
+        for target, name, value in ((fileops, "ROOT", self.data), (fileops, "reindex", lambda: None)):
+            patch = mock.patch.object(target, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tree(self):
+        return sorted((str(p), p.read_text() if p.is_file() else "") for p in self.root.rglob("*"))
+
+    def test_memory_refuses_every_traversal(self):
+        for bad in TRAVERSAL:
+            for shared in (False, True):
+                for args in ((bad, "demo"), ("cos", bad)):
+                    with self.assertRaises(ValueError, msg=repr(args)):
+                        bots.memory_path(args[0], args[1], self.data, shared)
+                    self.assertEqual(bots.read_memory(args[0], args[1], self.data, tail=0, shared=shared), "", repr(args))
+                    with self.assertRaises(ValueError, msg=repr(args)):
+                        bots.remember(args[0], "x", args[1], self.data, shared=shared)
+        self.assertEqual(self.tree(), self.before)
+
+    def test_project_writers_refuse_every_traversal(self):
+        calls = (lambda v: fileops.create_project(v, {}), lambda v: fileops.update_project(v, {"name": "n"}),
+                 lambda v: fileops.create_profile("demo", v, {}), lambda v: fileops.create_profile(v, "ok-slug", {}),
+                 lambda v: fileops.create_product("demo", v, {}), lambda v: fileops.create_product(v, "ok-slug", {}))
+        for bad in TRAVERSAL + ("x" * 300,):
+            for call in calls:
+                with self.assertRaises(fileops.ActionError, msg=repr(bad)):
+                    call(bad)
+        self.assertEqual(self.tree(), self.before)
+
+
 class LinkedAppCode(unittest.TestCase):
     def test_shared_threads_ask_the_index_for_no_source_code(self):
         with mock.patch.object(tokensave_bridge, "_run_tool", return_value="x") as tool:
