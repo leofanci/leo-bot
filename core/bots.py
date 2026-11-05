@@ -7,7 +7,9 @@ switches its own bots on/off and keeps its own memory. User data, gitignored:
   team/state.json                   HQ on/off per bot
   team/memory/<bot>.md              HQ memory
   projects/<slug>/team/state.json   that workspace's on/off (smart defaults until set)
-  projects/<slug>/team/<bot>.md     that workspace's memory (bots never mix workspaces)
+  projects/<slug>/team/<bot>.md     that workspace's private memory: the owner's private threads only
+  projects/<slug>/team/shared/<bot>.md  its team memory: threads invited people can see
+                                    (bots never mix workspaces, and the two never mix)
 
 Every skill always has exactly one owner: a switched-off bot's skills roll up
 to its nearest active manager. `cos` is the root and is always on.
@@ -253,27 +255,31 @@ def team(root=ROOT, ws=HQ, project=None):
 # --------------------------------------------------------------------------- #
 # Memory — one short markdown list per bot per project. Never mixes projects.
 # --------------------------------------------------------------------------- #
-def memory_path(bot_id, project=None, root=ROOT):
+def memory_path(bot_id, project=None, root=ROOT, shared=False):
+    """`shared`: the team memory of a project workspace. HQ has none: nobody joins HQ."""
     if not _SLUG_RE.fullmatch(bot_id or ""):
         raise ValueError("invalid bot id")
     root = Path(root)
     if project:
         if not _SLUG_RE.fullmatch(project) or not (root / "projects" / project).is_dir():
             raise ValueError(f"unknown project: {project}")
-        return root / "projects" / project / "team" / f"{bot_id}.md"
+        team_dir = root / "projects" / project / "team"
+        return (team_dir / "shared" if shared else team_dir) / f"{bot_id}.md"
+    if shared:
+        raise ValueError("HQ has no team memory")
     return root / "team" / "memory" / f"{bot_id}.md"
 
 
-def read_memory(bot_id, project=None, root=ROOT, tail=MEMORY_TAIL_LINES):
+def read_memory(bot_id, project=None, root=ROOT, tail=MEMORY_TAIL_LINES, shared=False):
     try:
-        lines = memory_path(bot_id, project, root).read_text(encoding="utf-8").splitlines()
+        lines = memory_path(bot_id, project, root, shared).read_text(encoding="utf-8").splitlines()
     except (OSError, ValueError):
         return ""
     lines = [ln for ln in lines if ln.strip()]
     return "\n".join(lines[-tail:]) if tail else "\n".join(lines)
 
 
-def remember(bot_id, text, project=None, root=ROOT, today=None):
+def remember(bot_id, text, project=None, root=ROOT, today=None, shared=False):
     """Append one dated line to the bot's memory for this project (or HQ)."""
     if bot_id not in load_defs():
         raise ValueError(f"unknown bot: {bot_id}")
@@ -282,22 +288,22 @@ def remember(bot_id, text, project=None, root=ROOT, today=None):
         raise ValueError("empty memory")
     if len(line) > MEMORY_LINE_MAX:
         raise ValueError(f"memory line over {MEMORY_LINE_MAX} chars; keep it to one fact")
-    path = memory_path(bot_id, project, root)
-    existing = read_memory(bot_id, project, root, tail=0)
+    path = memory_path(bot_id, project, root, shared)
+    existing = read_memory(bot_id, project, root, tail=0, shared=shared)
     lines = existing.splitlines() if existing else []
     lines.append(f"- {(today or date.today()).isoformat()} {line}")
     _atomic_write(path, "\n".join(lines[-MEMORY_MAX_LINES:]) + "\n")
     return str(path.relative_to(Path(root)))
 
 
-def forget(bot_id, line, project=None, root=ROOT):
+def forget(bot_id, line, project=None, root=ROOT, shared=False):
     """Delete one memory line (exact text, first match). True if removed."""
-    existing = read_memory(bot_id, project, root, tail=0)
+    existing = read_memory(bot_id, project, root, tail=0, shared=shared)
     lines = existing.splitlines() if existing else []
     target = (line or "").strip()
     if target not in lines:
         return False
     lines.remove(target)
-    path = memory_path(bot_id, project, root)
+    path = memory_path(bot_id, project, root, shared)
     _atomic_write(path, ("\n".join(lines) + "\n") if lines else "")
     return True

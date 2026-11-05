@@ -574,6 +574,8 @@ summary.pf-head::-webkit-details-marker{display:none}
 .team-total{margin:0 0 var(--ui-space-2-5);color:var(--ui-color-text-muted);font-size:var(--ui-type-control)}
 .mem-toggle{color:var(--ui-color-accent);font-weight:var(--ui-weight-semibold);cursor:pointer}
 .mem-box{margin-top:var(--ui-space-2);padding:var(--ui-space-2) var(--ui-space-2-5);border:1px dashed var(--ui-color-border);border-radius:var(--ui-radius-control)}
+.mem-scope + .mem-scope{margin-top:var(--ui-space-3)}
+.mem-head{margin-bottom:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}
 .mem-line{display:flex;align-items:flex-start;gap:var(--ui-space-2);padding:3px 0;font-size:var(--ui-type-label)}
 .mem-line span{flex:1}
 .mem-line .cl-del{display:grid;place-items:center;border:0;background:none;color:var(--ui-color-text-muted)}
