@@ -16,7 +16,7 @@ import os
 import shutil
 import subprocess
 
-from dashboard.engines.base import Engine, SessionLost
+from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 from dashboard.engines.claude_code import (
     APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
 )
@@ -110,6 +110,7 @@ class CodexEngine(Engine):
             yield ("error", "Codex is not installed on this machine.")
             return
         session._proc = proc
+        stderr = drain(proc.stderr)
         proc.stdin.write(text + "\n")
         proc.stdin.close()
         errors = []
@@ -127,7 +128,7 @@ class CodexEngine(Engine):
                     else:
                         yield ev
             proc.wait()
-            err = (proc.stderr.read() or "")[:500]
+            err = stderr()[:500]
             if proc.returncode not in (0, None) or errors:
                 detail = errors[-1] if errors else err
                 if had_session and "no rollout found" in f"{detail} {err}".lower():
@@ -135,11 +136,11 @@ class CodexEngine(Engine):
                     raise SessionLost(detail)
                 yield ("error", detail or "Codex failed. Check `codex login status`.")
         finally:
-            for stream in (proc.stdout, proc.stderr):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            stop_child(proc)
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
             session._proc = None
 
     def status(self):

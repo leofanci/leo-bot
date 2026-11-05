@@ -932,17 +932,69 @@ def project_local_folder(slug: str) -> str:
         raise ActionError(f"linked folder for project '{slug}' is unavailable: {exc}") from exc
 
 
+_NOT_ONE_LINE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
+_PRIORITIES = {"primary", "secondary", "experiment"}
+
+
+def _one_line(value, label: str) -> str:
+    """A value for a one-line file format. A line break in it would write a field or a row of
+    its own: `name: x\\nlocal_folder: /etc` would link a folder, which only the owner may do."""
+    text = str(value if value is not None else "").strip()
+    if _NOT_ONE_LINE.search(text) or "---" in text:
+        raise ActionError(f"{label}: one line of text, without '---'")
+    return text
+
+
+def _flat(value, label: str) -> str:
+    """Free text typed into a box (a bio, a topic): pasted line breaks become spaces."""
+    return _one_line(" ".join(str(value if value is not None else "").split()), label)
+
+
+def _priority(value) -> str:
+    """The index's schema allows these three: anything else would stop it building."""
+    text = _one_line(value, "priority")
+    if text not in _PRIORITIES:
+        raise ActionError("priority: primary, secondary or experiment")
+    return text
+
+
+def _entity_slugs() -> set:
+    """Every slug the index counts as one entity. It refuses to build on a duplicate or an
+    unknown one, and a broken index stops every write, so these are checked before writing."""
+    projects = ROOT / "projects"
+    if not projects.is_dir():
+        return set()
+    found = set()
+    for proj in projects.iterdir():
+        if proj.is_dir():
+            found.add(proj.name)
+            found.update(d.name for d in proj.glob("products/*") if d.is_dir())
+            found.update(d.name for d in proj.glob("profiles/*") if d.is_dir())
+            found.update(d.name for d in proj.glob("profiles/*/channels/*") if d.is_dir())
+    return found
+
+
+def _need_free_slug(slug: str) -> None:
+    if slug in _entity_slugs():
+        raise ActionError(f"'{slug}' is already used by a project, profile, channel or product: pick another")
+
+
+def _need_known_entity(slug: str) -> None:
+    if slug not in _entity_slugs():
+        raise ActionError(f"no project, profile, channel or product called '{slug}'")
+
+
 def create_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     projects_dir = ROOT / "projects"
     project_dir = projects_dir / slug
     if project_dir.exists():
         raise ActionError(f"project '{slug}' already exists")
-    name = (fields.get("name") or slug).strip()
-    kind = fields.get("kind") or "venture"
-    priority = fields.get("priority") or "primary"
-    status = fields.get("status") or "idea"
-    hours = str(fields.get("hours_per_week") or "0")
+    name = _one_line(fields.get("name") or slug, "name")
+    kind = _one_line(fields.get("kind") or "venture", "kind")
+    priority = _priority(fields.get("priority") or "primary")
+    status = _one_line(fields.get("status") or "idea", "status")
+    hours = _one_line(fields.get("hours_per_week") or "0", "hours_per_week")
     voice = (fields.get("voice") or "").strip()
     local_folder = normalize_local_folder(fields.get("local_folder"))
     for sub in ["profiles", "products", "strategy/memos", "strategy/experiments"]:
@@ -963,11 +1015,11 @@ def update_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     f = _project_dir(slug) / "project.md"
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8"))
-    name = (fields.get("name") or fm.get("name") or slug).strip()
-    kind = (fields.get("kind") or fm.get("kind") or "venture").strip()
-    priority = (fields.get("priority") or fm.get("priority") or "primary").strip()
-    status = (fields.get("status") or fm.get("status") or "idea").strip()
-    hours = str(fields.get("hours_per_week") or fm.get("hours_per_week") or "0").strip()
+    name = _one_line(fields.get("name") or fm.get("name") or slug, "name")
+    kind = _one_line(fields.get("kind") or fm.get("kind") or "venture", "kind")
+    priority = _priority(fields.get("priority") or fm.get("priority") or "primary")
+    status = _one_line(fields.get("status") or fm.get("status") or "idea", "status")
+    hours = _one_line(fields.get("hours_per_week") or fm.get("hours_per_week") or "0", "hours_per_week")
     local_folder = (fm.get("local_folder") or "").strip()
     if "local_folder" in fields:
         local_folder = normalize_local_folder(fields.get("local_folder"))
@@ -1025,8 +1077,9 @@ def create_profile(project_slug: str, slug: str, fields: dict) -> dict:
     profile_dir = project_dir / "profiles" / slug
     if profile_dir.exists():
         raise ActionError(f"profile '{slug}' already exists")
-    name = (fields.get("name") or slug).strip()
-    topic = (fields.get("topic") or "").strip()
+    _need_free_slug(slug)
+    name = _one_line(fields.get("name") or slug, "name")
+    topic = _flat(fields.get("topic") or "", "topic")
     for sub in ["content/briefs", "channels"]:
         (profile_dir / sub).mkdir(parents=True, exist_ok=True)
     md = f"---\nname: {name}\ntopic: {topic}\nproject: {project_slug}\n---\n"
@@ -1040,8 +1093,8 @@ def update_profile(slug: str, fields: dict) -> dict:
     profile_dir = _profile_dir(slug)  # raises if not found
     f = profile_dir / "profile.md"
     fm, _ = _parse_frontmatter(f.read_text(encoding="utf-8")) if f.exists() else ({}, "")
-    name = (fields.get("name") or fm.get("name") or slug).strip()
-    topic = (fields.get("topic") if fields.get("topic") is not None else fm.get("topic", "")).strip()
+    name = _one_line(fields.get("name") or fm.get("name") or slug, "name")
+    topic = _flat(fields.get("topic") if fields.get("topic") is not None else fm.get("topic", ""), "topic")
     project = fm.get("project", "")
     md = f"---\nname: {name}\ntopic: {topic}\nproject: {project}\n---\n"
     f.write_text(md, encoding="utf-8")
@@ -1055,8 +1108,10 @@ def create_channel(profile_slug: str, slug: str, platform: str, handle: str = ""
     channel_dir = profile_dir / "channels" / slug
     if channel_dir.exists():
         raise ActionError(f"channel '{slug}' already exists")
+    _need_free_slug(slug)
+    platform, handle = _one_line(platform, "platform"), _one_line(handle, "handle")
     channel_dir.mkdir(parents=True, exist_ok=True)
-    handle_line = f"handle: {handle}\n" if handle.strip() else ""
+    handle_line = f"handle: {handle}\n" if handle else ""
     md = f"---\nplatform: {platform}\n{handle_line}---\n"
     (channel_dir / "channel.md").write_text(md, encoding="utf-8")
     (channel_dir / "guidelines.md").write_text("", encoding="utf-8")
@@ -1069,11 +1124,11 @@ def update_channel(slug: str, fields: dict) -> dict:
     guidelines.md is a separate authored file and is left untouched."""
     f = _channel_dir(slug) / "channel.md"  # _channel_dir raises if slug unknown
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8")) if f.exists() else ({}, "")
-    platform = (fields.get("platform") or fm.get("platform") or "").strip()
+    platform = _one_line(fields.get("platform") or fm.get("platform") or "", "platform")
     raw_handle = fields.get("handle") if fields.get("handle") is not None else fm.get("handle", "")
-    handle = (raw_handle or "").strip()
-    name = (fields.get("name") or fm.get("name") or "").strip()
-    bio = (fields.get("bio") or fm.get("bio") or "").strip()
+    handle = _one_line(raw_handle or "", "handle")
+    name = _one_line(fields.get("name") or fm.get("name") or "", "name")
+    bio = _flat(fields.get("bio") or fm.get("bio") or "", "bio")
     lines = [f"platform: {platform}"]
     if handle:
         lines.append(f"handle: {handle}")
@@ -1122,18 +1177,19 @@ def mark_activity_done(title: str, entity_slug: str) -> dict:
     path = ROOT / "portfolio" / "activities.md"
     if not path.exists():
         raise ActionError("activities.md not found")
-    text = path.read_text(encoding="utf-8")
-    # Match the exact line and flip the checkbox
-    escaped = re.escape(title)
-    new_text, n = re.subn(
-        rf"^(- )\[ \] ({escaped}.*)$",
-        r"\1[x] \2",
-        text,
-        flags=re.MULTILINE,
-    )
+    # This exact title in this entity: the file holds every workspace's activities.
+    title, entity_slug = str(title or "").strip(), str(entity_slug or "").strip()
+    lines, n = path.read_text(encoding="utf-8").split("\n"), 0
+    for i, line in enumerate(lines):
+        if not line.startswith("- [ ] "):
+            continue
+        parts = [p.strip() for p in line[6:].split(" — ")]
+        if title and parts[0] == title and f"entity: {entity_slug}" in parts[1:]:
+            lines[i] = "- [x] " + line[6:]
+            n += 1
     if n == 0:
         raise ActionError(f"activity '{title}' not found or already done")
-    path.write_text(new_text, encoding="utf-8")
+    path.write_text("\n".join(lines), encoding="utf-8")
     reindex()
     return {"title": title, "done": True}
 
@@ -1197,8 +1253,10 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
     """Append an activity. Timed ones may not overlap any open timed activity
     in any workspace unless `allow_overlap` (the user's own manual booking);
     bots (osctl) never pass it."""
-    entity = (fields.get("entity") or "").strip()
-    title = (fields.get("title") or "").strip()
+    # One row per line, " — " between fields, in a file every workspace shares: a line break
+    # would write a row into another workspace, so each value stays on its one line.
+    entity = _one_line(fields.get("entity") or "", "entity")
+    title = _one_line(fields.get("title") or "", "title").replace(" — ", " - ")
     if not title:
         raise ActionError("title is required")
     if not entity:
@@ -1206,8 +1264,8 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
     portfolio = ROOT / "portfolio"
     portfolio.mkdir(exist_ok=True)
     path = portfolio / "activities.md"
-    date = (fields.get("date") or "").strip()
-    date_end = (fields.get("date_end") or "").strip()
+    date = _one_line(fields.get("date") or "", "date").replace(" — ", " ")
+    date_end = _one_line(fields.get("date_end") or "", "date_end").replace(" — ", " ")
     time, time_end = _validate_times(date, date_end, (fields.get("time") or "").strip(),
                                      (fields.get("time_end") or "").strip())
     overlaps = find_overlaps(date, time, time_end) if time else []
@@ -1215,7 +1273,7 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
         clash = ", ".join(f"{o['time']}-{o['time_end']}" for o in overlaps)  # no names: workspaces stay private
         raise ActionError(f"{date} {time}-{time_end} overlaps booked time: {clash}. "
                           "Pick a free slot (osctl get-busy) or ask the user.")
-    type_ = (fields.get("type") or "task").strip()
+    type_ = _one_line(fields.get("type") or "task", "type").replace(" — ", " ")
     priority = (fields.get("priority") or "").strip()
     existing_ids: set[str] = set()
     if path.exists():
@@ -1262,6 +1320,8 @@ def create_milestone(fields: dict) -> dict:
     if not date:
         raise ActionError("date is required")
     entity = (fields.get("entity") or "").strip()
+    if entity:
+        _need_known_entity(entity)
     portfolio = ROOT / "portfolio"
     portfolio.mkdir(exist_ok=True)
     path = portfolio / "milestones.json"
@@ -1313,6 +1373,8 @@ def update_milestone(ms_id: str, fields: dict) -> dict:
     """Edit one milestone in milestones.json. Empty values clear the field."""
     path = ROOT / "portfolio" / "milestones.json"
     data = _load_milestones(path)
+    if str(fields.get("entity") or "").strip():
+        _need_known_entity(str(fields["entity"]).strip())
     for m in data["milestones"]:
         if m.get("id") == ms_id:
             for k in _MILESTONE_FIELDS:
@@ -1787,9 +1849,10 @@ def create_product(project_slug: str, slug: str, fields: dict) -> dict:
     prod_dir = project_dir / "products" / slug
     if prod_dir.exists():
         raise ActionError(f"product '{slug}' already exists")
-    name = (fields.get("name") or slug).strip()
-    ptype = (fields.get("type") or "app").strip()
-    status = (fields.get("status") or "idea").strip()
+    _need_free_slug(slug)
+    name = _one_line(fields.get("name") or slug, "name")
+    ptype = _one_line(fields.get("type") or "app", "type")
+    status = _one_line(fields.get("status") or "idea", "status")
     prod_dir.mkdir(parents=True)
     (prod_dir / "product.md").write_text(
         f"---\nname: {name}\ntype: {ptype}\nstatus: {status}\n---\n",
@@ -1900,16 +1963,24 @@ def _parse_feature_line(line: str):
     return checkbox, title, why, priority
 
 
-def _find_feature_line_index(lines: list, feature_id: str):
+def _find_feature_line_index(lines: list, feature_id: str, product_slug: str = None):
     """Return (line_index, current_section) for the checklist line whose
-    slug_key(title) matches feature_id, or None."""
+    slug_key(title) matches feature_id, or the composed id add-feature hands out
+    (pr1.sec05.pd1.ft2), or None."""
+    registry = None
+    if product_slug and "." in feature_id:
+        db = _db_module()
+        registry = build_id_registry(db.tree(), db.posts(), root=ROOT)
     section = None
     for i, line in enumerate(lines):
         if line.startswith("## "):
             section = line[3:].strip()
             continue
         parsed = _parse_feature_line(line)
-        if parsed and slug_key(parsed[1]) == feature_id:
+        if not parsed:
+            continue
+        key = slug_key(parsed[1])
+        if key == feature_id or (registry and registry.get(lk_feature(product_slug, key)) == feature_id):
             return i, section
     return None
 
@@ -1962,7 +2033,7 @@ def update_feature(product_slug: str, feature_id: str, fields: dict) -> dict:
     if not roadmap.exists():
         raise ActionError(f"feature '{feature_id}' not found")
     lines = roadmap.read_text(encoding="utf-8").splitlines()
-    found = _find_feature_line_index(lines, feature_id)
+    found = _find_feature_line_index(lines, feature_id, product_slug)
     if not found:
         raise ActionError(f"feature '{feature_id}' not found")
     idx, cur_section = found
@@ -2021,7 +2092,7 @@ def delete_feature(product_slug: str, feature_id: str) -> dict:
     if not roadmap.exists():
         raise ActionError(f"feature '{feature_id}' not found")
     lines = roadmap.read_text(encoding="utf-8").splitlines()
-    found = _find_feature_line_index(lines, feature_id)
+    found = _find_feature_line_index(lines, feature_id, product_slug)
     if not found:
         raise ActionError(f"feature '{feature_id}' not found")
     idx, _section = found

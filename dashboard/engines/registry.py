@@ -1,5 +1,6 @@
 """registry.py: which engine runs a turn."""
 import os
+import pwd
 import shutil
 
 from dashboard.engines import config
@@ -45,22 +46,25 @@ def default_id(data):
     return f"api:{data['providers'][0]['id']}"
 
 
+def _people_engine(data, root, refusal=NO_PEOPLE_ENGINE):
+    """The API key for invited people. Nothing else ever answers for them."""
+    if not data.get("people"):
+        raise EngineRefused(refusal)
+    engine = get(data["people"], root)
+    if engine.kind != "api":
+        raise EngineRefused(refusal)
+    return engine
+
+
 def pick(root, ws, bot, invited=False, shared=False, apps=False):
     """The engine for one run. An invited person's message never runs on the owner's login.
     A full-disk engine runs only the owner's private threads, with no connected apps."""
     data = config.load(root)
     if invited:
-        if not data.get("people"):
-            raise EngineRefused(NO_PEOPLE_ENGINE)
-        engine = get(data["people"], root)
-        if engine.kind != "api":
-            raise EngineRefused(NO_PEOPLE_ENGINE)
-        return engine
+        return _people_engine(data, root)
     engine = get(data["bots"].get(f"{ws}/{bot}") or data["workspaces"].get(ws) or default_id(data), root)
     if shared and not engine.shared_safe:
-        if not data.get("people"):
-            raise EngineRefused(NO_SHARED_ENGINE.format(label=engine.label))
-        return get(data["people"], root)
+        return _people_engine(data, root, NO_SHARED_ENGINE.format(label=engine.label))
     if apps and "apps" not in engine.supports:
         fallback = data.get("default") if data.get("default") not in (None, "", engine.id) else ENGINE_ID
         other = get(fallback, root)
@@ -75,16 +79,14 @@ def for_job(root=config.ROOT):
     data = config.load(root)
     wanted = os.environ.get(ENGINE_ENV) or default_id(data)
     if wanted.startswith("runner:"):  # jobs run on the server: never another person's login
-        if wanted == "runner:owner":
-            wanted = default_id(data)
-        elif data.get("people"):
-            wanted = data["people"]
-        else:
-            raise EngineRefused(NO_PEOPLE_ENGINE)
+        if wanted != "runner:owner":
+            return _people_engine(data, root)
+        wanted = default_id(data)
     engine = get(wanted, root)
     if "complete" in engine.supports:
         return engine
-    return get(data.get("people") or ENGINE_ID, root)  # a CLI that keeps a shell never runs a job
+    # An owner's turn on a CLI that keeps a shell: a job never runs on one.
+    return _people_engine(data, root) if data.get("people") else get(ENGINE_ID, root)
 
 
 def statuses(root=config.ROOT):
@@ -103,4 +105,4 @@ def terminal_cmd(root=config.ROOT):
     choice = config.load(root).get("terminal") or "shell"
     if choice in ("claude", "codex") and shutil.which(choice):
         return [choice]
-    return [os.environ.get("SHELL") or "/bin/sh", "-l"]
+    return [os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh", "-l"]  # a service has no $SHELL

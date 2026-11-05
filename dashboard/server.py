@@ -71,9 +71,11 @@ from core.ids import (  # noqa: E402
 )
 
 APP_HTML = HERE / "app.html"
-AUTH_COOKIE = "myos_auth"
 # "mac" (default) or "server" (set by scripts/server-setup.sh): gates Mac-only features.
 DEPLOYMENT = "server" if os.environ.get("MYOS_DEPLOYMENT") == "server" else "mac"
+# Browsers keep cookies per host, not per port: over the SSH connection a server and the
+# Mac's own myOS are both 127.0.0.1, and one cookie name would log each out of the other.
+AUTH_COOKIE = "myos_server_auth" if DEPLOYMENT == "server" else "myos_auth"
 OWNER_TOKEN_FILE = ROOT / "team" / "owner-token"
 
 
@@ -1200,8 +1202,8 @@ def _room_for_chat(rec, team, ws, projects):
 
 def _for_person(rec):
     """A chat as an invited person gets it: no `scope` (it holds the owner's
-    linked app folder path)."""
-    return {k: v for k, v in rec.items() if k != "scope"}
+    linked app folder path), no `engines` (session ids on the owner's logins)."""
+    return {k: v for k, v in rec.items() if k not in ("scope", "engines")}
 
 
 def _people_view(ws, viewer):
@@ -2091,11 +2093,14 @@ class Handler(BaseHTTPRequestHandler):
         graph_error = None
         if workspace_dir and wants_app_context and tokensave_ready:
             try:
+                # An invited person's question must not read the app's source out of this.
                 graph_context = tokensave_bridge.context(
                     project_slug, tokensave_task, active_project=project_slug,
+                    include_code=not shared,
                 )
             except (tokensave_bridge.BridgeError, OSError) as exc:
-                graph_error = str(exc)[:1200]
+                # The detail can name the owner's folders: invited people get none of it.
+                graph_error = "the code index could not refresh" if shared else str(exc)[:1200]
 
         if skill == "tokensave" and graph_error:
             self.send_response(200)
@@ -2226,8 +2231,12 @@ class Handler(BaseHTTPRequestHandler):
             c.workspace, c.deny_dirs, c.deny_files, c.readonly = ws, sess.deny_dirs, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
-            c.engine = engine if engine.kind == "runner" else engine_registry.pick(
-                ROOT, ws, b2, invited=bool(person), shared=shared)
+            try:
+                c.engine = engine if engine.kind == "runner" else engine_registry.pick(
+                    ROOT, ws, b2, invited=bool(person), shared=shared)
+            except EngineRefused as e:  # this teammate's own engine can't run here
+                emit({"error": str(e)})
+                raise _RunFailed from None
             c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
             own = team.skills_of(b2)
             c_skill = _suggest_skill(question, among=own)
@@ -2243,7 +2252,7 @@ class Handler(BaseHTTPRequestHandler):
             if locked or c.engine.full_disk:  # its own read-only token, revoked when it answers
                 c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
                                                           "engine": c.engine.id, "runner_owner": sender,
-                                                          "shared": locked}),
+                                                          "shared": shared}),
                         "os_port": self.server.server_address[1]}
             try:
                 return run(c, prompt, c_model, c_web, msg, **c_kw)
@@ -2264,7 +2273,7 @@ class Handler(BaseHTTPRequestHandler):
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
-                                                         "shared": locked}),
+                                                         "shared": shared}),
                        "os_port": self.server.server_address[1]}
         try:
             # Tell the client which saved chat this turn belongs to (a scope
@@ -3118,14 +3127,20 @@ def main():
         sys.stdout.write(r.stdout)
         if r.returncode != 0:
             sys.stderr.write(r.stderr)
-            sys.exit("startup re-index failed — fix source files and retry")
+            # One bad file must not keep an always-on myOS down: with an earlier index it
+            # starts on that, says so in the log, and writes stay refused until it is fixed.
+            if not db.db_exists():
+                sys.exit("startup re-index failed — fix source files and retry")
+            print("WARNING: re-index failed; running on the last good index. Fix the file above.", file=sys.stderr)
 
     def _shutdown_children(*_a):
         # Terminate the chat agent's in-flight turn, if any. Per-connection
         # TerminalSessions already close() in _handle_terminal_ws's finally.
-        if _CHAT is not None:
+        for live in [_CHAT] + [slot[0] for slot in list(_PERSON_CHATS.values())]:
+            if live is None:
+                continue
             try:
-                _CHAT.close()
+                live.close()
             except Exception:  # noqa: BLE001
                 pass
         remove_uploads()

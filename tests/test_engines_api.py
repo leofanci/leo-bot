@@ -397,7 +397,9 @@ class Pick(unittest.TestCase):
         self.api()
         config.set_choice("people", "api:anthropic", None, self.root)
         self.assertEqual(registry.pick(self.root, "acme", "cmo", invited=True).id, "api:anthropic")
-        config.set_choice("people", "claude-code", None, self.root)  # a hand-edited file
+        data = config.load(self.root)  # a hand-edited file
+        data["people"] = "claude-code"
+        config.save(data, self.root)
         with self.assertRaises(EngineRefused):
             registry.pick(self.root, "acme", "cmo", invited=True)
 

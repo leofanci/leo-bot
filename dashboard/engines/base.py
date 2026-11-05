@@ -5,11 +5,13 @@ An engine runs one bot turn and yields the event tuples the server consumes:
 The server computes a TurnPolicy per turn; each driver enforces it its own way
 and refuses a turn it cannot enforce (EngineRefused), never running with more.
 """
+import threading
 from dataclasses import dataclass
 
 
-class EngineRefused(Exception):
-    """This engine cannot run this turn under its policy. The message is shown to the user."""
+class EngineRefused(ValueError):
+    """This engine cannot run this turn under its policy. The message is shown to the user.
+    A ValueError, so an owner's settings call on a missing engine answers 400 with that message."""
 
 
 class SessionLost(Exception):
@@ -39,6 +41,36 @@ class TurnTokens:
     os_port: int = None
     os_url: str = None        # a runner: osctl is on the server, over HTTPS
     runner_token: str = None
+
+
+def drain(stream):
+    """Read a child's stderr as it comes: a full pipe would freeze a chatty child, and the
+    turn with it, while we read its stdout. Returns a call that gives the text once it ended."""
+    box = []
+
+    def read():
+        try:
+            with stream:
+                box.append(stream.read() or "")
+        except (OSError, ValueError):
+            pass
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+
+    def text():
+        worker.join(timeout=5)
+        return "".join(box)
+    return text
+
+
+def stop_child(proc):
+    """A turn abandoned half way (the browser left) must not leave its child running."""
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
 
 
 class Engine:

@@ -21,7 +21,8 @@ with a bot) runs without a shell, file access or connected apps, for your
 messages there too. The bot's only tool is myOS itself (osctl), run by the
 server inside that workspace: it can read and save that workspace's content,
 but not your other workspaces, your files, your keys, bot memory or your mail.
-Bots can still answer from a summary of the project's linked app code. For
+Bots can still answer from an outline of the project's linked app (names and
+structure, never its source code). For
 mail, calendar or anything on your machine, use a DM with a bot or a private
 channel with no people in it. On the shared calendar, other workspaces show
 only as busy time. The terminal only opens on this machine, never over the

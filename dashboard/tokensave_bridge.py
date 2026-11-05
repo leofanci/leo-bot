@@ -121,11 +121,12 @@ def _run_tool(project_slug: str, tool: str, args: dict, *, active_project=None) 
     return output
 
 
-def context(project_slug: str, task: str, *, active_project=None) -> str:
+def context(project_slug: str, task: str, *, active_project=None, include_code=True) -> str:
+    """`include_code=False`: names and structure only, for a thread invited people can see."""
     return _run_tool(project_slug, "context", {
         "task": _bounded(task, "task"),
         "mode": "explore",
-        "include_code": True,
+        "include_code": bool(include_code),
         "max_nodes": 10,
         "max_per_file": 2,
         "max_code_blocks": 4,

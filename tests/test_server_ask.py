@@ -70,7 +70,7 @@ def _captured(body, tree=None):
             pass
 
         def ask(self, text, with_web=False, model=None, workspace_dir=None,
-                file_search_mode=False, web_domains=()):
+                file_search_mode=False, web_domains=(), **tokens):
             seen["text"] = text
             seen["web_domains"] = web_domains
             seen["with_web"] = with_web
@@ -80,6 +80,7 @@ def _captured(body, tree=None):
             yield ("done", {"result": "ok"})
 
     h = _bare_handler(io.BytesIO())
+    h.server = mock.Mock(server_address=("127.0.0.1", 8765))
     # build_id_registry persists numbering under {server.ROOT}/database/data/ —
     # isolate it so fixture slugs (acme, demo, ...) never leak into the real repo.
     with tempfile.TemporaryDirectory() as tmp, \
@@ -148,10 +149,29 @@ class SSE(unittest.TestCase):
         self.assertIn("fresh auth graph", seen["text"])
         self.assertTrue(seen["file_search_mode"])
         graph.assert_called_once_with(
-            "acme", "where is auth handled?", active_project="acme",
+            "acme", "where is auth handled?", active_project="acme", include_code=True,
         )
         self.assertLess(len(server.linked_workspace_prompt(
             "acme", "/tmp/acme-app", graph_context="small result")), 1100)
+
+    def test_a_shared_thread_gets_no_linked_source_code(self):
+        tree = [{"slug": "acme", "kind": "venture", "type": "project",
+                 "local_folder": "/tmp/acme-app", "profiles": []}]
+        with mock.patch.object(server.fileops, "project_local_folder",
+                               return_value="/tmp/acme-app"), \
+             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
+             mock.patch.object(server, "_shared_room", return_value=True), \
+             mock.patch.object(server.tokensave_bridge, "context",
+                               return_value="outline only") as graph:
+            seen = _captured({
+                "messages": [{"role": "user", "content": "where is auth handled?"}],
+                "project_slug": "acme",
+            }, tree)
+        graph.assert_called_once_with(
+            "acme", "where is auth handled?", active_project="acme", include_code=False,
+        )
+        self.assertNotIn("/tmp/acme-app", seen["text"])
+        self.assertFalse(seen["file_search_mode"])
 
     def test_unknown_or_unlinked_project_cannot_add_a_directory(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
@@ -210,7 +230,7 @@ class SSE(unittest.TestCase):
         self.assertIn("fresh auth graph", seen["text"])
         self.assertIn("already included in this turn", seen["text"])
         graph.assert_called_once_with(
-            "acme", "where is auth handled?", active_project="acme",
+            "acme", "where is auth handled?", active_project="acme", include_code=True,
         )
 
     def test_linked_gtm_chat_without_index_gets_bounded_file_fallback(self):
