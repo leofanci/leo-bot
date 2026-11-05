@@ -64,6 +64,7 @@ FORBIDDEN_DIRECTORIES = {
 PRIVATE_DATA_PREFIXES = (
     ("projects",),
     ("portfolio",),
+    ("private",),
     ("database", "data"),
     (".remember",),
     (".superpowers",),
@@ -362,6 +363,7 @@ class TestNoUsageData(unittest.TestCase):
             "projects/example/project.md",
             "projects/example/profiles/profile/content/plan.json",
             "portfolio/activities.md",
+            "private/notes.md",
             "database/data/os.db",
             ".remember/session.log",
             ".superpowers/state.json",

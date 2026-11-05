@@ -33,7 +33,7 @@ MAX_REDIRECTS = 4
 FETCH_TIMEOUT = 20
 MAX_MATCHES = 200
 # Every workspace's data at once, or the machine's own state (same list as osctl read-file).
-_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db", ".remember/",
+_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "private/", "database/", "os.db", ".remember/",
                      ".superpowers/", ".tokensave/", ".claude/", ".codex/", ".git/", "dashboard/vendor/")
 _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".log")
 _HOME_PRIVATE = (".claude", ".codex", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config")

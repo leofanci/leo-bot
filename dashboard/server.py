@@ -944,7 +944,7 @@ def _workspace_deny_dirs(ws, projects):
     dirs = [ROOT / "projects" / p["slug"] for p in others]
     dirs += [Path(p["local_folder"]) for p in others if p.get("local_folder")]  # their app code
     dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
-    dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave"]  # the owner's machine state
+    dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave", ROOT / "private"]  # the owner's machine state
     return tuple(str(d) for d in dirs)
 
 
@@ -1006,7 +1006,6 @@ engine_api.set_backends(osctl=os_relay.run_osctl, osctl_clean=os_relay.clean_arg
 
 def _engines_view():
     return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
-            "cloud": deployment_settings.view()["cloud"],
             "ws_list": [w for w in _workspaces(db.tree()) if w["id"] != bots.HQ]}
 
 
