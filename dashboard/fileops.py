@@ -1963,16 +1963,24 @@ def _parse_feature_line(line: str):
     return checkbox, title, why, priority
 
 
-def _find_feature_line_index(lines: list, feature_id: str):
+def _find_feature_line_index(lines: list, feature_id: str, product_slug: str = None):
     """Return (line_index, current_section) for the checklist line whose
-    slug_key(title) matches feature_id, or None."""
+    slug_key(title) matches feature_id, or the composed id add-feature hands out
+    (pr1.sec05.pd1.ft2), or None."""
+    registry = None
+    if product_slug and "." in feature_id:
+        db = _db_module()
+        registry = build_id_registry(db.tree(), db.posts(), root=ROOT)
     section = None
     for i, line in enumerate(lines):
         if line.startswith("## "):
             section = line[3:].strip()
             continue
         parsed = _parse_feature_line(line)
-        if parsed and slug_key(parsed[1]) == feature_id:
+        if not parsed:
+            continue
+        key = slug_key(parsed[1])
+        if key == feature_id or (registry and registry.get(lk_feature(product_slug, key)) == feature_id):
             return i, section
     return None
 
@@ -2025,7 +2033,7 @@ def update_feature(product_slug: str, feature_id: str, fields: dict) -> dict:
     if not roadmap.exists():
         raise ActionError(f"feature '{feature_id}' not found")
     lines = roadmap.read_text(encoding="utf-8").splitlines()
-    found = _find_feature_line_index(lines, feature_id)
+    found = _find_feature_line_index(lines, feature_id, product_slug)
     if not found:
         raise ActionError(f"feature '{feature_id}' not found")
     idx, cur_section = found
@@ -2084,7 +2092,7 @@ def delete_feature(product_slug: str, feature_id: str) -> dict:
     if not roadmap.exists():
         raise ActionError(f"feature '{feature_id}' not found")
     lines = roadmap.read_text(encoding="utf-8").splitlines()
-    found = _find_feature_line_index(lines, feature_id)
+    found = _find_feature_line_index(lines, feature_id, product_slug)
     if not found:
         raise ActionError(f"feature '{feature_id}' not found")
     idx, _section = found

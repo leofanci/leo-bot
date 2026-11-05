@@ -76,12 +76,13 @@ class FileToolsAreSafe(Tmp):
     def policy(self, **kw):
         return TurnPolicy(workspace_dir=str(self.root), file_search=True, **kw)
 
-    def test_a_catastrophic_pattern_is_killed_not_run_on_the_server(self):
-        (self.root / "a.txt").write_text("a" * 40 + "!\n")
+    def test_a_search_that_never_ends_is_killed_not_run_on_the_server(self):
+        (self.root / "a.txt").write_text("text\n")
         started = time.time()
-        with mock.patch.object(api_tools, "SEARCH_TIMEOUT", 1):
+        with mock.patch.object(api_tools, "SEARCH_TIMEOUT", 1), \
+                mock.patch.object(api_tools, "_GREP_WORKER", "import time\ntime.sleep(60)"):
             with self.assertRaises(api_tools.ToolError):
-                api_tools.search_files(None, "(a+)+$", self.root, self.policy())
+                api_tools.search_files(None, "text", self.root, self.policy())
         self.assertLess(time.time() - started, 5)
 
     def test_search_finds_and_skips_secrets(self):

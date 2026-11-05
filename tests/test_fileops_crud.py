@@ -268,6 +268,18 @@ class CrudTest(unittest.TestCase):
         self.assertIn("Night mode", (self.root / "projects/acme/products/app/roadmap.md").read_text())
         self.assertEqual(out["title"], "Night mode")
 
+    def test_update_and_delete_accept_the_id_add_feature_returned(self):
+        fileops.create_product("acme", "app", {"name": "Acme App"})
+        made = fileops.add_feature("app", {"title": "Dark mode"})
+        self.assertIn(".", made["id"])
+        fileops.update_feature("app", made["id"], {"why": "asked for"})
+        roadmap = self.root / "projects/acme/products/app/roadmap.md"
+        self.assertIn("asked for", roadmap.read_text())
+        with self.assertRaises(fileops.ActionError):
+            fileops.update_feature("app", made["id"] + "9", {"why": "x"})
+        fileops.delete_feature("app", made["id"])
+        self.assertNotIn("Dark mode", roadmap.read_text())
+
     def test_update_feature_unknown_raises(self):
         self._make_product_with_feature()
         with self.assertRaises(fileops.ActionError):
