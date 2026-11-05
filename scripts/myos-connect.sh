@@ -16,7 +16,13 @@ if [ -z "$TARGET" ]; then
   exit 1
 fi
 
-TOKEN="$(ssh "$TARGET" "sudo -n cat ~$MYOS_USER/my-os/dashboard/.auth-token 2>/dev/null || cat ~$MYOS_USER/my-os/dashboard/.auth-token")"
+# The service writes this as it starts, so give a fresh start a moment.
+TOKEN=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$MYOS_USER/my-os/dashboard/.auth-token 2>/dev/null || cat ~$MYOS_USER/my-os/dashboard/.auth-token 2>/dev/null" || true)"
+  [ -n "$TOKEN" ] && break
+  sleep 3
+done
 if [ -z "$TOKEN" ]; then
   echo "Could not read the login token on $TARGET. Is the myos service running?" >&2
   exit 1
