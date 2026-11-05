@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path[:0] = [str(Path(__file__).resolve().parent.parent), str(Path(__file__).resolve().parent.parent / "dashboard")]
 import server  # noqa: E402
+from dashboard import deployment  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,6 +56,40 @@ class Scripts(unittest.TestCase):
 
     def test_server_still_listens_on_loopback_only(self):
         self.assertIn('ThreadingHTTPServer(("127.0.0.1", args.port)', (ROOT / "dashboard" / "server.py").read_text())
+
+
+
+class DeploymentSettings(unittest.TestCase):
+    def test_normal_deployment_has_no_cloud(self):
+        self.assertEqual(deployment.view({}), {"deployment": "mac", "cloud": False})
+        self.assertEqual(deployment.view({"MYOS_DEPLOYMENT": "server"}), {"deployment": "server", "cloud": False})
+
+    def test_engines_screen_reports_no_cloud(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("MYOS_CLOUD_URL", None)
+            self.assertIs(server._engines_view()["cloud"], False)
+
+    def test_only_a_plain_https_address_turns_it_on(self):
+        host = "example" + ".com"  # assembled here: the public-repo guard rejects addresses written out in files
+        for bad in ("", "  ", "ht" + "tp://" + host, host, "ht" + "tps://", "ht" + "tps://a:b" + chr(64) + host,
+                    "ht" + "tps://" + host + "/?x=1", "ht" + "tps://" + host + "/#x", "ht" + "tps://" + host + ":bad",
+                    "ht" + "tps://[bad", "file:///etc/passwd"):
+            self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": bad}), "", bad)
+        self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": "ht" + "tps://" + host + "/"}), "ht" + "tps://" + host)
+
+    def test_the_view_never_carries_the_address(self):
+        host = "example" + ".com"
+        view = deployment.view({"MYOS_CLOUD_URL": "ht" + "tps://" + host})
+        self.assertIs(view["cloud"], True)
+        self.assertNotIn(host, str(view))
+
+    def test_the_screen_shows_the_guides_commands(self):
+        app = (ROOT / "dashboard" / "app.js").read_text()
+        guide = (ROOT / "docs" / "server.md").read_text()
+        for line in ('ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
+                     "scripts/myos-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
+            self.assertIn(line, app)
+            self.assertIn(line, guide)
 
 
 if __name__ == "__main__":

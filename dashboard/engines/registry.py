@@ -3,6 +3,7 @@ import os
 import pwd
 import shutil
 
+from dashboard import deployment
 from dashboard.engines import config
 from dashboard.engines.acp import AcpEngine
 from dashboard.engines.api import ApiEngine
@@ -16,7 +17,7 @@ NO_SHARED_ENGINE = "{label} can't run in a thread invited people can see. Pick a
 
 
 def on_server():
-    return os.environ.get("MYOS_DEPLOYMENT") == "server"
+    return deployment.mode() == "server"
 
 
 def get(engine_id, root=config.ROOT):
