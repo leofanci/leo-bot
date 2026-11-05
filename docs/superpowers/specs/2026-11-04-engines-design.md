@@ -10,7 +10,6 @@ things need more than that:
   API key.
 - A team server (myOS on a VPS) should not depend on one member's personal
   login.
-- A hosted myOS, if it ever exists, can only run on API keys.
 
 An **engine** is what runs a bot's turn. This design adds an engine layer with
 four drivers, so each workspace and each bot can pick its engine. Prior art:
@@ -47,8 +46,6 @@ ACP). Behavior is borrowed, no code.
 
 ## Non-goals
 
-- No hosted myOS in this round. The design only keeps it possible (API
-  engine, per-customer copy).
 - No moving one engine's private transcript into another engine. Each
   engine keeps its own session per thread (section 6a); what crosses between
   engines is only the thread's visible messages.
@@ -380,19 +377,15 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
 | 1 | Local | owner's Mac | owner's Mac | owner's for their own turns; API key for invited people |
 | 2 | Server + runners | VPS | each sender's Mac (section 10) | each sender's own; API key fallback |
 | 3 | All on a server | VPS | VPS | API key; the owner's subscription only for the owner's own turns |
-| 4 | Hosted myOS (later, separate design) | one container per customer | customer's container, or their runner | customer's own sign-in or key; myOS credits only through the api driver |
 
-Case 4 is not built here. These rules keep it open and cost little now:
+These rules apply to every case:
 
 - `deployment: "mac" | "server"` gates every Mac-only feature (folder
   chooser, opening Finder, `myOS.app`, full-disk engines), not only engines.
 - Every secret lives in one place per data root (`engines.json`,
   `integrations.json`, `team/`), never in code or env baked into an image.
 - Each `done` event's tokens and cost are stored per run with `engine_id` and
-  `account` (6a). Metering per account is what a credits provider would bill
-  from later.
-- A credits provider ("myOS Cloud") is one more api-driver provider entry; no
-  special path. Provider terms get read when this is designed.
+  `account` (6a).
 - Each person-facing label names the account that paid.
 
 Moving a workspace between machines (export/import), one dashboard showing

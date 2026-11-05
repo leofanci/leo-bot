@@ -5,6 +5,11 @@
 Repo is public. NEVER write real venture/profile/product/channel names, post content, or any user data into tracked files: code, tests, docs, comments, examples, placeholders, commit messages. Real data lives only in gitignored `projects/`. Fixtures and examples use generic slugs only: `demo`, `acme`, `profile-a`, `profile-b`. Enforced by `tests/test_no_usage_data.py`, run it before every commit.
 
 
+## Private folder
+
+`private/` is gitignored: owner-only notes and unreleased work. Tracked files, commit messages and PRs never describe what is in it.
+
+
 ## Git workflow
 
 Feature branches and worktrees are fine (superpowers workflow OK). When a job is done and approved, merge it into `main`. Keep `main` the single source of truth: don't leave finished work stranded on side branches, and delete branches/worktrees once merged.

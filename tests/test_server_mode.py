@@ -60,42 +60,13 @@ class Scripts(unittest.TestCase):
 
 
 class DeploymentSettings(unittest.TestCase):
-    def test_normal_deployment_has_no_cloud(self):
-        self.assertEqual(deployment.view({}), {"deployment": "mac", "cloud": False})
-        self.assertEqual(deployment.view({"MYOS_DEPLOYMENT": "server"}), {"deployment": "server", "cloud": False})
-
-    def test_engines_screen_reports_no_cloud(self):
-        with mock.patch.dict(os.environ):
-            os.environ.pop("MYOS_CLOUD_URL", None)
-            self.assertIs(server._engines_view()["cloud"], False)
-
-    def test_only_a_plain_https_address_turns_it_on(self):
-        host = "example" + ".com"  # assembled here: the public-repo guard rejects addresses written out in files
-        for bad in ("", "  ", "ht" + "tp://" + host, host, "ht" + "tps://", "ht" + "tps://a:b" + chr(64) + host,
-                    "ht" + "tps://" + host + "/?x=1", "ht" + "tps://" + host + "/#x", "ht" + "tps://" + host + ":bad",
-                    "ht" + "tps://[bad", "file:///etc/passwd", "ht" + "tps://exa mple." + "com", "ht" + "tps://exa\tmple." + "com",
-                    "ht" + "tps://exa\nmple." + "com", "ht" + "tps://" + host + "/a b", "ht" + "tps://" + host + "\\x",
-                    "ht" + "tps://" + host + ":0", "ht" + "tps://" + host + ":99999", "ht" + "tps://-"):
-            self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": bad}), "", bad)
-        self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": "ht" + "tps://" + host + "/"}), "ht" + "tps://" + host)
-
-    def test_a_port_and_a_path_are_still_plain_addresses(self):
-        address = "ht" + "tps://cloud." + "example" + ".com:8443/v1"
-        self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": address}), address)
+    def test_mode_comes_from_the_environment(self):
+        self.assertEqual(deployment.mode({}), "mac")
+        self.assertEqual(deployment.mode({"MYOS_DEPLOYMENT": "server"}), "server")
+        self.assertEqual(deployment.mode({"MYOS_DEPLOYMENT": "other"}), "mac")
 
     def test_the_server_reads_its_mode_from_one_place(self):
         self.assertIn("DEPLOYMENT = deployment_settings.mode()", (ROOT / "dashboard" / "server.py").read_text())
-
-    def test_the_guide_says_hosted_is_still_to_come(self):
-        guide = (ROOT / "docs" / "server.md").read_text()
-        self.assertIn("## No hosted version yet", guide)
-        self.assertIn("There is no hosted myOS yet, but there will be.", guide)
-
-    def test_the_view_never_carries_the_address(self):
-        host = "example" + ".com"
-        view = deployment.view({"MYOS_CLOUD_URL": "ht" + "tps://" + host})
-        self.assertIs(view["cloud"], True)
-        self.assertNotIn(host, str(view))
 
     def test_the_screen_shows_the_guides_commands(self):
         app = (ROOT / "dashboard" / "app.js").read_text()
@@ -104,6 +75,17 @@ class DeploymentSettings(unittest.TestCase):
                      "scripts/myos-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
             self.assertIn(line, app)
             self.assertIn(line, guide)
+
+
+class PrivateFolder(unittest.TestCase):
+    def test_git_ignores_it(self):
+        check = subprocess.run(["git", "check-ignore", "-q", "private/notes.md"], cwd=ROOT)
+        self.assertEqual(check.returncode, 0)
+
+    def test_company_bots_cant_read_it(self):
+        self.assertIn(str(ROOT / "private"), server._workspace_deny_dirs("acme", []))
+        for source in ("dashboard/osctl.py", "dashboard/engines/api_tools.py"):
+            self.assertIn('"private/"', (ROOT / source).read_text(), source)
 
 
 if __name__ == "__main__":

@@ -249,6 +249,7 @@ class SharedCalendar(unittest.TestCase):
                      ("create-activity", "--entity", "demo", "--title", "x"),
                      ("read-file", "--path", "projects/demo/project.md"),
                      ("read-file", "--path", "portfolio/activities.md"),
+                     ("read-file", "--path", "private/notes.md"),
                      ("create-project", "--slug", "new")):
             r = self.osctl("acme", *argv)
             self.assertFalse(r["ok"], argv)

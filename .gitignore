@@ -78,6 +78,9 @@ dashboard/os.db
 # User portfolio content — real operational data, 100% untracked
 /portfolio/
 
+# Owner-only notes and unreleased work
+/private/
+
 # Saved AI chats (user conversation data)
 /chats/
 

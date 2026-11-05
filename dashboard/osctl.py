@@ -49,7 +49,7 @@ _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-cata
 _NETWORK_CMDS = {"research-signal"}
 # Repo areas that hold every workspace's data at once (calendar via get-busy),
 # or the owner's own machine state (session notes, indexes, logs).
-_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "database/", "os.db", ".remember/",
+_PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "private/", "database/", "os.db", ".remember/",
                      ".superpowers/", ".tokensave/", ".claude/", ".git/", "dashboard/vendor/")
 _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sqlite3", ".log")
 # A shared thread (os_relay: an invited person can see it). It reads the team memory,
