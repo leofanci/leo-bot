@@ -78,14 +78,15 @@ def upsert_provider(fields, root=ROOT):
     if not _ID_RE.match(pid):
         raise ValueError("id: lowercase letters, digits and dashes")
     preset = PRESETS.get(pid, {})
-    fmt = fields.get("format") or preset.get("format")
-    if fmt not in FORMATS:
-        raise ValueError(f"format: one of {', '.join(FORMATS)}")
-    base = str(fields.get("base_url") or preset.get("base_url") or "").strip().rstrip("/")
-    if not re.match(r"^https?://[^\s/]+", base):
-        raise ValueError("base_url: an http(s) address")
     data = load(root)
     old = next((p for p in data["providers"] if p["id"] == pid), {})
+    # An edit sends only what changed: what is saved fills in the rest.
+    fmt = fields.get("format") or old.get("format") or preset.get("format")
+    if fmt not in FORMATS:
+        raise ValueError(f"format: one of {', '.join(FORMATS)}")
+    base = str(fields.get("base_url") or old.get("base_url") or preset.get("base_url") or "").strip().rstrip("/")
+    if not re.match(r"^https?://[^\s/]+", base):
+        raise ValueError("base_url: an http(s) address")
     key = str(fields.get("key") or "").strip()
     if not key and old.get("key"):
         if old.get("base_url") != base:  # a saved key never follows a new address on its own

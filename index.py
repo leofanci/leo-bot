@@ -25,6 +25,7 @@ FK resolves; an unresolved slug aborts the whole rebuild (no orphan rows).
 """
 
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -511,10 +512,11 @@ def build(root: Path):
 
     check_slugs(slugs, relationships, memos, experiments, posts, post_channels, features, activities, milestones)
 
-    # wipe + recreate from schema
-    if db_path.exists():
-        db_path.unlink()
-    conn = sqlite3.connect(db_path)
+    # Recreate from schema beside the old one, and swap only when it all worked: a failure
+    # here must leave the last good index in place, not an empty one.
+    tmp_path = db_path.with_name(f".{db_path.name}.{os.getpid()}.tmp")
+    tmp_path.unlink(missing_ok=True)
+    conn = sqlite3.connect(tmp_path)
     conn.execute("PRAGMA foreign_keys = ON;")
     for migration in sorted(MIGRATIONS_DIR.glob("*.sql")):
         conn.executescript(migration.read_text(encoding="utf-8"))
@@ -577,6 +579,7 @@ def build(root: Path):
 
     if fk:
         raise IndexError_(f"foreign_key_check found violations: {fk}")
+    os.replace(tmp_path, db_path)
 
     print(f"Rebuilt {rel(db_path, root)}")
     for name, rows in counts.items():
@@ -591,9 +594,12 @@ def main():
         sys.exit(1)
     try:
         build(root)
-    except IndexError_ as exc:
+    except (IndexError_, sqlite3.Error) as exc:
         print(f"\nINDEX FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        for leftover in (root / DB_RELPATH).parent.glob(f".{DB_RELPATH.name}.{os.getpid()}.tmp*"):
+            leftover.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

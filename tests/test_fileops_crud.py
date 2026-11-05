@@ -280,6 +280,15 @@ class CrudTest(unittest.TestCase):
         fileops.delete_feature("app", made["id"])
         self.assertNotIn("Dark mode", roadmap.read_text())
 
+    def test_update_and_delete_accept_the_id_create_phase_returned(self):
+        made = fileops.create_phase("acme", "Launch")
+        self.assertIn(".", made["id"])
+        fileops.update_phase("acme", made["id"], {"goal": "first users"})
+        with self.assertRaises(fileops.ActionError):
+            fileops.update_phase("acme", made["id"] + "9", {"goal": "x"})
+        fileops.delete_phase("acme", made["id"])
+        self.assertEqual(fileops.gtm_store.load_phases(self.root, "acme"), [])
+
     def test_update_feature_unknown_raises(self):
         self._make_product_with_feature()
         with self.assertRaises(fileops.ActionError):

@@ -53,7 +53,9 @@ class WebFetchIsSafe(unittest.TestCase):
         self.assertNotIn("owner secret", str(caught.exception))
 
     def test_mapped_and_private_addresses_are_not_public(self):
-        for ip in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1", "fe80::1%en0", "224.0.0.1"):
+        for ip in ("127.0.0.1", "10.0.0.1", "169.254.169.254", "::1", "::ffff:127.0.0.1", "fe80::1%en0", "224.0.0.1",
+                   "2002:7f00:1::", "2002:a9fe:a9fe::", "64:ff9b::7f00:1", "64:ff9b::a9fe:a9fe",
+                   "2001:0:4136:e378:8000:63bf:80ff:fffe"):
             self.assertFalse(api_tools._is_public_ip(ip), ip)
         self.assertTrue(api_tools._is_public_ip("93.184.216.34"))
 
@@ -63,6 +65,9 @@ class WebFetchIsSafe(unittest.TestCase):
             started = time.time()
             api_tools._page_text(page, "text/html")
             self.assertLess(time.time() - started, 2)
+
+    def test_a_stray_less_than_keeps_the_rest_of_the_page(self):
+        self.assertEqual(api_tools._page_text(b"<p>5</p> is < 6 and more", "text/html"), "5 is 6 and more")
 
     def test_the_stripper_still_reads_a_page(self):
         page = (b"<html><head><style>x{}</style><SCRIPT src=a>evil()</SCRIPT></head>"
@@ -168,6 +173,63 @@ class Keys(Tmp):
         self.assertEqual(config.provider("acme", self.root)["key"], "sk-new")
 
 
+class ProviderEdits(Tmp):
+    def test_editing_a_custom_provider_keeps_its_format_address_and_key(self):
+        config.upsert_provider({"id": "custom-one", "format": "openai", "base_url": "https://one.example/v1",
+                                "key": "sk-1", "models": {"fast": "a", "strong": "b"}}, self.root)
+        config.upsert_provider({"id": "custom-one", "models": {"fast": "c", "strong": "d"}}, self.root)  # what the form sends
+        row = config.provider("custom-one", self.root)
+        self.assertEqual((row["format"], row["base_url"], row["key"], row["models"]["fast"]),
+                         ("openai", "https://one.example/v1", "sk-1", "c"))
+
+
+class ApiKeyStaysHome(unittest.TestCase):
+    def test_a_redirect_does_not_resend_the_key(self):
+        seen = []
+
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append((self.path, self.headers.get("Authorization")))
+                self.send_response(302)
+                self.send_header("Location", f"http://127.0.0.1:{srv.server_port}/stolen")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            do_GET = do_POST
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), Redirect)
+        self.addCleanup(srv.server_close)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        engine = api.ApiEngine({"id": "x", "format": "openai", "key": "sk-1", "models": {"fast": "m"},
+                                "base_url": f"http://127.0.0.1:{srv.server_port}"}, "/tmp")
+        with self.assertRaises(api.ProviderError):
+            engine.complete("p", "s", None)
+        self.assertEqual([p for p, _ in seen], ["/chat/completions"])
+
+
+class IndexSwapsWhole(Tmp):
+    def build(self):
+        return subprocess.run([sys.executable, str(Path(__file__).resolve().parent.parent / "index.py"), str(self.root)],
+                              capture_output=True, text=True)
+
+    def test_a_failed_build_leaves_the_last_good_index(self):
+        (self.root / "projects/demo").mkdir(parents=True)
+        project = self.root / "projects/demo/project.md"
+        project.write_text("---\nname: Demo\npriority: primary\n---\n")
+        self.assertEqual(self.build().returncode, 0)
+        db_file = self.root / "database/data/os.db"
+        good = db_file.read_bytes()
+        project.write_text("---\nname: Demo\npriority: urgent\n---\n")  # the schema refuses this one mid-build
+        failed = self.build()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("INDEX FAILED", failed.stderr)
+        self.assertEqual(db_file.read_bytes(), good)
+        self.assertEqual([p.name for p in db_file.parent.iterdir() if ".tmp" in p.name], [])
+
+
 class Jobs(Tmp):
     def job_engine(self, env):
         with mock.patch.dict(os.environ, {"MYOS_ENGINE": env}):
@@ -209,6 +271,12 @@ class HostileRunner(unittest.TestCase):
         self.assertEqual(len(got[1][1]), 200)
         for kind, payload in got[2:]:
             self.assertEqual((kind, payload["tokens"], payload["cost"]), ("done", None, None))
+
+    def test_a_trickle_cannot_outlast_the_time_limit(self):
+        self.turn.created -= runners.MAX_TURN_SECONDS + 1
+        self.hub.events("rn-1", self.turn.id, [["delta", "x"]])
+        events = list(self.hub.wait_events(self.turn, poll=0.01))
+        self.assertEqual(events[0][0], "error")
 
     def test_a_flood_is_cut_off(self):
         stop = self.hub.events("rn-1", self.turn.id, [["delta", "x" * (runners.MAX_TURN_CHARS + 1)]])
@@ -361,7 +429,8 @@ class SharedThreadOsctl(Tmp):
         fileops.update_project("demo", {"priority": "secondary"})
 
     def test_a_duplicate_slug_cannot_stop_the_index(self):
-        for call in (lambda: fileops.create_channel("demo-p", "demo-prod", "instagram"),
+        for call in (lambda: fileops.create_project("demo-p", {}),
+                     lambda: fileops.create_channel("demo-p", "demo-prod", "instagram"),
                      lambda: fileops.create_product("demo", "demo-c", {}),
                      lambda: fileops.create_profile("demo", "demo", {})):
             with self.assertRaises(fileops.ActionError):
@@ -393,6 +462,17 @@ class SharedThreadOsctl(Tmp):
             with self.assertRaises(fileops.ActionError):
                 fileops.mark_activity_done(title, entity)
         self.assertEqual(path.read_text(), text)
+
+    def test_the_dashboard_can_still_finish_a_hand_written_row(self):
+        path = self.activities("## Activities\n- [ ] Old task — id: a1\n- [ ] Old task — id: a2 — entity: acme\n")
+        fileops.mark_activity_done("Old task", "")
+        self.assertEqual(path.read_text(), "## Activities\n- [x] Old task — id: a1\n- [ ] Old task — id: a2 — entity: acme\n")
+
+    def test_a_shared_thread_never_sees_the_linked_folder_path(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
+            osctl._emit({"project": {"entity": {"slug": "demo", "local_folder": "/srv/app"}}, "rows": [{"local_folder": "/x"}]})
+        self.assertNotIn("local_folder", out.getvalue())
 
     def test_an_activity_cannot_write_a_row_for_another_workspace(self):
         with self.assertRaises(fileops.ActionError):

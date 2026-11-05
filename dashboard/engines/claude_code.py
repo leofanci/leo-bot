@@ -321,8 +321,11 @@ class ClaudeCodeEngine(Engine):
         session._proc = proc
         said = ""
         stderr = drain(proc.stderr)
-        proc.stdin.write(text + "\n")
-        proc.stdin.close()
+        try:
+            proc.stdin.write(text + "\n")
+            proc.stdin.close()
+        except BrokenPipeError:  # it died at once: its own error, read below, is what to show
+            pass
         try:
             for line in proc.stdout:
                 line = line.strip()

@@ -5,6 +5,7 @@ An engine runs one bot turn and yields the event tuples the server consumes:
 The server computes a TurnPolicy per turn; each driver enforces it its own way
 and refuses a turn it cannot enforce (EngineRefused), never running with more.
 """
+import subprocess
 import threading
 from dataclasses import dataclass
 
@@ -66,11 +67,17 @@ def drain(stream):
 
 def stop_child(proc):
     """A turn abandoned half way (the browser left) must not leave its child running."""
-    if proc.poll() is None:
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
         try:
-            proc.terminate()
-        except OSError:
-            pass
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 class Engine:

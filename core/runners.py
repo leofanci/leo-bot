@@ -196,6 +196,9 @@ class Hub:
         """Yield a turn's events until it ends, its runner vanishes, or nobody takes it."""
         try:
             while True:
+                if time.time() - turn.created > MAX_TURN_SECONDS:  # checked always: a trickle never goes quiet
+                    yield ("error", "Your Mac took too long on this reply, so it was stopped.")
+                    return
                 try:
                     ev = turn.events.get(timeout=poll)
                 except queue.Empty:
@@ -206,9 +209,6 @@ class Hub:
                         return
                     if turn.runner is not None and not self.seen_recently(turn.runner):
                         yield ("error", "Your Mac went offline during this reply.")
-                        return
-                    if time.time() - turn.created > MAX_TURN_SECONDS:
-                        yield ("error", "Your Mac took too long on this reply, so it was stopped.")
                         return
                     continue
                 if ev is None:
