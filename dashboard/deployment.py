@@ -1,11 +1,13 @@
 """deployment.py: where this myOS runs, read from its environment.
 
 MYOS_DEPLOYMENT is "server" on a server (set by scripts/server-setup.sh), else this is a Mac.
-MYOS_CLOUD_URL is reserved for a hosted myOS service. Unset, which is the normal case, there
-is no Cloud: no screen, no sign-in and no request. Nothing here opens a connection.
+MYOS_CLOUD_URL is reserved for the hosted myOS service, which does not exist yet. For now, set
+or unset, there is no Cloud screen, sign-in or request. Nothing here opens a connection.
 """
 import os
-from urllib.parse import urlsplit
+import re
+
+_ADDRESS = re.compile(r"https://[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::([0-9]{1,5}))?(?:/[a-z0-9._~/-]*)?", re.I)
 
 
 def mode(env=os.environ):
@@ -15,13 +17,8 @@ def mode(env=os.environ):
 def cloud_url(env=os.environ):
     """The service's plain https address, or "" for anything else, so a typo can't half-enable it."""
     value = (env.get("MYOS_CLOUD_URL") or "").strip().rstrip("/")
-    try:
-        parts = urlsplit(value)
-        clean = parts.scheme == "https" and parts.hostname and not (parts.username or parts.password)
-        _ = parts.port  # raises on a bad port
-    except ValueError:
-        return ""
-    return value if clean and not (parts.query or parts.fragment) else ""
+    match = _ADDRESS.fullmatch(value)
+    return value if match and 0 < int(match[1] or 443) < 65536 else ""
 
 
 def view(env=os.environ):

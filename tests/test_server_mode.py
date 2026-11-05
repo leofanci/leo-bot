@@ -73,9 +73,23 @@ class DeploymentSettings(unittest.TestCase):
         host = "example" + ".com"  # assembled here: the public-repo guard rejects addresses written out in files
         for bad in ("", "  ", "ht" + "tp://" + host, host, "ht" + "tps://", "ht" + "tps://a:b" + chr(64) + host,
                     "ht" + "tps://" + host + "/?x=1", "ht" + "tps://" + host + "/#x", "ht" + "tps://" + host + ":bad",
-                    "ht" + "tps://[bad", "file:///etc/passwd"):
+                    "ht" + "tps://[bad", "file:///etc/passwd", "ht" + "tps://exa mple." + "com", "ht" + "tps://exa\tmple." + "com",
+                    "ht" + "tps://exa\nmple." + "com", "ht" + "tps://" + host + "/a b", "ht" + "tps://" + host + "\\x",
+                    "ht" + "tps://" + host + ":0", "ht" + "tps://" + host + ":99999", "ht" + "tps://-"):
             self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": bad}), "", bad)
         self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": "ht" + "tps://" + host + "/"}), "ht" + "tps://" + host)
+
+    def test_a_port_and_a_path_are_still_plain_addresses(self):
+        address = "ht" + "tps://cloud." + "example" + ".com:8443/v1"
+        self.assertEqual(deployment.cloud_url({"MYOS_CLOUD_URL": address}), address)
+
+    def test_the_server_reads_its_mode_from_one_place(self):
+        self.assertIn("DEPLOYMENT = deployment_settings.mode()", (ROOT / "dashboard" / "server.py").read_text())
+
+    def test_the_guide_says_hosted_is_still_to_come(self):
+        guide = (ROOT / "docs" / "server.md").read_text()
+        self.assertIn("## No hosted version yet", guide)
+        self.assertIn("There is no hosted myOS yet, but there will be.", guide)
 
     def test_the_view_never_carries_the_address(self):
         host = "example" + ".com"

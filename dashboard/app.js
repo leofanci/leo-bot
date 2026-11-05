@@ -1355,16 +1355,14 @@ async function drawRunners(box, stillOn = () => true){
   });
 }
 
-// HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
-// key. Invited people only ever run on an API key.
 // Where this myOS runs, and how to move it to a server of your own (docs/server.md).
 function deploymentSection(where){
   const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
   if (where === "server") return `<section class="integ-group"><h3>Where myOS runs</h3>
-    <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. Guide: docs/server.md.</div>
+    <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. To watch its log, run this on the server. Guide: docs/server.md.</div>
     ${cmd("journalctl -u myos -f")}</section>`;
   return `<section class="integ-group"><h3>Where myOS runs</h3>
-    <div class="help">On this Mac, so bots stop when it sleeps or quits. To keep them always on, run myOS on a server of your own. Run these from a my-os checkout on this Mac, one at a time, after replacing your-server. Guide: docs/server.md.</div>
+    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run myOS on a server of your own. Replace your-server, then run these from a my-os checkout here. They install myOS, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen myOS. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
     ${cmd(SERVER_STEPS.join("\n"))}</section>`;
 }
 const SERVER_STEPS = [
@@ -1372,6 +1370,8 @@ const SERVER_STEPS = [
   "scripts/myos-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
+// HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
+// key. Invited people only ever run on an API key.
 async function renderEngines(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
