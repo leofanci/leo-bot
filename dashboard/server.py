@@ -73,7 +73,7 @@ from core.ids import (  # noqa: E402
 
 APP_HTML = HERE / "app.html"
 # "mac" (default) or "server" (set by scripts/server-setup.sh): gates Mac-only features.
-DEPLOYMENT = "server" if os.environ.get("MYOS_DEPLOYMENT") == "server" else "mac"
+DEPLOYMENT = deployment_settings.mode()
 # Browsers keep cookies per host, not per port: over the SSH connection a server and the
 # Mac's own myOS are both 127.0.0.1, and one cookie name would log each out of the other.
 AUTH_COOKIE = "myos_server_auth" if DEPLOYMENT == "server" else "myos_auth"

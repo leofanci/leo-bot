@@ -80,11 +80,12 @@ A teammate who wants to use their own Claude or Codex login connects their Mac a
 **runner**: their messages run on their machine, on their login, and the answers
 come back to the shared workspace. See [Runners](runners.md).
 
-## No hosted version
+## No hosted version yet
 
-There is no hosted myOS: you run it yourself, on your Mac or your own server. HQ,
-Engines shows where this copy runs. `MYOS_CLOUD_URL` is reserved for a hosted service.
-Unset, myOS shows no Cloud screen and makes no Cloud request.
+There is no hosted myOS yet, but there will be. For now you run it yourself, on your
+Mac or your own server. HQ, Engines shows where this copy runs. `MYOS_CLOUD_URL` is
+reserved for the hosted service. For now it changes nothing you can see: myOS has no
+Cloud screen and makes no Cloud request.
 
 ## Updating
 
