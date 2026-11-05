@@ -1343,7 +1343,7 @@ async function drawRunners(box, stillOn = () => true){
   box.querySelector("[data-runner-add]").onclick = async () => {
     try {
       const r = await jpost("/api/runners", { name: "My Mac" });
-      const cmd = `printf %s '${r.token}' > ~/.myos-runner-token && chmod 600 ~/.myos-runner-token\npython3 -m dashboard.runner --server ${location.origin} --token-file ~/.myos-runner-token`;
+      const cmd = `(umask 077; printf %s '${r.token}' > ~/.myos-runner-token); chmod 600 ~/.myos-runner-token\npython3 -m dashboard.runner --server ${location.origin} --token-file ~/.myos-runner-token`;
       await drawRunners(box, stillOn);
       box.querySelector(".runner-new").innerHTML = `<div class="help">On your Mac, inside a my-os checkout, with Claude Code logged in. This is shown once.</div><pre class="runner-cmd"></pre>`;
       box.querySelector(".runner-cmd").textContent = cmd;

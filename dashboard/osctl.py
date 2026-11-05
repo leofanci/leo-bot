@@ -98,6 +98,8 @@ def _guard(args, ws):
         raise fileops.ActionError(f"{args.cmd} is only available in HQ")
     if args.cmd in ("remember", "get-memory") and not args.project:
         args.project = ws  # a company's bot keeps memory in its company, never in HQ
+    if args.cmd == "create-milestone" and not args.entity:
+        args.entity = ws  # same for its milestones
     own = _owners()
     for name, value in vars(args).items():
         if not (name in _OWNER_ARGS or name.endswith("_id")):

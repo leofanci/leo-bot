@@ -21,13 +21,18 @@ START_TIMEOUT = 60
 # A clean environment: never myOS's tokens, never a key from the server's own env.
 _ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
 OS_TOOL_MARKERS = ("mcp__os__", "os__osctl", "os_osctl", "os/osctl")
+_OWN_TOOL_KINDS = ("", "other")  # an MCP tool. execute, edit, delete and the rest are the agent's own
 
 
 def is_own_tool(tool_call):
-    """True when a permission request is for myOS's own MCP tool."""
+    """True when a permission request is for myOS's own MCP tool. A title can hold the
+    model's own text (`echo mcp__os__; rm -rf ~`), so the name must lead it, and the
+    kind must not be one of the agent's own tools."""
     tc = tool_call or {}
-    name = f"{tc.get('title') or ''} {tc.get('kind') or ''} {tc.get('toolCallId') or ''}".lower()
-    return any(m in name for m in OS_TOOL_MARKERS)
+    if str(tc.get("kind") or "").lower() not in _OWN_TOOL_KINDS:
+        return False
+    title, call_id = str(tc.get("title") or "").lower(), str(tc.get("toolCallId") or "").lower()
+    return title.startswith(OS_TOOL_MARKERS) or call_id.startswith(OS_TOOL_MARKERS)
 
 
 def permission_reply(params):

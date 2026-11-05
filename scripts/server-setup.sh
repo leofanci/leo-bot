@@ -30,12 +30,13 @@ if ! command -v apt-get >/dev/null; then
 fi
 
 apt-get update -qq
-apt-get install -y -qq python3 git curl rsync ca-certificates >/dev/null
+apt-get install -y -qq python3 git curl rsync sudo ca-certificates >/dev/null
 
 if ! id "$MYOS_USER" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/bash "$MYOS_USER"
 fi
 HOME_DIR="$(getent passwd "$MYOS_USER" | cut -d: -f6)"
+chmod 700 "$HOME_DIR"  # your data, keys and Claude login live here
 APP_DIR="$HOME_DIR/my-os"
 
 as_user() { runuser -u "$MYOS_USER" -- env HOME="$HOME_DIR" "$@"; }

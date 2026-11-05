@@ -15,8 +15,9 @@ Your messages now run there. Each reply says "via your Mac". Stop it with Ctrl-C
 your messages go back to the server's engine: for invited people, the API key the
 owner picked, or a note saying the runner is off.
 
-The server needs a public address for this ([sharing](sharing.md)), or the owner can
-run a runner over the SSH connection.
+The server needs a public https address for this ([sharing](sharing.md)), or the owner
+can run a runner over the SSH connection. The runner refuses a plain http address, and a
+token file other users on the Mac could read.
 
 ## What a bot can do on your Mac
 
@@ -31,3 +32,5 @@ same rule as any shared thread, checked the same way.
   for the owner, the people API key for invited people.
 - A new Mac starts a fresh session with a recap of the thread's messages.
 - Remove a runner in the same place you connected it. A turn in flight stops at once.
+- A reply on a runner shows no cost: it runs on that person's own login.
+- The server stops a runner turn after 30 minutes.

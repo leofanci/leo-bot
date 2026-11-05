@@ -28,8 +28,9 @@ TURN_TIMEOUT = 900
 READ_TIMEOUT = 300
 RETRIES = 2
 HISTORY_CHARS = 400_000  # about 100k tokens; oldest messages go first, the first one stays
-# Current Anthropic prices, USD per million tokens (input, output). Other models report no cost.
-PRICES = {"claude-haiku-5-5": (0.10, 0.50), "claude-sonnet-5-5": (2.0, 10.0), "claude-opus-5-5": (4.0, 20.0)}
+# Current Anthropic prices, USD per million tokens (input, output, cache read). Other models report no cost.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+          "claude-opus-5-5": (4.0, 20.0, 0.20)}
 # Backends the server plugs in (os_relay, apps_relay); generate.py jobs need none.
 BACKENDS = {}
 
@@ -114,6 +115,48 @@ class ApiEngine(Engine):
         return model
 
     # ---- history ------------------------------------------------------ #
+    @staticmethod
+    def _repair(messages):
+        """Make a stored thread one the API accepts. It refuses a thread for good over a tool
+        call with no result or an empty block, and a crash, a dropped stream or a cut-off
+        reply can leave exactly that behind. So those go, every turn."""
+        out = []
+        for i, m in enumerate(messages):
+            role, content = m.get("role"), m.get("content")
+            if role == "tool":
+                owner = next((p for p in reversed(out) if p.get("role") == "assistant"), {})
+                if m.get("tool_call_id") in {c.get("id") for c in owner.get("tool_calls") or []}:
+                    out.append(m)
+                continue
+            if role != "assistant":
+                out.append(m)
+                continue
+            if m.get("tool_calls"):  # OpenAI: every call needs its answer right after
+                answered = set()
+                for later in messages[i + 1:]:
+                    if later.get("role") != "tool":
+                        break
+                    answered.add(later.get("tool_call_id"))
+                if not {c.get("id") for c in m["tool_calls"]} <= answered:
+                    m = {k: v for k, v in m.items() if k != "tool_calls"}
+                if not m.get("tool_calls") and not m.get("content"):
+                    continue
+            elif isinstance(content, list):  # Anthropic
+                after = messages[i + 1].get("content") if i + 1 < len(messages) else None
+                answered = {b.get("tool_use_id") for b in after if isinstance(b, dict)} if isinstance(after, list) else set()
+                served = {b.get("tool_use_id") for b in content if isinstance(b, dict) and b.get("tool_use_id")}
+                blocks = [b for b in content if isinstance(b, dict) and not (
+                    (b.get("type") == "tool_use" and b.get("id") not in answered)
+                    or (b.get("type") == "server_tool_use" and b.get("id") not in served)
+                    or (b.get("type") == "text" and not b.get("text")))]
+                if not any(b.get("type") not in ("thinking", "redacted_thinking") for b in blocks):
+                    continue
+                m = {**m, "content": blocks}
+            elif not content:
+                continue
+            out.append(m)
+        return out
+
     def _history_path(self, session):
         return self.root / "chats" / f"{session.session_id}.{self.provider['id']}.jsonl"
 
@@ -156,7 +199,8 @@ class ApiEngine(Engine):
         kept = kept or [messages[-1]]  # the message being answered always goes
         while len(kept) > 1 and not self._starts_turn(kept[0]):  # never split a tool call from its result
             kept.pop(0)
-        return [self._no_thinking(m) for m in [messages[0], self._bridge()] + kept]
+        trimmed = [self._no_thinking(m) for m in [messages[0], self._bridge()] + kept]
+        return [m for m in trimmed if m.get("content") != []]
 
     @staticmethod
     def _bridge():
@@ -255,7 +299,7 @@ class ApiEngine(Engine):
         price = PRICES.get(model)
         if cost is None and price:
             cost = ((int(usage.get("input_tokens") or 0) * price[0]
-                     + int(usage.get("cache_read_input_tokens") or 0) * price[0] * 0.1
+                     + int(usage.get("cache_read_input_tokens") or 0) * price[2]
                      + int(usage.get("cache_creation_input_tokens") or 0) * price[0] * 1.25
                      + int(usage.get("output_tokens") or 0) * price[1]) / 1_000_000)
         return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost})
@@ -274,11 +318,14 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._trim(self._load(session))
+        messages = self._trim(self._repair(self._load(session)))
         tools = self._anthropic_tools(box, policy, model)
         parts, usage, calls = [], {}, 0
         while True:
-            if cancel.stopped or time.time() - started > TURN_TIMEOUT:
+            if cancel.stopped:
+                return
+            if time.time() - started > TURN_TIMEOUT:
+                yield ("error", f"This turn on {self.label} took too long, so it was stopped.")
                 return
             resp = self._open("/v1/messages", {
                 "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": session.rail,
@@ -290,7 +337,7 @@ class ApiEngine(Engine):
                     et = ev.get("type")
                     if et == "message_start":
                         for k, v in ((ev.get("message") or {}).get("usage") or {}).items():
-                            if isinstance(v, int):
+                            if isinstance(v, int) and k != "output_tokens":  # message_delta has the real count
                                 usage[k] = usage.get(k, 0) + v
                     elif et == "content_block_start":
                         block = dict(ev.get("content_block") or {})
@@ -322,6 +369,8 @@ class ApiEngine(Engine):
                         raise ProviderError(f"{self.label}: {(ev.get('error') or {}).get('message', 'stream error')}")
             if cancel.stopped:
                 return
+            if stop is None:  # the stream ended without saying why: don't pass it off as the answer
+                raise ProviderError(f"The connection to {self.label} dropped.")
             bad_input = {}
             for i, block in enumerate(content):
                 raw = block.pop("_json", None)
@@ -370,11 +419,14 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._trim(self._load(session))
+        messages = self._trim(self._repair(self._load(session)))
         tools = self._openai_tools(box)
         parts, usage, calls = [], {}, 0
         while True:
-            if cancel.stopped or time.time() - started > TURN_TIMEOUT:
+            if cancel.stopped:
+                return
+            if time.time() - started > TURN_TIMEOUT:
+                yield ("error", f"This turn on {self.label} took too long, so it was stopped.")
                 return
             resp = self._open("/chat/completions", {
                 "model": model, "stream": True, "stream_options": {"include_usage": True},

@@ -86,7 +86,11 @@ def upsert_provider(fields, root=ROOT):
         raise ValueError("base_url: an http(s) address")
     data = load(root)
     old = next((p for p in data["providers"] if p["id"] == pid), {})
-    key = str(fields.get("key") or "").strip() or old.get("key") or ""
+    key = str(fields.get("key") or "").strip()
+    if not key and old.get("key"):
+        if old.get("base_url") != base:  # a saved key never follows a new address on its own
+            raise ValueError("the address changed: enter the key again")
+        key = old["key"]
     if not key and not (preset.get("no_key") or fields.get("no_key") or old.get("no_key")):
         raise ValueError("key required")
     wanted = fields.get("models") if isinstance(fields.get("models"), dict) else {}
@@ -151,6 +155,8 @@ def set_choice(name, value, scope=None, root=ROOT):
             raise ValueError("unknown terminal")
         data["terminal"] = value
     elif name in ("default", "people"):
+        if name == "people" and value and not value.startswith("api:"):
+            raise ValueError("invited people run on an API key")
         data[name] = value
     elif name in ("workspaces", "bots"):
         if not scope:

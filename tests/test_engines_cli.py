@@ -232,7 +232,11 @@ class FullDiskRules(unittest.TestCase):
         self.assertEqual(self.pick(shared=True).id, "api:anthropic")
 
     def test_invited_person_never_runs_on_one(self):
-        config.set_choice("people", "codex", None, self.root)
+        with self.assertRaises(ValueError):
+            config.set_choice("people", "codex", None, self.root)
+        data = config.load(self.root)  # a hand-edited file
+        data["people"] = "codex"
+        config.save(data, self.root)
         with self.assertRaises(EngineRefused):
             self.pick(invited=True)
 

@@ -17,6 +17,10 @@ from pathlib import Path
 
 ONLINE_SECONDS = 45     # a runner polls every 25 s at most
 LEASE_SECONDS = 60      # a queued job no runner took
+MAX_TURN_SECONDS = 1800 # a runner that keeps polling but never ends a turn holds the thread no longer
+MAX_TURN_CHARS = 4_000_000  # what one turn may stream back
+MAX_PER_PERSON = 10
+_KINDS = ("delta", "tool", "error")
 _LOCK = threading.Lock()
 
 
@@ -52,6 +56,8 @@ def create(root, owner, name=""):
     rid = "rn-" + secrets.token_hex(4)
     with _LOCK:
         rows = _read(root)
+        if sum(r.get("owner") == owner for r in rows.values()) >= MAX_PER_PERSON:
+            raise ValueError("too many connected Macs: remove one first")
         rows[rid] = {"owner": owner, "name": (str(name or "").strip() or "My Mac")[:40],
                      "token_hash": _hash(token), "created": time.time()}
         _write(root, rows)
@@ -92,6 +98,19 @@ def revoke_owner(root, owner):
         revoke(root, row["id"], owner)
 
 
+def clean_event(ev):
+    """One event from a runner, which a hostile teammate can write by hand: right shape
+    or dropped. A runner's tokens and cost are its own business, so they never count here."""
+    if not isinstance(ev, (list, tuple)) or len(ev) != 2:
+        return None
+    kind, payload = ev
+    if kind == "done":
+        return ("done", {"result": None, "subtype": "success", "tokens": None, "cost": None})
+    if kind in _KINDS and isinstance(payload, str):
+        return (kind, payload[:200] if kind == "tool" else payload)
+    return None
+
+
 class Turn:
     def __init__(self, job, owner):
         self.id, self.job, self.owner = job["turn"], job, owner
@@ -99,6 +118,7 @@ class Turn:
         self.runner = None
         self.created = time.time()
         self.cancelled = False
+        self.chars = 0
 
 
 class Hub:
@@ -151,13 +171,21 @@ class Hub:
             turn = self._turns.get(turn_id)
             if turn is None or turn.runner != rid:
                 return True
-            cancelled = turn.cancelled
-        for ev in events:
-            if isinstance(ev, (list, tuple)) and len(ev) == 2 and ev[0] in ("delta", "tool", "done", "error"):
-                turn.events.put((ev[0], ev[1]))
-        if end:
-            turn.events.put(None)
-        return cancelled
+            if turn.cancelled:  # nobody is listening any more
+                return True
+            for ev in map(clean_event, events):
+                if ev is None:
+                    continue
+                turn.chars += len(ev[1]) if isinstance(ev[1], str) else 0
+                if turn.chars > MAX_TURN_CHARS:
+                    turn.cancelled = True
+                    turn.events.put(("error", "That reply was too long, so it was stopped."))
+                    turn.events.put(None)
+                    return True
+                turn.events.put(ev)
+            if end:
+                turn.events.put(None)
+        return False
 
     def holds(self, rid, turn_id):
         with self._cond:
@@ -171,11 +199,16 @@ class Hub:
                 try:
                     ev = turn.events.get(timeout=poll)
                 except queue.Empty:
+                    if turn.cancelled:  # stopped: the Mac learns on its next call
+                        return
                     if turn.runner is None and time.time() - turn.created > LEASE_SECONDS:
                         yield ("error", "Your Mac didn't pick this up. Check that the runner is on.")
                         return
                     if turn.runner is not None and not self.seen_recently(turn.runner):
                         yield ("error", "Your Mac went offline during this reply.")
+                        return
+                    if time.time() - turn.created > MAX_TURN_SECONDS:
+                        yield ("error", "Your Mac took too long on this reply, so it was stopped.")
                         return
                     continue
                 if ev is None:

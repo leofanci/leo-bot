@@ -23,11 +23,15 @@ fi
 APP="$REMOTE_HOME/my-os"
 
 ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S systemctl stop myos"
+# A failed copy must not leave myOS stopped or the copied files open.
+PRIVATE="$APP/projects $APP/chats $APP/team $APP/portfolio"
+finish() {
+  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $MYOS_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start myos"
+}
+trap finish EXIT
 for dir in projects chats team portfolio; do
   [ -d "$ROOT/$dir" ] || continue
   rsync -a --rsync-path="sudo -n rsync" "$ROOT/$dir/" "$TARGET:$APP/$dir/" 2>/dev/null \
     || rsync -a "$ROOT/$dir/" "$TARGET:$APP/$dir/"
 done
-PRIVATE="$APP/projects $APP/chats $APP/team $APP/portfolio"
-ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $MYOS_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start myos"
 echo "Done. Saved chats continue with a recap of their messages. Linked app folders need linking again on the server."

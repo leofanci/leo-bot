@@ -23,7 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from dashboard.engines.base import Engine, SessionLost
+from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 
 
 def parse_event(obj):
@@ -320,6 +320,7 @@ class ClaudeCodeEngine(Engine):
         session._started = True
         session._proc = proc
         said = ""
+        stderr = drain(proc.stderr)
         proc.stdin.write(text + "\n")
         proc.stdin.close()
         try:
@@ -338,17 +339,17 @@ class ClaudeCodeEngine(Engine):
                     yield (kind, payload)
             proc.wait()
             if proc.returncode not in (0, None):
-                err = (proc.stderr.read() or "")[:500]
+                err = stderr()[:500]
                 if was_started and _LOST_RE.search(err):
                     session._started = False
                     raise SessionLost(err)
                 yield ("error", _failure_text(err or said))
         finally:
-            for stream in (proc.stdout, proc.stderr):
-                try:
-                    stream.close()
-                except OSError:
-                    pass
+            stop_child(proc)
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
             session._proc = None
 
     def complete(self, prompt, stdin_text, model):
