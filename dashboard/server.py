@@ -253,70 +253,34 @@ def open_local_folder(path: str) -> None:
         raise fileops.ActionError(f"could not open linked folder: {message or 'unknown error'}")
 
 
-def resolve_linked_workspace(projects, project_slug):
-    """The project's first usable linked folder, never a client path. A stale link never
-    breaks chat; it leaves file tools off. A bridge until turns take every folder."""
-    slug = str(project_slug or "").strip()
-    if not slug or not any(p.get("slug") == slug for p in projects):
-        return None
-    try:
-        rows = folders.for_turn(slug, None, None, fileops.ROOT)
-    except (ValueError, OSError):
-        return None
-    return rows[0]["path"] if rows else None
-
-
-def tokensave_index_ready(workspace_dir):
-    """Cheap readiness check; never starts TokenSave or scans the app."""
-    return bool(
-        workspace_dir
-        and shutil.which("tokensave")
-        and (Path(workspace_dir) / ".tokensave" / "tokensave.db").is_file()
-    )
-
-
-def linked_workspace_prompt(project_slug, workspace_dir, *, graph_context="",
-                            graph_error=None, file_search_mode=False):
-    """Bounded app evidence plus an optional pointer for lazy file fallback."""
-    if not workspace_dir:
+def linked_workspace_prompt(project_slug, rows, *, graph_context="", graph_error=None):
+    """The turn's linked folders (name, path, access) plus any bounded TokenSave evidence.
+    `rows` come from _turn_folders; a locked turn passes none, so no path reaches it."""
+    if not rows and not graph_context and not graph_error:
         return ""
+    parts = []
+    if rows:
+        lines = ["## Linked folders", f"Workspace: {project_slug or 'HQ'}"]
+        for r in rows:
+            label = ("read-only this turn: a change needs a tag" if r.get("needs_tag")
+                     else "edit" if r["access"] == folders.EDIT else "read-only")
+            lines.append(f"- {r['name']}: {r['path']} ({label})")
+        lines.append(
+            "Before working in a folder, read its CLAUDE.md or AGENTS.md if it has one. Make focused "
+            "changes, and name every file you changed in your reply. Skip dependency, build, cache, "
+            "generated and secret files. You cannot run tests, builds or git: say what the owner should run.")
+        if any(r.get("needs_tag") for r in rows):
+            lines.append("This message was not tagged: read and search, but change nothing. To make a "
+                         "change, ask the owner to tag you (@your-handle or a /skill).")
+        parts.append("\n".join(lines))
     if graph_context:
-        guidance = (
-            "myOS already refreshed and queried this app's TokenSave graph exactly "
-            "once for this turn. Use the bounded result below as product evidence "
-            "for GTM, positioning, branding, ICP, offer, social/content, feature, "
-            "UX, and technical reasoning. Do not run TokenSave again."
-        )
+        parts.append(
+            "myOS already refreshed and queried this folder's TokenSave graph exactly once for this "
+            "turn. Use the bounded result below as evidence. Do not run TokenSave again.\n\n"
+            "## Fresh TokenSave context (bounded, read-only evidence)\n" + graph_context)
     elif graph_error:
-        guidance = (
-            f"TokenSave could not provide fresh context ({graph_error}). No stale "
-            "graph result was used."
-        )
-    else:
-        guidance = (
-            "This app has no ready local TokenSave index. Use bounded file discovery "
-            "when product facts from the app could improve the answer."
-        )
-    fallback = (
-        " If needed, use targeted Glob/Grep, then Read at most 200 relevant lines "
-        "at a time."
-        if file_search_mode else ""
-    )
-    root_line = f"App root: {workspace_dir}\n" if file_search_mode else ""
-    graph_block = (
-        "\n\n## Fresh TokenSave context (bounded, read-only evidence)\n"
-        f"{graph_context}"
-        if graph_context else ""
-    )
-    return (
-        "## Linked app workspace (read-only)\n"
-        f"Active project: {project_slug}\n"
-        f"{root_line}{guidance}{fallback}"
-        + (" Check a root AGENTS.md/CLAUDE.md first if present."
-           if file_search_mode else "")
-        + " Skip dependency, build, cache, generated, and secret files. Never edit the linked app."
-        + graph_block
-    )
+        parts.append(f"TokenSave could not provide fresh context ({graph_error}). No stale graph result was used.")
+    return "\n\n".join(parts)
 
 
 def state_snapshot(projects, only=None):
@@ -434,6 +398,7 @@ _SKILL_ROUTES = [
     ("workspace",             r"fill.{0,40}\btabs?\b|fill.{0,40}\bpanel\b|left panel|project sections?|divide.{0,50}\btabs?\b|populate.{0,40}(tabs?|panel|sections?)"),
     ("product-build",      r"product roadmap|build status|feature roadmap|plan (the )?features"),
     ("gtm-assessment",     r"assess\w*|where (do|does) (we|this) stand|pace call|gtm assessment"),
+    ("folder-work",        r"\bfix(es|ed|ing)?\b|\brefactor\w*|\bimplement\w*|edit the code"),
     # workspace is the catch-all dispatcher for strategic asks that matched nothing
     # specific — handled separately in _route_skill so it has lowest priority.
 ]
@@ -577,9 +542,9 @@ def _needs_apps(text, grant, explicit_skill=False):
     return False
 
 
-# Linked app access is activated only for code/app questions. The browser may
-# send the active project slug on every turn, but an ordinary GTM question must
-# not pay for Glob/Grep schemas or expose the linked directory to that process.
+# A code question with no usable linked folder gets the "App workspace unavailable"
+# note, so the bot never reads myOS's own source as a substitute. Folder access itself
+# is on every private turn (_turn_folders), not decided by this classifier.
 _WORKSPACE_INTENT_RE = re.compile(
     r"(?:\b(?:code|codebase|source code|repo(?:sitory)?|bug|debug(?:ging)?|"
     r"exception|stack trace|function|method|class|component|endpoint|database|"
@@ -657,7 +622,54 @@ def _in_active_skill_thread(session):
                 and getattr(session, "_last_skill", None))
 
 
-def _pick_model(skill, web, user_msg="", session=None, *, explicit=False):
+# Words that ask for a change in a folder. Used only to pick the model on a turn that may
+# edit: they never reach the tag gate (_WRITE_TURN_RE), so "fix" alone still runs untagged.
+_EDIT_WORD_RE = re.compile(r"\b(fix|change|edit|refactor|rename|delete|remove|implement|patch)\b", re.I)
+
+
+def _may_edit(explicit, room, user_msg, team, sess):
+    """A turn may change files in its edit folders when it was tagged: a /skill, any @bot,
+    any DM message, or the continuation of a tagged skill thread. Separate from may_write,
+    which still alone decides approvals."""
+    return bool(explicit or team.mentioned(user_msg) or (room or {}).get("kind") == "dm"
+                or _continuation_allowed(sess, user_msg))
+
+
+def _room_local(room):
+    """A room's channel-layer key, or None for a DM (a DM has no channel layer)."""
+    if not room or room.get("kind") == "dm":
+        return None
+    return rooms.split_id(room.get("id"))[1]
+
+
+def _layered_folders(ws, room, bot_id):
+    """Folders after the channel and bot layers, before any turn rule. [] when unknown."""
+    try:
+        return folders.for_turn(ws or bots.HQ, _room_local(room), bot_id, ROOT)
+    except (ValueError, OSError):
+        return []
+
+
+def _turn_folders(ws, room, bot_id, *, locked, may_edit, drop_edit, engine):
+    """(rows for the turn's block, read_dirs, edit_dirs). A locked turn (shared thread or
+    runner) gets nothing. edit_dirs needs a tagged turn, no app data in it, and an engine
+    that enforces per-folder edit limits (Codex and ACP do not)."""
+    if locked:
+        return [], (), ()
+    layered = _layered_folders(ws, room, bot_id)
+    supports = "folder_edit" in getattr(engine, "supports", ())
+    can_edit = bool(may_edit and not drop_edit and supports)
+    rows = []
+    for r in layered:
+        edit = r["access"] == folders.EDIT
+        rows.append({**r, "access": folders.EDIT if edit and can_edit else folders.READ,
+                     "needs_tag": bool(edit and supports and not drop_edit and not may_edit)})
+    read_dirs = tuple(r["path"] for r in rows)
+    edit_dirs = tuple(r["path"] for r in rows if r["access"] == folders.EDIT)
+    return rows, read_dirs, edit_dirs
+
+
+def _pick_model(skill, web, user_msg="", session=None, *, explicit=False, editing=False):
     """Sonnet on explicit /skill, /web, or while an explicit-skill thread is
     still active. The active-thread check is deliberately broader than
     _continuation_allowed's fixed phrase list ("yes"/"save"/...): a natural
@@ -665,12 +677,15 @@ def _pick_model(skill, web, user_msg="", session=None, *, explicit=False):
     doesn't match that list, and without this it would silently drop to Haiku
     for one turn then jump back to Sonnet on the next "yes save" — a model
     switch pays the full uncached system-prompt cost twice instead of once.
-    Only standalone read-only queries fall back to the cheap model."""
+    Only standalone read-only queries fall back to the cheap model. `editing`: a turn that
+    may change an edit folder takes the stronger model when it asks for a change."""
+    msg = (user_msg or "").strip()
+    if editing and (_WRITE_TURN_RE.search(msg) or _EDIT_WORD_RE.search(msg)):
+        return chat_session.ESCALATED_MODEL
     if skill == "tokensave" and not web:
         return chat_session.CHAT_MODEL
     if web:
         return chat_session.ESCALATED_MODEL
-    msg = (user_msg or "").strip()
     if skill and explicit:
         if _READ_TURN_RE.search(msg) and not _WRITE_TURN_RE.search(msg):
             return chat_session.CHAT_MODEL
@@ -893,13 +908,16 @@ def _plan_teammates(team, lead, handoff_from, user_msg, asks):
     return out[:MAX_TEAMMATES]
 
 
-def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, project_slug, skill, shared=False):
+def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, project_slug, skill, shared=False,
+                     folders_block=""):
     parts = []
     try:
         parts.append(state_snapshot(projects, only=project_slug))
     except Exception:  # noqa: BLE001
         pass
     parts.append(_bot_block(team, bot_id, None, project_slug, fresh=True, readonly=True, shared=shared))
+    if folders_block:
+        parts.append(folders_block)
     if skill:
         body = _load_skill_body(skill)
         if body:
@@ -928,21 +946,24 @@ def _resolve_workspace(ws, projects):
     return (record["slug"], record) if record else (bots.HQ, None)
 
 
-def _workspace_deny_dirs(ws, projects):
-    """Folders a company's bots may not Read/Grep: other companies, plus the
-    stores that hold every workspace at once (chats, team, calendar, index),
-    and other companies' linked app folders.
-    HQ is the holding's CEO office and sees everything."""
+def _workspace_deny_dirs(ws, projects, kept=()):
+    """Folders a turn's bots may not Read/Grep/Edit/Write. A company: other companies, the
+    stores that hold every workspace at once (chats, team, calendar, index), and every other
+    workspace's linked folder unless this turn keeps it too (same, inside or around it).
+    Any workspace: its own folders a layer took away that sit inside a kept one.
+    HQ is the holding's CEO office and otherwise sees everything."""
+    ws = ws or bots.HQ
+    kept = [str(k) for k in kept]
+    own_removed = [p for p in folders.all_paths(ws, ROOT) if p not in kept]
     if ws == bots.HQ:
-        return ()
+        return folders.turn_denies(kept, [], own_removed)
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
-    # Their linked folders, except one this workspace links too (same, inside or around it).
     dirs += [Path(p) for p in folders.turn_denies(
-        folders.all_paths(ws, ROOT), folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), [])]
+        kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
     dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
     dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave", ROOT / "private"]  # the owner's machine state
-    return tuple(str(d) for d in dirs)
+    return tuple(dict.fromkeys(str(d) for d in dirs))
 
 
 def _workspace_deny_files(ws):
@@ -961,7 +982,8 @@ API_NOTE = (
     "## Your tools\n"
     "This bot runs on an API key, not a command line. Your myOS tool is `osctl`: put the words that follow "
     "`python3 -m dashboard.osctl` in `args`, one per item, and a long body in `stdin`. There is no shell. "
-    "Read files with `read_file`.")
+    "Read files with `read_file`; search linked folders with `search_files`; change files in an edit "
+    "folder with `write_file` and `edit_file`, when offered.")
 _API_APP_SESSIONS = {}  # apps turn token -> MCP session id (api engine only)
 
 
@@ -1202,8 +1224,8 @@ def _room_for_chat(rec, team, ws, projects):
 
 
 def _for_person(rec):
-    """A chat as an invited person gets it: no `scope` (it holds the owner's
-    linked app folder path), no `engines` (session ids on the owner's logins)."""
+    """A chat as an invited person gets it: no `scope` (old ones hold a linked folder path),
+    no `engines` (session ids on the owner's logins)."""
     return {k: v for k, v in rec.items() if k not in ("scope", "engines")}
 
 
@@ -1995,6 +2017,9 @@ class Handler(BaseHTTPRequestHandler):
         suggest = _suggest_skill(user_msg) if not explicit else None
         # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
         may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
+        # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
+        # change files in its edit folders; an untagged one reads and searches only.
+        may_edit = _may_edit(explicit, room, user_msg, team, sess)
         # An app request is not a content write: decided before the write gate, and
         # its only approval path is the held app action (no skill, no APPROVAL line).
         # A thread an invited person can see never reaches the owner's connected apps.
@@ -2019,6 +2044,11 @@ class Handler(BaseHTTPRequestHandler):
         sess.engine = engine
         locked = shared or engine.kind == "runner"
         sess.shared = locked
+        apps_used = bool(getattr(sess, "apps_used", False))
+        folder_rows, read_dirs, edit_dirs = _turn_folders(
+            ws, room, bot_id, locked=locked, may_edit=may_edit,
+            drop_edit=bool(app_turn or apps_used), engine=engine)
+        sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
         if (_WRITE_TURN_RE.search(user_msg or "")
                 and not app_turn
@@ -2038,104 +2068,59 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        apps_used = bool(getattr(sess, "apps_used", False))
         with_web = _needs_web(user_msg, skill) and not apps_used
         model = (chat_session.ESCALATED_MODEL if app_turn
-                 else _pick_model(skill, with_web, user_msg, sess, explicit=bool(explicit)))
+                 else _pick_model(skill, with_web, user_msg, sess, explicit=bool(explicit),
+                                  editing=bool(may_edit and edit_dirs)))
 
         wants_file_search = _needs_workspace(user_msg, skill)
         wants_app_context = _needs_app_context(user_msg, skill, suggest)
-        # A linked app is product context for the whole project—not only code
-        # questions. Retrieval runs here exactly once; the model never receives
-        # permission to invoke TokenSave itself.
-        workspace_dir = resolve_linked_workspace(projects, project_slug)
-        if skill == "tokensave" and not workspace_dir:
+        # TokenSave reads the first indexed folder of the layered rows, before the lock drop:
+        # a shared thread still gets the outline with no source code, never a path.
+        layered = _layered_folders(ws, room, bot_id)
+        graph_folder = folders.first_indexed(layered) if shutil.which("tokensave") else None
+        if skill == "tokensave" and not graph_folder:
             # Deterministic zero-model response: do not inject a skill body or
             # spend a model turn when the requested graph has no safe target.
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
             message = (
-                "Link an existing local app folder to the active myOS project "
-                "first, then use /tokensave again."
+                "Link a folder to this workspace first (its settings, Folders), then use /tokensave again."
+                if not layered else
+                "None of this workspace's folders has a TokenSave index yet. Run `tokensave init` "
+                "once inside the folder, then use /tokensave again. No model turn was spent."
             )
-            self.wfile.write(f"data: {json.dumps({'delta': message})}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.log_message("chat tokensave skipped: no active linked folder")
-            return
+            return self._sse_message(message)
         tokensave_task = re.sub(
             r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
         ).replace("\x00", "").strip()[:tokensave_bridge.MAX_QUERY_CHARS]
         if not tokensave_task:
-            tokensave_task = "Summarize this app's product, users, and main capabilities"
-
-        tokensave_ready = tokensave_index_ready(workspace_dir)
-        if skill == "tokensave" and not tokensave_ready:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            message = (
-                "The linked app has no TokenSave index yet. Run `tokensave init` "
-                "once inside that app folder, then use /tokensave again. No model "
-                "turn was spent."
-            )
-            self.wfile.write(f"data: {json.dumps({'delta': message})}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.log_message("chat tokensave skipped: linked folder has no index")
-            return
+            tokensave_task = "Summarize this folder's product, users, and main capabilities"
 
         graph_context = ""
         graph_error = None
-        if workspace_dir and wants_app_context and tokensave_ready:
+        if graph_folder and wants_app_context:
             try:
                 # An invited person's question must not read the app's source out of this.
                 graph_context = tokensave_bridge.context(
-                    project_slug, tokensave_task, active_project=project_slug,
-                    include_code=not shared,
+                    ws, tokensave_task, active_project=ws,
+                    include_code=not shared, folder=graph_folder,
                 )
             except (tokensave_bridge.BridgeError, OSError) as exc:
                 # The detail can name the owner's folders: invited people get none of it.
                 graph_error = "the code index could not refresh" if shared else str(exc)[:1200]
 
         if skill == "tokensave" and graph_error:
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            message = (
-                f"TokenSave could not refresh the linked app: {graph_error}. "
-                "No stale context was used and no model turn was spent."
-            )
-            self.wfile.write(f"data: {json.dumps({'delta': message})}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.log_message("chat tokensave skipped: refresh failed")
-            return
+            return self._sse_message(
+                f"TokenSave could not refresh the linked folder: {graph_error}. "
+                "No stale context was used and no model turn was spent.")
 
-        file_search_mode = bool(
-            workspace_dir and not locked
-            and (wants_file_search
-                 or (wants_app_context and not graph_context))
-        )
-        workspace = ""
-        if workspace_dir and (wants_app_context or file_search_mode):
-            workspace = linked_workspace_prompt(
-                project_slug, workspace_dir, graph_context=graph_context,
-                graph_error=graph_error, file_search_mode=file_search_mode,
-            )
-        if wants_file_search and project_slug and not workspace_dir:
+        workspace = linked_workspace_prompt(
+            project_slug, folder_rows, graph_context=graph_context, graph_error=graph_error)
+        if wants_file_search and not read_dirs and not locked:
             workspace = (
                 "## App workspace unavailable\n"
-                "The requested project's local-folder link is missing, stale, or "
-                "invalid. Do not inspect the myOS source tree as a substitute; "
-                "ask the user to relink the app folder."
+                "This workspace has no usable linked folder (missing, stale or not linked). "
+                "Do not inspect the myOS source tree as a substitute; ask the owner to link the "
+                "folder in the workspace's settings, Folders."
             )
 
         if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
@@ -2174,9 +2159,9 @@ class Handler(BaseHTTPRequestHandler):
         ctx_len = len((body.get("context") or "").strip())
         fresh = sess.is_fresh()
         self.log_message(
-            "chat turn prompt=%d ctx=%d bot=%s skill=%s explicit=%s model=%s web=%s app=%s graph=%s files=%s apps=%s fresh=%s turn=%d",
+            "chat turn prompt=%d ctx=%d bot=%s skill=%s explicit=%s model=%s web=%s folders=%d edit=%d graph=%s apps=%s fresh=%s turn=%d",
             len(text), ctx_len, bot_id, skill or "-", bool(explicit), model, with_web,
-            bool(workspace_dir), bool(graph_context), file_search_mode, app_turn, fresh,
+            len(read_dirs), len(edit_dirs), bool(graph_context), app_turn, fresh,
             sess._turn_count,
         )
 
@@ -2229,7 +2214,7 @@ class Handler(BaseHTTPRequestHandler):
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
             c = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
-            c.workspace, c.deny_dirs, c.deny_files, c.readonly = ws, sess.deny_dirs, sess.deny_files, True
+            c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
             try:
@@ -2239,6 +2224,10 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"error": str(e)})
                 raise _RunFailed from None
             c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
+            # Consulted: its own layered folders, read-only, and its own walls.
+            c_rows, c_read, _ = _turn_folders(ws, room, b2, locked=locked, may_edit=False,
+                                              drop_edit=True, engine=c.engine)
+            c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
             own = team.skills_of(b2)
             c_skill = _suggest_skill(question, among=own)
             c_skill = c_skill if c_skill in own else None
@@ -2246,20 +2235,21 @@ class Handler(BaseHTTPRequestHandler):
             c_model = (chat_session.ESCALATED_MODEL if (c_skill or c_web)
                        else chat_session.CHAT_MODEL)
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
-                                      projects, project_slug or None, c_skill, shared=shared)
+                                      projects, project_slug or None, c_skill, shared=shared,
+                                      folders_block=linked_workspace_prompt(project_slug, c_rows))
             slot = person["id"] if person else "sess"
             _EXTRA[slot] = c
-            c_kw = {}
+            c_kw = {"read_dirs": c_read, "edit_dirs": ()}
             if locked or c.engine.full_disk:  # its own read-only token, revoked when it answers
-                c_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
-                                                          "engine": c.engine.id, "runner_owner": sender,
-                                                          "shared": shared}),
-                        "os_port": self.server.server_address[1]}
+                c_kw.update({"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": True, "apps_used": apps_used,
+                                                               "engine": c.engine.id, "runner_owner": sender,
+                                                               "shared": shared}),
+                             "os_port": self.server.server_address[1]})
             try:
                 return run(c, prompt, c_model, c_web, msg, **c_kw)
             finally:
                 _EXTRA[slot] = None
-                if c_kw:
+                if c_kw.get("os_token"):
                     os_relay.TOKENS.revoke(c_kw["os_token"])
 
         # The turn token lives for this request: the lead and its follow-up run
@@ -2285,9 +2275,8 @@ class Handler(BaseHTTPRequestHandler):
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
-            lead_text = run(sess, text, model, with_web, msgs[0],
-                            read_dirs=((workspace_dir,) if file_search_mode else ()),
-                            edit_dirs=(), **apps_kw)
+            folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
+            lead_text = run(sess, text, model, with_web, msgs[0], **folder_kw, **apps_kw)
             lead_text, asks = _extract_consults(lead_text, team)
             if asks:
                 msgs[0]["content"] = lead_text
@@ -2303,7 +2292,7 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
-                run(sess, _followup_prompt(team, answers), model, with_web, m3, **apps_kw)
+                run(sess, _followup_prompt(team, answers), model, with_web, m3, **folder_kw, **apps_kw)
             last = len(msgs) - 1
             if apps_kw.get("apps_token"):  # what the relay held this turn: cards in the thread
                 held = [r for r in approvals.pending(ROOT, ws)
@@ -2827,7 +2816,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.delete_strategy(proj, tail.rstrip("/"))})
             if path.startswith("/api/project/") and path.endswith("/folder/open"):
                 slug = path[len("/api/project/"):-len("/folder/open")]
-                folder = resolve_linked_workspace([{"slug": slug}], slug)
+                try:
+                    rows = folders.for_turn(slug, None, None, fileops.ROOT)
+                except ValueError:
+                    rows = []
+                folder = rows[0]["path"] if rows else None
                 if not folder:
                     raise fileops.ActionError(f"project '{slug}' has no usable linked folder")
                 open_local_folder(folder)

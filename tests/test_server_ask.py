@@ -131,46 +131,6 @@ class SSE(unittest.TestCase):
         text = _captured_prompt({"messages": [{"role": "user", "content": "hi"}]})
         self.assertIn("## Request\nhi", text)
 
-    def test_linked_project_adds_only_a_lazy_workspace_pointer(self):
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
-             mock.patch.object(server.tokensave_bridge, "context",
-                               return_value="fresh auth graph") as graph:
-            seen = _captured({
-                "messages": [{"role": "user", "content": "where is auth handled?"}],
-                "project_slug": "acme",
-            }, tree)
-        self.assertEqual(seen["workspace_dir"], "/tmp/acme-app")
-        self.assertIn("## Linked app workspace (read-only)", seen["text"])
-        self.assertIn("App root: /tmp/acme-app", seen["text"])
-        self.assertIn("fresh auth graph", seen["text"])
-        self.assertTrue(seen["file_search_mode"])
-        graph.assert_called_once_with(
-            "acme", "where is auth handled?", active_project="acme", include_code=True,
-        )
-        self.assertLess(len(server.linked_workspace_prompt(
-            "acme", "/tmp/acme-app", graph_context="small result")), 1100)
-
-    def test_a_shared_thread_gets_no_linked_source_code(self):
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
-             mock.patch.object(server, "_shared_room", return_value=True), \
-             mock.patch.object(server.tokensave_bridge, "context",
-                               return_value="outline only") as graph:
-            seen = _captured({
-                "messages": [{"role": "user", "content": "where is auth handled?"}],
-                "project_slug": "acme",
-            }, tree)
-        graph.assert_called_once_with(
-            "acme", "where is auth handled?", active_project="acme", include_code=False,
-        )
-        self.assertNotIn("/tmp/acme-app", seen["text"])
-        self.assertFalse(seen["file_search_mode"])
-
     def test_unknown_or_unlinked_project_cannot_add_a_directory(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
                  "folders": [], "profiles": []}]
@@ -189,59 +149,6 @@ class SSE(unittest.TestCase):
         self.assertIn("App workspace unavailable", seen["text"])
         self.assertIn("Do not inspect the myOS source tree", seen["text"])
 
-    def test_gtm_chat_can_use_linked_code_graph_without_file_search_schemas(self):
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app") as resolve, \
-             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
-             mock.patch.object(server.tokensave_bridge, "context",
-                               return_value="fresh positioning graph") as graph:
-            seen = _captured({
-                "messages": [{"role": "user", "content": "what positioning memos do we have?"}],
-                "project_slug": "acme",
-            }, tree)
-        resolve.assert_called_once_with(mock.ANY, "acme")
-        self.assertIsNone(seen["workspace_dir"])
-        self.assertFalse(seen["file_search_mode"])
-        self.assertIn("already refreshed and queried", seen["text"])
-        self.assertIn("fresh positioning graph", seen["text"])
-        self.assertNotIn("App root:", seen["text"])
-        graph.assert_called_once()
-
-    def test_tokensave_tag_activates_bounded_graph_mode_on_haiku(self):
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
-             mock.patch.object(server.tokensave_bridge, "context",
-                               return_value="fresh auth graph") as graph:
-            seen = _captured({
-                "messages": [{"role": "user", "content": "/tokensave where is auth handled?"}],
-                "project_slug": "acme",
-            }, tree)
-        self.assertEqual(seen["workspace_dir"], "/tmp/acme-app")
-        self.assertTrue(seen["file_search_mode"])
-        self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
-        self.assertIn("## Active skill: tokensave", seen["text"])
-        self.assertIn("fresh auth graph", seen["text"])
-        self.assertIn("already included in this turn", seen["text"])
-        graph.assert_called_once_with(
-            "acme", "where is auth handled?", active_project="acme", include_code=True,
-        )
-
-    def test_linked_gtm_chat_without_index_gets_bounded_file_fallback(self):
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=False):
-            seen = _captured({
-                "messages": [{"role": "user", "content": "what should our brand emphasize?"}],
-                "project_slug": "acme",
-            }, tree)
-        self.assertEqual(seen["workspace_dir"], "/tmp/acme-app")
-        self.assertTrue(seen["file_search_mode"])
-        self.assertIn("no ready local TokenSave index", seen["text"])
-
     def test_tokensave_without_link_spends_no_model_turn(self):
         sink = io.BytesIO()
         h = _bare_handler(sink)
@@ -256,57 +163,8 @@ class SSE(unittest.TestCase):
                 "messages": [{"role": "user", "content": "/tokensave inspect auth"}],
             })
         out = sink.getvalue().decode()
-        self.assertIn("Link an existing local app folder", out)
+        self.assertIn("Link a folder to this workspace first", out)
         self.assertIn("[DONE]", out)
-
-    def test_tokensave_without_index_spends_no_model_turn(self):
-        sink = io.BytesIO()
-        h = _bare_handler(sink)
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-
-        class NoCallSession(FakeSession):
-            def ask(self, *args, **kwargs):
-                raise AssertionError("model must not run without a TokenSave index")
-
-        with mock.patch.object(server, "get_chat_session", return_value=NoCallSession()), \
-             mock.patch.object(server.db, "tree", return_value=tree), \
-             mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=False):
-            h._handle_ask({
-                "messages": [{"role": "user", "content": "/tokensave inspect auth"}],
-                "project_slug": "acme",
-            })
-        out = sink.getvalue().decode()
-        self.assertIn("tokensave init", out)
-        self.assertIn("No model turn was spent", out)
-        self.assertIn("[DONE]", out)
-
-    def test_tokensave_refresh_failure_spends_no_model_turn_or_stale_context(self):
-        sink = io.BytesIO()
-        h = _bare_handler(sink)
-        tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
-
-        class NoCallSession(FakeSession):
-            def ask(self, *args, **kwargs):
-                raise AssertionError("model must not run after a failed refresh")
-
-        with mock.patch.object(server, "get_chat_session", return_value=NoCallSession()), \
-             mock.patch.object(server.db, "tree", return_value=tree), \
-             mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
-             mock.patch.object(server, "tokensave_index_ready", return_value=True), \
-             mock.patch.object(server.tokensave_bridge, "context",
-                               side_effect=server.tokensave_bridge.BridgeError("index locked")):
-            h._handle_ask({
-                "messages": [{"role": "user", "content": "/tokensave inspect auth"}],
-                "project_slug": "acme",
-            })
-        out = sink.getvalue().decode()
-        self.assertIn("index locked", out)
-        self.assertIn("No stale context was used", out)
-        self.assertIn("no model turn was spent", out)
-
 
 class RouteSkill(unittest.TestCase):
     def test_plain_chat_routes_nothing(self):
@@ -608,3 +466,307 @@ class StateSnapshot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---- linked folders on chat turns (core.folders) --------------------------- #
+from core import folders as _folders  # noqa: E402
+from dashboard.engines.claude_code import ClaudeCodeEngine as _CC  # noqa: E402
+
+
+class _FakeEngine:
+    label = "Fake"
+    shared_safe = True
+
+    def __init__(self, id="claude-code", kind="cli", supports=_CC.supports, full_disk=False):
+        self.id, self.kind, self.supports, self.full_disk = id, kind, frozenset(supports), full_disk
+
+    def resolve_model(self, model):
+        return model
+
+    def is_fresh(self, session):
+        return True
+
+
+class TurnFolders(unittest.TestCase):
+    """Which folders a turn gets, and what it may change there."""
+
+    def setUp(self):
+        root, ext = tempfile.TemporaryDirectory(), tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.addCleanup(ext.cleanup)
+        self.root = Path(root.name).resolve()
+        ext = Path(ext.name).resolve()
+        self.a, self.b, self.d = ext / "app-a", ext / "docs-b", ext / "demo-app"
+        for d in (self.a, self.b, self.d):
+            d.mkdir()
+        for slug in ("acme", "demo"):
+            (self.root / "projects" / slug).mkdir(parents=True)
+            (self.root / "projects" / slug / "project.md").write_text(f"---\nname: {slug}\nkind: venture\n---\n")
+        (self.root / "team").mkdir()
+        _folders.add("acme", str(self.a), _folders.EDIT, self.root)
+        _folders.add("acme", str(self.b), _folders.READ, self.root)
+        _folders.add("demo", str(self.d), _folders.EDIT, self.root)
+        self.reply = "ok"
+
+    def tree(self):
+        return [{"slug": s, "kind": "venture", "type": "project", "profiles": [],
+                 "folders": _folders.load(s, self.root)["folders"]} for s in ("acme", "demo")]
+
+    def turn(self, msg, room="acme/general", engine=None, shared=False, explicit_thread=False,
+             runner=False, apps=False, session_id=None, ctx_error=None):
+        seen = {"runs": [], "ctx": []}
+        test = self
+
+        def record(self_, text, with_web=False, model=None, read_dirs=(), edit_dirs=(), web_domains=(), **kw):
+            seen["runs"].append({"text": text, "model": model, "web": with_web, "read_dirs": tuple(read_dirs),
+                                 "edit_dirs": tuple(edit_dirs), "deny_dirs": tuple(getattr(self_, "deny_dirs", ())),
+                                 "who": type(self_).__name__})
+            yield ("delta", test.reply if len(seen["runs"]) == 1 else "ok")
+            yield ("done", {"result": "ok"})
+
+        class Sess:
+            _started = False
+            _turn_count = 0
+            _last_skill = "folder-work" if explicit_thread else None
+            _skill_explicit = explicit_thread
+            ask = record
+
+            def is_fresh(self):
+                return True
+
+            def note_skill(self, skill, explicit=False):
+                pass
+
+        sess = Sess()
+        if session_id:
+            sess.session_id = session_id
+        seen["sess"] = sess
+        seen["approvals"] = mock.Mock(return_value={"id": "ap1"})
+        h = _bare_handler(io.BytesIO())
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        patches = [mock.patch.object(server, "get_chat_session", return_value=sess),
+                   mock.patch.object(server, "ROOT", self.root),
+                   mock.patch.object(server.fileops, "ROOT", self.root),
+                   mock.patch.object(server.db, "tree", return_value=self.tree()),
+                   mock.patch.object(server.chat_session.ChatSession, "ask", record),
+                   mock.patch.object(server.tokensave_bridge, "context",
+                                     side_effect=ctx_error or (lambda *a, **k: seen["ctx"].append(k) or "graph")),
+                   mock.patch.object(server.chat_store, "CHATS_DIR", self.root / "chats"),
+                   mock.patch.object(server.chat_store, "record_turn"),
+                   mock.patch.object(server.approvals, "add", seen["approvals"])]
+        if engine is not None:
+            patches.append(mock.patch.object(server.engine_registry, "pick", return_value=engine))
+        if shared:
+            patches.append(mock.patch.object(server, "_shared_room", return_value=True))
+        if runner:
+            patches.append(mock.patch.object(server.runners.HUB, "online", return_value=True))
+        if apps:
+            patches += [mock.patch.object(server.integrations, "api_key", return_value="k"),
+                        mock.patch.object(server, "_needs_apps", return_value=True)]
+        for p in patches:
+            p.start()
+        try:
+            h._handle_ask({"messages": [{"role": "user", "content": msg}], "room_id": room})
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        seen["out"] = h.wfile.getvalue().decode()
+        seen["lead"] = seen["runs"][0] if seen["runs"] else None
+        return seen
+
+    def test_untagged_turn_reads_all_folders_and_edits_none(self):
+        lead = self.turn("where is auth handled?")["lead"]
+        self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
+        self.assertEqual(lead["edit_dirs"], ())
+        self.assertIn("tag", lead["text"].split("## Linked folders", 1)[1].lower())
+
+    def test_tagged_dm_skill_and_continuation_can_edit(self):
+        for name, kw in (("bot tag", {"msg": "@cto fix the login redirect"}),
+                         ("skill tag", {"msg": "/folder-work tidy the readme"}),
+                         ("dm", {"msg": "tidy the readme", "room": "acme/dm-cto"}),
+                         ("continuation", {"msg": "yes go ahead", "explicit_thread": True})):
+            with self.subTest(name):
+                lead = self.turn(**kw)["lead"]
+                self.assertEqual(lead["edit_dirs"], (str(self.a),))
+                self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
+
+    def test_untagged_save_word_still_hits_the_tag_gate(self):
+        seen = self.turn("update the readme with the new steps")
+        self.assertEqual(seen["runs"], [])
+        self.assertIn("tag who should do it", seen["out"])
+
+    def test_read_folder_never_in_edit_dirs(self):
+        lead = self.turn("@cto refactor the docs folder")["lead"]
+        self.assertNotIn(str(self.b), lead["edit_dirs"])
+
+    def test_app_turn_and_apps_used_thread_drop_edit(self):
+        lead = self.turn("@cto check my inbox and fix the login", apps=True)["lead"]
+        self.assertEqual(lead["edit_dirs"], ())
+
+    def test_web_turn_keeps_edit(self):
+        # A fetched page could carry instructions: accepted (spec), fetches reach only typed hosts.
+        lead = self.turn("@cto /web fix the login like docs.example.com says")["lead"]
+        self.assertTrue(lead["web"])
+        self.assertEqual(lead["edit_dirs"], (str(self.a),))
+
+    def test_shared_and_runner_turns_get_no_folders(self):
+        for name, kw in (("shared", {"shared": True}), ("runner", {"runner": True})):
+            with self.subTest(name):
+                lead = self.turn("@cto fix the login", **kw)["lead"]
+                self.assertEqual((lead["read_dirs"], lead["edit_dirs"]), ((), ()))
+                self.assertNotIn(str(self.a), lead["text"])
+                self.assertNotIn("## Linked folders", lead["text"])
+
+    def test_codex_and_acp_never_get_edit_dirs(self):
+        for eid in ("codex", "acp"):
+            with self.subTest(eid):
+                seen = self.turn("@cto fix the login", engine=_FakeEngine(eid, supports=(), full_disk=True))
+                lead = seen["lead"]
+                self.assertEqual(lead["edit_dirs"], ())
+                block = lead["text"].split("## Linked folders", 1)[1]
+                self.assertIn(f"{self.a}", block)
+                self.assertNotIn("(edit)", block)
+
+    def test_engines_refuse_edit_dirs_they_cannot_enforce(self):
+        from dashboard.engines.base import Engine, EngineRefused, TurnPolicy
+        eng = Engine()
+        eng.label = "X"
+        with self.assertRaises(EngineRefused):
+            eng.check(TurnPolicy(read_dirs=("/w/a",), edit_dirs=("/w/a",)))
+        eng.check(TurnPolicy(read_dirs=("/w/a",)))
+
+    def test_consulted_teammate_reads_only(self):
+        seen = self.turn("@cmo @cto how should the login page read?")
+        mate = seen["runs"][1]
+        self.assertEqual(mate["who"], "ChatSession")
+        self.assertEqual(mate["read_dirs"], (str(self.a), str(self.b)))
+        self.assertEqual(mate["edit_dirs"], ())
+        self.assertIn("## Linked folders", mate["text"])
+
+    def test_followup_keeps_the_leads_folders(self):
+        self.reply = "Let me check.\nCONSULT @cmo: what tone?"
+        seen = self.turn("@cto fix the login copy")
+        self.assertEqual(len(seen["runs"]), 3)
+        lead, follow = seen["runs"][0], seen["runs"][2]
+        self.assertEqual((follow["read_dirs"], follow["edit_dirs"]), (lead["read_dirs"], lead["edit_dirs"]))
+        self.assertEqual(lead["edit_dirs"], (str(self.a),))
+
+    def test_other_workspace_folder_in_deny_dirs_unless_also_linked(self):
+        lead = self.turn("where is auth handled?")["lead"]
+        self.assertIn(str(self.d), lead["deny_dirs"])
+        _folders.add("acme", str(self.d), _folders.READ, self.root)
+        lead = self.turn("where is auth handled?")["lead"]
+        self.assertNotIn(str(self.d), lead["deny_dirs"])
+        self.assertIn(str(self.d), lead["read_dirs"])
+
+    def test_hq_gets_its_own_folders_and_no_other_workspace_denies(self):
+        hq = self.root.parent / (self.root.name + "-hq")
+        hq.mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(hq, ignore_errors=True))
+        _folders.add("hq", str(hq), _folders.EDIT, self.root)
+        lead = self.turn("@cos tidy the notes", room="hq/general")["lead"]
+        self.assertEqual(lead["read_dirs"], (str(hq),))
+        self.assertEqual(lead["edit_dirs"], (str(hq),))
+        self.assertNotIn(str(self.a), lead["deny_dirs"])
+
+    def test_layer_removed_nested_folder_denied(self):
+        inner = self.a / "vendor"
+        inner.mkdir()
+        row = _folders.add("acme", str(inner), _folders.EDIT, self.root)
+        _folders.set_limit("acme", "bots", "cto", {"f1": "edit"}, self.root)
+        lead = self.turn("@cto fix the login")["lead"]
+        self.assertEqual(lead["read_dirs"], (str(self.a),))
+        self.assertIn(str(inner), lead["deny_dirs"])
+        self.assertTrue(row["id"])
+
+    def test_channel_layer_limits_and_dm_skips_it(self):
+        _folders.set_limit("acme", "rooms", "general", {"f2": "read"}, self.root)
+        lead = self.turn("@cto fix the login")["lead"]
+        self.assertEqual((lead["read_dirs"], lead["edit_dirs"]), ((str(self.b),), ()))
+        lead = self.turn("fix the login", room="acme/dm-cto")["lead"]
+        self.assertEqual(lead["edit_dirs"], (str(self.a),))
+
+    def test_stale_folder_skipped_and_chat_still_answers(self):
+        self.b.rmdir()
+        seen = self.turn("where is auth handled?")
+        self.assertEqual(seen["lead"]["read_dirs"], (str(self.a),))
+        self.assertIn("[DONE]", seen["out"])
+
+    def test_block_lists_folders_and_is_absent_with_none(self):
+        text = self.turn("hello there")["lead"]["text"]
+        block = text.split("## Linked folders", 1)[1]
+        self.assertIn(f"app-a: {self.a}", block)
+        self.assertIn(f"docs-b: {self.b}", block)
+        self.assertIn("read-only", block)
+        self.assertIn("CLAUDE.md", block)
+        self.assertIn("AGENTS.md", block)
+        _folders.remove("acme", "f1", self.root)
+        _folders.remove("acme", "f2", self.root)
+        self.assertNotIn("## Linked folders", self.turn("hello there")["lead"]["text"])
+
+    def test_tokensave_stops_only_for_tokensave_without_index(self):
+        seen = self.turn("/tokensave how does login work")
+        self.assertEqual(seen["runs"], [])
+        self.assertIn("tokensave init", seen["out"])
+        _folders.remove("acme", "f1", self.root)
+        _folders.remove("acme", "f2", self.root)
+        seen = self.turn("/tokensave how does login work")
+        self.assertEqual(seen["runs"], [])
+        self.assertIn("Link a folder", seen["out"])
+
+    def test_tokensave_uses_the_first_indexed_folder(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("/tokensave how does login work")
+            self.assertEqual(seen["ctx"][0]["folder"], str(self.b))
+            self.assertTrue(seen["ctx"][0]["include_code"])
+            self.assertIn("graph", seen["lead"]["text"])
+            # A shared thread keeps the outline with no source code, and no paths.
+            seen = self.turn("/tokensave how does login work", shared=True)
+            self.assertEqual(seen["ctx"][0]["folder"], str(self.b))
+            self.assertFalse(seen["ctx"][0]["include_code"])
+            self.assertNotIn(str(self.b), seen["lead"]["text"])
+
+    def test_tokensave_tag_runs_on_the_cheap_model_with_the_graph(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("/tokensave where is auth handled?")
+        lead = seen["lead"]
+        self.assertEqual(lead["model"], server.chat_session.CHAT_MODEL)
+        self.assertIn("## Active skill: tokensave", lead["text"])
+        self.assertIn("already refreshed and queried", lead["text"])
+        self.assertEqual(seen["ctx"][0]["active_project"], "acme")
+
+    def test_tokensave_refresh_failure_spends_no_model_turn_or_stale_context(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("/tokensave inspect auth", ctx_error=server.tokensave_bridge.BridgeError("index locked"))
+        self.assertEqual(seen["runs"], [])
+        self.assertIn("index locked", seen["out"])
+        self.assertIn("No stale context was used", seen["out"])
+
+    def test_cto_edit_turn_runs_with_no_index_on_the_strong_model(self):
+        lead = self.turn("@cto fix the login redirect")["lead"]
+        self.assertEqual(lead["model"], server.chat_session.ESCALATED_MODEL)
+        self.assertIn("folder-work", lead["text"])
+
+    def test_edit_word_picks_strong_model_only_when_editing(self):
+        pick = server._pick_model
+        self.assertEqual(pick(None, False, "fix the login", None, editing=True), server.chat_session.ESCALATED_MODEL)
+        self.assertEqual(pick(None, False, "fix the login", None, editing=False), server.chat_session.CHAT_MODEL)
+        self.assertEqual(pick("tokensave", False, "rename the handler", None, editing=True),
+                         server.chat_session.ESCALATED_MODEL)
+        self.assertEqual(pick(None, False, "how does it work", None, editing=True), server.chat_session.CHAT_MODEL)
+        # The edit words never reach the tag gate.
+        self.assertIsNone(server._WRITE_TURN_RE.search("fix the login"))
+
+    def test_may_write_and_approvals_unchanged(self):
+        self.reply = "Done.\nAPPROVAL: save it"
+        seen = self.turn("tidy the readme please", room="acme/dm-cto", session_id="c1")
+        self.assertEqual(seen["lead"]["edit_dirs"], (str(self.a),))  # a DM turn may edit
+        seen["approvals"].assert_not_called()  # but an untagged turn still asks no approval
+        seen = self.turn("/folder-work fix the readme", session_id="c1")
+        seen["approvals"].assert_called_once()

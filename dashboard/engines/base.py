@@ -102,6 +102,8 @@ class Engine:
             raise EngineRefused(f"{self.label} cannot run in a thread invited people can see.")
         if policy.apps and "apps" not in self.supports:
             raise EngineRefused(f"{self.label} cannot use connected apps.")
+        if policy.edit_dirs and "folder_edit" not in self.supports:
+            raise EngineRefused(f"{self.label} cannot change files in linked folders.")
 
     def turn(self, session, text, policy, model, tokens):
         raise NotImplementedError

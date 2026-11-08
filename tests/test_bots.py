@@ -165,7 +165,10 @@ class Routing(unittest.TestCase):
         self.assertEqual(self.route("@cmo thoughts on our name?"), ("cmo", None, False, None))
 
     def test_single_skill_bot_always_uses_it(self):
-        self.assertEqual(self.route("@cto how does login work")[1], "tokensave")
+        self.assertEqual(self.route("@social draft three posts")[1], "content-brief")
+        # CTO owns two skills: a change routes to folder-work, a plain question to none.
+        self.assertEqual(self.route("@cto fix the login redirect")[1], "folder-work")
+        self.assertIsNone(self.route("@cto how does login work")[1])
 
     def test_slash_skill_speaks_as_owner(self):
         self.assertEqual(self.route("/positioning for acme"),
