@@ -642,3 +642,20 @@ class Files(Tmp):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoBotLinksAFolder(unittest.TestCase):
+    """CodeQL #124's source is the owner-typed folder path. A bot reaches osctl only through the
+    relay or the api engine's osctl backend; both bind MYOS_WORKSPACE, so --local-folder is refused
+    before anything is read or written."""
+
+    def test_relay_osctl_refuses_local_folder_for_every_kind_of_turn(self):
+        from dashboard import os_relay
+        for ctx in ({"ws": "hq", "shared": False, "engine": "api:x"},
+                    {"ws": "demo", "shared": True},
+                    {"ws": "demo", "shared": False, "readonly": True}):
+            for cmd in ("update-project", "create-project"):
+                text, failed = os_relay.run_osctl(
+                    [cmd, "--slug", "no-such-slug-zz", "--local-folder", tempfile.gettempdir()], "", ctx)
+                self.assertTrue(failed, (cmd, ctx))
+                self.assertRegex(text, "only you can link|read-only: you were consulted", (cmd, ctx))

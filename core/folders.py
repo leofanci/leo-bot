@@ -40,7 +40,7 @@ NEVER_WRITE_FILES = (".mcp.json", ".envrc", ".pre-commit-config.yaml",
 # (Grep/Glob honor Read deny rules too). Verified against claude 2.x:
 # "**/x" covers the repo; a linked --add-dir needs its own "//abs/**/x" rule.
 SECRET_FILE_GLOBS = [
-    ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc",
+    ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc", ".pgpass", ".pypirc", ".git-credentials",
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
     ".auth-token", "owner-token",  # dashboard login token (server.TOKEN_FILE, OWNER_TOKEN_FILE)
     "engines.json", "runners.json",  # API keys (dashboard.engines.config), runner token hashes

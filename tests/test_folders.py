@@ -422,3 +422,11 @@ class StaysInsideMyOS(unittest.TestCase):
             with self.assertRaises(ValueError):
                 folders.save("evil", {"folders": []}, root)
             self.assertFalse((outside / "team" / "folders.json").exists())
+
+
+class CredentialFiles(unittest.TestCase):
+    def test_credential_files_from_hermes_list_are_secret(self):
+        base = Path("/w/a")
+        for name in (".pgpass", ".pypirc", ".git-credentials"):
+            self.assertFalse(folders.may_write(base / name, base), name)
+            self.assertIn(name, folders.SECRET_FILE_GLOBS)

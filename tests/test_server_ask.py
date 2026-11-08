@@ -759,6 +759,20 @@ class TurnFolders(unittest.TestCase):
         used = {r["path"] for r in _folders.for_turn("acme", None, "cto", self.root)}
         self.assertFalse(used - linked)
 
+    def test_a_bot_limited_to_no_folders_is_told_so_not_to_link_one(self):
+        _folders.set_limit("acme", "bots", "cto", {}, self.root)
+        lead = self.turn("@cto where is the auth handler in the code?")["lead"]
+        self.assertEqual(lead["read_dirs"], ())
+        self.assertIn("limited", lead["text"])
+        self.assertNotIn("ask the owner to link", lead["text"])
+        # Every folder stale: that is said, not a limit.
+        _folders.set_limit("acme", "bots", "cto", None, self.root)
+        self.a.rmdir()
+        self.b.rmdir()
+        lead = self.turn("@cto where is the auth handler in the code?")["lead"]
+        self.assertIn("no usable linked folder", lead["text"])
+        self.assertNotIn("limited", lead["text"])
+
     def test_recap_goes_before_the_prompt_once(self):
         seen = self.turn("hello there", recap="RECAP-OF-EARLIER-THREAD")
         self.assertTrue(seen["lead"]["text"].startswith("RECAP-OF-EARLIER-THREAD"))
@@ -943,6 +957,12 @@ class SavedThreadFolders(unittest.TestCase):
         fresh = server.get_chat_session(("acme",), self.id("c1"), linked=set())
         self.assertNotEqual(fresh.session_id, self.id("c1"))
         self.assertIn("earlier message", fresh.pending_recap)
+
+    def test_an_unresolved_old_scope_path_matches_its_resolved_link(self):
+        import os
+        self.saved(["acme", "/tmp"])
+        sess = server.get_chat_session(("acme",), self.id("c1"), linked={os.path.realpath("/tmp")})
+        self.assertEqual(sess.session_id, self.id("c1"))
 
     def test_scope_slug_reads_both_shapes(self):
         self.assertEqual(server._scope_slug(["acme", "/app"]), "acme")

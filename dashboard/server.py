@@ -1141,7 +1141,7 @@ def _used_paths(sess_or_rec):
     scope = sess_or_rec.get("scope") if isinstance(sess_or_rec, dict) else None
     if isinstance(scope, (list, tuple)) and len(scope) > 1 and isinstance(scope[1], str) and scope[1]:
         used.add(scope[1])
-    return used
+    return {os.path.realpath(p) for p in used}  # compared with the resolved linked paths
 
 
 def _folder_gone(sess_or_rec, linked):
@@ -2228,12 +2228,13 @@ class Handler(BaseHTTPRequestHandler):
         workspace = linked_workspace_prompt(
             project_slug, folder_rows, graph_context=graph_context, graph_error=graph_error)
         if wants_file_search and not read_dirs and not locked:
-            workspace = (
-                "## App workspace unavailable\n"
-                "This workspace has no usable linked folder (missing, stale or not linked). "
-                "Do not inspect the myOS source tree as a substitute; ask the owner to link the "
-                "folder in the workspace's settings, Folders."
-            )
+            why = ("Your folders are limited for this channel or for you, and none is open to you "
+                   "this turn: say so and ask the owner to change the limit on the Folders screen."
+                   if _layered_folders(ws, None, None) else
+                   "This workspace has no usable linked folder (missing, stale or not linked): ask "
+                   "the owner to link the folder in the workspace's settings, Folders.")
+            workspace = ("## App workspace unavailable\n" + why
+                         + " Do not inspect the myOS source tree as a substitute.")
 
         if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
             workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
