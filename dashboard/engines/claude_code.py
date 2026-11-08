@@ -23,6 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+from core import folders
 from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 
 
@@ -100,18 +101,9 @@ APP_ALLOWED_TOOLS = [
 WEB_ALLOWED_TOOLS = [
     "WebSearch",
 ]
-# Secret-looking files stay unreadable even inside the repo or a linked app
-# folder (Grep/Glob honor Read deny rules too). Verified against claude 2.x:
-# "**/x" covers the repo; a linked --add-dir needs its own "//abs/**/x" rule.
-SECRET_FILE_GLOBS = [
-    ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc",
-    "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
-    ".auth-token", "owner-token",  # dashboard login token (server.TOKEN_FILE, OWNER_TOKEN_FILE)
-    "engines.json", "runners.json",  # API keys (dashboard.engines.config), runner token hashes
-    ".myos-runner-token", ".myos-runner-sessions.json",  # a runner's own files on a person's Mac
-    "integrations.json",  # Composio key + sessions (core.integrations)
-    "people.json", "invites.json", "access.json",  # invited people (core.people)
-]
+# Secret-looking files stay unreadable even inside the repo or a linked folder.
+# The list lives in core.folders (also the never-write list); re-exported here.
+SECRET_FILE_GLOBS = folders.SECRET_FILE_GLOBS
 
 
 def private_read_rules(repo_dir):

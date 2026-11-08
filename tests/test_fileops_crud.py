@@ -11,6 +11,9 @@ class CrudTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Linked folders may not sit inside myOS (fileops.ROOT): they live next to it.
+        self._ext = tempfile.TemporaryDirectory()
+        self.ext = Path(self._ext.name)
         root = self.root
         proj = root / "projects" / "acme"
         write(proj / "project.md",
@@ -30,6 +33,7 @@ class CrudTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        self._ext.cleanup()
 
     def _con(self):
         return sqlite3.connect(self.root / "database" / "data" / "os.db")
@@ -48,7 +52,7 @@ class CrudTest(unittest.TestCase):
             fileops.update_project("nope", {"name": "X"})
 
     def test_project_local_folder_can_be_linked_and_unlinked(self):
-        app_dir = self.root / "local apps" / "acme-app #1"
+        app_dir = self.ext / "local apps" / "acme-app #1"
         app_dir.mkdir(parents=True)
         fileops.update_project("acme", {"local_folder": str(app_dir)})
         expected = str(app_dir.resolve())
@@ -89,7 +93,7 @@ class CrudTest(unittest.TestCase):
     def test_project_local_folder_rejects_home_config_and_app_bundles(self):
         # ~/.ssh, ~/.config (CLI tokens), ~/Library hold secrets, never app code;
         # "open" on a .app launches it instead of showing a folder.
-        home = self.root / "home"
+        home = self.ext / "home"
         bad = (".ssh", ".config/gh", ".aws", "Library/Application Support", "apps/Tool.app")
         for rel in bad:
             (home / rel).mkdir(parents=True)
@@ -104,7 +108,7 @@ class CrudTest(unittest.TestCase):
     def test_project_local_folder_allows_apps_in_cloud_drives_not_whole_drives(self):
         # iCloud Drive, Dropbox, Google Drive live under ~/Library: an app inside
         # one is fine, the drive itself (everything synced) is not.
-        home = self.root / "home"
+        home = self.ext / "home"
         icloud = home / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
         cloud = home / "Library" / "CloudStorage" / "Dropbox"
         ok = (icloud / "apps" / "acme-app", cloud / "code" / "acme-app")

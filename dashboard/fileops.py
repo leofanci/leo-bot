@@ -46,6 +46,7 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
+from core import folders
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
@@ -867,53 +868,12 @@ def _slugify(name: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")
 
 
-# Cloud drives sync under ~/Library (None = any provider folder): an app folder
-# inside one is fine, the drive itself (everything synced) is not.
-_CLOUD_DRIVES = (("Library", "Mobile Documents", "com~apple~CloudDocs"), ("Library", "CloudStorage", None))
-
-
-def _inside_cloud_drive(rel_parts) -> bool:
-    return any(len(rel_parts) > len(drive)
-               and all(d is None or d == p for d, p in zip(drive, rel_parts))
-               for drive in _CLOUD_DRIVES)
-
-
 def normalize_local_folder(value) -> str:
-    """Return one safe app directory, or an empty string to unlink it."""
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if any(ord(char) < 32 for char in raw):
-        raise ActionError("local folder path cannot contain control characters")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise ActionError("local folder must be an absolute path")
-    if not path.exists():
-        raise ActionError(f"local folder does not exist: {path}")
-    if not path.is_dir():
-        raise ActionError(f"local folder is not a directory: {path}")
-    resolved = path.resolve()
-    workspace_root = ROOT.resolve()
-    home = Path.home().resolve()
-    filesystem_root = Path(resolved.anchor).resolve()
-    if resolved in {filesystem_root, home, workspace_root}:
-        raise ActionError("local folder must be a specific app directory")
-    # A parent of myOS (for example ~/Documents/GitHub) would expose this repo
-    # and every sibling app when passed to Claude as an allowed directory.
-    if workspace_root.is_relative_to(resolved):
-        raise ActionError("local folder cannot contain the myOS workspace")
-    # Claude's config holds every bot session's transcript, all workspaces.
-    if resolved.is_relative_to(home / ".claude"):
-        raise ActionError("local folder cannot be inside the Claude config folder")
-    # ~/.ssh, ~/.config, ~/.aws, ~/Library: keys and CLI tokens, never app code.
-    if resolved.is_relative_to(home):
-        rel = resolved.relative_to(home).parts
-        if (rel[0].startswith(".") or rel[0] == "Library") and not _inside_cloud_drive(rel):
-            raise ActionError("local folder cannot be a hidden or Library folder in your home")
-    # "Open folder" would launch an app bundle instead of showing it.
-    if any(part.lower().endswith(".app") for part in resolved.parts):
-        raise ActionError("local folder cannot be an app bundle")
-    return str(resolved)
+    """Return one safe folder (core.folders.normalize_path), or an empty string."""
+    try:
+        return folders.normalize_path(value, ROOT)
+    except folders.FolderError as exc:
+        raise ActionError(str(exc)) from exc
 
 
 def project_local_folder(slug: str) -> str:
