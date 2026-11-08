@@ -120,6 +120,10 @@ def recap(rec, engine_id=None):
     return RECAP_HEAD + "\n".join(reversed(lines)) if lines else ""
 
 
+def _paths(value):
+    return {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
+
+
 def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
                 by=None, by_name=None, shared=False):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
@@ -167,6 +171,7 @@ def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, ex
         "skill_explicit": sess._skill_explicit,
         "last_bot": getattr(sess, "_last_bot", None),
         "apps_used": bool(getattr(sess, "apps_used", False)),
+        "folder_paths": sorted(_paths(getattr(sess, "folder_paths", None)) | _paths(rec.get("folder_paths"))),
         "shared": bool(rec.get("shared")) and bool(shared),
     })
     engine = getattr(sess, "engine", None)

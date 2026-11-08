@@ -1085,13 +1085,51 @@ _CHAT = None
 _CHAT_SCOPE = None
 
 
-def get_chat_session(project_scope=None, chat_id=None, new=False):
-    """Return a session isolated to one project (or the unscoped dashboard).
+def _scope_slug(scope):
+    """The workspace slug of a session scope: new `(slug,)` and old `(slug, path)` shapes."""
+    if isinstance(scope, (list, tuple)) and scope and isinstance(scope[0], str):
+        return scope[0]
+    return None
 
-    A Claude resume contains earlier prompts and tool results. Reusing it after
-    switching linked projects would retain the previous app's evidence even
-    though current filesystem permissions changed, so a scope change starts a
-    fresh conversation (the old chat stays saved).
+
+def _used_paths(sess_or_rec):
+    value = (sess_or_rec.get("folder_paths") if isinstance(sess_or_rec, dict)
+             else getattr(sess_or_rec, "folder_paths", None))
+    return {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
+
+
+def _folder_gone(sess_or_rec, linked):
+    """A folder this thread used is no longer linked: its session holds what it read there."""
+    return linked is not None and bool(_used_paths(sess_or_rec) - set(linked))
+
+
+def _fresh_with_recap(rec):
+    sess = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+    sess.pending_recap = chat_store.recap(rec) or None
+    return sess
+
+
+def _reopen(rec, scope, linked):
+    """Restore a saved chat for `scope`, or a fresh session. Same workspace keeps it; an
+    unscoped chat may adopt a project only if it never used a folder; a used folder that
+    is gone starts fresh with a recap of the visible messages."""
+    rec_slug = _scope_slug(rec.get("scope")) if rec else None
+    same = rec and (rec_slug == _scope_slug(scope) or (rec_slug is None and not _used_paths(rec)))
+    if not same:
+        return chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+    if _folder_gone(rec, linked):
+        return _fresh_with_recap(rec)
+    return chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
+
+
+def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
+    """Return a session isolated to one workspace (or the unscoped dashboard).
+
+    A Claude resume contains earlier prompts and tool results. Reusing it in another
+    workspace, or after a folder it read was unlinked, would keep that evidence though
+    the current permissions changed, so those start a fresh conversation (the old chat
+    stays saved; an unlinked folder's thread gets a recap of its visible messages).
+    `linked`: the workspace's linked folder paths now (None: not checked).
 
     `chat_id` reopens a saved chat (chat_store) when it is not the active one;
     `new` forces a fresh session (client has no chat yet, so it must never
@@ -1110,22 +1148,24 @@ def get_chat_session(project_scope=None, chat_id=None, new=False):
         return _CHAT
     if chat_id and (_CHAT is None or getattr(_CHAT, "session_id", None) != chat_id):
         rec = chat_store.load(chat_id)
-        rec_scope = tuple(rec["scope"]) if rec and rec.get("scope") else None
         if _CHAT is not None:
             _CHAT.close()
-        # An unscoped chat never had app access, so it may adopt a project.
-        _CHAT = (chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
-                 if rec and rec_scope in (scope, None)
-                 else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL))
+        _CHAT = _reopen(rec, scope, linked)
         _CHAT_SCOPE = scope
         return _CHAT
-    if chat_id and _CHAT is not None and _CHAT_SCOPE is None:
-        _CHAT_SCOPE = scope  # active unscoped chat adopts its first project
-    if _CHAT is None or _CHAT_SCOPE != scope:
+    if chat_id and _CHAT is not None and _CHAT_SCOPE is None and not _used_paths(_CHAT):
+        _CHAT_SCOPE = scope  # active unscoped chat that never used a folder adopts its first project
+    if _CHAT is not None and _scope_slug(_CHAT_SCOPE) == _scope_slug(scope) and _folder_gone(_CHAT, linked):
+        rec = chat_store.load(getattr(_CHAT, "session_id", None)) if chat_id else None
+        _CHAT.close()
+        _CHAT = _fresh_with_recap(rec)
+        _CHAT_SCOPE = scope
+        return _CHAT
+    if _CHAT is None or _scope_slug(_CHAT_SCOPE) != _scope_slug(scope):
         if _CHAT is not None:
             _CHAT.close()
         _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
-        _CHAT_SCOPE = scope
+    _CHAT_SCOPE = scope
     return _CHAT
 
 
@@ -1153,24 +1193,23 @@ def _release_elsewhere(chat_id, holder):
             del _PERSON_CHATS[pid]
 
 
-def person_chat_session(pid, project_scope=None, chat_id=None, new=False):
-    """get_chat_session for an invited person: their own slot."""
+def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked=None):
+    """get_chat_session for an invited person: their own slot, same rules."""
     with _SLOTS_LOCK:
         _release_elsewhere(chat_id, pid)
         slot = _PERSON_CHATS.get(pid)
         cur, cur_scope = (slot or [None, None])
         scope = project_scope or None
         if not new and chat_id and cur is not None and getattr(cur, "session_id", None) == chat_id \
-                and cur_scope in (scope, None):
+                and (_scope_slug(cur_scope) == _scope_slug(scope)
+                     or (cur_scope is None and not _used_paths(cur))) \
+                and not _folder_gone(cur, linked):
             _PERSON_CHATS[pid] = [cur, scope]
             return cur
         if cur is not None:
             cur.close()
         rec = chat_store.load(chat_id) if (chat_id and not new) else None
-        rec_scope = tuple(rec["scope"]) if rec and rec.get("scope") else None
-        sess = (chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
-                if rec and rec_scope in (scope, None)
-                else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL))
+        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
         _PERSON_CHATS[pid] = [sess, scope]
         return sess
 
@@ -1226,7 +1265,7 @@ def _room_for_chat(rec, team, ws, projects):
 def _for_person(rec):
     """A chat as an invited person gets it: no `scope` (old ones hold a linked folder path),
     no `engines` (session ids on the owner's logins)."""
-    return {k: v for k, v in rec.items() if k not in ("scope", "engines")}
+    return {k: v for k, v in rec.items() if k not in ("scope", "engines", "folder_paths")}
 
 
 def _people_view(ws, viewer):
@@ -1990,16 +2029,15 @@ class Handler(BaseHTTPRequestHandler):
         project_record = next(
             (p for p in projects if p.get("slug") == project_slug), None,
         )
-        project_scope = (
-            (project_slug, ((project_record.get("folders") or [{}])[0]).get("path") or "")
-            if project_record else None
-        )
+        # Scope is the workspace; which folders a thread used is checked against `linked`.
+        project_scope = (project_slug,) if project_record else None
+        linked = set(folders.all_paths(ws, ROOT))
         chat_id = body.get("chat_id") or None
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
-        sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id) if person
-                else get_chat_session(project_scope, chat_id, new=not chat_id))
+        sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
+                if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
         if chat_id:
             answer = body.get("approval")
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
@@ -2152,6 +2190,11 @@ class Handler(BaseHTTPRequestHandler):
         missed = chat_store.recap(saved_rec, engine.id)
         if missed:
             text = f"{missed}\n\n{text}"
+        # A fresh start after a used folder was unlinked: the thread's visible messages, once.
+        pending = getattr(sess, "pending_recap", None)
+        if pending:
+            text = f"{pending}\n\n{text}"
+            sess.pending_recap = None
         sess.note_skill(skill, explicit=bool(explicit))
         if hasattr(sess, "note_bot"):
             sess.note_bot(bot_id)

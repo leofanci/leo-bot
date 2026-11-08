@@ -312,14 +312,15 @@ class ProjectScopedChatSession(unittest.TestCase):
             server._CHAT_SCOPE = None
             with mock.patch.object(server.chat_session, "ChatSession",
                                    side_effect=[first, second, third]) as make:
+                # Scope is the workspace: an old (slug, path) scope is that slug.
                 self.assertIs(server.get_chat_session(("acme", "/app-a")), first)
-                self.assertIs(server.get_chat_session(("acme", "/app-a")), first)
-                self.assertIs(server.get_chat_session(("acme", "/app-b")), second)
-                self.assertIs(server.get_chat_session(("other", "/app-c")), third)
+                self.assertIs(server.get_chat_session(("acme",)), first)
+                self.assertIs(server.get_chat_session(("other",)), second)
+                self.assertIs(server.get_chat_session(None), third)
             self.assertEqual(make.call_count, 3)
             first.close.assert_called_once_with()
             second.close.assert_called_once_with()
-            self.assertEqual(server._CHAT_SCOPE, ("other", "/app-c"))
+            self.assertIsNone(server._CHAT_SCOPE)
         finally:
             server._CHAT = old_chat
             server._CHAT_SCOPE = old_scope
@@ -464,9 +465,6 @@ class StateSnapshot(unittest.TestCase):
         self.assertNotIn("channel", out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ---- linked folders on chat turns (core.folders) --------------------------- #
 from core import folders as _folders  # noqa: E402
@@ -513,7 +511,7 @@ class TurnFolders(unittest.TestCase):
                  "folders": _folders.load(s, self.root)["folders"]} for s in ("acme", "demo")]
 
     def turn(self, msg, room="acme/general", engine=None, shared=False, explicit_thread=False,
-             runner=False, apps=False, session_id=None, ctx_error=None):
+             runner=False, apps=False, session_id=None, ctx_error=None, recap=None):
         seen = {"runs": [], "ctx": []}
         test = self
 
@@ -540,6 +538,8 @@ class TurnFolders(unittest.TestCase):
         sess = Sess()
         if session_id:
             sess.session_id = session_id
+        if recap:
+            sess.pending_recap = recap
         seen["sess"] = sess
         seen["approvals"] = mock.Mock(return_value={"id": "ap1"})
         h = _bare_handler(io.BytesIO())
@@ -728,6 +728,11 @@ class TurnFolders(unittest.TestCase):
             self.assertFalse(seen["ctx"][0]["include_code"])
             self.assertNotIn(str(self.b), seen["lead"]["text"])
 
+    def test_recap_goes_before_the_prompt_once(self):
+        seen = self.turn("hello there", recap="RECAP-OF-EARLIER-THREAD")
+        self.assertTrue(seen["lead"]["text"].startswith("RECAP-OF-EARLIER-THREAD"))
+        self.assertFalse(seen["sess"].pending_recap)
+
     def test_tokensave_tag_runs_on_the_cheap_model_with_the_graph(self):
         (self.b / ".tokensave").mkdir()
         (self.b / ".tokensave" / "tokensave.db").write_text("")
@@ -770,3 +775,141 @@ class TurnFolders(unittest.TestCase):
         seen["approvals"].assert_not_called()  # but an untagged turn still asks no approval
         seen = self.turn("/folder-work fix the readme", session_id="c1")
         seen["approvals"].assert_called_once()
+
+
+class SavedThreadFolders(unittest.TestCase):
+    """A saved thread keeps its context across folder changes unless a folder it used is gone."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.chats = Path(tmp.name)
+        p = mock.patch.object(server.chat_store, "CHATS_DIR", self.chats)
+        p.start()
+        self.addCleanup(p.stop)
+        old = (server._CHAT, server._CHAT_SCOPE)
+        server._CHAT = server._CHAT_SCOPE = None
+
+        def restore():
+            server._CHAT, server._CHAT_SCOPE = old
+        self.addCleanup(restore)
+
+    def id(self, alias):
+        """Chat ids are uuids (chat_store): one per alias in a test."""
+        self._ids = getattr(self, "_ids", {})
+        return self._ids.setdefault(alias, str(__import__("uuid").uuid4()))
+
+    def saved(self, scope, folder_paths=(), cid="c1"):
+        rec = {"id": self.id(cid), "title": "t", "created": 1, "updated": 1, "scope": scope, "started": True,
+               "turn_count": 2, "room": "acme/general", "engines": {},
+               "messages": [{"role": "user", "content": "earlier message", "ts": 1},
+                            {"role": "assistant", "content": "earlier answer", "ts": 2, "bot": "cto"}],
+               "folder_paths": list(folder_paths)}
+        server.chat_store.save(rec)
+        return rec
+
+    def test_old_scope_keeps_its_context(self):
+        self.saved(["acme", "/app-a"])
+        sess = server.get_chat_session(("acme",), self.id("c1"), linked=set())
+        self.assertEqual(sess.session_id, self.id("c1"))
+        self.assertTrue(sess._started)
+        self.assertFalse(getattr(sess, "pending_recap", None))
+
+    def test_adding_a_folder_keeps_the_session(self):
+        self.saved(["acme"], ["/w/a"])
+        sess = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/a", "/w/b"})
+        self.assertEqual(sess.session_id, self.id("c1"))
+        self.assertEqual(sess.folder_paths, {"/w/a"})
+
+    def test_changing_access_or_a_layer_keeps_the_session(self):
+        self.saved(["acme"], ["/w/a"])
+        first = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/a"})
+        # Same active thread, next turn: access or a layer changed, the paths did not.
+        second = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/a"})
+        self.assertIs(second, first)
+
+    def test_unlinking_a_used_folder_starts_fresh_with_a_recap(self):
+        self.saved(["acme"], ["/w/a", "/w/b"])
+        second = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/a"})
+        self.assertNotEqual(second.session_id, self.id("c1"))
+        self.assertIn("earlier message", second.pending_recap)
+        self.assertTrue(server.chat_store.load(self.id("c1")))  # the old chat stays saved
+        # The active session, too: a used folder unlinked mid-thread.
+        first = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/a", "/w/b"})
+        self.assertEqual(first.session_id, self.id("c1"))
+        again = server.get_chat_session(("acme",), self.id("c1"), linked={"/w/b"})
+        self.assertIsNot(again, first)
+        self.assertIn("earlier message", again.pending_recap)
+
+    def test_hq_thread_with_folders_never_moves_to_a_company(self):
+        self.saved(None, ["/w/hq-notes"])
+        sess = server.get_chat_session(("acme",), self.id("c1"), linked=set())
+        self.assertNotEqual(sess.session_id, self.id("c1"))
+        # The active HQ session that used a folder is not adopted either.
+        hq = server.get_chat_session(None, self.id("c1"), linked={"/w/hq-notes"})
+        self.assertEqual(hq.session_id, self.id("c1"))
+        moved = server.get_chat_session(("acme",), self.id("c1"), linked=set())
+        self.assertIsNot(moved, hq)
+        # An HQ thread that never had folders still adopts its first project.
+        self.saved(None, [], cid="c2")
+        self.assertEqual(server.get_chat_session(("acme",), self.id("c2"), linked=set()).session_id, self.id("c2"))
+
+    def test_person_slot_follows_the_same_rules(self):
+        self.saved(["acme", "/app-a"])
+        self.assertEqual(server.person_chat_session("p1", ("acme",), self.id("c1"), linked=set()).session_id, self.id("c1"))
+        self.saved(["acme"], ["/w/a"], cid="c3")
+        sess = server.person_chat_session("p1", ("acme",), self.id("c3"), linked=set())
+        self.assertNotEqual(sess.session_id, self.id("c3"))
+        server.stop_person_chat("p1")
+        server._PERSON_CHATS.pop("p1", None)
+
+    def test_ask_records_folder_paths_and_restore_reads_them(self):
+        class Eng:
+            id, label, kind, supports, full_disk = "fake", "Fake", "cli", frozenset({"folder_edit"}), False
+
+            def is_fresh(self, s):
+                return True
+
+            def turn(self, session, text, policy, model, tokens):
+                yield ("done", {})
+        sess = server.chat_session.ChatSession(repo_dir=".", rail="r")
+        sess.engine = Eng()
+        list(sess.ask("hi", read_dirs=("/w/a",), edit_dirs=("/w/a",)))
+        list(sess.ask("hi again"))
+        self.assertEqual(sess.folder_paths, {"/w/a"})
+        server.chat_store.record_turn(sess, ("acme",), "hi", "ok", room="acme/general")
+        rec = server.chat_store.load(sess.session_id)
+        self.assertEqual(rec["folder_paths"], ["/w/a"])
+        self.assertEqual(rec["scope"], ["acme"])
+        self.assertFalse(rec["shared"])
+        back = server.chat_session.ChatSession.restore(".", "r", rec)
+        self.assertEqual(back.folder_paths, {"/w/a"})
+
+    def test_thread_with_a_folder_turn_hidden_from_a_person_who_joins_later(self):
+        from core import rooms
+        sess = server.chat_session.ChatSession(repo_dir=".", rail="r")
+        sess.folder_paths = {"/w/a"}
+        server.chat_store.record_turn(sess, ("acme",), "hi", "ok", room="acme/general", shared=False)
+        rec = server.chat_store.load(sess.session_id)
+        room = {"id": "acme/general", "kind": "general"}
+        self.assertTrue(rooms.chat_visible(rec, room, {"kind": "owner"}))
+        self.assertFalse(rooms.chat_visible(rec, room, {"kind": "person", "id": "p1"}))
+
+    def test_person_never_gets_folder_paths(self):
+        rec = self.saved(["acme", "/app-a"], ["/w/a"])
+        out = server._for_person(rec)
+        self.assertNotIn("folder_paths", out)
+        self.assertNotIn("scope", out)
+        self.assertNotIn("/w/a", str(out))
+        for row in server.chat_store.list_meta():
+            self.assertNotIn("folder_paths", row)
+
+    def test_scope_slug_reads_both_shapes(self):
+        self.assertEqual(server._scope_slug(["acme", "/app"]), "acme")
+        self.assertEqual(server._scope_slug(("acme",)), "acme")
+        self.assertIsNone(server._scope_slug(None))
+        self.assertIsNone(server._scope_slug([]))
+
+
+if __name__ == "__main__":
+    unittest.main()

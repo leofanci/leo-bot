@@ -51,6 +51,10 @@ class ChatSession:
         # Set by the server per turn: an invited person can see this thread, so
         # the turn gets only the osctl relay (+ web as usual). See OS_MCP_PATH.
         self.shared = False
+        # Every linked folder a turn of this thread was given. Its session holds what those
+        # turns read, so when one is unlinked the server starts a fresh session (with a recap).
+        self.folder_paths = set()
+        self.pending_recap = None  # set by the server on such a fresh start; used once
 
     @classmethod
     def restore(cls, repo_dir, rail, rec, **kw):
@@ -63,6 +67,7 @@ class ChatSession:
         sess._skill_explicit = bool(rec.get("skill_explicit"))
         sess._last_bot = rec.get("last_bot")
         sess.apps_used = bool(rec.get("apps_used"))
+        sess.folder_paths = {p for p in rec.get("folder_paths") or () if isinstance(p, str)}
         return sess
 
     def is_fresh(self):
@@ -101,6 +106,8 @@ class ChatSession:
         into `text` by the server. Server injects full snapshot + skill body on
         fresh session start only (no turn cap: a session never auto-resets)."""
         policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token))
+        if not policy.shared:
+            self.folder_paths |= set(policy.read_dirs)
         tokens = TurnTokens(apps_token, apps_port, os_token, os_port)
         failed = False
         try:
