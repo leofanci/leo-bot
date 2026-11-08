@@ -106,7 +106,7 @@ def default_active(project=None):
         on = {ROOT_BOT, "product", "cmo", "gtm", "research"}
         if project.get("profiles"):
             on.add("social")
-    if project.get("local_folder"):
+    if project.get("folders"):
         on.add("cto")
     return on
 

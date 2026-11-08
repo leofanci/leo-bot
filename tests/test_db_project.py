@@ -27,7 +27,7 @@ class TestProject(unittest.TestCase):
             db = self._db(tmp)
             p = db.project("acme")
             self.assertEqual(p["entity"]["slug"], "acme")
-            self.assertEqual(p["entity"]["local_folder"], "/tmp/acme-app")
+            self.assertNotIn("local_folder", p["entity"])  # folders live in core.folders
             self.assertEqual([x["slug"] for x in p["profiles"]], ["demo"])
             self.assertEqual([x["slug"] for x in p["products"]], ["app"])
             self.assertEqual(len(p["memos"]), 1)

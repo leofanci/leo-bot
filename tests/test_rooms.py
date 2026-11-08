@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import index
-from core import bots, rooms
+from core import bots, folders, rooms
 import dashboard.db as db
 import dashboard.fileops as fileops
 import dashboard.osctl as osctl
@@ -17,7 +17,7 @@ import dashboard.server as server
 from tests.test_index_projects import write
 
 VENTURE = {"slug": "acme", "kind": "venture", "profiles": [{"slug": "profile-a"}],
-           "local_folder": "/tmp/acme-app"}
+           "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}]}
 
 
 class Rooms(unittest.TestCase):
@@ -87,7 +87,7 @@ class WorkspaceTurns(unittest.TestCase):
             (self.root / "projects" / slug).mkdir(parents=True)
         self.tree = [dict(VENTURE, type="project", name="Acme", products=[]),
                      {"slug": "demo", "name": "Demo", "kind": "brand", "type": "project",
-                      "local_folder": None, "profiles": [], "products": []}]
+                      "folders": [], "profiles": [], "products": []}]
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -146,7 +146,7 @@ class WorkspaceTurns(unittest.TestCase):
         self.assertIn("SNAPSHOT only=acme", seen["text"])
 
     def test_other_companies_linked_folders_are_denied(self):
-        self.tree[1]["local_folder"] = "/tmp/demo-app"
+        folders.save("demo", {"folders": [{"id": "f1", "path": "/tmp/demo-app", "access": "read"}]}, self.root)
         denied = self.ask("acme/general")["sess"].deny_dirs
         self.assertIn("/tmp/demo-app", denied)
 

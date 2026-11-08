@@ -12,7 +12,7 @@ import dashboard.server as server
 SKILLS = {d.name for d in (Path(bots.ROOT) / "skills").iterdir() if (d / "SKILL.md").exists()}
 # A venture with profiles and a linked app: its smart default switches every bot on.
 VENTURE = {"slug": "acme", "kind": "venture", "profiles": [{"slug": "profile-a"}],
-           "local_folder": "/tmp/acme-app"}
+           "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}]}
 
 
 def venture_root(tmp):
@@ -59,9 +59,9 @@ class Team(unittest.TestCase):
         on = lambda t: sorted(b.id for b in t.bots.values() if b.active)  # noqa: E731
         self.assertEqual(on(self.team()), sorted(bots.load_defs()))
         self.assertEqual(on(bots.team(self.root)), ["cos"])  # HQ: CEO office
-        brand = {"slug": "acme", "kind": "brand", "profiles": [], "local_folder": None}
+        brand = {"slug": "acme", "kind": "brand", "profiles": [], "folders": []}
         self.assertEqual(on(bots.team(self.root, "acme", brand)), ["cmo", "cos", "social"])
-        plain = {"slug": "acme", "kind": "venture", "profiles": [], "local_folder": None}
+        plain = {"slug": "acme", "kind": "venture", "profiles": [], "folders": []}
         self.assertEqual(on(bots.team(self.root, "acme", plain)),
                          ["cmo", "cos", "gtm", "product", "research"])
 

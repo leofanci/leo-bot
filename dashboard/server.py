@@ -44,6 +44,7 @@ import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
 from core import bots    # noqa: E402
 from core import rooms   # noqa: E402
+from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
 from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
@@ -253,22 +254,16 @@ def open_local_folder(path: str) -> None:
 
 
 def resolve_linked_workspace(projects, project_slug):
-    """Resolve the active project's saved app folder without trusting a client path.
-
-    The client sends only a slug. It must match the indexed project tree, and the
-    actual path is then read from authored project.md and revalidated. A missing
-    or stale link never breaks chat; it simply leaves app tools disabled.
-    """
+    """The project's first usable linked folder, never a client path. A stale link never
+    breaks chat; it leaves file tools off. A bridge until turns take every folder."""
     slug = str(project_slug or "").strip()
-    if not slug:
-        return None
-    project = next((p for p in projects if p.get("slug") == slug), None)
-    if not project or not project.get("local_folder"):
+    if not slug or not any(p.get("slug") == slug for p in projects):
         return None
     try:
-        return fileops.project_local_folder(slug)
-    except (fileops.ActionError, OSError):
+        rows = folders.for_turn(slug, None, None, fileops.ROOT)
+    except (ValueError, OSError):
         return None
+    return rows[0]["path"] if rows else None
 
 
 def tokensave_index_ready(workspace_dir):
@@ -942,7 +937,9 @@ def _workspace_deny_dirs(ws, projects):
         return ()
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
-    dirs += [Path(p["local_folder"]) for p in others if p.get("local_folder")]  # their app code
+    # Their linked folders, except one this workspace links too (same, inside or around it).
+    dirs += [Path(p) for p in folders.turn_denies(
+        folders.all_paths(ws, ROOT), folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), [])]
     dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
     dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave", ROOT / "private"]  # the owner's machine state
     return tuple(str(d) for d in dirs)
@@ -1972,7 +1969,7 @@ class Handler(BaseHTTPRequestHandler):
             (p for p in projects if p.get("slug") == project_slug), None,
         )
         project_scope = (
-            (project_slug, project_record.get("local_folder") or "")
+            (project_slug, ((project_record.get("folders") or [{}])[0]).get("path") or "")
             if project_record else None
         )
         chat_id = body.get("chat_id") or None
@@ -2830,7 +2827,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.delete_strategy(proj, tail.rstrip("/"))})
             if path.startswith("/api/project/") and path.endswith("/folder/open"):
                 slug = path[len("/api/project/"):-len("/folder/open")]
-                folder = fileops.project_local_folder(slug)
+                folder = resolve_linked_workspace([{"slug": slug}], slug)
+                if not folder:
+                    raise fileops.ActionError(f"project '{slug}' has no usable linked folder")
                 open_local_folder(folder)
                 return self._send(200, {"ok": True, "path": folder})
             if path.startswith("/api/project/") and path.endswith("/update"):

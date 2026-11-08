@@ -131,18 +131,21 @@ def _guard(args, ws):
             raise fileops.ActionError("bot memory is not readable as a file here")
 
 
-def _no_local_folder(value):
-    """A shared thread never learns where the owner keeps the linked app on this machine."""
+_FOLDER_KEYS = ("local_folder", "folders", "folder_paths")
+
+
+def _no_folder_paths(value):
+    """A shared thread never learns where the owner keeps linked folders on this machine."""
     if isinstance(value, dict):
-        return {k: _no_local_folder(v) for k, v in value.items() if k != "local_folder"}
+        return {k: _no_folder_paths(v) for k, v in value.items() if k not in _FOLDER_KEYS}
     if isinstance(value, list):
-        return [_no_local_folder(v) for v in value]
+        return [_no_folder_paths(v) for v in value]
     return value
 
 
 def _emit(obj, ok=True):
     if os.environ.get("MYOS_SHARED"):
-        obj = _no_local_folder(obj)
+        obj = _no_folder_paths(obj)
     print(json.dumps({"ok": ok, **obj}, ensure_ascii=False))
     return 0 if ok else 1
 
@@ -620,7 +623,7 @@ def _build_parser():
     p.add_argument("--status")
     p.add_argument("--hours-per-week", dest="hours_per_week")
     p.add_argument("--local-folder", dest="local_folder",
-                   help="absolute directory path; pass an empty value to unlink")
+                   help="absolute directory path to link (edit access); unlink on the Folders screen")
     p.set_defaults(_run=lambda a: fileops.update_project(
         a.slug, _fields(a, ["name", "kind", "priority", "status", "hours_per_week", "local_folder"])))
 

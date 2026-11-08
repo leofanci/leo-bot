@@ -133,9 +133,8 @@ class SSE(unittest.TestCase):
 
     def test_linked_project_adds_only_a_lazy_workspace_pointer(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
-        with mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
+        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=True), \
              mock.patch.object(server.tokensave_bridge, "context",
                                return_value="fresh auth graph") as graph:
@@ -156,9 +155,8 @@ class SSE(unittest.TestCase):
 
     def test_a_shared_thread_gets_no_linked_source_code(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
-        with mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
+        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=True), \
              mock.patch.object(server, "_shared_room", return_value=True), \
              mock.patch.object(server.tokensave_bridge, "context",
@@ -175,7 +173,7 @@ class SSE(unittest.TestCase):
 
     def test_unknown_or_unlinked_project_cannot_add_a_directory(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": None, "profiles": []}]
+                 "folders": [], "profiles": []}]
         seen = _captured({
             "messages": [{"role": "user", "content": "inspect the app"}],
             "project_slug": "../../outside",
@@ -193,9 +191,8 @@ class SSE(unittest.TestCase):
 
     def test_gtm_chat_can_use_linked_code_graph_without_file_search_schemas(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
-        with mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app") as resolve, \
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
+        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app") as resolve, \
              mock.patch.object(server, "tokensave_index_ready", return_value=True), \
              mock.patch.object(server.tokensave_bridge, "context",
                                return_value="fresh positioning graph") as graph:
@@ -203,7 +200,7 @@ class SSE(unittest.TestCase):
                 "messages": [{"role": "user", "content": "what positioning memos do we have?"}],
                 "project_slug": "acme",
             }, tree)
-        resolve.assert_called_once_with("acme")
+        resolve.assert_called_once_with(mock.ANY, "acme")
         self.assertIsNone(seen["workspace_dir"])
         self.assertFalse(seen["file_search_mode"])
         self.assertIn("already refreshed and queried", seen["text"])
@@ -213,9 +210,8 @@ class SSE(unittest.TestCase):
 
     def test_tokensave_tag_activates_bounded_graph_mode_on_haiku(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
-        with mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
+        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=True), \
              mock.patch.object(server.tokensave_bridge, "context",
                                return_value="fresh auth graph") as graph:
@@ -235,9 +231,8 @@ class SSE(unittest.TestCase):
 
     def test_linked_gtm_chat_without_index_gets_bounded_file_fallback(self):
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
-        with mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
+        with mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=False):
             seen = _captured({
                 "messages": [{"role": "user", "content": "what should our brand emphasize?"}],
@@ -268,7 +263,7 @@ class SSE(unittest.TestCase):
         sink = io.BytesIO()
         h = _bare_handler(sink)
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
 
         class NoCallSession(FakeSession):
             def ask(self, *args, **kwargs):
@@ -276,8 +271,7 @@ class SSE(unittest.TestCase):
 
         with mock.patch.object(server, "get_chat_session", return_value=NoCallSession()), \
              mock.patch.object(server.db, "tree", return_value=tree), \
-             mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+             mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=False):
             h._handle_ask({
                 "messages": [{"role": "user", "content": "/tokensave inspect auth"}],
@@ -292,7 +286,7 @@ class SSE(unittest.TestCase):
         sink = io.BytesIO()
         h = _bare_handler(sink)
         tree = [{"slug": "acme", "kind": "venture", "type": "project",
-                 "local_folder": "/tmp/acme-app", "profiles": []}]
+                 "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "profiles": []}]
 
         class NoCallSession(FakeSession):
             def ask(self, *args, **kwargs):
@@ -300,8 +294,7 @@ class SSE(unittest.TestCase):
 
         with mock.patch.object(server, "get_chat_session", return_value=NoCallSession()), \
              mock.patch.object(server.db, "tree", return_value=tree), \
-             mock.patch.object(server.fileops, "project_local_folder",
-                               return_value="/tmp/acme-app"), \
+             mock.patch.object(server, "resolve_linked_workspace", return_value="/tmp/acme-app"), \
              mock.patch.object(server, "tokensave_index_ready", return_value=True), \
              mock.patch.object(server.tokensave_bridge, "context",
                                side_effect=server.tokensave_bridge.BridgeError("index locked")):

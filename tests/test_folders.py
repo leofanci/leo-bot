@@ -3,8 +3,9 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from core import folders
+from core import bots, folders
 from tests.test_index_projects import write
 
 
@@ -255,6 +256,77 @@ class FolderStoreTest(unittest.TestCase):
         folders.add("acme", str(self.docs), root=self.root)
         data = json.loads(self._file().read_text())
         self.assertEqual(set(data), {"folders", "rooms", "bots", "seq"})
+
+
+
+class ReadersUseTheStore(unittest.TestCase):
+    """Task 2: every reader of the old `local_folder` line reads folders.json instead."""
+
+    def setUp(self):
+        import index
+        from dashboard import db, fileops
+        self.db, self.fileops, self.index = db, fileops, index
+        self._root = tempfile.TemporaryDirectory()
+        self._ext = tempfile.TemporaryDirectory()
+        self.root = Path(self._root.name).resolve()
+        self.app = Path(self._ext.name).resolve() / "acme-app"
+        self.docs = Path(self._ext.name).resolve() / "acme-docs"
+        self.app.mkdir()
+        self.docs.mkdir()
+        write(self.root / "projects/acme/project.md",
+              f"---\nname: Acme\nkind: venture\nlocal_folder: {self.app}\n---\nbody\n")
+        write(self.root / "projects/demo/project.md", "---\nname: Demo\nkind: venture\n---\n")
+        patches = [mock.patch.object(fileops, "ROOT", self.root),
+                   mock.patch.object(db, "DB_PATH", self.root / "database/data/os.db"),
+                   mock.patch.object(fileops, "reindex", lambda: index.build(self.root))]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch("sys.stdout"):
+            index.build(self.root)
+
+    def tearDown(self):
+        self._root.cleanup()
+        self._ext.cleanup()
+
+    def test_project_tree_lists_folders(self):
+        tree = {p["slug"]: p for p in self.db.tree()}
+        self.assertNotIn("local_folder", tree["acme"])
+        self.assertEqual([(r["path"], r["access"]) for r in tree["acme"]["folders"]], [(str(self.app), "read")])
+        self.assertEqual(tree["demo"]["folders"], [])
+
+    def test_default_active_turns_cto_on_with_any_folder(self):
+        tree = {p["slug"]: p for p in self.db.tree()}
+        self.assertIn("cto", bots.default_active(tree["acme"]))
+        self.assertNotIn("cto", bots.default_active(tree["demo"]))
+
+    def test_update_project_adds_and_never_rewrites_the_line(self):
+        with mock.patch("sys.stdout"):
+            out = self.fileops.update_project("acme", {"name": "Acme Inc", "local_folder": str(self.docs)})
+        self.assertEqual(set(out), {"slug", "folders"})
+        self.assertEqual([(r["path"], r["access"]) for r in out["folders"]],
+                         [(str(self.app), "read"), (str(self.docs), "edit")])
+        md = (self.root / "projects/acme/project.md").read_text()
+        self.assertNotIn("local_folder", md)
+        self.assertIn("name: Acme Inc", md)
+        with mock.patch("sys.stdout"):
+            out = self.fileops.update_project("acme", {"local_folder": ""})
+        self.assertEqual(len(out["folders"]), 2)
+
+    def test_create_project_links_one_folder_at_edit(self):
+        with mock.patch("sys.stdout"):
+            out = self.fileops.create_project("newco", {"local_folder": str(self.docs)})
+        self.assertEqual([(r["path"], r["access"]) for r in out["folders"]], [(str(self.docs), "edit")])
+        self.assertNotIn("local_folder", (self.root / "projects/newco/project.md").read_text())
+
+    def test_create_project_refuses_a_bad_folder_before_writing(self):
+        with self.assertRaises(self.fileops.ActionError):
+            self.fileops.create_project("newco", {"local_folder": str(self.root / "projects")})
+        self.assertFalse((self.root / "projects/newco").exists())
+
+    def test_index_never_stores_the_path(self):
+        rows = [e for e in self.db.entities() if e["slug"] == "acme"]
+        self.assertIsNone(rows[0].get("local_folder"))
 
 
 if __name__ == "__main__":

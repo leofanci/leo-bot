@@ -75,7 +75,7 @@ class TurnCards(unittest.TestCase):
         self.root = Path(self.tmp.name)
         (self.root / "projects" / "acme").mkdir(parents=True)
         self.tree = [{"slug": "acme", "name": "Acme", "kind": "venture", "type": "project",
-                      "local_folder": None, "profiles": [], "products": []}]
+                      "folders": [], "profiles": [], "products": []}]
         self._chats = server.chat_store.CHATS_DIR
         server.chat_store.CHATS_DIR = self.root / "chats"
 

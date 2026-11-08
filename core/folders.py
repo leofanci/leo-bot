@@ -367,7 +367,11 @@ def turn_denies(kept_paths, other_paths, own_removed_paths) -> tuple:
 
 
 def all_paths(ws, root=bots.ROOT) -> list:
-    return [r["path"] for r in load(ws, root)["folders"]]
+    """Every linked path of a workspace; none for a workspace that does not exist."""
+    try:
+        return [r["path"] for r in load(ws, root)["folders"]]
+    except ValueError:
+        return []
 
 
 def other_workspace_paths(ws, slugs, root=bots.ROOT) -> list:

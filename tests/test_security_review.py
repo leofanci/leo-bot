@@ -4,6 +4,7 @@ import http.server
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import bots, runners
+from core import bots, folders, runners
 from dashboard import fileops, osctl, runner as runner_client, tokensave_bridge
 from dashboard.engines import acp, api, api_tools, config, registry
 from dashboard.engines.base import EngineRefused, TurnPolicy, TurnTokens, drain
@@ -477,6 +478,24 @@ class SharedThreadOsctl(Tmp):
         with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
             osctl._emit({"project": {"entity": {"slug": "demo", "local_folder": "/srv/app"}}, "rows": [{"local_folder": "/x"}]})
         self.assertNotIn("local_folder", out.getvalue())
+
+    def test_shared_osctl_never_shows_folders(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
+            osctl._emit({"project": {"folders": [{"path": "/srv/app"}]}, "rows": [{"folders": ["/srv/x"]}]})
+        self.assertNotIn("/srv/app", out.getvalue())
+        self.assertNotIn("/srv/x", out.getvalue())
+
+    def test_osctl_in_a_bot_turn_cannot_add_a_folder(self):
+        app = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, app, True)
+        for argv in (["update-project", "--slug", "demo", "--local-folder", str(app)],
+                     ["create-project", "--slug", "newco", "--local-folder", str(app)]):
+            with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": "demo"}), \
+                    mock.patch("sys.stdout", io.StringIO()) as out:
+                self.assertEqual(osctl.main(argv), 1, argv)
+            self.assertIn("only you can link", out.getvalue())
+        self.assertEqual(folders.all_paths("demo", self.root), [])
 
     def test_an_activity_cannot_write_a_row_for_another_workspace(self):
         with self.assertRaises(fileops.ActionError):

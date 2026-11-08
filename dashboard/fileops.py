@@ -876,22 +876,6 @@ def normalize_local_folder(value) -> str:
         raise ActionError(str(exc)) from exc
 
 
-def project_local_folder(slug: str) -> str:
-    """Return one project's usable linked folder, with a helpful stale-link error."""
-    project_dir = _project_dir(slug)
-    project_file = project_dir / "project.md"
-    if not project_file.exists():
-        raise ActionError(f"project '{slug}' not found")
-    fm, _ = _parse_frontmatter(project_file.read_text(encoding="utf-8"))
-    raw = (fm.get("local_folder") or "").strip()
-    if not raw:
-        raise ActionError(f"project '{slug}' has no local folder linked")
-    try:
-        return normalize_local_folder(raw)
-    except ActionError as exc:
-        raise ActionError(f"linked folder for project '{slug}' is unavailable: {exc}") from exc
-
-
 _NOT_ONE_LINE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 _PRIORITIES = {"primary", "secondary", "experiment"}
 
@@ -957,16 +941,25 @@ def create_project(slug: str, fields: dict) -> dict:
     status = _one_line(fields.get("status") or "idea", "status")
     hours = _one_line(fields.get("hours_per_week") or "0", "hours_per_week")
     voice = (fields.get("voice") or "").strip()
-    local_folder = normalize_local_folder(fields.get("local_folder"))
+    local_folder = normalize_local_folder(fields.get("local_folder"))  # checked before any write
     for sub in ["profiles", "products", "strategy/memos", "strategy/experiments"]:
         (project_dir / sub).mkdir(parents=True, exist_ok=True)
-    folder_line = f"local_folder: {local_folder}\n" if local_folder else ""
     md = (f"---\nname: {name}\nkind: {kind}\npriority: {priority}\n"
-          f"hours_per_week: {hours}\nstatus: {status}\n{folder_line}---\n{voice}\n")
+          f"hours_per_week: {hours}\nstatus: {status}\n---\n{voice}\n")
     (project_dir / "project.md").write_text(md, encoding="utf-8")
     ensure_config(ROOT, slug)
+    if local_folder:
+        _link_folder(slug, local_folder)
     reindex()
-    return {"slug": slug, "local_folder": local_folder or None}
+    return {"slug": slug, "folders": folders.load(slug, ROOT)["folders"]}
+
+
+def _link_folder(slug: str, path: str) -> None:
+    """Add one folder at the default access (core.folders.add)."""
+    try:
+        folders.add(slug, path, root=ROOT)
+    except (folders.FolderError, ValueError) as exc:
+        raise ActionError(str(exc)) from exc
 
 
 def update_project(slug: str, fields: dict) -> dict:
@@ -975,21 +968,24 @@ def update_project(slug: str, fields: dict) -> dict:
     NOT changed here — only the display name and metadata are editable."""
     slug = _safe_component(slug, "project slug")
     f = _project_dir(slug) / "project.md"
+    if not f.exists():
+        raise ActionError(f"project '{slug}' not found")
+    folders.load(slug, ROOT)  # moves an old local_folder line out first, so it is never lost
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8"))
     name = _one_line(fields.get("name") or fm.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or fm.get("kind") or "venture", "kind")
     priority = _priority(fields.get("priority") or fm.get("priority") or "primary")
     status = _one_line(fields.get("status") or fm.get("status") or "idea", "status")
     hours = _one_line(fields.get("hours_per_week") or fm.get("hours_per_week") or "0", "hours_per_week")
-    local_folder = (fm.get("local_folder") or "").strip()
-    if "local_folder" in fields:
-        local_folder = normalize_local_folder(fields.get("local_folder"))
-    folder_line = f"local_folder: {local_folder}\n" if local_folder else ""
+    # A non-empty local_folder adds a folder; unlinking is done on the Folders screen.
+    local_folder = normalize_local_folder(fields.get("local_folder"))
     md = (f"---\nname: {name}\nkind: {kind}\npriority: {priority}\n"
-          f"hours_per_week: {hours}\nstatus: {status}\n{folder_line}---\n{body}\n")
+          f"hours_per_week: {hours}\nstatus: {status}\n---\n{body}\n")
     f.write_text(md, encoding="utf-8")
+    if local_folder:
+        _link_folder(slug, local_folder)
     reindex()
-    return {"slug": slug, "local_folder": local_folder or None}
+    return {"slug": slug, "folders": folders.load(slug, ROOT)["folders"]}
 
 
 def _portfolio_refs(slug: str) -> list:
