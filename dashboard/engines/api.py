@@ -105,7 +105,7 @@ def _sse(resp):
 class ApiEngine(Engine):
     kind = "api"
     shared_safe = True  # a shared turn is only ever offered osctl (plus web when allowed)
-    supports = frozenset({"web", "apps", "file_search", "complete"})
+    supports = frozenset({"web", "apps", "folder_edit", "complete"})
 
     def __init__(self, provider, root):
         self.provider = provider

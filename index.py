@@ -169,7 +169,7 @@ def collect_entities(root: Path):
             "name": meta.get("name") or pslug, "priority": meta.get("priority"),
             "status": meta.get("status") or "active",
             "hours_per_week": first_int(meta.get("hours_per_week")),
-            "local_folder": meta.get("local_folder"),
+            "local_folder": None,  # folders live in team/folders.json (core.folders)
             "file_path": rel(proj / "project.md", root) if (proj / "project.md").exists() else None,
             "updated_at": mtime_iso(proj / "project.md"),
         })

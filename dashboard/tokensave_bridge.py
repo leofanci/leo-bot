@@ -2,7 +2,7 @@
 
 The chat process may call only this module, never arbitrary TokenSave install,
 sync, edit, or administration commands. A project slug is resolved through its
-authored local_folder link, and graph output is hard-capped before it reaches the
+linked folders (core.folders), and graph output is hard-capped before it reaches the
 model context.
 """
 
@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from core import folders
 from dashboard import fileops
 
 
@@ -33,7 +34,7 @@ class BridgeError(RuntimeError):
     pass
 
 
-def _linked_workspace(project_slug: str, active_project=None) -> str:
+def _linked_workspace(project_slug: str, active_project=None, folder=None) -> str:
     active_slug = (
         str(active_project).strip()
         if active_project is not None
@@ -44,10 +45,19 @@ def _linked_workspace(project_slug: str, active_project=None) -> str:
     if project_slug != active_slug:
         raise BridgeError("requested project is not the active linked project")
     try:
-        folder = fileops.project_local_folder(project_slug)
-    except (fileops.ActionError, OSError) as exc:
+        rows = folders.for_turn(project_slug, None, None, fileops.ROOT)
+    except (ValueError, OSError) as exc:
         raise BridgeError(str(exc)) from exc
-    path = Path(folder).resolve()
+    if not rows:
+        raise BridgeError(f"project '{project_slug}' has no usable linked folder")
+    if folder is not None:
+        wanted = str(Path(str(folder)).resolve())
+        if wanted not in {r["path"] for r in rows}:
+            raise BridgeError("requested folder is not linked to this project")
+        chosen = wanted
+    else:
+        chosen = folders.first_indexed(rows) or rows[0]["path"]
+    path = Path(chosen)
     if not (path / ".tokensave" / "tokensave.db").is_file():
         raise BridgeError(
             "linked app has no TokenSave index; run `tokensave init` in that app once"
@@ -81,8 +91,8 @@ def _bounded(value: str, label: str) -> str:
     return text
 
 
-def _run_tool(project_slug: str, tool: str, args: dict, *, active_project=None) -> str:
-    graph_root = _linked_workspace(project_slug, active_project)
+def _run_tool(project_slug: str, tool: str, args: dict, *, active_project=None, folder=None) -> str:
+    graph_root = _linked_workspace(project_slug, active_project, folder)
     binary = _binary()
     # Refresh only TokenSave's derived local cache. This incremental operation
     # never modifies app source files and its output is not sent to the model.
@@ -121,8 +131,10 @@ def _run_tool(project_slug: str, tool: str, args: dict, *, active_project=None) 
     return output
 
 
-def context(project_slug: str, task: str, *, active_project=None, include_code=True) -> str:
-    """`include_code=False`: names and structure only, for a thread invited people can see."""
+def context(project_slug: str, task: str, *, active_project=None, include_code=True, folder=None) -> str:
+    """`include_code=False`: names and structure only, for a thread invited people can see.
+    `folder`: one of the project's linked folders, resolved for the turn; by default the
+    first one with an index."""
     return _run_tool(project_slug, "context", {
         "task": _bounded(task, "task"),
         "mode": "explore",
@@ -132,7 +144,7 @@ def context(project_slug: str, task: str, *, active_project=None, include_code=T
         "max_code_blocks": 4,
         "max_code_lines": 80,
         "path_exclude": PATH_EXCLUDES,
-    }, active_project=active_project)
+    }, active_project=active_project, folder=folder)
 
 
 def main(argv=None) -> int:

@@ -27,8 +27,10 @@ workspace. Its private memory is for your DMs and channels with no people, and i
 never reaches a shared thread. Its team memory is what shared threads use. Only you
 add to team memory, in Team, under the bot's Memory. Everyone in those threads can
 get a bot to repeat what's in it.
-Bots can still answer from an outline of the project's linked app (names and
-structure, never its source code). For
+Bots can still answer from an outline of a linked folder's code (names and
+structure, never its source code), but shared threads never get the folders
+themselves or their paths. A thread where a bot worked in your folders stays
+hidden from invited people, also from someone who joins later. For
 mail, calendar or anything on your machine, use a DM with a bot or a private
 channel with no people in it. On the shared calendar, other workspaces show
 only as busy time. The terminal only opens on this machine, never over the

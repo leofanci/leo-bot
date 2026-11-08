@@ -51,6 +51,10 @@ class ChatSession:
         # Set by the server per turn: an invited person can see this thread, so
         # the turn gets only the osctl relay (+ web as usual). See OS_MCP_PATH.
         self.shared = False
+        # Every linked folder a turn of this thread was given. Its session holds what those
+        # turns read, so when one is unlinked the server starts a fresh session (with a recap).
+        self.folder_paths = set()
+        self.pending_recap = None  # set by the server on such a fresh start; used once
 
     @classmethod
     def restore(cls, repo_dir, rail, rec, **kw):
@@ -63,6 +67,7 @@ class ChatSession:
         sess._skill_explicit = bool(rec.get("skill_explicit"))
         sess._last_bot = rec.get("last_bot")
         sess.apps_used = bool(rec.get("apps_used"))
+        sess.folder_paths = {p for p in rec.get("folder_paths") or () if isinstance(p, str)}
         return sess
 
     def is_fresh(self):
@@ -76,33 +81,33 @@ class ChatSession:
             "fresh": self.is_fresh(),
         }
 
-    def _policy(self, with_web=False, workspace_dir=None, file_search_mode=False,
-                web_domains=(), apps=False):
+    def _policy(self, with_web=False, read_dirs=(), edit_dirs=(), web_domains=(), apps=False):
+        read_dirs = tuple(str(d) for d in read_dirs or ())
+        edit_dirs = tuple(str(d) for d in edit_dirs or () if str(d) in read_dirs)
         return TurnPolicy(shared=self.shared, readonly=self.readonly, web=bool(with_web),
                           web_domains=tuple(web_domains or ()), apps=apps,
-                          workspace=self.workspace or "hq", workspace_dir=workspace_dir,
-                          file_search=bool(file_search_mode), deny_dirs=tuple(self.deny_dirs),
+                          workspace=self.workspace or "hq", read_dirs=read_dirs, edit_dirs=edit_dirs,
+                          deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used))
 
-    def _base_cmd(self, with_web=False, model=None, workspace_dir=None,
-                  file_search_mode=False, web_domains=(), apps_port=None, os_port=None):
+    def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
+                  web_domains=(), apps_port=None, os_port=None):
         """The `claude -p` argv for one turn (ClaudeCodeEngine.build_cmd)."""
-        policy = self._policy(with_web, workspace_dir, file_search_mode, web_domains)
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains)
         return ClaudeCodeEngine(self.claude_bin).build_cmd(self, policy, model, apps_port, os_port)
 
-    def ask(self, text, with_web=False, model=None, workspace_dir=None,
-            file_search_mode=False, web_domains=(), apps_token=None, apps_port=None,
-            os_token=None, os_port=None):
+    def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
+            web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None):
         """Run one turn on self.engine; yield (kind, payload) events.
-        `with_web` adds web tools for this turn; `workspace_dir` plus
-        `file_search_mode` grants read-only access to one linked app and adds
-        file search only when fallback discovery is warranted; `model` overrides
+        `with_web` adds web tools for this turn; `read_dirs` are the linked folders
+        it may read and search, `edit_dirs` (a subset) the ones it may change; `model` overrides
         the default for this turn (the server tiers per turn: see
         server._needs_web / _pick_model). Any routed skill is already injected
         into `text` by the server. Server injects full snapshot + skill body on
         fresh session start only (no turn cap: a session never auto-resets)."""
-        policy = self._policy(with_web, workspace_dir, file_search_mode, web_domains,
-                              apps=bool(apps_token))
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token))
+        if not policy.shared:
+            self.folder_paths |= set(policy.read_dirs)
         tokens = TurnTokens(apps_token, apps_port, os_token, os_port)
         failed = False
         try:

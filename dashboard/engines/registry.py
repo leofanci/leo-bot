@@ -93,12 +93,13 @@ def for_job(root=config.ROOT):
 def statuses(root=config.ROOT):
     """One row per engine for the engines screen."""
     data = config.load(root)
-    rows = [ClaudeCodeEngine().status()]
+    engines = [ClaudeCodeEngine()]
     if not on_server():
-        rows.append(CodexEngine().status())
-        rows += [AcpEngine(a).status() for a in data["acp_agents"]]
-    rows += [ApiEngine(p, root).status() for p in data["providers"]]
-    return rows
+        engines.append(CodexEngine())
+        engines += [AcpEngine(a) for a in data["acp_agents"]]
+    engines += [ApiEngine(p, root) for p in data["providers"]]
+    # folder_edit: whether bots on it may change files in linked folders (Codex and ACP: never).
+    return [{**e.status(), "folder_edit": "folder_edit" in e.supports} for e in engines]
 
 
 def terminal_cmd(root=config.ROOT):

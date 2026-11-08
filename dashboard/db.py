@@ -2,11 +2,15 @@
 
 Opens os.db READ-ONLY (uri mode=ro) so the dashboard physically cannot write to
 the derived index — the invariant enforced at the connection level, not just by
-discipline. All view queries live here; nothing in this module mutates anything.
+discipline. All view queries live here; nothing in this module mutates anything,
+except core.folders' one-time move of an old `local_folder` line when a project's
+folders are first read.
 """
 
 import sqlite3
 from pathlib import Path
+
+from core import folders
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "database" / "data" / "os.db"
@@ -62,7 +66,7 @@ def profiles():
 
 def entities():
     return _rows(
-        "SELECT slug, type, subtype, name, priority, status, hours_per_week, local_folder, file_path"
+        "SELECT slug, type, subtype, name, priority, status, hours_per_week, file_path"
         " FROM entities ORDER BY type, slug"
     )
 
@@ -83,10 +87,19 @@ def experiments():
     )
 
 
+def _folders(slug):
+    """A project's linked folders (core.folders). The checkout this index belongs to is
+    three levels above DB_PATH, so a test index reads its own folders."""
+    try:
+        return folders.load(slug, Path(DB_PATH).resolve().parents[2])["folders"]
+    except (OSError, ValueError):
+        return []
+
+
 def tree():
     """Projects with nested profiles (+ channels) and products, plus counts —
     the shape the left rail renders."""
-    ents = _rows("SELECT slug, type, subtype, name, priority, local_folder FROM entities")
+    ents = _rows("SELECT slug, type, subtype, name, priority FROM entities")
     rels = _rows("SELECT from_slug, to_slug FROM relationships WHERE kind = 'belongs_to'")
     belongs = {(r["from_slug"], r["to_slug"]) for r in rels}
 
@@ -142,7 +155,7 @@ def tree():
             "kind": e["subtype"],
             "type": e["type"],
             "priority": e["priority"],
-            "local_folder": e["local_folder"],
+            "folders": _folders(slug),
             "profiles": sorted(profiles_list, key=lambda x: x["name"]),
             "products": sorted(products_list, key=lambda x: x["name"]),
             "experiments": exp_n.get(slug, 0),
@@ -184,7 +197,7 @@ def channel(slug):
 def project(slug):
     """Everything one project owns, for the project-section views. None if unknown."""
     ent = _rows(
-        "SELECT slug, type, subtype, name, priority, status, hours_per_week, local_folder, file_path"
+        "SELECT slug, type, subtype, name, priority, status, hours_per_week, file_path"
         " FROM entities WHERE slug = ? AND type = 'project'",
         (slug,),
     )

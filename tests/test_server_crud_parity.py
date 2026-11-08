@@ -1,4 +1,4 @@
-import io, json, tempfile, unittest
+import io, json, shutil, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -89,27 +89,20 @@ class CrudParityRoutesTest(unittest.TestCase):
     @mock.patch.object(server.sys, "platform", "darwin")
     @mock.patch.object(server.subprocess, "run")
     def test_local_folder_picker_returns_validated_path(self, run_mock):
-        folder = Path(self.tmp.name) / "My App"
+        folder = Path(self._outside()) / "My App"
         folder.mkdir()
         run_mock.return_value = mock.Mock(returncode=0, stdout=str(folder) + "\n", stderr="")
         out = _post("/api/local-folder/pick", {})
         self.assertTrue(out["ok"])
         self.assertEqual(out["path"], str(folder.resolve()))
 
-    @mock.patch.object(server.sys, "platform", "darwin")
-    @mock.patch.object(server.subprocess, "run")
-    def test_open_project_folder_uses_only_the_saved_link(self, run_mock):
-        folder = Path(self.tmp.name) / "My App"
-        folder.mkdir()
-        write(Path(self.tmp.name) / "projects" / "acme" / "project.md",
-              f"---\nname: Acme\nlocal_folder: {folder}\n---")
-        run_mock.return_value = mock.Mock(returncode=0, stdout="", stderr="")
-        out = _post("/api/project/acme/folder/open", {"path": "/tmp/not-used"})
-        self.assertTrue(out["ok"])
-        expected = str(folder.resolve())
-        self.assertEqual(out["path"], expected)
-        run_mock.assert_called_once_with(
-            ["/usr/bin/open", expected], capture_output=True, text=True, timeout=15)
+    # Opening a linked folder moved to /api/folders/open (tests/test_folder_routes.py).
+
+    def _outside(self):
+        """Linked folders live next to myOS, never inside it."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        return d
 
 
 if __name__ == "__main__":

@@ -68,8 +68,8 @@ class AskWithStub(unittest.TestCase):
     def test_linked_workspace_tools_are_loaded_only_when_needed(self):
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="RAIL", claude_bin=self.stub)
         ordinary = sess._base_cmd()
-        linked = sess._base_cmd(workspace_dir="/tmp/My App", file_search_mode=True)
-        graph = sess._base_cmd(workspace_dir="/tmp/My App")
+        linked = sess._base_cmd(read_dirs=("/tmp/My App",))
+        graph = sess._base_cmd()
 
         ordinary_tools = ordinary[ordinary.index("--tools") + 1:ordinary.index("--allowedTools")]
         linked_tools = linked[linked.index("--tools") + 1:linked.index("--allowedTools")]
@@ -115,7 +115,7 @@ class WebAndSecretPolicy(unittest.TestCase):
 
     def test_secret_files_denied_in_repo_and_linked_folder(self):
         sess = cs.ChatSession(repo_dir=".", rail="R")
-        cmd = sess._base_cmd(workspace_dir="/tmp/app", file_search_mode=True)
+        cmd = sess._base_cmd(read_dirs=("/tmp/app",))
         denied = cmd[cmd.index("--disallowedTools") + 1:cmd.index("--strict-mcp-config")]
         self.assertIn("Read(**/.env)", denied)
         self.assertIn("Read(//tmp/app/**/.env)", denied)

@@ -5,12 +5,16 @@ import index
 from tests.test_index_projects import write
 import dashboard.fileops as fileops
 import dashboard.db as db
+from core import folders
 
 
 class CrudTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # Linked folders may not sit inside myOS (fileops.ROOT): they live next to it.
+        self._ext = tempfile.TemporaryDirectory()
+        self.ext = Path(self._ext.name)
         root = self.root
         proj = root / "projects" / "acme"
         write(proj / "project.md",
@@ -30,6 +34,7 @@ class CrudTest(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+        self._ext.cleanup()
 
     def _con(self):
         return sqlite3.connect(self.root / "database" / "data" / "os.db")
@@ -48,15 +53,16 @@ class CrudTest(unittest.TestCase):
             fileops.update_project("nope", {"name": "X"})
 
     def test_project_local_folder_can_be_linked_and_unlinked(self):
-        app_dir = self.root / "local apps" / "acme-app #1"
+        app_dir = self.ext / "local apps" / "acme-app #1"
         app_dir.mkdir(parents=True)
-        fileops.update_project("acme", {"local_folder": str(app_dir)})
+        out = fileops.update_project("acme", {"local_folder": str(app_dir)})
         expected = str(app_dir.resolve())
-        self.assertEqual(db.project("acme")["entity"]["local_folder"], expected)
-        self.assertEqual(fileops.project_local_folder("acme"), expected)
+        self.assertEqual([r["path"] for r in out["folders"]], [expected])
+        self.assertEqual([r["path"] for r in folders.load("acme", self.root)["folders"]], [expected])
 
+        # An empty value no longer unlinks: that is done on the Folders screen.
         fileops.update_project("acme", {"local_folder": ""})
-        self.assertIsNone(db.project("acme")["entity"]["local_folder"])
+        self.assertEqual(len(folders.load("acme", self.root)["folders"]), 1)
         self.assertNotIn("local_folder:", (self.root / "projects/acme/project.md").read_text())
 
     def test_project_local_folder_must_be_an_existing_directory(self):
@@ -89,7 +95,7 @@ class CrudTest(unittest.TestCase):
     def test_project_local_folder_rejects_home_config_and_app_bundles(self):
         # ~/.ssh, ~/.config (CLI tokens), ~/Library hold secrets, never app code;
         # "open" on a .app launches it instead of showing a folder.
-        home = self.root / "home"
+        home = self.ext / "home"
         bad = (".ssh", ".config/gh", ".aws", "Library/Application Support", "apps/Tool.app")
         for rel in bad:
             (home / rel).mkdir(parents=True)
@@ -104,7 +110,7 @@ class CrudTest(unittest.TestCase):
     def test_project_local_folder_allows_apps_in_cloud_drives_not_whole_drives(self):
         # iCloud Drive, Dropbox, Google Drive live under ~/Library: an app inside
         # one is fine, the drive itself (everything synced) is not.
-        home = self.root / "home"
+        home = self.ext / "home"
         icloud = home / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
         cloud = home / "Library" / "CloudStorage" / "Dropbox"
         ok = (icloud / "apps" / "acme-app", cloud / "code" / "acme-app")
@@ -119,10 +125,11 @@ class CrudTest(unittest.TestCase):
                     fileops.normalize_local_folder(d)
 
     def test_project_local_folder_rejects_slug_path_traversal(self):
-        with self.assertRaises(fileops.ActionError):
-            fileops.project_local_folder("../acme")
-        with self.assertRaises(fileops.ActionError):
-            fileops.project_local_folder(str(self.root / "projects" / "acme"))
+        for bad in ("../acme", str(self.root / "projects" / "acme")):
+            with self.assertRaises(ValueError):
+                folders.load(bad, self.root)
+            with self.assertRaises(fileops.ActionError):
+                fileops.update_project(bad, {"local_folder": str(self.ext)})
 
     def test_delete_project_removes_it(self):
         fileops.delete_milestone("ms-1")  # drop the only reference first

@@ -4,8 +4,10 @@ No CLI runs here, so nothing else exists: a tool the policy does not allow is
 never offered, and every path and host is checked by myOS.
 
   osctl         always; runs on the server with the turn's workspace bound
-  read_file     not shared; repo and linked folder minus every private path
-  search_files  not shared, file_search on; same check
+  read_file     not shared; repo and the turn's linked folders minus every private path
+  search_files  not shared, linked folders this turn; same check
+  write_file    not shared, edit folders this turn; never the never-write list (core.folders)
+  edit_file     same as write_file; one exact match, UTF-8 text only
   web_fetch     web on; only hosts the user typed, never a private address
   apps tools    apps on, not shared; through the apps relay, same gate as Claude Code
 """
@@ -17,13 +19,16 @@ import json
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from core import folders
 from dashboard.engines.claude_code import SECRET_FILE_GLOBS
 
 MAX_OUT_CHARS = 120_000
@@ -72,15 +77,33 @@ OSCTL_SPEC = {
 }
 READ_SPEC = {
     "name": "read_file",
-    "description": "Read one text file by path (relative to the myOS folder, or inside the linked app folder).",
+    "description": "Read one text file by path (relative to the myOS folder, or an absolute path inside a linked folder).",
     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}},
                      "required": ["path"], "additionalProperties": False},
 }
 SEARCH_SPEC = {
     "name": "search_files",
-    "description": "Search the linked app folder. `glob` filters file names (e.g. **/*.py), `pattern` is a regex on file contents; either or both.",
-    "input_schema": {"type": "object", "properties": {"glob": {"type": "string"}, "pattern": {"type": "string"}},
+    "description": ("Search the linked folders (all of them, or `folder`, one folder's path). `glob` filters "
+                    "file names (e.g. **/*.py), `pattern` is a regex on file contents; either or both. "
+                    "Returns absolute paths."),
+    "input_schema": {"type": "object", "properties": {"glob": {"type": "string"}, "pattern": {"type": "string"},
+                                                      "folder": {"type": "string"}},
                      "additionalProperties": False},
+}
+WRITE_SPEC = {
+    "name": "write_file",
+    "description": ("Create or replace one text file inside a linked folder with edit access. `path` is "
+                    "absolute, or relative to the first edit folder. Git, editor and secret files are refused."),
+    "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                     "required": ["path", "content"], "additionalProperties": False},
+}
+EDIT_SPEC = {
+    "name": "edit_file",
+    "description": ("Change one text file inside a linked folder with edit access: `old_text` must appear "
+                    "exactly once and is replaced by `new_text`. Read the file first."),
+    "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"},
+                                                      "new_text": {"type": "string"}},
+                     "required": ["path", "old_text", "new_text"], "additionalProperties": False},
 }
 FETCH_SPEC = {
     "name": "web_fetch",
@@ -128,7 +151,7 @@ def read_file(raw, root, policy):
     root = Path(root).resolve()
     if not isinstance(raw, str) or not raw or "\x00" in raw:
         raise ToolError("path required")
-    bases = [root] + ([Path(policy.workspace_dir).resolve()] if policy.workspace_dir else [])
+    bases = [root] + [Path(d).resolve() for d in policy.read_dirs]
     path = (root / raw).resolve()
     if not any(_inside(path, b) for b in bases) or is_private_path(path, root, policy):
         raise ToolError("that file is not readable here")
@@ -143,10 +166,16 @@ def read_file(raw, root, policy):
         raise ToolError("no such file") from None
 
 
-def search_files(glob, pattern, root, policy):
-    if not policy.workspace_dir:
-        raise ToolError("no linked app folder this turn")
-    base = Path(policy.workspace_dir).resolve()
+def search_files(glob, pattern, root, policy, folder=None):
+    """Search every read folder of the turn, or the one named by `folder`. Absolute paths out."""
+    if not policy.read_dirs:
+        raise ToolError("no linked folder this turn")
+    bases = [Path(d).resolve() for d in policy.read_dirs]
+    if folder:
+        wanted = Path(str(folder)).expanduser().resolve() if isinstance(folder, str) else None
+        if wanted not in bases:
+            raise ToolError("that folder is not linked this turn")
+        bases = [wanted]
     if len(str(glob or "")) > MAX_PATTERN_CHARS or len(str(pattern or "")) > MAX_PATTERN_CHARS:
         raise ToolError("that search is too long")
     if pattern:
@@ -155,29 +184,136 @@ def search_files(glob, pattern, root, policy):
         except re.error as e:
             raise ToolError(f"bad pattern: {e}") from None
     names, stopped = [], None
-    for dirpath, dirs, files in os.walk(base):
-        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "dist", "build")]
-        for name in files:
-            full = Path(dirpath) / name
-            rel = full.relative_to(base).as_posix()
-            if glob and not (fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(name, glob)):
-                continue
-            real = full.resolve()
-            if is_private_path(real, root, policy) or not _inside(real, base):
-                continue
-            try:
-                if not real.is_file() or (pattern and real.stat().st_size > MAX_FILE_BYTES):
+    for base in bases:
+        for dirpath, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "__pycache__", ".venv", "dist", "build")]
+            for name in files:
+                full = Path(dirpath) / name
+                rel = full.relative_to(base).as_posix()
+                if glob and not (fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(name, glob)):
                     continue
-            except OSError:
-                continue
-            names.append((rel, str(real)))
-            if len(names) >= (5000 if pattern else MAX_MATCHES):
-                stopped = "(stopped: too many files)" if pattern else "(stopped: too many matches)"
+                real = full.resolve()
+                if is_private_path(real, root, policy) or not _inside(real, base):
+                    continue
+                try:
+                    if not real.is_file() or (pattern and real.stat().st_size > MAX_FILE_BYTES):
+                        continue
+                except OSError:
+                    continue
+                names.append((str(full), str(real)))
+                if len(names) >= (5000 if pattern else MAX_MATCHES):
+                    stopped = "(stopped: too many files)" if pattern else "(stopped: too many matches)"
+                    break
+            if stopped:
                 break
         if stopped:
             break
     hits = _grep(pattern, names) if pattern else [rel for rel, _ in names]
     return "\n".join(hits + ([stopped] if stopped else [])) or "(no matches)"
+
+
+def _edit_target(raw, root, policy):
+    """(edit folder, target path) for a write, or ToolError. The parent is resolved with
+    symlinks followed; the target itself must be missing or a regular file, never a link."""
+    if policy.shared or not policy.edit_dirs:
+        raise ToolError("no folder can be changed this turn")
+    if not isinstance(raw, str) or not raw.strip() or "\x00" in raw:
+        raise ToolError("path required")
+    reads = {Path(d).resolve() for d in policy.read_dirs}
+    edits = [b for b in (Path(d).resolve() for d in policy.edit_dirs) if b in reads]
+    if not edits:
+        raise ToolError("no folder can be changed this turn")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = edits[0] / path
+    if path.name in ("", ".", ".."):
+        raise ToolError("a file path is required")
+    target = path.parent.resolve() / path.name
+    base = next((b for b in edits if b in target.parents), None)
+    if base is None:
+        raise ToolError("only files inside a linked folder with edit access can be changed")
+    # The deepest folder holding the target decides: a Read folder nested in an Edit one stays read-only.
+    holder = max((b for b in reads if b in target.parents), key=lambda b: len(b.parts))
+    if holder not in edits:
+        raise ToolError("that folder is read-only this turn")
+    hooks = [Path(h) for h in folders.hook_dirs(base)]
+    if (not folders.may_write(target, base) or is_private_path(target, root, policy)
+            or any(h == target or h in target.parents for h in hooks)):
+        raise ToolError("that file cannot be changed: git, hook, editor and secret files stay as they are")
+    try:
+        st = os.lstat(target)
+    except FileNotFoundError:
+        return base, target
+    except OSError:
+        raise ToolError("that file cannot be changed") from None
+    if not stat.S_ISREG(st.st_mode):
+        raise ToolError("only regular files can be replaced")
+    return base, target
+
+
+def _write_atomic(base, target, data):
+    """Write through a temp file in the same folder, then swap it in, keeping the mode."""
+    try:
+        mode = stat.S_IMODE(os.lstat(target).st_mode)
+    except FileNotFoundError:
+        mode = 0o644
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Created after the checks: re-check the folder it landed in is still inside.
+        if base not in target.parent.resolve().parents and target.parent.resolve() != base:
+            raise ToolError("only files inside a linked folder with edit access can be changed")
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".myos-", suffix=".tmp")
+    except OSError as e:
+        raise ToolError(f"could not write that file: {e.strerror or e}") from None
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise ToolError(f"could not write that file: {e.strerror or e}") from None
+
+
+def write_file(raw_path, content, root, policy):
+    if not isinstance(content, str):
+        raise ToolError("content must be text")
+    data = content.encode("utf-8")
+    if len(data) > MAX_FILE_BYTES:
+        raise ToolError("that content is too large")
+    base, target = _edit_target(raw_path, root, policy)
+    _write_atomic(base, target, data)
+    return f"wrote {target} ({len(data)} bytes)"
+
+
+def edit_file(raw_path, old, new, root, policy):
+    if not isinstance(old, str) or not old or not isinstance(new, str):
+        raise ToolError("old_text and new_text are required")
+    base, target = _edit_target(raw_path, root, policy)
+    try:
+        if not target.is_file():
+            raise ToolError("no such file")
+        if target.stat().st_size > MAX_FILE_BYTES:
+            raise ToolError("that file is too large")
+        raw = target.read_bytes()
+    except OSError:
+        raise ToolError("no such file") from None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ToolError("that file is not UTF-8 text, so it cannot be edited") from None
+    count = text.count(old)
+    if count != 1:
+        raise ToolError("old_text was not found" if not count
+                        else f"old_text appears {count} times: include more of the lines around it")
+    data = text.replace(old, new, 1).encode("utf-8")
+    if len(data) > MAX_FILE_BYTES:
+        raise ToolError("the edited file would be too large")
+    _write_atomic(base, target, data)
+    return f"edited {target}"
 
 
 def _grep(pattern, names):
@@ -329,8 +465,10 @@ class ToolBox:
         self.specs, self._apps = [OSCTL_SPEC], set()
         if not policy.shared:
             self.specs.append(READ_SPEC)
-            if policy.file_search and policy.workspace_dir:
+            if policy.read_dirs:
                 self.specs.append(SEARCH_SPEC)
+            if policy.edit_dirs:
+                self.specs += [WRITE_SPEC, EDIT_SPEC]
         if policy.web and policy.web_domains:
             self.specs.append(FETCH_SPEC)
         if policy.apps and not policy.shared and tokens.apps_token and backends.get("apps_list"):
@@ -358,8 +496,14 @@ class ToolBox:
                 return text, bool(failed)
             if name == "read_file" and not self.policy.shared:
                 return read_file(args.get("path"), self.root, self.policy), False
-            if name == "search_files" and not self.policy.shared and self.policy.file_search:
-                return search_files(args.get("glob"), args.get("pattern"), self.root, self.policy), False
+            if name == "search_files" and not self.policy.shared and self.policy.read_dirs:
+                return search_files(args.get("glob"), args.get("pattern"), self.root, self.policy,
+                                    folder=args.get("folder")), False
+            if name == "write_file" and not self.policy.shared and self.policy.edit_dirs:
+                return write_file(args.get("path"), args.get("content"), self.root, self.policy), False
+            if name == "edit_file" and not self.policy.shared and self.policy.edit_dirs:
+                return edit_file(args.get("path"), args.get("old_text"), args.get("new_text"),
+                                 self.root, self.policy), False
             if name == "web_fetch" and self.policy.web:
                 return web_fetch(args.get("url"), self.policy), False
             if name in self._apps:

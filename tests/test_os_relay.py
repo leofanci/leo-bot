@@ -112,7 +112,7 @@ class SharedCommand(unittest.TestCase):
         return out
 
     def test_no_shell_no_files_no_apps(self):
-        cmd = self.cmd(workspace_dir="/x/app", file_search_mode=True, apps_port=8765, os_port=8765)
+        cmd = self.cmd(read_dirs=("/x/app",), edit_dirs=("/x/app",), apps_port=8765, os_port=8765)
         self.assertEqual(self.flag(cmd, "--tools"), [""])
         self.assertEqual(self.flag(cmd, "--allowedTools"), ["mcp__os"])
         self.assertNotIn("--add-dir", cmd)

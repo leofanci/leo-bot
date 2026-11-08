@@ -4,6 +4,7 @@ import http.server
 import io
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -14,7 +15,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import bots, runners
+from core import bots, folders, runners
 from dashboard import fileops, osctl, runner as runner_client, tokensave_bridge
 from dashboard.engines import acp, api, api_tools, config, registry
 from dashboard.engines.base import EngineRefused, TurnPolicy, TurnTokens, drain
@@ -83,7 +84,7 @@ class WebFetchIsSafe(unittest.TestCase):
 
 class FileToolsAreSafe(Tmp):
     def policy(self, **kw):
-        return TurnPolicy(workspace_dir=str(self.root), file_search=True, **kw)
+        return TurnPolicy(read_dirs=(str(self.root),), **kw)
 
     def test_a_search_that_never_ends_is_killed_not_run_on_the_server(self):
         (self.root / "a.txt").write_text("text\n")
@@ -478,6 +479,24 @@ class SharedThreadOsctl(Tmp):
             osctl._emit({"project": {"entity": {"slug": "demo", "local_folder": "/srv/app"}}, "rows": [{"local_folder": "/x"}]})
         self.assertNotIn("local_folder", out.getvalue())
 
+    def test_shared_osctl_never_shows_folders(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
+            osctl._emit({"project": {"folders": [{"path": "/srv/app"}]}, "rows": [{"folders": ["/srv/x"]}]})
+        self.assertNotIn("/srv/app", out.getvalue())
+        self.assertNotIn("/srv/x", out.getvalue())
+
+    def test_osctl_in_a_bot_turn_cannot_add_a_folder(self):
+        app = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, app, True)
+        for argv in (["update-project", "--slug", "demo", "--local-folder", str(app)],
+                     ["create-project", "--slug", "newco", "--local-folder", str(app)]):
+            with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": "demo"}), \
+                    mock.patch("sys.stdout", io.StringIO()) as out:
+                self.assertEqual(osctl.main(argv), 1, argv)
+            self.assertIn("only you can link", out.getvalue())
+        self.assertEqual(folders.all_paths("demo", self.root), [])
+
     def test_an_activity_cannot_write_a_row_for_another_workspace(self):
         with self.assertRaises(fileops.ActionError):
             fileops.create_activity({"entity": "demo", "title": "x\n- [ ] y — id: a9 — entity: acme"})
@@ -623,3 +642,20 @@ class Files(Tmp):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoBotLinksAFolder(unittest.TestCase):
+    """CodeQL #124's source is the owner-typed folder path. A bot reaches osctl only through the
+    relay or the api engine's osctl backend; both bind MYOS_WORKSPACE, so --local-folder is refused
+    before anything is read or written."""
+
+    def test_relay_osctl_refuses_local_folder_for_every_kind_of_turn(self):
+        from dashboard import os_relay
+        for ctx in ({"ws": "hq", "shared": False, "engine": "api:x"},
+                    {"ws": "demo", "shared": True},
+                    {"ws": "demo", "shared": False, "readonly": True}):
+            for cmd in ("update-project", "create-project"):
+                text, failed = os_relay.run_osctl(
+                    [cmd, "--slug", "no-such-slug-zz", "--local-folder", tempfile.gettempdir()], "", ctx)
+                self.assertTrue(failed, (cmd, ctx))
+                self.assertRegex(text, "only you can link|read-only: you were consulted", (cmd, ctx))

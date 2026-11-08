@@ -141,7 +141,7 @@ class Anthropic(Base):
 
     def test_shared_turn_is_offered_only_osctl(self):
         self.fake.replies = [anthropic_text("x")]
-        list(self.session(shared=True, deny_dirs=("/x",)).ask("hi", workspace_dir="/tmp", file_search_mode=True))
+        list(self.session(shared=True, deny_dirs=("/x",)).ask("hi", read_dirs=("/tmp",), edit_dirs=("/tmp",)))
         self.assertEqual([t["name"] for t in self.fake.requests[0]["body"]["tools"]], ["osctl"])
 
     def test_shared_turn_refuses_read_file_even_if_the_model_asks(self):
@@ -260,6 +260,179 @@ class OpenAI(Base):
         self.assertNotIn("authorization", self.fake.requests[0]["headers"])
 
 
+class FolderWrites(unittest.TestCase):
+    """write_file and edit_file: only inside an edit folder, never the never-write list."""
+
+    def setUp(self):
+        root, ext = tempfile.TemporaryDirectory(), tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.addCleanup(ext.cleanup)
+        self.root = Path(root.name).resolve()
+        self.ext = Path(ext.name).resolve()
+        self.edit, self.ro, self.outside = (self.ext / n for n in ("edit", "ro", "outside"))
+        for d in (self.edit, self.ro, self.outside):
+            d.mkdir()
+        (self.edit / "link").symlink_to(self.outside)
+        (self.ro / "notes.md").write_text("read only")
+        self.policy = TurnPolicy(workspace="acme", read_dirs=(str(self.edit), str(self.ro)),
+                                 edit_dirs=(str(self.edit),))
+
+    def write(self, path, content="n", policy=None):
+        return api_tools.write_file(str(path), content, self.root, policy or self.policy)
+
+    def test_write_inside_edit_folder(self):
+        out = self.write(self.edit / "src" / "new.py", "print(1)\n")
+        self.assertEqual((self.edit / "src" / "new.py").read_text(), "print(1)\n")
+        self.assertIn(str(self.edit / "src" / "new.py"), out)
+        self.write("rel.md", "relative")
+        self.assertEqual((self.edit / "rel.md").read_text(), "relative")
+        for rel in ("CLAUDE.md", "AGENTS.md", ".github/workflows/ci.yml"):
+            self.write(self.edit / rel)
+            self.assertEqual((self.edit / rel).read_text(), "n")
+
+    def test_write_refusals(self):
+        (self.edit / "evil").symlink_to(self.outside / "target")
+        for path in (self.outside / "x", self.ro / "x", self.edit / ".env", self.edit / ".git/hooks/x",
+                     self.edit / ".envrc", self.edit / "link/x", self.edit / "../x", self.root / "x",
+                     self.edit / ".mcp.json", self.edit / ".vscode/tasks.json", self.edit / ".claude/x",
+                     self.edit / ".husky/pre-push", self.edit / "sub/.GIT/config", self.edit / "id_rsa",
+                     self.edit / "evil", self.edit, self.edit / "..", "../x", "/etc/hosts"):
+            with self.assertRaises(api_tools.ToolError, msg=str(path)):
+                self.write(path)
+            path = Path(path) if Path(path).is_absolute() else self.edit / path
+            self.assertFalse(path.resolve().is_file() and path.read_text() == "n", path)
+        self.assertFalse((self.edit / ".git").exists())
+        self.assertEqual(list(self.outside.iterdir()), [])
+
+    def test_a_read_folder_inside_the_edit_folder_is_not_writable(self):
+        docs = self.edit / "docs"
+        docs.mkdir()
+        p = TurnPolicy(workspace="acme", read_dirs=(str(self.edit), str(docs)), edit_dirs=(str(self.edit),))
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.write_file(str(docs / "x.md"), "n", self.root, p)
+        self.assertFalse((docs / "x.md").exists())
+        api_tools.write_file(str(self.edit / "y.md"), "n", self.root, p)
+
+    def test_core_hooks_path_is_not_writable(self):
+        with mock.patch.object(api_tools.folders, "hook_dirs", return_value=[str(self.edit / "scripts" / "hooks")]):
+            with self.assertRaises(api_tools.ToolError):
+                self.write(self.edit / "scripts" / "hooks" / "pre-commit")
+        self.assertFalse((self.edit / "scripts").exists())
+
+    def test_write_refuses_a_pipe_and_oversized_content(self):
+        os.mkfifo(self.edit / "pipe")
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "pipe")
+        (self.edit / "dir").mkdir()
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "dir")
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "big.txt", "x" * (api_tools.MAX_FILE_BYTES + 1))
+        self.assertFalse((self.edit / "big.txt").exists())
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "x.txt", 42)
+
+    def test_write_is_atomic_and_keeps_mode(self):
+        f = self.edit / "run.sh"
+        f.write_text("old")
+        f.chmod(0o750)
+        self.write(f, "new")
+        self.assertEqual(f.read_text(), "new")
+        self.assertEqual(stat.S_IMODE(f.stat().st_mode), 0o750)
+        self.assertEqual(sorted(p.name for p in self.edit.iterdir()), ["link", "run.sh"])
+        with mock.patch.object(api_tools.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(api_tools.ToolError):
+                self.write(f, "broken")
+        self.assertEqual(f.read_text(), "new")
+        self.assertEqual(sorted(p.name for p in self.edit.iterdir()), ["link", "run.sh"])
+
+    def test_edit_replaces_exactly_one_match(self):
+        f = self.edit / "app.py"
+        f.write_text("a = 1\nb = 2\n")
+        out = api_tools.edit_file(str(f), "b = 2", "b = 3", self.root, self.policy)
+        self.assertEqual(f.read_text(), "a = 1\nb = 3\n")
+        self.assertIn(str(f), out)
+
+    def test_edit_refuses_missing_or_repeated_text_and_leaves_the_file(self):
+        f = self.edit / "app.py"
+        f.write_text("x = 1\nx = 1\n")
+        for old in ("x = 1", "nope", ""):
+            with self.assertRaises(api_tools.ToolError, msg=old):
+                api_tools.edit_file(str(f), old, "y", self.root, self.policy)
+        self.assertEqual(f.read_text(), "x = 1\nx = 1\n")
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.edit_file(str(self.edit / "missing.py"), "a", "b", self.root, self.policy)
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.edit_file(str(self.ro / "notes.md"), "read", "write", self.root, self.policy)
+        self.assertEqual((self.ro / "notes.md").read_text(), "read only")
+
+    def test_edit_refuses_non_utf8_and_leaves_the_file(self):
+        f = self.edit / "blob.bin"
+        f.write_bytes(b"\xff\xfeabc")
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.edit_file(str(f), "abc", "def", self.root, self.policy)
+        self.assertEqual(f.read_bytes(), b"\xff\xfeabc")
+
+    def test_tools_not_offered_without_edit_folders(self):
+        names = lambda p: [s["name"] for s in api_tools.ToolBox(p, self.root, TurnTokens(), "api", {}).specs]
+        self.assertIn("write_file", names(self.policy))
+        self.assertIn("edit_file", names(self.policy))
+        read_only = TurnPolicy(workspace="acme", read_dirs=(str(self.edit),))
+        self.assertNotIn("write_file", names(read_only))
+        self.assertNotIn("edit_file", names(read_only))
+        box = api_tools.ToolBox(read_only, self.root, TurnTokens(), "api", {})
+        text, failed = box.run("write_file", {"path": str(self.edit / "x"), "content": "n"})
+        self.assertTrue(failed)
+        self.assertFalse((self.edit / "x").exists())
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "x", policy=read_only)
+
+    def test_tools_not_offered_on_a_shared_turn(self):
+        shared = TurnPolicy(workspace="acme", shared=True, read_dirs=(str(self.edit),), edit_dirs=(str(self.edit),))
+        box = api_tools.ToolBox(shared, self.root, TurnTokens(), "api", {})
+        self.assertEqual([s["name"] for s in box.specs], ["osctl"])
+        text, failed = box.run("write_file", {"path": str(self.edit / "x"), "content": "n"})
+        self.assertTrue(failed)
+        with self.assertRaises(api_tools.ToolError):
+            self.write(self.edit / "x", policy=shared)
+        self.assertFalse((self.edit / "x").exists())
+
+    def test_toolbox_runs_write_and_edit(self):
+        box = api_tools.ToolBox(self.policy, self.root, TurnTokens(), "api", {})
+        text, failed = box.run("write_file", {"path": str(self.edit / "a.txt"), "content": "one"})
+        self.assertFalse(failed, text)
+        text, failed = box.run("edit_file", {"path": str(self.edit / "a.txt"), "old_text": "one", "new_text": "two"})
+        self.assertFalse(failed, text)
+        self.assertEqual((self.edit / "a.txt").read_text(), "two")
+
+    def test_deny_dirs_block_writes(self):
+        vendor = self.edit / "vendor"
+        vendor.mkdir()
+        p = TurnPolicy(workspace="acme", read_dirs=(str(self.edit),), edit_dirs=(str(self.edit),),
+                       deny_dirs=(str(vendor),))
+        with self.assertRaises(api_tools.ToolError):
+            self.write(vendor / "x", policy=p)
+        self.assertFalse((vendor / "x").exists())
+
+    def test_read_reaches_every_read_dir_and_nothing_else(self):
+        (self.edit / "app.py").write_text("needle")
+        (self.ro / "doc.md").write_text("needle")
+        (self.outside / "o.md").write_text("needle")
+        self.assertEqual(api_tools.read_file(str(self.ro / "doc.md"), self.root, self.policy), "needle")
+        self.assertEqual(api_tools.read_file(str(self.edit / "app.py"), self.root, self.policy), "needle")
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.read_file(str(self.outside / "o.md"), self.root, self.policy)
+        out = api_tools.search_files(None, "needle", self.root, self.policy)
+        self.assertIn(str(self.edit / "app.py"), out)
+        self.assertIn(str(self.ro / "doc.md"), out)
+        self.assertNotIn("o.md", out)
+        only = api_tools.search_files("*.md", None, self.root, self.policy, folder=str(self.ro))
+        self.assertIn(str(self.ro / "doc.md"), only)
+        self.assertNotIn("app.py", only)
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.search_files(None, "needle", self.root, self.policy, folder=str(self.outside))
+
+
 class FileRules(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -297,7 +470,7 @@ class FileRules(unittest.TestCase):
         (linked / ".env").write_text("secret")
         with self.assertRaises(api_tools.ToolError):
             self.read(str(linked / "app.py"))
-        on = TurnPolicy(workspace="acme", workspace_dir=str(linked), file_search=True)
+        on = TurnPolicy(workspace="acme", read_dirs=(str(linked),))
         self.assertEqual(self.read(str(linked / "app.py"), on), "code")
         with self.assertRaises(api_tools.ToolError):
             self.read(str(linked / ".env"), on)

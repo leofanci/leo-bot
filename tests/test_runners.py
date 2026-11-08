@@ -112,7 +112,7 @@ class ClientSide(unittest.TestCase):
         p = runner_client.job_policy({"policy": {"shared": False, "apps": True, "workspace": "acme"}})
         self.assertTrue(p.shared)
         self.assertFalse(p.apps)
-        self.assertIsNone(p.workspace_dir)
+        self.assertEqual((p.read_dirs, p.edit_dirs), ((), ()))
 
     def test_runner_turn_has_no_shell_or_files_and_reaches_only_the_server(self):
         sess = runner_client.JobSession({"chat": "c", "rail": "R", "model": "haiku"}, "/tmp/x", False)

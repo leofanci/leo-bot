@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from core import folders
 from dashboard import tokensave_bridge as bridge
 
 
@@ -12,7 +13,9 @@ class TokenSaveBridge(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.app = self.root / "apps" / "acme"
+        self.ext = tempfile.TemporaryDirectory()  # linked folders live next to myOS
+        self.addCleanup(self.ext.cleanup)
+        self.app = Path(self.ext.name).resolve() / "apps" / "acme"
         self.app.mkdir(parents=True)
         project = self.root / "projects" / "acme"
         project.mkdir(parents=True)
@@ -82,12 +85,29 @@ class TokenSaveBridge(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
 
     def test_parent_graph_is_rejected_to_avoid_sibling_scope_leakage(self):
-        (self.root / ".tokensave").mkdir()
-        (self.root / ".tokensave" / "tokensave.db").touch()
+        (self.app.parent / ".tokensave").mkdir()
+        (self.app.parent / ".tokensave" / "tokensave.db").touch()
         with mock.patch.object(bridge.subprocess, "run") as run:
             with self.assertRaisesRegex(bridge.BridgeError, "tokensave init"):
                 bridge.context("acme", "handler")
         run.assert_not_called()
+
+    def test_folder_must_be_linked_and_defaults_to_the_first_indexed(self):
+        other = self.app.parent / "docs"
+        other.mkdir()
+        (other / ".tokensave").mkdir()
+        (other / ".tokensave" / "tokensave.db").touch()
+        with mock.patch.object(bridge.subprocess, "run") as run:
+            with self.assertRaisesRegex(bridge.BridgeError, "not linked"):
+                bridge.context("acme", "find auth", folder=str(other))
+        run.assert_not_called()
+        folders.add("acme", str(other), root=self.root)
+        with mock.patch.object(bridge.shutil, "which", return_value="/bin/tokensave"), self._run() as run:
+            bridge.context("acme", "find auth")
+        self.assertEqual(run.call_args_list[0].args[0], ["/bin/tokensave", "sync", str(other)])
+        with mock.patch.object(bridge.subprocess, "run") as run:
+            with self.assertRaisesRegex(bridge.BridgeError, "tokensave init"):
+                bridge.context("acme", "find auth", folder=str(self.app))
 
     def test_bridge_rejects_a_different_project_slug(self):
         with self.assertRaisesRegex(bridge.BridgeError, "not the active"):

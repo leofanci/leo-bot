@@ -76,6 +76,18 @@ cp -r skills/* ~/.claude/skills/
 
 Run myOS on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (HQ, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
 
+### Linked folders
+
+Each workspace, HQ included, can link any number of folders on the machine running myOS
+(the workspace's Folders screen). Each folder is **Edit** or **Read**, and a channel or a
+bot can be limited to some folders or to read access. Bots read and search them on your
+private threads. On Claude Code and API-key engines, a tagged message (@bot, /skill, a DM)
+can change files in Edit folders; an untagged one only reads. Bots never touch git, editor
+or secret files (`.git/`, `.claude/`, `.vscode/`, `.env` and the like), and they cannot run
+tests, builds or git: they name the files they changed and you review them in your own git.
+Codex and other CLIs stay read-only. Invited people, shared threads and runners never reach
+a linked folder or see its path.
+
 ### Dashboard (macOS app)
 
 The app's launcher binary is not committed: build it from source once after cloning. With the repo hooks enabled (`git config core.hooksPath .githooks`), every pull or checkout that changes the app's source rebuilds it automatically.
@@ -89,7 +101,7 @@ Without the app, run `python3 dashboard/server.py` and open the login link it pr
 
 ---
 
-## The 23 skills
+## The 24 skills
 
 ### Layer 0 — OS dispatcher
 | Skill | What it does |
@@ -122,6 +134,8 @@ Without the app, run `python3 dashboard/server.py` and open the login link it pr
 | Skill | What it does |
 |---|---|
 | `product-build` | Roadmap, feature planning, manual micro-features, releases → content ramp |
+| `tokensave` | Read-only look at a linked folder through its TokenSave index |
+| `folder-work` | Read and change code and docs in a linked folder (CTO's default) |
 
 > Manual micro-features and non-GTM tasks: add them by hand to
 > `products/<slug>/roadmap.md` or `portfolio/activities.md` (markdown checklists)

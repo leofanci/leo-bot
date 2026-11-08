@@ -13,7 +13,7 @@ import dashboard.osctl as osctl
 import dashboard.server as server
 
 VENTURE = {"slug": "acme", "name": "Acme", "kind": "venture", "type": "project",
-           "profiles": [{"slug": "profile-a"}], "local_folder": "/tmp/acme-app", "products": []}
+           "profiles": [{"slug": "profile-a"}], "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}], "products": []}
 
 
 class Planning(unittest.TestCase):

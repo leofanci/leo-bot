@@ -46,6 +46,7 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
+from core import folders
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
@@ -867,69 +868,12 @@ def _slugify(name: str) -> str:
     return re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")
 
 
-# Cloud drives sync under ~/Library (None = any provider folder): an app folder
-# inside one is fine, the drive itself (everything synced) is not.
-_CLOUD_DRIVES = (("Library", "Mobile Documents", "com~apple~CloudDocs"), ("Library", "CloudStorage", None))
-
-
-def _inside_cloud_drive(rel_parts) -> bool:
-    return any(len(rel_parts) > len(drive)
-               and all(d is None or d == p for d, p in zip(drive, rel_parts))
-               for drive in _CLOUD_DRIVES)
-
-
 def normalize_local_folder(value) -> str:
-    """Return one safe app directory, or an empty string to unlink it."""
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    if any(ord(char) < 32 for char in raw):
-        raise ActionError("local folder path cannot contain control characters")
-    path = Path(raw).expanduser()
-    if not path.is_absolute():
-        raise ActionError("local folder must be an absolute path")
-    if not path.exists():
-        raise ActionError(f"local folder does not exist: {path}")
-    if not path.is_dir():
-        raise ActionError(f"local folder is not a directory: {path}")
-    resolved = path.resolve()
-    workspace_root = ROOT.resolve()
-    home = Path.home().resolve()
-    filesystem_root = Path(resolved.anchor).resolve()
-    if resolved in {filesystem_root, home, workspace_root}:
-        raise ActionError("local folder must be a specific app directory")
-    # A parent of myOS (for example ~/Documents/GitHub) would expose this repo
-    # and every sibling app when passed to Claude as an allowed directory.
-    if workspace_root.is_relative_to(resolved):
-        raise ActionError("local folder cannot contain the myOS workspace")
-    # Claude's config holds every bot session's transcript, all workspaces.
-    if resolved.is_relative_to(home / ".claude"):
-        raise ActionError("local folder cannot be inside the Claude config folder")
-    # ~/.ssh, ~/.config, ~/.aws, ~/Library: keys and CLI tokens, never app code.
-    if resolved.is_relative_to(home):
-        rel = resolved.relative_to(home).parts
-        if (rel[0].startswith(".") or rel[0] == "Library") and not _inside_cloud_drive(rel):
-            raise ActionError("local folder cannot be a hidden or Library folder in your home")
-    # "Open folder" would launch an app bundle instead of showing it.
-    if any(part.lower().endswith(".app") for part in resolved.parts):
-        raise ActionError("local folder cannot be an app bundle")
-    return str(resolved)
-
-
-def project_local_folder(slug: str) -> str:
-    """Return one project's usable linked folder, with a helpful stale-link error."""
-    project_dir = _project_dir(slug)
-    project_file = project_dir / "project.md"
-    if not project_file.exists():
-        raise ActionError(f"project '{slug}' not found")
-    fm, _ = _parse_frontmatter(project_file.read_text(encoding="utf-8"))
-    raw = (fm.get("local_folder") or "").strip()
-    if not raw:
-        raise ActionError(f"project '{slug}' has no local folder linked")
+    """Return one safe folder (core.folders.normalize_path), or an empty string."""
     try:
-        return normalize_local_folder(raw)
-    except ActionError as exc:
-        raise ActionError(f"linked folder for project '{slug}' is unavailable: {exc}") from exc
+        return folders.normalize_path(value, ROOT)
+    except folders.FolderError as exc:
+        raise ActionError(str(exc)) from exc
 
 
 _NOT_ONE_LINE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
@@ -997,16 +941,25 @@ def create_project(slug: str, fields: dict) -> dict:
     status = _one_line(fields.get("status") or "idea", "status")
     hours = _one_line(fields.get("hours_per_week") or "0", "hours_per_week")
     voice = (fields.get("voice") or "").strip()
-    local_folder = normalize_local_folder(fields.get("local_folder"))
+    local_folder = normalize_local_folder(fields.get("local_folder"))  # checked before any write
     for sub in ["profiles", "products", "strategy/memos", "strategy/experiments"]:
         (project_dir / sub).mkdir(parents=True, exist_ok=True)
-    folder_line = f"local_folder: {local_folder}\n" if local_folder else ""
     md = (f"---\nname: {name}\nkind: {kind}\npriority: {priority}\n"
-          f"hours_per_week: {hours}\nstatus: {status}\n{folder_line}---\n{voice}\n")
+          f"hours_per_week: {hours}\nstatus: {status}\n---\n{voice}\n")
     (project_dir / "project.md").write_text(md, encoding="utf-8")
     ensure_config(ROOT, slug)
+    if local_folder:
+        _link_folder(slug, local_folder)
     reindex()
-    return {"slug": slug, "local_folder": local_folder or None}
+    return {"slug": slug, "folders": folders.load(slug, ROOT)["folders"]}
+
+
+def _link_folder(slug: str, path: str) -> None:
+    """Add one folder at the default access (core.folders.add)."""
+    try:
+        folders.add(slug, path, root=ROOT)
+    except (folders.FolderError, ValueError) as exc:
+        raise ActionError(str(exc)) from exc
 
 
 def update_project(slug: str, fields: dict) -> dict:
@@ -1015,21 +968,22 @@ def update_project(slug: str, fields: dict) -> dict:
     NOT changed here — only the display name and metadata are editable."""
     slug = _safe_component(slug, "project slug")
     f = _project_dir(slug) / "project.md"
+    folders.load(slug, ROOT)  # moves an old local_folder line out first, so it is never lost
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8"))
     name = _one_line(fields.get("name") or fm.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or fm.get("kind") or "venture", "kind")
     priority = _priority(fields.get("priority") or fm.get("priority") or "primary")
     status = _one_line(fields.get("status") or fm.get("status") or "idea", "status")
     hours = _one_line(fields.get("hours_per_week") or fm.get("hours_per_week") or "0", "hours_per_week")
-    local_folder = (fm.get("local_folder") or "").strip()
-    if "local_folder" in fields:
-        local_folder = normalize_local_folder(fields.get("local_folder"))
-    folder_line = f"local_folder: {local_folder}\n" if local_folder else ""
+    # A non-empty local_folder adds a folder; unlinking is done on the Folders screen.
+    local_folder = normalize_local_folder(fields.get("local_folder"))
     md = (f"---\nname: {name}\nkind: {kind}\npriority: {priority}\n"
-          f"hours_per_week: {hours}\nstatus: {status}\n{folder_line}---\n{body}\n")
+          f"hours_per_week: {hours}\nstatus: {status}\n---\n{body}\n")
     f.write_text(md, encoding="utf-8")
+    if local_folder:
+        _link_folder(slug, local_folder)
     reindex()
-    return {"slug": slug, "local_folder": local_folder or None}
+    return {"slug": slug, "folders": folders.load(slug, ROOT)["folders"]}
 
 
 def _portfolio_refs(slug: str) -> list:

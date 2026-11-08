@@ -45,14 +45,16 @@ class T(unittest.TestCase):
         self.assertIn("already exists", out["error"])
 
     def test_create_project_with_local_folder(self):
-        app_dir = self.root / "apps" / "acme-app"
+        outside = tempfile.TemporaryDirectory()  # linked folders live next to myOS
+        self.addCleanup(outside.cleanup)
+        app_dir = Path(outside.name) / "apps" / "acme-app"
         app_dir.mkdir(parents=True)
         code, out = run(["create-project", "--slug", "acme",
                          "--local-folder", str(app_dir)])
         self.assertEqual(code, 0)
         expected = str(app_dir.resolve())
-        self.assertEqual(out["local_folder"], expected)
-        self.assertEqual(db.project("acme")["entity"]["local_folder"], expected)
+        self.assertEqual([(r["path"], r["access"]) for r in out["folders"]], [(expected, "edit")])
+        self.assertEqual([p["folders"][0]["path"] for p in db.tree() if p["slug"] == "acme"], [expected])
 
     def test_create_profile_and_channel_and_post(self):
         run(["create-project", "--slug", "acme", "--name", "Acme"])
