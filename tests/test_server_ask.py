@@ -728,6 +728,37 @@ class TurnFolders(unittest.TestCase):
             self.assertFalse(seen["ctx"][0]["include_code"])
             self.assertNotIn(str(self.b), seen["lead"]["text"])
 
+    def test_fix_wording_never_pulls_another_bots_mention_to_cto(self):
+        team = server.bots.team(self.root, "acme", self.tree()[0])
+        sess = type("S", (), {"_skill_explicit": False, "_last_skill": None, "_last_bot": None})()
+        for msg, bot in (("@cmo fix the typo in the launch post", "cmo"),
+                         ("@gtm fix the date of the webinar", "gtm"),
+                         ("@cos implement the plan we agreed", "cos")):
+            got = server._route_bot(team, msg, sess)
+            self.assertEqual(got[0], bot, msg)
+            self.assertNotEqual(got[1], "folder-work", msg)
+        self.assertEqual(server._route_bot(team, "@cto fix the login", sess)[:2], ("cto", "folder-work"))
+        self.assertIsNone(server._suggest_skill("fix the typo in the launch post"))
+
+    def test_runner_turn_gets_no_source_code_or_error_detail(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("/tokensave how does login work", runner=True)
+            self.assertFalse(seen["ctx"][0]["include_code"])
+            seen = self.turn("/tokensave how does login work", runner=True,
+                             ctx_error=server.tokensave_bridge.BridgeError(f"bad index at {self.b}"))
+        self.assertNotIn(str(self.b), seen["out"])
+
+    def test_symlinked_stored_path_never_forks_the_thread(self):
+        link = self.root.parent / (self.root.name + "-link")
+        link.symlink_to(self.a)
+        self.addCleanup(link.unlink)
+        _folders.save("acme", {"folders": [{"id": "f1", "path": str(link), "access": "edit"}]}, self.root)
+        linked = set(_folders.all_paths("acme", self.root))
+        used = {r["path"] for r in _folders.for_turn("acme", None, "cto", self.root)}
+        self.assertFalse(used - linked)
+
     def test_recap_goes_before_the_prompt_once(self):
         seen = self.turn("hello there", recap="RECAP-OF-EARLIER-THREAD")
         self.assertTrue(seen["lead"]["text"].startswith("RECAP-OF-EARLIER-THREAD"))
@@ -810,7 +841,7 @@ class SavedThreadFolders(unittest.TestCase):
 
     def test_old_scope_keeps_its_context(self):
         self.saved(["acme", "/app-a"])
-        sess = server.get_chat_session(("acme",), self.id("c1"), linked=set())
+        sess = server.get_chat_session(("acme",), self.id("c1"), linked={"/app-a"})
         self.assertEqual(sess.session_id, self.id("c1"))
         self.assertTrue(sess._started)
         self.assertFalse(getattr(sess, "pending_recap", None))
@@ -856,7 +887,8 @@ class SavedThreadFolders(unittest.TestCase):
 
     def test_person_slot_follows_the_same_rules(self):
         self.saved(["acme", "/app-a"])
-        self.assertEqual(server.person_chat_session("p1", ("acme",), self.id("c1"), linked=set()).session_id, self.id("c1"))
+        self.assertEqual(server.person_chat_session("p1", ("acme",), self.id("c1"), linked={"/app-a"}).session_id,
+                         self.id("c1"))
         self.saved(["acme"], ["/w/a"], cid="c3")
         sess = server.person_chat_session("p1", ("acme",), self.id("c3"), linked=set())
         self.assertNotEqual(sess.session_id, self.id("c3"))
@@ -903,6 +935,14 @@ class SavedThreadFolders(unittest.TestCase):
         self.assertNotIn("/w/a", str(out))
         for row in server.chat_store.list_meta():
             self.assertNotIn("folder_paths", row)
+
+    def test_an_old_scope_path_counts_as_used(self):
+        self.saved(["acme", "/app-a"])
+        self.assertEqual(server.get_chat_session(("acme",), self.id("c1"), linked={"/app-a"}).session_id, self.id("c1"))
+        server._CHAT = server._CHAT_SCOPE = None
+        fresh = server.get_chat_session(("acme",), self.id("c1"), linked=set())
+        self.assertNotEqual(fresh.session_id, self.id("c1"))
+        self.assertIn("earlier message", fresh.pending_recap)
 
     def test_scope_slug_reads_both_shapes(self):
         self.assertEqual(server._scope_slug(["acme", "/app"]), "acme")

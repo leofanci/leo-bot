@@ -995,7 +995,7 @@ async function renderFolders(){
       const limited = layer !== undefined;
       const per = limited ? rows.map(r => `<label class="folder-pick">${esc(r.name)}
           <select data-limit-folder="${esc(r.id)}" data-kind="${kind}" data-key="${esc(key)}" aria-label="${esc(r.name)}">
-          ${[["", "None"], ["read", "Read"], ["edit", "Edit"]].map(([v, l]) => `<option value="${v}"${(layer[r.id] || "") === v ? " selected" : ""}>${l}</option>`).join("")}
+          ${(r.access === "edit" ? [["", "None"], ["read", "Read"], ["edit", "Edit"]] : [["", "None"], ["read", "Read"]]).map(([v, l]) => `<option value="${v}"${(layer[r.id] || "") === v ? " selected" : ""}>${l}</option>`).join("")}
           </select></label>`).join("") : "";
       return `<div class="eng-choice"><label>${esc(label)} <select data-limit-mode data-kind="${kind}" data-key="${esc(key)}">
           <option value="all"${limited ? "" : " selected"}>All folders</option><option value="limit"${limited ? " selected" : ""}>Limited</option></select></label>
@@ -1006,7 +1006,8 @@ async function renderFolders(){
         ${(d.channels || []).map(c => limitRow("rooms", c.id, "#" + c.name, d.rooms?.[c.id])).join("")}</section>
       <section class="integ-group"><h3>Bots</h3>
         ${(d.team || []).map(b => limitRow("bots", b.id, `${b.name} (@${b.handle})`, d.bots?.[b.id])).join("")}</section>` : "";
-    box.innerHTML = `<section class="integ-group"><h3>Linked folders</h3>${folderRows}${add}</section>${layers}`;
+    const broken = d.damaged ? `<div class="folder-warn">This workspace's folders.json is damaged, so bots get no folders and changes are refused. Fix the file by hand or delete it, then reload.</div>` : "";
+    box.innerHTML = `<section class="integ-group"><h3>Linked folders</h3>${broken}${folderRows}${add}</section>${layers}`;
     const call = async (route, body) => {
       try { await jpost(`/api/folders/${route}`, { ws, ...body }); await draw(); }
       catch (err) { toast("✗ " + err.message); await draw(); }

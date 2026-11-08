@@ -304,6 +304,21 @@ class FolderWrites(unittest.TestCase):
         self.assertFalse((self.edit / ".git").exists())
         self.assertEqual(list(self.outside.iterdir()), [])
 
+    def test_a_read_folder_inside_the_edit_folder_is_not_writable(self):
+        docs = self.edit / "docs"
+        docs.mkdir()
+        p = TurnPolicy(workspace="acme", read_dirs=(str(self.edit), str(docs)), edit_dirs=(str(self.edit),))
+        with self.assertRaises(api_tools.ToolError):
+            api_tools.write_file(str(docs / "x.md"), "n", self.root, p)
+        self.assertFalse((docs / "x.md").exists())
+        api_tools.write_file(str(self.edit / "y.md"), "n", self.root, p)
+
+    def test_core_hooks_path_is_not_writable(self):
+        with mock.patch.object(api_tools.folders, "hook_dirs", return_value=[str(self.edit / "scripts" / "hooks")]):
+            with self.assertRaises(api_tools.ToolError):
+                self.write(self.edit / "scripts" / "hooks" / "pre-commit")
+        self.assertFalse((self.edit / "scripts").exists())
+
     def test_write_refuses_a_pipe_and_oversized_content(self):
         os.mkfifo(self.edit / "pipe")
         with self.assertRaises(api_tools.ToolError):

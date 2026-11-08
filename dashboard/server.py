@@ -403,6 +403,7 @@ _SKILL_ROUTES = [
     # specific — handled separately in _route_skill so it has lowest priority.
 ]
 SKILL_NAMES = frozenset(name for name, _ in _SKILL_ROUTES) | {"workspace", "tokensave"}
+_OWNER_ONLY_ROUTES = frozenset({"folder-work"})
 _COMPILED_ROUTES = [(name, re.compile(pat, re.I)) for name, pat in _SKILL_ROUTES]
 _MENTION_RE = re.compile(r"[@/]([a-z][a-z0-9-]+)")
 # Generic strategic intent with no specific skill → route to the workspace dispatcher.
@@ -428,6 +429,9 @@ def _suggest_skill(text, among=None):
     if not text:
         return None
     routes = _COMPILED_ROUTES
+    # folder-work matches everyday words ("fix", "implement"): only a bot that owns it
+    # (CTO, tagged or in its DM) routes there; it never takes over another bot's turn.
+    routes = [r for r in routes if r[0] not in _OWNER_ONLY_ROUTES or r[0] in (among or ())]
     if among:
         routes = ([r for r in routes if r[0] in among]
                   + [r for r in routes if r[0] not in among])
@@ -1102,6 +1106,7 @@ def _folders_view(ws, projects):
     team_rows = [{"id": b.id, "name": b.name, "handle": b.handle, "active": b.active}
                  for b in team.bots.values()]
     return {"ws": ws, "folders": rows, "rooms": data["rooms"], "bots": data["bots"],
+            "damaged": folders.damaged(ws, ROOT),
             "channels": channels, "team": team_rows,
             "chooser": DEPLOYMENT != "server" and sys.platform == "darwin"}
 
@@ -1128,9 +1133,15 @@ def _scope_slug(scope):
 
 
 def _used_paths(sess_or_rec):
+    """Folders a thread's session may hold data from. An old `(slug, path)` scope counts its
+    path: those threads read that one linked folder."""
     value = (sess_or_rec.get("folder_paths") if isinstance(sess_or_rec, dict)
              else getattr(sess_or_rec, "folder_paths", None))
-    return {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
+    used = {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
+    scope = sess_or_rec.get("scope") if isinstance(sess_or_rec, dict) else None
+    if isinstance(scope, (list, tuple)) and len(scope) > 1 and isinstance(scope[1], str) and scope[1]:
+        used.add(scope[1])
+    return used
 
 
 def _folder_gone(sess_or_rec, linked):
@@ -2203,11 +2214,11 @@ class Handler(BaseHTTPRequestHandler):
                 # An invited person's question must not read the app's source out of this.
                 graph_context = tokensave_bridge.context(
                     ws, tokensave_task, active_project=ws,
-                    include_code=not shared, folder=graph_folder,
+                    include_code=not locked, folder=graph_folder,
                 )
             except (tokensave_bridge.BridgeError, OSError) as exc:
-                # The detail can name the owner's folders: invited people get none of it.
-                graph_error = "the code index could not refresh" if shared else str(exc)[:1200]
+                # The detail can name the owner's folders: a locked turn gets none of it.
+                graph_error = "the code index could not refresh" if locked else str(exc)[:1200]
 
         if skill == "tokensave" and graph_error:
             return self._sse_message(

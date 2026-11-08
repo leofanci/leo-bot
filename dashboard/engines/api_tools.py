@@ -232,8 +232,14 @@ def _edit_target(raw, root, policy):
     base = next((b for b in edits if b in target.parents), None)
     if base is None:
         raise ToolError("only files inside a linked folder with edit access can be changed")
-    if not folders.may_write(target, base) or is_private_path(target, root, policy):
-        raise ToolError("that file cannot be changed: git, editor and secret files stay as they are")
+    # The deepest folder holding the target decides: a Read folder nested in an Edit one stays read-only.
+    holder = max((b for b in reads if b in target.parents), key=lambda b: len(b.parts))
+    if holder not in edits:
+        raise ToolError("that folder is read-only this turn")
+    hooks = [Path(h) for h in folders.hook_dirs(base)]
+    if (not folders.may_write(target, base) or is_private_path(target, root, policy)
+            or any(h == target or h in target.parents for h in hooks)):
+        raise ToolError("that file cannot be changed: git, hook, editor and secret files stay as they are")
     try:
         st = os.lstat(target)
     except FileNotFoundError:

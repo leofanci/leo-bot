@@ -331,3 +331,80 @@ class ReadersUseTheStore(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewFixes(unittest.TestCase):
+    """Findings of the whole-branch review, each pinned."""
+
+    def setUp(self):
+        self._root, self._ext = tempfile.TemporaryDirectory(), tempfile.TemporaryDirectory()
+        self.addCleanup(self._root.cleanup)
+        self.addCleanup(self._ext.cleanup)
+        self.root = Path(self._root.name).resolve()
+        self.tmp = Path(self._ext.name).resolve()
+        write(self.root / "projects/acme/project.md", "---\nname: Acme\n---\n")
+        (self.root / "team").mkdir()
+
+    def test_backslash_and_extglob_are_refused(self):
+        for name in ("a\\b", "x!(y)", "x@(y)", "x+(y)"):
+            (self.tmp / name).mkdir()
+            with self.assertRaises(folders.FolderError, msg=name):
+                folders.normalize_path(str(self.tmp / name), self.root)
+            self.assertTrue(folders.has_glob_chars(str(self.tmp / name)), name)
+        (self.tmp / "My App (old)").mkdir()
+        self.assertEqual(folders.normalize_path(str(self.tmp / "My App (old)"), self.root), str(self.tmp / "My App (old)"))
+
+    def test_hook_managers_and_git_files_are_never_written(self):
+        base = self.tmp
+        for rel in (".pre-commit-config.yaml", "lefthook.yml", ".lefthook.yml", "lefthook-local.yml",
+                    ".lefthook/pre-commit/x", ".githooks/pre-commit", ".cursor/mcp.json", ".gemini/settings.json",
+                    "sub/.git", "sub/HEAD", "LEFTHOOK.YML"):
+            self.assertFalse(folders.may_write(base / rel, base), rel)
+
+    def test_hook_dirs_reads_core_hooks_path(self):
+        import shutil, subprocess
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        repo = self.tmp / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.assertEqual(folders.hook_dirs(str(repo)), [])
+        subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", "scripts/hooks"], check=True)
+        self.assertEqual(folders.hook_dirs(str(repo)), [str(repo / "scripts" / "hooks")])
+        self.assertEqual(folders.hook_dirs(str(self.tmp / "missing")), [])
+
+    def test_all_paths_are_resolved_like_turn_rows(self):
+        real = self.tmp / "ext" / "app"
+        real.mkdir(parents=True)
+        link = self.tmp / "app"
+        link.symlink_to(real)
+        folders.save("acme", {"folders": [{"id": "f1", "path": str(link), "access": "edit"}]}, self.root)
+        self.assertEqual(folders.all_paths("acme", self.root), [str(real)])
+        self.assertEqual([r["path"] for r in folders.for_turn("acme", None, None, self.root)], [str(real)])
+
+    def test_a_damaged_file_is_never_written_over(self):
+        f = self.root / "projects/acme/team/folders.json"
+        f.parent.mkdir(parents=True)
+        f.write_text('{"folders": [{"id": "f1", "path": "/x", "access": "edit"},')
+        self.assertTrue(folders.damaged("acme", self.root))
+        self.assertEqual(folders.load("acme", self.root)["folders"], [])
+        (self.tmp / "app").mkdir()
+        for call in (lambda: folders.add("acme", str(self.tmp / "app"), root=self.root),
+                     lambda: folders.remove("acme", "f1", self.root),
+                     lambda: folders.set_access("acme", "f1", "read", self.root),
+                     lambda: folders.set_limit("acme", "bots", "cmo", {}, self.root)):
+            with self.assertRaises(folders.FolderError):
+                call()
+        self.assertTrue(f.read_text().startswith('{"folders": [{"id": "f1"'))
+        self.assertFalse(folders.damaged("demo-none", self.root))
+
+    def test_crlf_project_md_migrates(self):
+        app = self.tmp / "app"
+        app.mkdir()
+        (self.root / "projects/acme/project.md").write_bytes(
+            f"---\r\nname: Acme\r\nlocal_folder: {app}\r\n---\r\nbody\r\n".encode())
+        rows = folders.load("acme", self.root)["folders"]
+        self.assertEqual([r["path"] for r in rows], [str(app)])
+        text = (self.root / "projects/acme/project.md").read_text()
+        self.assertNotIn("local_folder", text)
+        self.assertIn("name: Acme", text)

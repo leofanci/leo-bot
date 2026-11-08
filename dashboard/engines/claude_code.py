@@ -124,10 +124,14 @@ EDIT_TOOLS = ["Edit", "Write"]
 
 def never_write_rules(folder):
     """Edit and Write denies for the never-write list inside one edit folder (core.folders):
-    git and editor config that could run code later, and every secret-looking file."""
-    names = [*folders.NEVER_WRITE_FILES, *SECRET_FILE_GLOBS]
+    git, hook-manager and editor config that could run code later, a file named like one of
+    those directories (a `.git` gitfile), every secret-looking file, and the repo's own
+    core.hooksPath when it sits inside the folder."""
+    names = [*folders.NEVER_WRITE_DIRS, *folders.NEVER_WRITE_FILES, *SECRET_FILE_GLOBS]
     return ([f"{t}(/{folder}/**/{d}/**)" for d in folders.NEVER_WRITE_DIRS for t in EDIT_TOOLS]
-            + [f"{t}(/{folder}/**/{n})" for n in names for t in EDIT_TOOLS])
+            + [f"{t}(/{folder}/**/{n})" for n in names for t in EDIT_TOOLS]
+            + [f"{t}(/{h}/**)" for h in folders.hook_dirs(folder) if not folders.has_glob_chars(h)
+               for t in EDIT_TOOLS])
 # WebSearch/WebFetch are added only on turns whose request needs live research
 # (server._needs_web) — their schemas are small but off by default per the
 # token-lean policy.
@@ -273,6 +277,10 @@ class ClaudeCodeEngine(Engine):
             denied += [f"Read(/{d}/**/{g})" for g in SECRET_FILE_GLOBS]
         for d in edit_dirs:
             denied += never_write_rules(d)
+        # A Read folder nested inside an Edit folder stays read-only.
+        for d in read_dirs:
+            if d not in edit_dirs and any(Path(e) in Path(d).parents for e in edit_dirs):
+                denied += [f"{t}(/{d}/**)" for t in EDIT_TOOLS]
         denied += [f"{t}(/{d}/**)" for d in policy.deny_dirs for t in ("Read", *EDIT_TOOLS)]
         denied += [f"Read(/{f})" for f in policy.deny_files]
         cmd = [self.claude_bin, "-p",

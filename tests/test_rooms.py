@@ -148,7 +148,7 @@ class WorkspaceTurns(unittest.TestCase):
     def test_other_companies_linked_folders_are_denied(self):
         folders.save("demo", {"folders": [{"id": "f1", "path": "/tmp/demo-app", "access": "read"}]}, self.root)
         denied = self.ask("acme/general")["sess"].deny_dirs
-        self.assertIn("/tmp/demo-app", denied)
+        self.assertIn(os.path.realpath("/tmp/demo-app"), denied)  # resolved, as a turn's own rows are
 
     def test_hq_sees_every_company(self):
         seen = self.ask("hq/general")

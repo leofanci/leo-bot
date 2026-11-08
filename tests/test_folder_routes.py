@@ -133,6 +133,21 @@ class FolderRoutes(sp.Base):
             self.assertTrue(rows["acme-docs"]["cant_write"])
         self.assertTrue(rows["gone"]["missing"])
 
+    def test_a_damaged_file_is_flagged_and_kept(self):
+        f = self.root / "projects/acme/team/folders.json"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{broken")
+        code, out, _ = self.get(owner=True)
+        self.assertEqual(code, 200)
+        self.assertTrue(out["damaged"])
+        code, out, _ = self.post("add", {"ws": "acme", "path": str(self.app)})
+        self.assertEqual(code, 400)
+        self.assertEqual(f.read_text(), "{broken")
+
+    def test_layer_choices_never_offer_more_than_the_folder(self):
+        js = (Path(server.HERE) / "app.js").read_text()
+        self.assertIn('r.access === "edit" ? [["", "None"], ["read", "Read"], ["edit", "Edit"]] : [["", "None"], ["read", "Read"]]', js)
+
     def test_bad_access_or_unknown_id_is_400(self):
         folders.add("acme", str(self.app), root=self.root)
         for route, body in (("access", {"ws": "acme", "id": "f1", "access": "admin"}),

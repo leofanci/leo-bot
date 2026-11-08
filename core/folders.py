@@ -15,7 +15,9 @@ once, as `read`, and leaves project.md. New links default to `edit`.
 """
 import fnmatch
 import json
+import os
 import re
+import subprocess
 from pathlib import Path, PurePath
 
 from core import bots
@@ -24,10 +26,16 @@ READ, EDIT = "read", "edit"
 ACCESS = (READ, EDIT)
 FILE_NAME = "folders.json"
 
-# Never written by a bot, in any folder: git and editor config can make code run later
-# (hooks, tasks, MCP servers), and secrets stay unreadable too.
-NEVER_WRITE_DIRS = (".git", ".husky", ".claude", ".codex", ".agents", ".vscode")
-NEVER_WRITE_FILES = (".mcp.json", ".envrc")
+# Never written by a bot, in any folder: git, hook-manager and editor config can make code
+# run later (hooks, tasks, MCP servers), and secrets stay unreadable too. A file named like
+# one of the directories is refused as well: a `.git` file can point git at hooks elsewhere,
+# and `HEAD` is what makes git take a folder for a repository.
+NEVER_WRITE_DIRS = (".git", ".husky", ".claude", ".codex", ".agents", ".vscode",
+                    ".lefthook", ".githooks", ".cursor", ".gemini")
+NEVER_WRITE_FILES = (".mcp.json", ".envrc", ".pre-commit-config.yaml",
+                     "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml",
+                     "lefthook-local.yml", "lefthook-local.yaml", ".lefthook-local.yml", ".lefthook-local.yaml",
+                     "HEAD")
 # Secret-looking files stay unreadable even inside the repo or a linked folder
 # (Grep/Glob honor Read deny rules too). Verified against claude 2.x:
 # "**/x" covers the repo; a linked --add-dir needs its own "//abs/**/x" rule.
@@ -41,9 +49,11 @@ SECRET_FILE_GLOBS = [
     "people.json", "invites.json", "access.json",  # invited people (core.people)
 ]
 
-# A deny rule is a glob: a path holding glob characters could not be matched by its own
-# secret-file rules, so such a folder is never linked.
-_GLOB_CHARS = set("*?[]{}")
+# A deny rule is a glob: a path holding glob characters (or a backslash, which escapes the
+# next one, or an extglob opener) could not be matched by its own secret-file rules, so such
+# a folder is never linked. Plain parentheses are fine: checked live on Claude Code.
+_GLOB_CHARS = set("*?[]{}\\")
+_EXTGLOB = ("!(", "@(", "+(")
 _ID_RE = re.compile(r"^f([1-9][0-9]{0,5})$")
 _KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _KINDS = ("rooms", "bots")
@@ -54,7 +64,11 @@ _CLOUD_DRIVES = (("Library", "Mobile Documents", "com~apple~CloudDocs"), ("Libra
 
 
 def has_glob_chars(path) -> bool:
-    return bool(_GLOB_CHARS & set(str(path)))
+    text = str(path)
+    return bool(_GLOB_CHARS & set(text)) or any(x in text for x in _EXTGLOB)
+
+
+_GLOB_MSG = "local folder path cannot contain * ? [ ] { }, a backslash, or !( @( +("
 
 
 class FolderError(ValueError):
@@ -74,8 +88,8 @@ def normalize_path(value, root=bots.ROOT) -> str:
         return ""
     if any(ord(char) < 32 for char in raw):
         raise FolderError("local folder path cannot contain control characters")
-    if _GLOB_CHARS & set(raw):
-        raise FolderError("local folder path cannot contain * ? [ ] { }")
+    if has_glob_chars(raw):
+        raise FolderError(_GLOB_MSG)
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise FolderError("local folder must be an absolute path")
@@ -84,8 +98,8 @@ def normalize_path(value, root=bots.ROOT) -> str:
     if not path.is_dir():
         raise FolderError(f"local folder is not a directory: {path}")
     resolved = path.resolve()
-    if _GLOB_CHARS & set(str(resolved)):
-        raise FolderError("local folder path cannot contain * ? [ ] { }")
+    if has_glob_chars(resolved):
+        raise FolderError(_GLOB_MSG)
     workspace_root = Path(root).resolve()
     home = Path.home().resolve()
     filesystem_root = Path(resolved.anchor).resolve()
@@ -185,7 +199,7 @@ def _migrate(ws, root) -> dict:
         text = md.read_text(encoding="utf-8")
     except OSError:
         return data
-    lines, rest = _split_frontmatter(text)
+    lines, rest = _split_frontmatter(text.replace("\r\n", "\n"))
     if lines is None:
         return data
     raw = None
@@ -212,15 +226,39 @@ def _migrate(ws, root) -> dict:
     return data
 
 
+def _read(f):
+    """(parsed data, damaged). Damaged: the file exists but is not a JSON object."""
+    try:
+        raw = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, True
+    return raw, not isinstance(raw, dict)
+
+
 def load(ws, root=bots.ROOT) -> dict:
-    """The workspace's folders and layers, migrating `local_folder` when no file exists."""
+    """The workspace's folders and layers, migrating `local_folder` when no file exists.
+    A damaged file reads as no folders: chat never breaks over it."""
     f = _path(ws, root)
     if not f.exists():
         return _migrate(ws, root)
+    raw, bad = _read(f)
+    return _empty() if bad else _clean(raw)
+
+
+def damaged(ws, root=bots.ROOT) -> bool:
+    """The file exists and is not readable JSON: writes refuse until it is fixed or removed,
+    so a hand edit gone wrong never loses its links to the next change."""
     try:
-        return _clean(json.loads(f.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        return _empty()
+        f = _path(ws, root)
+    except ValueError:
+        return False
+    return f.exists() and _read(f)[1]
+
+
+def _load_for_write(ws, root):
+    if damaged(ws, root):
+        raise FolderError(f"{_path(ws, root)} is damaged: fix it or delete it, then try again")
+    return load(ws, root)
 
 
 def save(ws, data, root=bots.ROOT) -> None:
@@ -258,7 +296,7 @@ def add(ws, path, access=EDIT, root=bots.ROOT) -> dict:
     resolved = normalize_path(path, root)
     if not resolved:
         raise FolderError("pick a folder to link")
-    data = load(ws, root)
+    data = _load_for_write(ws, root)
     for row in data["folders"]:
         if row["path"] == resolved:
             return dict(row)
@@ -271,7 +309,7 @@ def add(ws, path, access=EDIT, root=bots.ROOT) -> dict:
 def remove(ws, folder_id, root=bots.ROOT) -> None:
     """Unlink a folder and take it out of every layer. A layer left empty stays, meaning no
     folders: dropping it would widen that channel or bot to every folder."""
-    data = load(ws, root)
+    data = _load_for_write(ws, root)
     row = _find(data, folder_id)
     data["folders"].remove(row)
     for kind in _KINDS:
@@ -282,7 +320,7 @@ def remove(ws, folder_id, root=bots.ROOT) -> None:
 
 def set_access(ws, folder_id, access, root=bots.ROOT) -> None:
     _need_access(access)
-    data = load(ws, root)
+    data = _load_for_write(ws, root)
     _find(data, folder_id)["access"] = access
     save(ws, data, root)
 
@@ -294,7 +332,7 @@ def set_limit(ws, kind, key, limit, root=bots.ROOT) -> None:
         raise FolderError("kind: rooms or bots")
     if not isinstance(key, str) or not _KEY_RE.match(key):
         raise FolderError(f"unknown {kind[:-1]}: {key!r}")
-    data = load(ws, root)
+    data = _load_for_write(ws, root)
     if limit is None:
         data[kind].pop(key, None)
     else:
@@ -371,11 +409,13 @@ def turn_denies(kept_paths, other_paths, own_removed_paths) -> tuple:
 
 
 def all_paths(ws, root=bots.ROOT) -> list:
-    """Every linked path of a workspace; none for a workspace that does not exist."""
+    """Every linked path of a workspace, resolved like a turn's rows (symlinks followed),
+    so a stored path and the path a turn used compare equal. None for an unknown workspace."""
     try:
-        return [r["path"] for r in load(ws, root)["folders"]]
+        rows = load(ws, root)["folders"]
     except ValueError:
         return []
+    return list(dict.fromkeys(os.path.realpath(r["path"]) for r in rows))
 
 
 def other_workspace_paths(ws, slugs, root=bots.ROOT) -> list:
@@ -410,9 +450,28 @@ def may_write(path, base) -> bool:
     if any(p in NEVER_WRITE_DIRS for p in parts):
         return False
     name = parts[-1]
-    if name in NEVER_WRITE_FILES:
+    if name in {f.lower() for f in NEVER_WRITE_FILES}:
         return False
     return not any(fnmatch.fnmatchcase(name, g.lower()) for g in SECRET_FILE_GLOBS)
+
+
+def hook_dirs(folder) -> list:
+    """The repo's own `core.hooksPath` when it sits inside `folder` (a bot must never write
+    hooks there). Read-only `git config`; none when git or the setting is missing."""
+    try:
+        out = subprocess.run(["git", "-C", str(folder), "config", "--get", "core.hooksPath"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode != 0 or not out.stdout.strip():
+            return []
+        top = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if top.returncode != 0:
+        return []
+    hp = Path(os.path.realpath(Path(top.stdout.strip()) / Path(out.stdout.strip()).expanduser()))
+    base = Path(os.path.realpath(folder))
+    return [str(hp)] if hp == base or base in hp.parents else []
 
 
 def is_git_repo(path) -> bool:
