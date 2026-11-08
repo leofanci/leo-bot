@@ -38,8 +38,7 @@ class FakeSession:
     def note_skill(self, skill, explicit=False):
         pass
 
-    def ask(self, text, with_web=False, model=None, workspace_dir=None,
-            file_search_mode=False, web_domains=()):
+    def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(), web_domains=()):
         yield ("delta", "Hi ")
         yield ("delta", "there")
         yield ("done", {"result": "Hi there"})
@@ -69,14 +68,15 @@ def _captured(body, tree=None):
         def note_skill(self, skill, explicit=False):
             pass
 
-        def ask(self, text, with_web=False, model=None, workspace_dir=None,
-                file_search_mode=False, web_domains=(), **tokens):
+        def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
+                web_domains=(), **tokens):
             seen["text"] = text
             seen["web_domains"] = web_domains
             seen["with_web"] = with_web
             seen["model"] = model
-            seen["workspace_dir"] = workspace_dir
-            seen["file_search_mode"] = file_search_mode
+            seen["read_dirs"], seen["edit_dirs"] = tuple(read_dirs), tuple(edit_dirs)
+            seen["workspace_dir"] = read_dirs[0] if read_dirs else None
+            seen["file_search_mode"] = bool(read_dirs)
             yield ("done", {"result": "ok"})
 
     h = _bare_handler(io.BytesIO())

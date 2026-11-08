@@ -27,8 +27,8 @@ class TurnPolicy:
     web_domains: tuple = ()        # hosts the user typed (fetch only these)
     apps: bool = False             # connected-apps relay this turn
     workspace: str = "hq"          # MYOS_WORKSPACE
-    workspace_dir: str = None      # linked app folder, read-only
-    file_search: bool = False      # Glob/Grep fallback on the linked folder
+    read_dirs: tuple = ()          # linked folders this turn may read and search (absolute)
+    edit_dirs: tuple = ()          # of those, the ones it may also change (a subset)
     deny_dirs: tuple = ()
     deny_files: tuple = ()
     apps_used: bool = False
@@ -86,7 +86,7 @@ class Engine:
     kind = ""              # "cli" | "api" | "runner"
     shared_safe = False    # lockdown verified live for shared threads
     full_disk = False      # its shell and read tools reach any file (spec section 5a)
-    supports = frozenset() # {"web", "apps", "file_search", "complete"}
+    supports = frozenset() # {"web", "apps", "folder_edit", "complete"}
 
     def resolve_model(self, model):
         """The server asks for a tier name (haiku, sonnet); map it to this engine's model."""

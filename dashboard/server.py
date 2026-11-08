@@ -2286,8 +2286,8 @@ class Handler(BaseHTTPRequestHandler):
                       "project": project_scope[0] if project_scope else None})
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
             lead_text = run(sess, text, model, with_web, msgs[0],
-                            workspace_dir=(workspace_dir if file_search_mode else None),
-                            file_search_mode=file_search_mode, **apps_kw)
+                            read_dirs=((workspace_dir,) if file_search_mode else ()),
+                            edit_dirs=(), **apps_kw)
             lead_text, asks = _extract_consults(lead_text, team)
             if asks:
                 msgs[0]["content"] = lead_text

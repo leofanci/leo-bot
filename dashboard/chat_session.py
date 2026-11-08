@@ -76,33 +76,31 @@ class ChatSession:
             "fresh": self.is_fresh(),
         }
 
-    def _policy(self, with_web=False, workspace_dir=None, file_search_mode=False,
-                web_domains=(), apps=False):
+    def _policy(self, with_web=False, read_dirs=(), edit_dirs=(), web_domains=(), apps=False):
+        read_dirs = tuple(str(d) for d in read_dirs or ())
+        edit_dirs = tuple(str(d) for d in edit_dirs or () if str(d) in read_dirs)
         return TurnPolicy(shared=self.shared, readonly=self.readonly, web=bool(with_web),
                           web_domains=tuple(web_domains or ()), apps=apps,
-                          workspace=self.workspace or "hq", workspace_dir=workspace_dir,
-                          file_search=bool(file_search_mode), deny_dirs=tuple(self.deny_dirs),
+                          workspace=self.workspace or "hq", read_dirs=read_dirs, edit_dirs=edit_dirs,
+                          deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used))
 
-    def _base_cmd(self, with_web=False, model=None, workspace_dir=None,
-                  file_search_mode=False, web_domains=(), apps_port=None, os_port=None):
+    def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
+                  web_domains=(), apps_port=None, os_port=None):
         """The `claude -p` argv for one turn (ClaudeCodeEngine.build_cmd)."""
-        policy = self._policy(with_web, workspace_dir, file_search_mode, web_domains)
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains)
         return ClaudeCodeEngine(self.claude_bin).build_cmd(self, policy, model, apps_port, os_port)
 
-    def ask(self, text, with_web=False, model=None, workspace_dir=None,
-            file_search_mode=False, web_domains=(), apps_token=None, apps_port=None,
-            os_token=None, os_port=None):
+    def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
+            web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None):
         """Run one turn on self.engine; yield (kind, payload) events.
-        `with_web` adds web tools for this turn; `workspace_dir` plus
-        `file_search_mode` grants read-only access to one linked app and adds
-        file search only when fallback discovery is warranted; `model` overrides
+        `with_web` adds web tools for this turn; `read_dirs` are the linked folders
+        it may read and search, `edit_dirs` (a subset) the ones it may change; `model` overrides
         the default for this turn (the server tiers per turn: see
         server._needs_web / _pick_model). Any routed skill is already injected
         into `text` by the server. Server injects full snapshot + skill body on
         fresh session start only (no turn cap: a session never auto-resets)."""
-        policy = self._policy(with_web, workspace_dir, file_search_mode, web_domains,
-                              apps=bool(apps_token))
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token))
         tokens = TurnTokens(apps_token, apps_port, os_token, os_port)
         failed = False
         try:

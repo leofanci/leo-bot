@@ -53,6 +53,10 @@ _KINDS = ("rooms", "bots")
 _CLOUD_DRIVES = (("Library", "Mobile Documents", "com~apple~CloudDocs"), ("Library", "CloudStorage", None))
 
 
+def has_glob_chars(path) -> bool:
+    return bool(_GLOB_CHARS & set(str(path)))
+
+
 class FolderError(ValueError):
     """A folder that cannot be linked, or a change to the store that is not allowed."""
 

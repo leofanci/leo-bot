@@ -4,8 +4,8 @@ No CLI runs here, so nothing else exists: a tool the policy does not allow is
 never offered, and every path and host is checked by myOS.
 
   osctl         always; runs on the server with the turn's workspace bound
-  read_file     not shared; repo and linked folder minus every private path
-  search_files  not shared, file_search on; same check
+  read_file     not shared; repo and the turn's linked folders minus every private path
+  search_files  not shared, linked folders this turn; same check
   web_fetch     web on; only hosts the user typed, never a private address
   apps tools    apps on, not shared; through the apps relay, same gate as Claude Code
 """
@@ -128,7 +128,7 @@ def read_file(raw, root, policy):
     root = Path(root).resolve()
     if not isinstance(raw, str) or not raw or "\x00" in raw:
         raise ToolError("path required")
-    bases = [root] + ([Path(policy.workspace_dir).resolve()] if policy.workspace_dir else [])
+    bases = [root] + [Path(d).resolve() for d in policy.read_dirs]
     path = (root / raw).resolve()
     if not any(_inside(path, b) for b in bases) or is_private_path(path, root, policy):
         raise ToolError("that file is not readable here")
@@ -144,9 +144,9 @@ def read_file(raw, root, policy):
 
 
 def search_files(glob, pattern, root, policy):
-    if not policy.workspace_dir:
-        raise ToolError("no linked app folder this turn")
-    base = Path(policy.workspace_dir).resolve()
+    if not policy.read_dirs:
+        raise ToolError("no linked folder this turn")
+    base = Path(policy.read_dirs[0]).resolve()
     if len(str(glob or "")) > MAX_PATTERN_CHARS or len(str(pattern or "")) > MAX_PATTERN_CHARS:
         raise ToolError("that search is too long")
     if pattern:
@@ -329,7 +329,7 @@ class ToolBox:
         self.specs, self._apps = [OSCTL_SPEC], set()
         if not policy.shared:
             self.specs.append(READ_SPEC)
-            if policy.file_search and policy.workspace_dir:
+            if policy.read_dirs:
                 self.specs.append(SEARCH_SPEC)
         if policy.web and policy.web_domains:
             self.specs.append(FETCH_SPEC)
@@ -358,7 +358,7 @@ class ToolBox:
                 return text, bool(failed)
             if name == "read_file" and not self.policy.shared:
                 return read_file(args.get("path"), self.root, self.policy), False
-            if name == "search_files" and not self.policy.shared and self.policy.file_search:
+            if name == "search_files" and not self.policy.shared and self.policy.read_dirs:
                 return search_files(args.get("glob"), args.get("pattern"), self.root, self.policy), False
             if name == "web_fetch" and self.policy.web:
                 return web_fetch(args.get("url"), self.policy), False

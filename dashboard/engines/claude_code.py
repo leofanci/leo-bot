@@ -81,9 +81,9 @@ def web_fetch_rules(domains):
     return [r for d in domains for r in (f"WebFetch(domain:{d})", f"WebFetch(domain:www.{d})")]
 
 
-# Mutations go through osctl ONLY (Write/Edit are never loaded, so the
-# authored-files-are-truth invariant holds). Permissions are assembled per turn:
-# linked-folder and TokenSave permissions do not exist on ordinary chat turns.
+# myOS data changes go through osctl ONLY: Write/Edit load only for edit folders and
+# are allowed only inside them, so the authored-files-are-truth invariant holds.
+# Permissions are assembled per turn: linked-folder permissions exist only on turns with folders.
 # Passed as separate --allowedTools args — do not join with spaces.
 BASE_ALLOWED_TOOLS = [
     "Bash(python3 -m dashboard.osctl:*)",
@@ -116,9 +116,18 @@ def private_read_rules(repo_dir):
 # model pick one. Instead the server routes to the ONE relevant skill and injects
 # its SKILL.md into the prompt (see server._route_skill) — no discovery overhead.
 BASE_TOOLS = ["Bash", "Read"]
-# App-code discovery is progressive: these schemas are present only for a code
-# question whose active GTM project has a linked folder. Neither tool modifies files.
+# Search tools load on any turn with linked folders. Neither modifies files.
 APP_TOOLS = ["Glob", "Grep"]
+# File changes load only on a turn with edit folders, and are allowed only inside them.
+EDIT_TOOLS = ["Edit", "Write"]
+
+
+def never_write_rules(folder):
+    """Edit and Write denies for the never-write list inside one edit folder (core.folders):
+    git and editor config that could run code later, and every secret-looking file."""
+    names = [*folders.NEVER_WRITE_FILES, *SECRET_FILE_GLOBS]
+    return ([f"{t}(/{folder}/**/{d}/**)" for d in folders.NEVER_WRITE_DIRS for t in EDIT_TOOLS]
+            + [f"{t}(/{folder}/**/{n})" for n in names for t in EDIT_TOOLS])
 # WebSearch/WebFetch are added only on turns whose request needs live research
 # (server._needs_web) — their schemas are small but off by default per the
 # token-lean policy.
@@ -210,7 +219,7 @@ class ClaudeCodeEngine(Engine):
     label = "Claude Code"
     kind = "cli"
     shared_safe = True  # verified live: see tests/test_chat_session.py and PR #22
-    supports = frozenset({"web", "apps", "file_search", "complete"})
+    supports = frozenset({"web", "apps", "folder_edit", "complete"})
 
     def __init__(self, claude_bin="claude"):
         self.claude_bin = claude_bin
@@ -224,28 +233,34 @@ class ClaudeCodeEngine(Engine):
         # --disable-slash-commands + --setting-sources "": zero skill-discovery
         # tokens, no leaked built-in commands.
         #   --system-prompt        REPLACES Claude Code's default prompt with RAIL.
-        #   --tools Bash Read [Glob Grep] [WebSearch WebFetch]  app discovery is
-        #                          loaded only for a linked workspace; mutations
-        #                          stay osctl-only. Web tools are likewise opt-in.
-        #   --add-dir             grants file-tool access to that one linked app
-        #                          folder for the current turn; no eager read.
+        #   --tools Bash Read [Glob Grep] [Edit Write] [WebSearch WebFetch]  search
+        #                          tools load only with linked folders, Edit/Write
+        #                          only with edit folders; myOS data stays osctl-only.
+        #   --add-dir             one per linked folder this turn may read.
+        #   Edit(//dir/**)        allowed per edit folder; the never-write list inside
+        #                          it, and every deny dir, are denied (deny wins).
         #   --strict-mcp-config    no --mcp-config given => zero MCP servers/tools.
         #   --model                per-turn (server tiers haiku->sonnet).
         # Changing model/tools per turn is safe across --resume: the session is
         # restored from disk by id and context is preserved (verified). Do NOT use
         # --bare: it changes auth behavior.
         shared, with_web = policy.shared, policy.web
-        workspace_dir, file_search_mode = policy.workspace_dir, policy.file_search
         web_domains = policy.web_domains
+        # A rule is a glob: a path holding glob characters could not be matched by its own
+        # deny rules, so it never reaches one (core.folders refuses to link it, too).
+        read_dirs = tuple(d for d in policy.read_dirs if not folders.has_glob_chars(d))
+        edit_dirs = tuple(d for d in policy.edit_dirs if d in read_dirs)
         if shared:  # no file, shell or app tools: the osctl relay only
-            workspace_dir = file_search_mode = apps_port = None
+            read_dirs = edit_dirs = ()
+            apps_port = None
         tools = ((WEB_TOOLS if with_web else []) if shared else
                  (list(BASE_TOOLS)
-                  + (APP_TOOLS if workspace_dir and file_search_mode else [])
+                  + (APP_TOOLS if read_dirs else [])
+                  + (EDIT_TOOLS if edit_dirs else [])
                   + (WEB_TOOLS if with_web else [])))
         allowed_tools = (([] if shared else list(BASE_ALLOWED_TOOLS))
-                         + (APP_ALLOWED_TOOLS
-                            if workspace_dir and file_search_mode else [])
+                         + (APP_ALLOWED_TOOLS if read_dirs else [])
+                         + [f"{t}(/{d}/**)" for d in edit_dirs for t in EDIT_TOOLS]
                          + (WEB_ALLOWED_TOOLS if with_web else [])
                          + (web_fetch_rules(web_domains) if with_web else [])
                          + (["mcp__apps"] if apps_port else [])
@@ -254,9 +269,11 @@ class ClaudeCodeEngine(Engine):
                else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(session.repo_dir)
-        if workspace_dir and file_search_mode:
-            denied += [f"Read(/{workspace_dir}/**/{g})" for g in SECRET_FILE_GLOBS]
-        denied += [f"Read(/{d}/**)" for d in policy.deny_dirs]
+        for d in read_dirs:
+            denied += [f"Read(/{d}/**/{g})" for g in SECRET_FILE_GLOBS]
+        for d in edit_dirs:
+            denied += never_write_rules(d)
+        denied += [f"{t}(/{d}/**)" for d in policy.deny_dirs for t in ("Read", *EDIT_TOOLS)]
         denied += [f"Read(/{f})" for f in policy.deny_files]
         cmd = [self.claude_bin, "-p",
                "--output-format", "stream-json",
@@ -273,8 +290,8 @@ class ClaudeCodeEngine(Engine):
                "--setting-sources", "",
                "--restricted",
                "--permission-mode", "default"]
-        if workspace_dir and file_search_mode:
-            cmd += ["--add-dir", str(workspace_dir)]
+        for d in read_dirs:
+            cmd += ["--add-dir", str(d)]
         if session._started:
             cmd += ["--resume", session.session_id]
         else:

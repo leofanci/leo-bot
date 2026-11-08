@@ -141,7 +141,7 @@ class Anthropic(Base):
 
     def test_shared_turn_is_offered_only_osctl(self):
         self.fake.replies = [anthropic_text("x")]
-        list(self.session(shared=True, deny_dirs=("/x",)).ask("hi", workspace_dir="/tmp", file_search_mode=True))
+        list(self.session(shared=True, deny_dirs=("/x",)).ask("hi", read_dirs=("/tmp",), edit_dirs=("/tmp",)))
         self.assertEqual([t["name"] for t in self.fake.requests[0]["body"]["tools"]], ["osctl"])
 
     def test_shared_turn_refuses_read_file_even_if_the_model_asks(self):
@@ -297,7 +297,7 @@ class FileRules(unittest.TestCase):
         (linked / ".env").write_text("secret")
         with self.assertRaises(api_tools.ToolError):
             self.read(str(linked / "app.py"))
-        on = TurnPolicy(workspace="acme", workspace_dir=str(linked), file_search=True)
+        on = TurnPolicy(workspace="acme", read_dirs=(str(linked),))
         self.assertEqual(self.read(str(linked / "app.py"), on), "code")
         with self.assertRaises(api_tools.ToolError):
             self.read(str(linked / ".env"), on)

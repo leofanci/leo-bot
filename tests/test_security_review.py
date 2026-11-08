@@ -84,7 +84,7 @@ class WebFetchIsSafe(unittest.TestCase):
 
 class FileToolsAreSafe(Tmp):
     def policy(self, **kw):
-        return TurnPolicy(workspace_dir=str(self.root), file_search=True, **kw)
+        return TurnPolicy(read_dirs=(str(self.root),), **kw)
 
     def test_a_search_that_never_ends_is_killed_not_run_on_the_server(self):
         (self.root / "a.txt").write_text("text\n")
