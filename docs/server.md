@@ -58,8 +58,11 @@ scripts/sync-to-server.sh root@your-server
 ```
 
 This copies your projects, chats, team and portfolio. Saved chats carry on with a
-recap of their messages. Linked app folders need to be on the server and linked
-again. After moving, use the server copy only, or the two will drift apart.
+recap of their messages. Linked folders are not copied: clone your repos on the
+server and link them there, on the workspace's Folders screen (type the path; there
+is no folder chooser on a server). Paths synced from your Mac show as "Missing on
+this machine" until you replace them. After moving, use the server copy only, or the
+two will drift apart.
 
 ## 5. Invite people
 

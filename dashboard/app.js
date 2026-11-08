@@ -203,6 +203,7 @@ const ROUTES = [
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
   [/^\/integrations$/,                          ()       => { setState("integrations"); renderIntegrations(); }],
   [/^\/engines$/,                               ()       => { setState("engines"); renderEngines(); }],
+  [/^\/folders$/,                               ()       => { setState("folders"); renderFolders(); }],
   [/^\/files$/,                                 ()       => { setState("files"); renderFiles(); }],
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
@@ -552,6 +553,7 @@ async function renderRail(){
       <nav class="nav">
         ${person ? "" : `<a data-view="approvals">${icon("inbox")}<span class="rail-name">Approvals</span>${_APPROVALS.length ? `<span class="badge">${_APPROVALS.length}</span>` : ""}</a>
         ${w.id !== "hq" ? `<a data-view="files">${icon("folder")}<span class="rail-name">Files</span></a>` : ""}
+        <a data-view="folders">${icon("folder")}<span class="rail-name">Folders</span></a>
         <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>`}
         <a data-view="team">${icon("users")}<span class="rail-name">Team</span><span class="count">${_BOTS.filter(b => b.active).length}</span></a>
         ${w.id === "hq" && !person ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>
@@ -607,7 +609,7 @@ const KIND_META = {
   roadmap: ["map", "Roadmap", "Roadmap"], plan: ["route", "Go-to-market", "Go-to-market plan"],
   content: ["calendar", "Content", "Content plan"], brief: ["compose", "Post briefs", "Post brief"], voice: ["mic", "Voice", "Voice"],
 };
-const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", integrations: "Integrations", engines: "Engines", calendar: "Calendar", needs: "Today", operations: "Operations" };
+const VIEW_LABEL = { content: "Content", files: "Files", folders: "Folders", team: "Team", approvals: "Approvals", integrations: "Integrations", engines: "Engines", calendar: "Calendar", needs: "Today", operations: "Operations" };
 const profileName = slug => _TREE.flatMap(p => p.profiles).find(x => x.slug === slug)?.name || slug;
 // "Instagram, TikTok": the channels of a deliverable's profile.
 const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === d.profile)?.channels || [])
@@ -935,18 +937,18 @@ function openEditProject(slug){ navigate(`#/project/${slug}/edit`); }
 function openNewProfile(projectSlug){ navigate(`#/project/${projectSlug}/profile/new`); }
 function openNewChannel(profileSlug){ navigate(`#/profile/${profileSlug}/channel/new`); }
 
-function localFolderField(value="", allowOpen=false){
-  return `${flabel("Local app folder")}
+// New project: one optional folder, linked with edit access once the project exists.
+// Every other change (more folders, access, limits, unlink) is on the Folders screen.
+function localFolderField(){
+  return `${flabel("Folder (optional)")}
     <div class="folder-link-control">
-      ${finput("local_folder",value,'placeholder="/Users/you/Projects/my-app"')}
+      ${finput("local_folder","",'placeholder="/Users/you/Projects/my-app"')}
       <button type="button" class="btn" data-pick-local-folder>Choose…</button>
-      ${allowOpen?'<button type="button" class="btn" data-open-linked-folder>Open</button>':""}
-      ${value?'<button type="button" class="btn" data-clear-local-folder>Unlink</button>':""}
     </div>
-    <p class="field-help">Project chat can use the app as read-only context for GTM, brand, content, product, and code questions. When relevant, TokenSave refreshes once and adds one bounded semantic result; app files are never copied into myOS.</p>`;
+    <p class="field-help">Bots can read and search it, and change files in it when you tag them. Add more folders, or make one read-only, on the workspace's Folders screen.</p>`;
 }
 
-function wireLocalFolderControls(root, projectSlug=null){
+function wireLocalFolderControls(root){
   const input=root.querySelector("input[name=local_folder]");
   const pick=root.querySelector("[data-pick-local-folder]");
   if(pick) pick.onclick=async()=>{
@@ -957,13 +959,92 @@ function wireLocalFolderControls(root, projectSlug=null){
     }catch(err){ toast("✗ "+err.message); }
     finally{ pick.disabled=false; }
   };
-  const clear=root.querySelector("[data-clear-local-folder]");
-  if(clear) clear.onclick=()=>{ input.value=""; input.focus(); };
-  const open=root.querySelector("[data-open-linked-folder]");
-  if(open&&projectSlug) open.onclick=async()=>{
-    try{ await jpost(`/api/project/${projectSlug}/folder/open`,{}); }
-    catch(err){ toast("✗ "+err.message); }
+}
+
+// ── Folders (owner only): linked folders, their access, channel and bot limits ──
+async function renderFolders(){
+  const stillOn = routeGuard();
+  const ws = _WS;
+  const wname = wsById(ws)?.name || (ws === "hq" ? "HQ" : ws);
+  $("#main").innerHTML = `
+    <div class="topbar"><div><div class="crumbs">${esc(wname)} · settings</div><h1 class="title">Folders</h1></div></div>
+    <div class="scroll"><div class="help">Folders on this machine that this workspace's bots can work in. Bots read and search every folder here on your own private threads, and change files in Edit folders when you tag them (@bot, /skill or a DM). They cannot run tests, builds or git, and never touch git, editor or secret files. Invited people never see these folders.</div><div id="fold"></div></div>`;
+  if (isPerson()) { $("#fold").innerHTML = `<div class="empty">Only the owner manages folders.</div>`; return; }
+  const draw = async () => {
+    const d = await api(`/api/folders?ws=${encodeURIComponent(ws)}`).catch(e => ({ error: e.message }));
+    if (!stillOn()) return;
+    const box = $("#fold");
+    if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+    const rows = d.folders || [];
+    const accessSel = (cur, attrs) => `<select ${attrs} aria-label="Access">${[["read", "Read"], ["edit", "Edit"]].map(([v, l]) =>
+      `<option value="${v}"${cur === v ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+    const warn = r => [r.missing && "Missing on this machine", r.problem && esc(r.problem),
+      r.not_git && "Not a git repo: edits can't be undone easily", r.cant_write && "myOS can't write here"]
+      .filter(Boolean).map(t => `<span class="folder-warn">${t}</span>`).join("");
+    const folderRows = rows.map(r => `<div class="post"><div class="t"><b>${esc(r.name)}</b><small>${esc(r.path)}</small>${warn(r)}</div>
+        ${accessSel(r.access, `data-access="${esc(r.id)}"`)}
+        ${d.chooser && !r.missing ? `<button class="go" data-open="${esc(r.id)}">Open</button>` : ""}
+        <button class="more" data-unlink="${esc(r.id)}">Unlink</button></div>`).join("")
+      || `<div class="empty">No folders yet.</div>`;
+    const add = `<form class="integ-key folder-add">
+        <input name="path" placeholder="${d.chooser ? "/Users/you/Projects/my-app" : "/home/you/my-app (a folder on this server)"}" aria-label="Folder path">
+        ${accessSel("edit", 'name="access"')}
+        ${d.chooser ? `<button class="btn sm" type="button" data-choose>Choose…</button>` : ""}
+        <button class="btn sm primary" type="submit">Add folder</button></form>`;
+    const limitRow = (kind, key, label, layer) => {
+      const limited = layer !== undefined;
+      const per = limited ? rows.map(r => `<label class="folder-pick">${esc(r.name)}
+          <select data-limit-folder="${esc(r.id)}" data-kind="${kind}" data-key="${esc(key)}" aria-label="${esc(r.name)}">
+          ${[["", "None"], ["read", "Read"], ["edit", "Edit"]].map(([v, l]) => `<option value="${v}"${(layer[r.id] || "") === v ? " selected" : ""}>${l}</option>`).join("")}
+          </select></label>`).join("") : "";
+      return `<div class="eng-choice"><label>${esc(label)} <select data-limit-mode data-kind="${kind}" data-key="${esc(key)}">
+          <option value="all"${limited ? "" : " selected"}>All folders</option><option value="limit"${limited ? " selected" : ""}>Limited</option></select></label>
+          ${limited ? `<div class="folder-limits">${per}</div>` : ""}</div>`;
+    };
+    const layers = rows.length ? `
+      <section class="integ-group"><h3>Channels</h3><div class="help">A channel can only narrow what its bots get. DMs follow the bot's own limit.</div>
+        ${(d.channels || []).map(c => limitRow("rooms", c.id, "#" + c.name, d.rooms?.[c.id])).join("")}</section>
+      <section class="integ-group"><h3>Bots</h3>
+        ${(d.team || []).map(b => limitRow("bots", b.id, `${b.name} (@${b.handle})`, d.bots?.[b.id])).join("")}</section>` : "";
+    box.innerHTML = `<section class="integ-group"><h3>Linked folders</h3>${folderRows}${add}</section>${layers}`;
+    const call = async (route, body) => {
+      try { await jpost(`/api/folders/${route}`, { ws, ...body }); await draw(); }
+      catch (err) { toast("✗ " + err.message); await draw(); }
+    };
+    box.querySelectorAll("[data-access]").forEach(s => s.onchange = () => call("access", { id: s.dataset.access, access: s.value }));
+    box.querySelectorAll("[data-open]").forEach(b => b.onclick = () => jpost("/api/folders/open", { ws, id: b.dataset.open }).catch(err => toast("✗ " + err.message)));
+    box.querySelectorAll("[data-unlink]").forEach(b => b.onclick = () => {
+      if (!b.dataset.armed) { b.dataset.armed = "1"; b.textContent = "Click again to unlink"; return; }
+      call("remove", { id: b.dataset.unlink });
+    });
+    const form = box.querySelector(".folder-add");
+    form.querySelector("[data-choose]")?.addEventListener("click", async e => {
+      e.target.disabled = true;
+      try { const out = await jpost("/api/local-folder/pick", {}); if (!out.cancelled && out.path) form.elements.path.value = out.path; }
+      catch (err) { toast("✗ " + err.message); }
+      e.target.disabled = false;
+    });
+    form.onsubmit = e => {
+      e.preventDefault();
+      const path = form.elements.path.value.trim();
+      if (!path) return toast("Type or choose a folder first");
+      call("add", { path, access: form.elements.access.value });
+    };
+    const layerOf = (kind, key) => {
+      const out = {};
+      box.querySelectorAll(`[data-limit-folder][data-kind="${kind}"][data-key="${CSS.escape(key)}"]`).forEach(s => { if (s.value) out[s.dataset.limitFolder] = s.value; });
+      return out;
+    };
+    box.querySelectorAll("[data-limit-mode]").forEach(s => s.onchange = () => {
+      const { kind, key } = s.dataset;
+      // Limited starts from every folder at its own access: nothing changes until you narrow it.
+      const start = Object.fromEntries(rows.map(r => [r.id, r.access]));
+      call("limit", { kind, key, limit: s.value === "all" ? null : start });
+    });
+    box.querySelectorAll("[data-limit-folder]").forEach(s => s.onchange = () =>
+      call("limit", { kind: s.dataset.kind, key: s.dataset.key, limit: layerOf(s.dataset.kind, s.dataset.key) }));
   };
+  draw();
 }
 
 function highlight(){
@@ -997,6 +1078,7 @@ async function refreshViews(){
   if (v === "approvals") return renderApprovals();
   if (v === "integrations") return renderIntegrations();
   if (v === "engines") return renderEngines();
+  if (v === "folders") return renderFolders();
   if (v === "files") return renderFiles();
   if (v === "section") return renderProjectSection(STATE.project, STATE.section);
   if (v === "profile") return onProfileList(STATE.profile) ? renderProfile(STATE.profile) : undefined;
@@ -1390,7 +1472,7 @@ async function renderEngines(){
     const apiOnly = usable.filter(e => e.kind === "api");
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
-      return `<div class="post"><div class="t"><b>${esc(e.label)}</b><small>${esc(e.detail || "")}${p ? ` · fast: ${esc(p.models?.fast || "-")} · strong: ${esc(p.models?.strong || "-")}` : ""}</small></div>
+      return `<div class="post"><div class="t"><b>${esc(e.label)}</b><small>${esc(e.detail || "")}${p ? ` · fast: ${esc(p.models?.fast || "-")} · strong: ${esc(p.models?.strong || "-")}` : ""}${e.folder_edit === false ? " · Read-only in linked folders" : ""}</small></div>
         <span class="tag">${e.ok ? "ready" : "not ready"}</span>
         <button class="go" data-test="${esc(e.id)}">Test</button>
         ${p ? `<button class="go" data-edit="${esc(p.id)}">Edit</button><button class="more" data-remove="${esc(p.id)}">Remove</button>` : ""}
@@ -3246,11 +3328,11 @@ async function renderEditProject(slug){
       ${flabel("Priority")}${fsel("priority",[["primary","Primary"],["secondary","Secondary"],["experiment","Experiment"]],e.priority||"primary")}
       ${flabel("Status")}${fsel("status",[["idea","Idea"],["prototype","Prototype"],["live","Live"],["revenue","Revenue"]],e.status||"idea")}
       ${flabel("Hours / week")}${finput("hours_per_week",String(e.hours_per_week??0),'type="number" min="0"')}
-      ${localFolderField(e.local_folder||"",Boolean(e.local_folder))}
+      ${flabel("Folders")}<p class="help"><a class="text-link" id="ep2-folders">Linked folders and access</a></p>
       ${flabel("Logo")}<p class="help"><a class="text-link" id="ep2-logo">Change logo</a></p>
       <p class="help">Slug <b>${esc(slug)}</b> is fixed — it's the identity used across files.</p>
     </div></div>`;
-  wireLocalFolderControls($("#main"),slug);
+  document.getElementById("ep2-folders").onclick=()=>{ if(_WS!==slug) window.Workspaces.switchTo(slug).then(()=>navigate("#/folders")); else navigate("#/folders"); };
   document.getElementById("ep2-save").onclick=async()=>{
     const data=formVals($("#main"));
     try{ await jpost(`/api/project/${slug}/update`,data); toast("Project updated ✓"); await renderRail(); refreshViews(); history.back(); }

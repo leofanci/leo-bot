@@ -1071,6 +1071,41 @@ def _known_ws(value, projects):
     return next((w["id"] for w in _workspaces(projects) if w["id"] == value), None)
 
 
+def _folders_ws(value, projects):
+    """A workspace id from our own list, or ValueError (the Folders routes answer 400)."""
+    ws = _known_ws(str(value or ""), projects)
+    if not ws:
+        raise ValueError("unknown workspace")
+    return ws
+
+
+def _folders_view(ws, projects):
+    """HQ or a workspace, Folders: owner only. Each row says what would stop a bot here."""
+    data = folders.load(ws, ROOT)
+    rows = []
+    for r in data["folders"]:
+        p = Path(r["path"])
+        missing = not p.is_dir()
+        problem = None
+        if not missing:
+            try:
+                folders.normalize_path(r["path"], ROOT)
+            except folders.FolderError as e:
+                problem = str(e)
+        rows.append({**r, "missing": missing, "problem": problem,
+                     "not_git": not missing and not folders.is_git_repo(p),
+                     "cant_write": not missing and not os.access(p, os.W_OK)})
+    record = next((p for p in projects if p.get("slug") == ws), None)
+    team = bots.team(ROOT, ws, record)
+    channels = [{"id": rooms.split_id(r["id"])[1], "name": r.get("name") or ""}
+                for r in rooms.list_rooms(team, ws, ROOT) if r.get("kind") != "dm"]
+    team_rows = [{"id": b.id, "name": b.name, "handle": b.handle, "active": b.active}
+                 for b in team.bots.values()]
+    return {"ws": ws, "folders": rows, "rooms": data["rooms"], "bots": data["bots"],
+            "channels": channels, "team": team_rows,
+            "chooser": DEPLOYMENT != "server" and sys.platform == "darwin"}
+
+
 def _workspaces(projects):
     """Workspace list; `logo` is the uploaded image's version token (None: default look)."""
     spaces = ([{"id": bots.HQ, "name": "HQ", "kind": "hq"}]
@@ -1717,6 +1752,34 @@ class Handler(BaseHTTPRequestHandler):
             integrations.remove_key(ROOT)
             return self._send(200, integrations.public(ROOT))
         return self._send(404, {"error": "unknown endpoint"})
+
+    def _folders_post(self, path, body):
+        """Folders screen writes: owner only, same-origin (the caller checked)."""
+        projects = db.tree()
+        ws = _folders_ws(body.get("ws"), projects)
+        fid = str(body.get("id") or "")
+        if path == "/api/folders/add":
+            folders.add(ws, str(body.get("path") or ""), body.get("access") or folders.EDIT, ROOT)
+        elif path == "/api/folders/remove":
+            folders.remove(ws, fid, ROOT)
+        elif path == "/api/folders/access":
+            folders.set_access(ws, fid, body.get("access"), ROOT)
+        elif path == "/api/folders/limit":
+            view = _folders_view(ws, projects)
+            kind, key = body.get("kind"), body.get("key")
+            known = ([c["id"] for c in view["channels"]] if kind == "rooms"
+                     else [b["id"] for b in view["team"]] if kind == "bots" else [])
+            if key not in known:
+                raise ValueError(f"unknown {'channel' if kind == 'rooms' else 'bot'}: {key}")
+            folders.set_limit(ws, kind, key, body.get("limit"), ROOT)
+        elif path == "/api/folders/open":
+            row = next((r for r in folders.load(ws, ROOT)["folders"] if r["id"] == fid), None)
+            if row is None:
+                raise ValueError(f"no linked folder '{fid}'")
+            open_local_folder(folders.normalize_path(row["path"], ROOT))
+        else:
+            return self._send(404, {"error": "unknown endpoint"})
+        return self._send(200, _folders_view(ws, projects))
 
     def _engines_post(self, path, body):
         """HQ, Engines: owner only (the caller checked)."""
@@ -2599,6 +2662,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ws": ws, "files": files})
             if path == "/api/engines":
                 return self._send(200, _engines_view())
+            if path == "/api/folders":
+                projects = db.tree()
+                ws = _folders_ws((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], projects)
+                return self._send(200, _folders_view(ws, projects))
             if path == "/api/runners":
                 return self._send(200, {"runners": runners.list_for(ROOT, "owner")})
             if path == "/api/integrations":
@@ -2857,17 +2924,6 @@ class Handler(BaseHTTPRequestHandler):
                 rest = path[len("/api/project/"):-len("/delete")]
                 proj, tail = rest.split("/strategy/", 1)
                 return self._send(200, {"ok": True, **fileops.delete_strategy(proj, tail.rstrip("/"))})
-            if path.startswith("/api/project/") and path.endswith("/folder/open"):
-                slug = path[len("/api/project/"):-len("/folder/open")]
-                try:
-                    rows = folders.for_turn(slug, None, None, fileops.ROOT)
-                except ValueError:
-                    rows = []
-                folder = rows[0]["path"] if rows else None
-                if not folder:
-                    raise fileops.ActionError(f"project '{slug}' has no usable linked folder")
-                open_local_folder(folder)
-                return self._send(200, {"ok": True, "path": folder})
             if path.startswith("/api/project/") and path.endswith("/update"):
                 slug = path[len("/api/project/"):-len("/update")]
                 return self._send(200, {"ok": True, **fileops.update_project(slug, body)})
@@ -2987,6 +3043,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._engines_post(path, body)
+            if path.startswith("/api/folders/"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._folders_post(path, body)
             if path in ("/api/runners", "/api/runners/revoke"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})

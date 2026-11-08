@@ -28,6 +28,13 @@ connected apps. A thread anyone else can see moves to the people key, or tells y
 pick one. Claude Code and API keys are locked down in shared threads (see
 [sharing](sharing.md)).
 
+## Linked folders
+
+On Claude Code and API-key engines, bots can change files in a workspace's Edit folders
+on a tagged message, never git, editor or secret files. **Codex and other CLIs over ACP
+are read-only in linked folders**: their own tools have no per-folder rule for that
+never-write list, so myOS never gives them edit access, and the Engines screen says so.
+
 ## Keys
 
 Keys live in `team/engines.json`, owner-only. No bot can read that file and no screen

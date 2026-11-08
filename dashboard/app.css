@@ -773,3 +773,10 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .eng-choice small{display:block;color:var(--ui-color-text-muted);margin-top:4px}
 .msg-via{display:block;color:var(--ui-color-text-muted);font-size:11px;margin-top:4px}
 .runner-cmd{white-space:pre-wrap;word-break:break-all;background:var(--ui-color-surface);border:1px solid var(--ui-color-border);border-radius:8px;padding:10px;font-size:12px}
+
+/* Folders screen */
+.folder-warn{display:block;margin-top:4px;font-size:var(--ui-type-label);color:var(--ui-color-warning)}
+.folder-add{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:var(--ui-space-2)}
+.folder-add input[name=path]{flex:1 1 260px;min-width:0}
+.folder-limits{display:flex;flex-wrap:wrap;gap:8px 16px;margin:6px 0 0 12px}
+.folder-pick{display:flex;align-items:center;gap:6px;font-size:var(--ui-type-label)}
