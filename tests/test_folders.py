@@ -408,3 +408,17 @@ class ReviewFixes(unittest.TestCase):
         text = (self.root / "projects/acme/project.md").read_text()
         self.assertNotIn("local_folder", text)
         self.assertIn("name: Acme", text)
+
+
+class StaysInsideMyOS(unittest.TestCase):
+    def test_a_project_folder_that_leads_outside_myos_is_refused(self):
+        with tempfile.TemporaryDirectory() as r, tempfile.TemporaryDirectory() as o:
+            root, outside = Path(r).resolve(), Path(o).resolve()
+            (root / "projects").mkdir()
+            (outside / "team").mkdir()
+            (root / "projects" / "evil").symlink_to(outside)
+            with self.assertRaises(ValueError):
+                folders.load("evil", root)
+            with self.assertRaises(ValueError):
+                folders.save("evil", {"folders": []}, root)
+            self.assertFalse((outside / "team" / "folders.json").exists())

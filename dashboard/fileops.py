@@ -968,8 +968,6 @@ def update_project(slug: str, fields: dict) -> dict:
     NOT changed here — only the display name and metadata are editable."""
     slug = _safe_component(slug, "project slug")
     f = _project_dir(slug) / "project.md"
-    if not f.exists():
-        raise ActionError(f"project '{slug}' not found")
     folders.load(slug, ROOT)  # moves an old local_folder line out first, so it is never lost
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8"))
     name = _one_line(fields.get("name") or fm.get("name") or slug, "name")

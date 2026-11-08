@@ -127,8 +127,18 @@ def normalize_path(value, root=bots.ROOT) -> str:
 
 
 # ---- store ------------------------------------------------------------------ #
+def _inside_root(path, root) -> Path:
+    """`path` resolved, refused unless it stays inside the myOS folder: a project folder that
+    is a symlink to elsewhere never gets the store written or read through it."""
+    real = os.path.normpath(os.path.realpath(path))
+    base = os.path.realpath(root)
+    if not real.startswith(base + os.sep):
+        raise ValueError("unknown workspace")
+    return Path(real)
+
+
 def _path(ws, root):
-    return bots.ws_dir(ws, root) / FILE_NAME
+    return _inside_root(bots.ws_dir(ws, root) / FILE_NAME, root)
 
 
 def _empty():
@@ -194,7 +204,10 @@ def _migrate(ws, root) -> dict:
     data = _empty()
     if not ws or ws == bots.HQ:
         return data
-    md = Path(root) / "projects" / ws / "project.md"
+    try:
+        md = _inside_root(Path(root) / "projects" / ws / "project.md", root)
+    except ValueError:
+        return data
     try:
         text = md.read_text(encoding="utf-8")
     except OSError:
