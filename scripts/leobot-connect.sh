@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Open Leo Bot running on your server, from your laptop, over SSH:
 #
-#   scripts/myos-connect.sh user@server [port]
+#   scripts/leobot-connect.sh user@server [port]
 #
 # The server stays private: the dashboard reaches your browser through the SSH
 # connection only, so the terminal and every owner screen work as if it were local.
@@ -12,7 +12,7 @@ TARGET="${1:-}"
 PORT="${2:-8766}"
 MYOS_USER="${MYOS_USER:-myos}"
 if [ -z "$TARGET" ]; then
-  echo "Usage: scripts/myos-connect.sh user@server [port]" >&2
+  echo "Usage: scripts/leobot-connect.sh user@server [port]" >&2
   exit 1
 fi
 

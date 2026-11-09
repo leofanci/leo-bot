@@ -1450,7 +1450,7 @@ function deploymentSection(where){
 }
 const SERVER_STEPS = [
   `ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
-  "scripts/myos-connect.sh root@your-server",
+  "scripts/leobot-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
 // HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API

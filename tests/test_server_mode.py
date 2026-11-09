@@ -44,7 +44,7 @@ class MacOnly(unittest.TestCase):
 
 class Scripts(unittest.TestCase):
     def test_shell_syntax_and_executable(self):
-        for name in ("server-setup.sh", "myos-connect.sh", "sync-to-server.sh"):
+        for name in ("server-setup.sh", "leobot-connect.sh", "sync-to-server.sh"):
             path = ROOT / "scripts" / name
             self.assertTrue(os.access(path, os.X_OK), name)
             self.assertEqual(subprocess.run(["bash", "-n", str(path)]).returncode, 0, name)
@@ -72,7 +72,7 @@ class DeploymentSettings(unittest.TestCase):
         app = (ROOT / "dashboard" / "app.js").read_text()
         guide = (ROOT / "docs" / "server.md").read_text()
         for line in ('ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
-                     "scripts/myos-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
+                     "scripts/leobot-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
             self.assertIn(line, app)
             self.assertIn(line, guide)
 

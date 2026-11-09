@@ -42,7 +42,7 @@ Prefer API keys only? Skip this and add a key in HQ, Engines.
 From a checkout of this repo on your laptop:
 
 ```sh
-scripts/myos-connect.sh root@your-server
+scripts/leobot-connect.sh root@your-server
 ```
 
 Your browser opens Leo Bot through the SSH connection. Every owner screen works,

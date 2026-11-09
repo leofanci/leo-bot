@@ -1066,8 +1066,19 @@ engine_api.set_backends(osctl=os_relay.run_osctl, osctl_clean=os_relay.clean_arg
 
 
 def _engines_view():
+    projects = db.tree()
+    spaces = _workspaces(projects)
+    bot_list = []
+    for w in spaces:
+        project = next((p for p in projects if p.get("slug") == w["id"]), None)
+        try:
+            roster = bots.team(ROOT, w["id"], project).to_api()
+        except Exception:  # a broken team file must not hide the rest of the screen
+            continue
+        bot_list.append({"ws": w["id"], "ws_name": w["name"],
+                         "bots": [{"id": b["id"], "name": b["name"], "icon": b.get("icon")} for b in roster]})
     return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
-            "ws_list": [w for w in _workspaces(db.tree()) if w["id"] != bots.HQ]}
+            "ws_list": [w for w in spaces if w["id"] != bots.HQ], "bot_list": bot_list}
 
 
 def _shared_room(ws, room):
