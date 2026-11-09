@@ -21,6 +21,7 @@ Content lives under:
 
 import datetime
 import json
+import os
 import re
 import subprocess
 import sys
@@ -155,6 +156,15 @@ def _safe_post_id(value: str) -> str:
     if not _SAFE_POST_ID_RE.fullmatch(cleaned) or ".." in cleaned:
         raise ActionError("invalid post id")
     return cleaned
+
+
+def _inside(path: Path, base: Path, label: str) -> Path:
+    """`path` resolved, refused unless it stays inside `base`: a symlink (dangling or not)
+    never takes a write out of the data folder."""
+    real = os.path.normpath(os.path.realpath(path))
+    if not real.startswith(os.path.realpath(base) + os.sep):
+        raise ActionError(f"{label} is outside the data folder")
+    return Path(real)
 
 
 def _confined_dir(base: Path, component: str, label: str) -> Path:
@@ -931,9 +941,9 @@ def _need_known_entity(slug: str) -> None:
 def create_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     projects_dir = ROOT / "projects"
-    project_dir = projects_dir / slug
-    if project_dir.exists():
+    if (projects_dir / slug).exists() or (projects_dir / slug).is_symlink():
         raise ActionError(f"project '{slug}' already exists")
+    project_dir = _inside(projects_dir / slug, projects_dir, "project")
     _need_free_slug(slug)
     name = _one_line(fields.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or "venture", "kind")
@@ -967,7 +977,7 @@ def update_project(slug: str, fields: dict) -> dict:
     The slug is identity (it's the directory name + every reference key), so it is
     NOT changed here — only the display name and metadata are editable."""
     slug = _safe_component(slug, "project slug")
-    f = _project_dir(slug) / "project.md"
+    f = _inside(_project_dir(slug) / "project.md", ROOT / "projects", "project")
     folders.load(slug, ROOT)  # moves an old local_folder line out first, so it is never lost
     fm, body = _parse_frontmatter(f.read_text(encoding="utf-8"))
     name = _one_line(fields.get("name") or fm.get("name") or slug, "name")
