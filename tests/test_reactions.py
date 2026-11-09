@@ -133,6 +133,15 @@ class Context(unittest.TestCase):
              "reactions": [{"emoji": "👍", "by": "ceo", "ts": 3}]}]}
         self.assertEqual(store.reaction_note(rec), "")  # the bot already answered after it
 
+    def test_note_keeps_reactions_made_while_the_bot_replied(self):
+        rec = {"messages": [
+            {"role": "user", "content": "plan?", "ts": 10},
+            {"role": "assistant", "bot": "cos", "content": "Plan A.", "ts": 20,
+             "reactions": [{"emoji": "👍", "by": "ceo", "ts": 15}]}]}  # added during the reply
+        self.assertIn("👍 You", store.reaction_note(rec))
+        rec["messages"].append({"role": "user", "content": "next", "ts": 30})
+        self.assertEqual(store.reaction_note(rec), "")  # that turn's prompt already had it
+
     def test_note_reaches_the_next_turn(self):
         rec = {"messages": [{"role": "assistant", "bot": "cos", "content": "Plan A.", "ts": 2,
                              "reactions": [{"emoji": "👍", "by": "ceo", "ts": 3}]}]}

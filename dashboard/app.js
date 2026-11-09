@@ -4267,7 +4267,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name).closest(".msg");
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
-      row.hidden = !rowHasBody(m);   // a reply that was only an emoji: kept for its index and spend
+      // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
+      row.hidden = m.role !== "user" && !m.content && !row.querySelector(".approval-bar, .deliv-list");
       paintReactions(row, m.reactions);
     });
     renderAppCards();
