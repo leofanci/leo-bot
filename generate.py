@@ -37,6 +37,7 @@ Optional --workspace ROOT (default: cwd). Writes to:
 import argparse
 import json
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -739,6 +740,14 @@ def build_parser():
     return ap
 
 
+JOB_DEADLINE = 1500  # seconds: a model job that hangs ends itself, whoever started it
+
+
+def _arm_deadline():
+    if hasattr(signal, "SIGALRM"):
+        signal.alarm(JOB_DEADLINE)
+
+
 def main():
     args = build_parser().parse_args()
     root = Path(args.workspace).resolve()
@@ -762,4 +771,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _arm_deadline()  # only when run as a job, never when imported by tests
     main()
