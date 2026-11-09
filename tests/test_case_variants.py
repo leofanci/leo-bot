@@ -111,3 +111,17 @@ class TerminalResize(unittest.TestCase):
         self.addCleanup(os.close, t.fd)
         t.resize(10**9, -5)
         t.resize(None, None)
+
+
+class FolderCaseVariants(unittest.TestCase):
+    def test_case_variants_of_refused_places_are_refused(self):
+        home = Path.home().resolve()
+        if not _case_insensitive(home):
+            self.skipTest("case-sensitive disk")
+        for variant in (str(home).upper(), str(home).upper() + "/.ssh", str(home / ".SSH")):
+            with self.assertRaises(folders.FolderError, msg=variant):
+                folders.normalize_path(variant)
+        docs = home / "Documents"
+        if docs.is_dir():
+            with self.assertRaises(folders.FolderError):
+                folders.normalize_path(str(home / "documents"))  # parent of the myOS checkout
