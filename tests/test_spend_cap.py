@@ -34,3 +34,14 @@ class ReadSize(unittest.TestCase):
         self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a"})[0], "read")
         self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a" * 3000})[0], "hold")
         self.assertEqual(app_rules.decide("GMAIL_GENERATE_THING", {"gmail": "write"}, cat, {})[0], "hold")
+
+
+class OpenFolder(unittest.TestCase):
+    def test_app_bundle_refused(self):
+        from dashboard import server
+        fileops = server.fileops
+        with tempfile.TemporaryDirectory() as d:
+            app = Path(d) / "Thing.app"
+            app.mkdir()
+            with self.assertRaises(fileops.ActionError):
+                server.open_local_folder(str(app))
