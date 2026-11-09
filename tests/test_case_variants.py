@@ -135,3 +135,20 @@ class AppReadUrlArguments(unittest.TestCase):
         for args in ({"url": "https://evil.example/?d=1"}, {"a": [{"b": "www.evil.test"}]}, {"q": "x.attacker.example"}):
             self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args)[0], "hold", args)
         self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"})[0], "refuse")
+
+
+class SharedAndDeny(unittest.TestCase):
+    def test_research_signal_blocked_in_shared_threads(self):
+        from dashboard import osctl
+        self.assertIn("research-signal", osctl._SHARED_BLOCKED)
+
+    def test_deny_dirs_include_unindexed_projects(self):
+        from dashboard import server
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            for n in ("mine", "other"):
+                (root / "projects" / n).mkdir(parents=True)
+            with mock.patch.object(server, "ROOT", root):
+                dirs = server._workspace_deny_dirs("mine", [])
+            self.assertIn(str(root / "projects" / "other"), dirs)
+            self.assertNotIn(str(root / "projects" / "mine"), dirs)

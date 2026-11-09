@@ -1712,6 +1712,7 @@ def delete_experiment(project_slug: str, stem: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _require_strategy(project_slug: str, stem: str) -> str:
+    _project_dir(project_slug)  # a symlinked project folder is refused here too
     stem = _safe_component(stem, "strategy stem")
     known = {s["stem"] for s in gtm_store.load_strategies(ROOT, project_slug)}
     if stem not in known:
@@ -1748,6 +1749,7 @@ def _bare_phase_id(project_slug: str, phase_id: str, phases: list) -> str:
 
 
 def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
+    _project_dir(project_slug)
     phases = gtm_store.load_phases(ROOT, project_slug)
     phase_id = _bare_phase_id(project_slug, phase_id, phases)
     match = next((p for p in phases if p["id"] == phase_id), None)
@@ -1763,6 +1765,7 @@ def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
 
 
 def delete_phase(project_slug: str, phase_id: str) -> dict:
+    _project_dir(project_slug)
     phases = gtm_store.load_phases(ROOT, project_slug)
     phase_id = _bare_phase_id(project_slug, phase_id, phases)
     if not any(p["id"] == phase_id for p in phases):
