@@ -1427,9 +1427,13 @@ def _normalize_doc_strict(project_slug: str, doc_key: str, text: str, cfg: dict)
 
 def _need_inside_project(project_slug: str, *paths) -> None:
     """Refuse a file that is, or sits behind, a symlink leading out of the project folder."""
-    base = _project_dir(project_slug).resolve()
+    base = os.path.realpath(str(_project_dir(project_slug)))
     for p in paths:
-        if p and (p.is_symlink() or not Path(p).resolve().is_relative_to(base)):
+        if not p:
+            continue
+        real = os.path.realpath(str(p))
+        if not real.startswith(base + os.sep) or os.path.normpath(str(p)) != os.path.normpath(real).replace(
+                os.path.realpath(str(ROOT)), str(ROOT), 1):
             raise ActionError("path outside project")
 
 
