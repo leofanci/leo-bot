@@ -106,10 +106,19 @@ WEB_ALLOWED_TOOLS = [
 SECRET_FILE_GLOBS = folders.SECRET_FILE_GLOBS
 
 
+# Keys and CLI tokens in the home folder: a bare Read must not reach them.
+HOME_PRIVATE = (".codex", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config")
+
+
 def private_read_rules(repo_dir):
     """Read denies for every turn: Claude's config keeps each bot session's
     transcript (all workspaces), and server.log lists their ids."""
-    return [f"Read(/{Path.home() / '.claude'}/**)",
+    home = Path.home()
+    private = [home / ".claude", *(home / n for n in HOME_PRIVATE)]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        private.append(Path(cfg).expanduser())
+    return [*(f"Read(/{d}/**)" for d in private),
             f"Read(/{Path(repo_dir).resolve() / 'dashboard' / 'server.log'})"]
 # Tools loaded EVERY turn. Skills are NOT loaded via the Skill tool — that costs
 # ~4k tok of discovery (35 descriptions, incl. useless built-ins) just to let the

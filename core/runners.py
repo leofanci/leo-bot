@@ -229,6 +229,17 @@ class Hub:
             if turn in rows:
                 rows.remove(turn)
 
+    def drop_turns(self, owner, ws):
+        """A person removed from one workspace: their turns there end now (and with them
+        the turn tokens their runner holds)."""
+        with self._cond:
+            for turn in list(self._turns.values()):
+                if turn.owner == owner and (turn.job.get("policy") or {}).get("workspace") == ws:
+                    turn.cancelled = True
+                    turn.events.put(("error", "You were removed from this workspace."))
+                    turn.events.put(None)
+            self._cond.notify_all()
+
     def drop(self, rid):
         with self._cond:
             self._seen.pop(rid, None)

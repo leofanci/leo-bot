@@ -67,26 +67,37 @@ def _owners():
     """slug/id → owning project, for every entity in the index. Built once per
     command (main clears it), however many checks ask."""
     tree, posts = db.tree(), db.posts()
-    own = {}
+    own = {}  # keys lowercased: _guard looks them up lowercased, and a slug may hold capitals
     for proj in tree:
-        own[proj["slug"]] = proj["slug"]
+        own[proj["slug"].lower()] = proj["slug"]
         for prof in proj.get("profiles", []):
-            own[prof["slug"]] = proj["slug"]
+            own[prof["slug"].lower()] = proj["slug"]
             for ch in prof.get("channels", []):
-                own[ch["slug"]] = proj["slug"]
+                own[ch["slug"].lower()] = proj["slug"]
         for prod in proj.get("products", []):
-            own[prod["slug"]] = proj["slug"]
+            own[prod["slug"].lower()] = proj["slug"]
+    # The folders themselves, so a project the index has not caught up with is walled too.
+    projects = fileops.ROOT / "projects"
+    for proj in (projects.iterdir() if projects.is_dir() else ()):
+        if proj.is_dir() and not proj.name.startswith("."):
+            own.setdefault(proj.name.lower(), proj.name)
+            for sub in ("products/*", "profiles/*", "profiles/*/channels/*"):
+                for d in proj.glob(sub):
+                    if d.is_dir():
+                        own.setdefault(d.name.lower(), proj.name)
     for post in posts:
-        if post.get("profile_slug") in own:
-            own[post["id"]] = own[post["profile_slug"]]
+        owner = own.get(str(post.get("profile_slug") or "").lower())
+        if owner:
+            own[str(post["id"]).lower()] = owner
     for ms in db._rows("SELECT id, entity_slug FROM milestones"):
-        if ms.get("id") and ms.get("entity_slug") in own:
-            own[str(ms["id"]).lower()] = own[ms["entity_slug"]]
+        if ms.get("id"):
+            # A milestone with no workspace entity (HQ's, or 'external') is HQ's: never a workspace's.
+            own[str(ms["id"]).lower()] = own.get(str(ms.get("entity_slug") or "").lower(), bots.HQ)
     try:
         reg = build_id_registry(tree, posts, root=fileops.ROOT)
         for entry in reg.entries:
             if entry.get("kind") == "project" and (entry.get("ref") or {}).get("project"):
-                own[entry["id"]] = entry["ref"]["project"]
+                own[str(entry["id"]).lower()] = entry["ref"]["project"]
     except Exception:  # noqa: BLE001 — ids are a convenience, slugs still guard
         pass
     return own
@@ -100,6 +111,10 @@ def _guard(args, ws):
         args.project = ws  # a company's bot keeps memory in its company, never in HQ
     if args.cmd in ("create-milestone", "mark-done") and not args.entity:
         args.entity = ws  # same for its milestones and activities
+    entity = getattr(args, "entity", None)
+    if isinstance(entity, str) and entity.strip().lower() in ("external", bots.HQ.lower()) \
+            and entity.strip().lower() != ws.lower():
+        raise fileops.ActionError("HQ's calendar entries are not writable from a workspace")
     own = _owners()
     for name, value in vars(args).items():
         if not (name in _OWNER_ARGS or name.endswith("_id")):
@@ -108,7 +123,7 @@ def _guard(args, ws):
             continue
         key = value.strip().lower()
         owner = own.get(key) or own.get(key.split(".", 1)[0])
-        if owner and owner != ws:
+        if owner and owner.lower() != ws.lower():
             raise fileops.ActionError(f"'{value}' belongs to another workspace")
     path = getattr(args, "path", None)
     if isinstance(path, str) and path:
@@ -767,7 +782,9 @@ def _build_parser():
         if not target.is_relative_to(repo_root.resolve()):
             raise fileops.ActionError("path outside repo")
         # Same secret-file policy as the chat agent's Read deny rules.
-        if any(fnmatch.fnmatch(target.name, g) for g in chat_session.SECRET_FILE_GLOBS):
+        # Case-blind, as a Mac disk is: .AUTH-TOKEN opens .auth-token.
+        name = target.name.lower()
+        if any(fnmatch.fnmatchcase(name, g.lower()) for g in chat_session.SECRET_FILE_GLOBS):
             raise fileops.ActionError("secret files are not readable")
         if not target.exists():
             raise fileops.ActionError(f"file not found: {a.path}")

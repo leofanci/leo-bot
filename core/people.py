@@ -160,7 +160,10 @@ def join(root=bots.ROOT, code=None, name=None, *, token=None):
         everyone = _people(root)
         if found:
             pid = found["id"]
-            token_out = token
+            # Fresh token on every join: a cookie planted on this device before the join
+            # (cookie tossing) must not stay valid for whoever planted it.
+            token_out = secrets.token_urlsafe(32)
+            everyone[pid]["token_hash"] = _hash(token_out)
         else:
             pid = "p-" + secrets.token_hex(6)
             token_out = secrets.token_urlsafe(32)
@@ -220,6 +223,25 @@ def remove(root=bots.ROOT, ws=None, pid=None):
         if not any(_project_ws(root, k) for k in rec["ws"]):
             del everyone[pid]
         _save(root, "people.json", {"people": everyone})
+
+
+def forget_workspace(root=bots.ROOT, ws=None):
+    """A deleted workspace: nobody keeps it and its invites die, so a project made later
+    with the same slug starts with no people. Returns the ids of people left with none."""
+    if not isinstance(ws, str) or not ws or ws == bots.HQ:
+        return []
+    gone = []
+    with LOCK:
+        everyone = _people(root)
+        for pid, rec in list(everyone.items()):
+            if isinstance(rec, dict) and ws in (rec.get("ws") or {}):
+                del rec["ws"][ws]
+                if not any(_project_ws(root, k) for k in rec["ws"]):
+                    del everyone[pid]
+                    gone.append(pid)
+        _save(root, "people.json", {"people": everyone})
+        _save(root, "invites.json", {"invites": [r for r in _invites(root) if r.get("ws") != ws]})
+    return gone
 
 
 # -- sharing address --------------------------------------------------------- #

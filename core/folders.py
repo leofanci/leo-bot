@@ -31,11 +31,14 @@ FILE_NAME = "folders.json"
 # one of the directories is refused as well: a `.git` file can point git at hooks elsewhere,
 # and `HEAD` is what makes git take a folder for a repository.
 NEVER_WRITE_DIRS = (".git", ".husky", ".claude", ".codex", ".agents", ".vscode",
-                    ".lefthook", ".githooks", ".cursor", ".gemini")
+                    ".lefthook", ".githooks", ".cursor", ".gemini", ".hg", ".opencode", ".zed", ".idea",
+                    ".devcontainer")
 NEVER_WRITE_FILES = (".mcp.json", ".envrc", ".pre-commit-config.yaml",
                      "lefthook.yml", "lefthook.yaml", ".lefthook.yml", ".lefthook.yaml",
                      "lefthook-local.yml", "lefthook-local.yaml", ".lefthook-local.yml", ".lefthook-local.yaml",
-                     "HEAD")
+                     "HEAD", "opencode.json", "opencode.jsonc", "mise.toml", ".mise.toml", ".lintstagedrc",
+                     ".lintstagedrc.json", ".lintstagedrc.js", "lint-staged.config.js", "devcontainer.json",
+                     ".devcontainer.json")
 # Secret-looking files stay unreadable even inside the repo or a linked folder
 # (Grep/Glob honor Read deny rules too). Verified against claude 2.x:
 # "**/x" covers the repo; a linked --add-dir needs its own "//abs/**/x" rule.
@@ -77,8 +80,39 @@ class FolderError(ValueError):
 
 def _inside_cloud_drive(rel_parts) -> bool:
     return any(len(rel_parts) > len(drive)
-               and all(d is None or d == p for d, p in zip(drive, rel_parts))
+               and all(d is None or d.lower() == p.lower() for d, p in zip(drive, rel_parts))
                for drive in _CLOUD_DRIVES)
+
+
+def _same(a, b) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _below(path, base):
+    """The path parts under `base` (matched by file identity), or None when `path` is not below it."""
+    path = Path(path)
+    for ancestor in path.parents:
+        if _same(ancestor, base):
+            return path.parts[len(ancestor.parts):]
+    return None
+
+
+def under(path, base) -> bool:
+    """True when `path` is `base` or inside it, by file identity: a case variant on a
+    case-insensitive disk (or any other spelling of the same place) counts."""
+    path, base = Path(path), Path(base)
+    for candidate in (path, *path.parents):
+        if candidate == base:
+            return True
+        try:
+            if os.path.samefile(candidate, base):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def normalize_path(value, root=bots.ROOT) -> str:
@@ -103,25 +137,27 @@ def normalize_path(value, root=bots.ROOT) -> str:
     workspace_root = Path(root).resolve()
     home = Path.home().resolve()
     filesystem_root = Path(resolved.anchor).resolve()
-    if resolved in {filesystem_root, home, workspace_root}:
+    if any(_same(resolved, p) for p in (filesystem_root, home, workspace_root)):
         raise FolderError("local folder must be a specific app directory")
     # A parent of myOS (for example ~/Documents/GitHub) would expose this repo
     # and every sibling app when passed to Claude as an allowed directory.
-    if workspace_root.is_relative_to(resolved):
+    if under(workspace_root, resolved):
         raise FolderError("local folder cannot contain the myOS workspace")
     # Claude's config holds every bot session's transcript, all workspaces.
-    if resolved.is_relative_to(home / ".claude"):
+    if under(resolved, home / ".claude"):
         raise FolderError("local folder cannot be inside the Claude config folder")
     # ~/.ssh, ~/.config, ~/.aws, ~/Library: keys and CLI tokens, never app code.
-    if resolved.is_relative_to(home):
-        rel = resolved.relative_to(home).parts
-        if (rel[0].startswith(".") or rel[0] == "Library") and not _inside_cloud_drive(rel):
+    rel = _below(resolved, home)
+    if rel:
+        rel = tuple(rel)
+        if (rel[0].startswith(".") or rel[0].lower() == "library") and not _inside_cloud_drive(
+                tuple(x.lower() for x in rel)):
             raise FolderError("local folder cannot be a hidden or Library folder in your home")
     # "Open folder" would launch an app bundle instead of showing it.
     if any(part.lower().endswith(".app") for part in resolved.parts):
         raise FolderError("local folder cannot be an app bundle")
     # myOS's own data is written only through osctl; a link inside it would bypass that.
-    if resolved.is_relative_to(workspace_root):
+    if under(resolved, workspace_root):
         raise FolderError("local folder cannot be inside the myOS folder")
     return str(resolved)
 

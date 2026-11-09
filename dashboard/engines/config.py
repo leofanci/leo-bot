@@ -140,6 +140,14 @@ def _clear_engine(data, gone):
         data[key] = {k: v for k, v in data[key].items() if v != gone}
 
 
+def forget_workspace(slug, root=ROOT):
+    """A deleted workspace: its engine picks and its bots' picks go too."""
+    data = load(root)
+    data["workspaces"].pop(slug, None)
+    data["bots"] = {k: v for k, v in data["bots"].items() if not k.startswith(f"{slug}/")}
+    save(data, root)
+
+
 def remove_provider(provider_id, root=ROOT):
     data = load(root)
     data["providers"] = [p for p in data["providers"] if p["id"] != provider_id]
