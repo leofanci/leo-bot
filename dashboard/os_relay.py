@@ -8,8 +8,8 @@ gets one HTTP MCP server pointing back at the dashboard
 (POST /api/internal/os/mcp) with a per-request turn token, and one tool:
 
   osctl   runs `python -m dashboard.osctl <args>` on the server, with the
-          turn's workspace bound from the token (MYOS_WORKSPACE, never the
-          bot's) and MYOS_SHARED set, so osctl applies its shared rules.
+          turn's workspace bound from the token (LEOBOT_WORKSPACE, never the
+          bot's) and LEOBOT_SHARED set, so osctl applies its shared rules.
 
 Arguments go to the process as a list (no shell); a body travels as `stdin`.
 """
@@ -32,7 +32,7 @@ MAX_STDIN_CHARS = 400_000
 MAX_OUT_CHARS = 120_000
 TIMEOUT = 600  # generate-* commands run a model turn
 PROTOCOL = "2025-06-18"
-SHARED_ENV = "MYOS_SHARED"
+SHARED_ENV = "LEOBOT_SHARED"
 CODE_DIR = Path(__file__).resolve().parent.parent  # where `-m dashboard.osctl` imports from
 
 TOOL_SPEC = {
@@ -79,15 +79,15 @@ def clean_args(arguments):
 def env_for(ctx):
     """The child's environment: the token's workspace, never a caller's."""
     drop = {chat_session.APPS_TOKEN_ENV, chat_session.APPS_USED_ENV, chat_session.OS_TOKEN_ENV,
-            chat_session.ENGINE_ENV, "MYOS_WORKSPACE", "MYOS_READONLY", SHARED_ENV}
+            chat_session.ENGINE_ENV, "LEOBOT_WORKSPACE", "LEOBOT_READONLY", SHARED_ENV}
     env = {k: v for k, v in os.environ.items() if k not in drop}
-    env["MYOS_WORKSPACE"] = ctx["ws"]
+    env["LEOBOT_WORKSPACE"] = ctx["ws"]
     if ctx.get("shared", True):  # an owner's private turn on the api engine sets it False
         env[SHARED_ENV] = "1"
     if ctx.get("engine"):  # a generate-* job runs on the engine its turn runs on
         env[chat_session.ENGINE_ENV] = ctx["engine"]
     if ctx.get("readonly"):
-        env["MYOS_READONLY"] = "1"
+        env["LEOBOT_READONLY"] = "1"
     if ctx.get("apps_used"):
         env[chat_session.APPS_USED_ENV] = "1"
     return env
@@ -140,7 +140,7 @@ def handle(frame, ctx, root=bots.ROOT, runner=run_osctl):
         version = params.get("protocolVersion")
         return {"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": version if isinstance(version, str) and len(version) < 32 else PROTOCOL,
-            "capabilities": {"tools": {}}, "serverInfo": {"name": "myos", "version": "1"}}}
+            "capabilities": {"tools": {}}, "serverInfo": {"name": "leobot", "version": "1"}}}
     if method == "ping":
         return {"jsonrpc": "2.0", "id": rid, "result": {}}
     if method == "tools/list":

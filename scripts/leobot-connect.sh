@@ -10,7 +10,7 @@ set -euo pipefail
 
 TARGET="${1:-}"
 PORT="${2:-8766}"
-MYOS_USER="${MYOS_USER:-myos}"
+LEOBOT_USER="${LEOBOT_USER:-leobot}"
 if [ -z "$TARGET" ]; then
   echo "Usage: scripts/leobot-connect.sh user@server [port]" >&2
   exit 1
@@ -26,12 +26,12 @@ fi
 # The service writes this as it starts, so give a fresh start a moment.
 TOKEN=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$MYOS_USER/my-os/dashboard/.auth-token 2>/dev/null || cat ~$MYOS_USER/my-os/dashboard/.auth-token 2>/dev/null" || true)"
+  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null || cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null" || true)"
   [ -n "$TOKEN" ] && break
   sleep 3
 done
 if [ -z "$TOKEN" ]; then
-  echo "Could not read the login token on $TARGET. Is the myos service running?" >&2
+  echo "Could not read the login token on $TARGET. Is the leobot service running?" >&2
   exit 1
 fi
 

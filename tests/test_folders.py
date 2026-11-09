@@ -85,7 +85,7 @@ class FolderStoreTest(unittest.TestCase):
         with self.assertRaises(folders.FolderError):
             folders.add("acme", str(self.docs), "write", root=self.root)
 
-    def test_refuses_inside_myos_and_glob_characters(self):
+    def test_refuses_inside_leobot_and_glob_characters(self):
         for name in ("app[1]", "a*", "b?", "c{d}"):
             (self.tmp / name).mkdir()
         for bad in (self.root / "projects", self.root, self.tmp / "app[1]", self.tmp / "a*",
@@ -410,8 +410,8 @@ class ReviewFixes(unittest.TestCase):
         self.assertIn("name: Acme", text)
 
 
-class StaysInsideMyOS(unittest.TestCase):
-    def test_a_project_folder_that_leads_outside_myos_is_refused(self):
+class StaysInsideLeoBot(unittest.TestCase):
+    def test_a_project_folder_that_leads_outside_leobot_is_refused(self):
         with tempfile.TemporaryDirectory() as r, tempfile.TemporaryDirectory() as o:
             root, outside = Path(r).resolve(), Path(o).resolve()
             (root / "projects").mkdir()

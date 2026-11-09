@@ -187,7 +187,7 @@ class LoginAndLocalFilesTest(unittest.TestCase):
         h_out = self.get("/healthz?nonce=abc123")
         self.assertEqual(h_out["code"], 200)
         body = json.loads(h_out["body"])
-        want = hmac.new(server.AUTH_TOKEN.encode(), b"myos-healthz:abc123", "sha256").hexdigest()
+        want = hmac.new(server.AUTH_TOKEN.encode(), b"leobot-healthz:abc123", "sha256").hexdigest()
         self.assertEqual(body, {"app": "Leo Bot", "proof": want})
         self.assertNotIn(server.AUTH_TOKEN.encode(), h_out["body"])
 

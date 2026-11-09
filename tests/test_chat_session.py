@@ -149,7 +149,7 @@ class AppsMount(unittest.TestCase):
         cfg = json.loads(cmd[cmd.index("--mcp-config") + 1])["mcpServers"]["apps"]
         self.assertEqual(cfg["type"], "http")
         self.assertEqual(cfg["url"], "http://127.0.0.1:8765/api/internal/apps/mcp")
-        self.assertEqual(cfg["headers"], {"Authorization": "Bearer ${MYOS_APPS_TOKEN}"})
+        self.assertEqual(cfg["headers"], {"Authorization": "Bearer ${LEOBOT_APPS_TOKEN}"})
         allowed = cmd[cmd.index("--allowedTools") + 1:cmd.index("--disallowedTools")]
         self.assertIn("mcp__apps", allowed)
 
@@ -171,7 +171,7 @@ class AppsMount(unittest.TestCase):
         with mock.patch.object(cs.subprocess, "Popen", P):
             list(sess.ask("hi", apps_token=self.TOKEN, apps_port=8765))
         self.assertFalse([a for a in seen["cmd"] if self.TOKEN in a])
-        self.assertEqual(seen["env"]["MYOS_APPS_TOKEN"], self.TOKEN)
+        self.assertEqual(seen["env"]["LEOBOT_APPS_TOKEN"], self.TOKEN)
 
     def test_no_token_env_on_ordinary_turn(self):
         sess = cs.ChatSession(repo_dir=".", rail="R")
@@ -188,10 +188,10 @@ class AppsMount(unittest.TestCase):
 
             def poll(self):
                 return 0
-        with mock.patch.dict(cs.os.environ, {"MYOS_APPS_TOKEN": "leak"}), \
+        with mock.patch.dict(cs.os.environ, {"LEOBOT_APPS_TOKEN": "leak"}), \
                 mock.patch.object(cs.subprocess, "Popen", P):
             list(sess.ask("hi"))
-        self.assertNotIn("MYOS_APPS_TOKEN", seen["env"])
+        self.assertNotIn("LEOBOT_APPS_TOKEN", seen["env"])
 
 
 def _turn_env(sess):
@@ -250,10 +250,10 @@ class BotSandboxEnv(unittest.TestCase):
 
     def test_thread_that_read_an_app_tells_osctl(self):
         sess = cs.ChatSession(repo_dir=".", rail="R")
-        with mock.patch.dict(cs.os.environ, {"MYOS_APPS_USED": "1"}):  # never inherited
-            self.assertNotIn("MYOS_APPS_USED", _turn_env(sess))
+        with mock.patch.dict(cs.os.environ, {"LEOBOT_APPS_USED": "1"}):  # never inherited
+            self.assertNotIn("LEOBOT_APPS_USED", _turn_env(sess))
         sess.apps_used = True
-        self.assertEqual(_turn_env(sess)["MYOS_APPS_USED"], "1")
+        self.assertEqual(_turn_env(sess)["LEOBOT_APPS_USED"], "1")
 
 
 if __name__ == "__main__":

@@ -192,7 +192,7 @@ class SharedCalendar(unittest.TestCase):
 
     def osctl(self, ws, *argv):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": ws}), contextlib.redirect_stdout(out):
+        with mock.patch.dict(os.environ, {"LEOBOT_WORKSPACE": ws}), contextlib.redirect_stdout(out):
             osctl.main(list(argv))
         return json.loads(out.getvalue())
 
@@ -290,7 +290,7 @@ class SharedCalendar(unittest.TestCase):
     def test_research_signal_is_off_once_a_thread_read_an_app(self):
         # Its query goes to public search sites: the "read mail, leak it via a
         # search" path that web-off closes for WebSearch.
-        with mock.patch.dict(os.environ, {"MYOS_APPS_USED": "1"}), \
+        with mock.patch.dict(os.environ, {"LEOBOT_APPS_USED": "1"}), \
                 mock.patch.object(fileops, "research_signal") as research:
             r = self.osctl("hq", "research-signal", "--query", "x")
         self.assertFalse(r["ok"])

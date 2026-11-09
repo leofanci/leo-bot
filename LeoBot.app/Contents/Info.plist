@@ -5,7 +5,7 @@
   <key>CFBundleExecutable</key>
   <string>LeoBot</string>
   <key>CFBundleIdentifier</key>
-  <string>org.example.myos</string>
+  <string>org.example.leobot</string>
   <key>CFBundleName</key>
   <string>Leo Bot</string>
   <key>CFBundleDisplayName</key>

@@ -45,7 +45,7 @@ class Base(unittest.TestCase):
 FAKE_CODEX = r'''
 import json, os, sys
 log = os.environ.get("CX_LOG")
-open(log, "a").write(json.dumps({"argv": sys.argv[1:], "stdin": sys.stdin.read(), "token": os.environ.get("MYOS_OS_TOKEN"), "leak": os.environ.get("MYOS_APPS_TOKEN")}) + "\n")
+open(log, "a").write(json.dumps({"argv": sys.argv[1:], "stdin": sys.stdin.read(), "token": os.environ.get("LEOBOT_OS_TOKEN"), "leak": os.environ.get("LEOBOT_APPS_TOKEN")}) + "\n")
 for o in [{"type": "thread.started", "thread_id": "th-1"},
           {"type": "item.completed", "item": {"type": "agent_message", "text": "hello"}},
           {"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}]:
@@ -57,7 +57,7 @@ class CodexDriver(Base):
     def setUp(self):
         super().setUp()
         self.log = self.dir / "log"
-        patcher = mock.patch.dict(os.environ, {"CX_LOG": str(self.log), "MYOS_APPS_TOKEN": "leak"})
+        patcher = mock.patch.dict(os.environ, {"CX_LOG": str(self.log), "LEOBOT_APPS_TOKEN": "leak"})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.engine = codex.CodexEngine(self.stub("codex", FAKE_CODEX))
@@ -72,7 +72,7 @@ class CodexDriver(Base):
         call = self.calls()[0]
         argv = " ".join(call["argv"])
         for needed in ("--ignore-user-config", "--ignore-rules", 'sandbox_mode="read-only"', "features.shell_tool=false",
-                       "features.apps=false", "bearer_token_env_var", "MYOS_OS_TOKEN"):
+                       "features.apps=false", "bearer_token_env_var", "LEOBOT_OS_TOKEN"):
             self.assertIn(needed, argv)
         self.assertNotIn("tok ", argv + " ")  # relay token in env only
         self.assertEqual(call["token"], "tok")
@@ -110,7 +110,7 @@ for line in sys.stdin:
         open(log, "a").write(line)
     method, rid = m.get("method"), m.get("id")
     if method == "initialize":
-        log and open(log, "a").write(json.dumps({"env_token": os.environ.get("MYOS_OS_TOKEN"), "env_key": os.environ.get("ANTHROPIC_API_KEY")}) + "\n")
+        log and open(log, "a").write(json.dumps({"env_token": os.environ.get("LEOBOT_OS_TOKEN"), "env_key": os.environ.get("ANTHROPIC_API_KEY")}) + "\n")
         send({"id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}}})
     elif method in ("session/new",):
         send({"id": rid, "result": {"sessionId": "s-1"}})
@@ -132,7 +132,7 @@ class AcpDriver(Base):
     def setUp(self):
         super().setUp()
         self.log = self.dir / "log"
-        patcher = mock.patch.dict(os.environ, {"ACP_LOG": str(self.log), "MYOS_OS_TOKEN": "leak", "ANTHROPIC_API_KEY": "leak"})
+        patcher = mock.patch.dict(os.environ, {"ACP_LOG": str(self.log), "LEOBOT_OS_TOKEN": "leak", "ANTHROPIC_API_KEY": "leak"})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.agent = {"id": "fake", "name": "Fake", "command": self.stub("fakeacp", FAKE_ACP), "args": []}
@@ -245,7 +245,7 @@ class FullDiskRules(unittest.TestCase):
         self.assertEqual(self.pick(apps=True).id, "claude-code")
 
     def test_off_on_a_server(self):
-        with mock.patch.dict(os.environ, {"MYOS_DEPLOYMENT": "server"}):
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "server"}):
             for eid in ("codex", "acp:opencode"):
                 with self.assertRaises(EngineRefused):
                     registry.get(eid, self.root)

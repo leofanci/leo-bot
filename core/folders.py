@@ -48,7 +48,7 @@ SECRET_FILE_GLOBS = [
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
     ".auth-token", "owner-token",  # dashboard login token (server.TOKEN_FILE, OWNER_TOKEN_FILE)
     "engines.json", "runners.json",  # API keys (dashboard.engines.config), runner token hashes
-    ".myos-runner-token", ".myos-runner-sessions.json",  # a runner's own files on a person's Mac
+    ".leobot-runner-token", ".leobot-runner-sessions.json",  # a runner's own files on a person's Mac
     "integrations.json",  # Composio key + sessions (core.integrations)
     "people.json", "invites.json", "access.json",  # invited people (core.people)
 ]

@@ -29,18 +29,18 @@ from core.ids import (  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
-# Workspace isolation. The chat server sets MYOS_WORKSPACE for every bot turn:
+# Workspace isolation. The chat server sets LEOBOT_WORKSPACE for every bot turn:
 # "hq" (the holding's CEO office: sees everything) or a project slug (one
 # company: its bots only touch that project). The calendar is the one shared
 # thing, and other workspaces show there only as busy time.
 # --------------------------------------------------------------------------- #
 def _workspace():
-    ws = (os.environ.get("MYOS_WORKSPACE") or "").strip()
+    ws = (os.environ.get("LEOBOT_WORKSPACE") or "").strip()
     return ws if ws and ws != "hq" else None
 
 
 _BLOCKED_IN_WORKSPACE = {"create-project"}
-# A consulted teammate (MYOS_READONLY) may only look things up; the lead saves.
+# A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
                    "resolve-id", "get-memory", "get-busy", "get-subsections",
                    "get-brief-spec", "get-voice", "research-signal"}
@@ -155,10 +155,10 @@ def _guard(args, ws):
         parts = rel.split("/")
         if parts[0] == "projects" and len(parts) > 1 and parts[1] != ws.lower():
             raise fileops.ActionError("that file belongs to another workspace")
-        if os.environ.get("MYOS_SHARED") and not (
+        if os.environ.get("LEOBOT_SHARED") and not (
                 rel.startswith(f"projects/{ws.lower()}/") or rel.startswith(_SHARED_READ_PREFIXES)):
             raise fileops.ActionError("in a shared thread only this workspace's files are readable")
-        if os.environ.get("MYOS_SHARED") and rel.startswith(f"projects/{ws.lower()}/team/"):
+        if os.environ.get("LEOBOT_SHARED") and rel.startswith(f"projects/{ws.lower()}/team/"):
             raise fileops.ActionError("bot memory is not readable as a file here")
 
 
@@ -175,7 +175,7 @@ def _no_folder_paths(value):
 
 
 def _emit(obj, ok=True):
-    if os.environ.get("MYOS_SHARED"):
+    if os.environ.get("LEOBOT_SHARED"):
         obj = _no_folder_paths(obj)
     print(json.dumps({"ok": ok, **obj}, ensure_ascii=False))
     return 0 if ok else 1
@@ -325,7 +325,7 @@ def _build_parser():
     p.add_argument("--bot", required=True)
     p.add_argument("--project")
     p.set_defaults(_run=lambda a: {"memory": bots.read_memory(a.bot, a.project, tail=0,
-                                                              shared=bool(os.environ.get("MYOS_SHARED")))})
+                                                              shared=bool(os.environ.get("LEOBOT_SHARED")))})
 
     p = sub.add_parser("create-experiment", help="Create strategy/experiments/<stem>.json")
     p.add_argument("--project", required=True)
@@ -918,17 +918,17 @@ def main(argv=None):
     args = parser.parse_args(argv)
     _owners.cache_clear()
     try:
-        if os.environ.get("MYOS_READONLY") and args.cmd not in _READ_ONLY_CMDS:
+        if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
             raise fileops.ActionError("read-only: you were consulted. Tell your teammate "
                                       "what to save; they will do it.")
-        if os.environ.get("MYOS_WORKSPACE") and getattr(args, "local_folder", None) is not None:
+        if os.environ.get("LEOBOT_WORKSPACE") and getattr(args, "local_folder", None) is not None:
             # A linked folder becomes --add-dir on that company's turns: only the
             # user links one, in the dashboard. Any bot (HQ too) is refused.
             raise fileops.ActionError("only you can link a local folder, from the dashboard")
         if os.environ.get(chat_session.APPS_USED_ENV) and args.cmd in _NETWORK_CMDS:
             raise fileops.ActionError(f"{args.cmd} is off here: this thread read a connected app")
         ws = _workspace()
-        if os.environ.get("MYOS_SHARED"):
+        if os.environ.get("LEOBOT_SHARED"):
             if not ws:
                 raise fileops.ActionError("a shared thread runs inside one project workspace")
             if args.cmd in _SHARED_BLOCKED or args.cmd not in _SHARED_ALLOWED:

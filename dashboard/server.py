@@ -77,7 +77,7 @@ APP_HTML = HERE / "app.html"
 DEPLOYMENT = deployment_settings.mode()
 # Browsers keep cookies per host, not per port: over the SSH connection a server and the
 # Mac's own Leo Bot are both 127.0.0.1, and one cookie name would log each out of the other.
-AUTH_COOKIE = "myos_server_auth" if DEPLOYMENT == "server" else "myos_auth"
+AUTH_COOKIE = "leobot_server_auth" if DEPLOYMENT == "server" else "leobot_auth"
 OWNER_TOKEN_FILE = ROOT / "team" / "owner-token"
 
 
@@ -120,7 +120,7 @@ RAIL = CHAT_RAIL
 TOKEN_FILE = HERE / ".auth-token"
 _TOKEN_IN_LOG = re.compile(r"([?&]token=|/join/)[^&\s\"?]*")
 # An invited person's device cookie (core.people); the owner keeps AUTH_COOKIE.
-MEMBER_COOKIE = "myos_member"
+MEMBER_COOKIE = "leobot_member"
 MEMBER_MAX_AGE = 365 * 86400
 OWNER = {"kind": "owner"}
 # Headers a tunnel (Tailscale Serve/Funnel, Cloudflare Tunnel, any reverse proxy)
@@ -151,7 +151,7 @@ def upload_dir():
     global _UPLOAD_DIR
     with _UPLOAD_LOCK:  # two first uploads at once must not make two folders
         if _UPLOAD_DIR is None:
-            _UPLOAD_DIR = tempfile.mkdtemp(prefix="myos-uploads-")
+            _UPLOAD_DIR = tempfile.mkdtemp(prefix="leobot-uploads-")
         return _UPLOAD_DIR
 
 
@@ -182,7 +182,7 @@ def restrict_new_files():
 def health_proof(nonce):
     """HMAC-SHA256(AUTH_TOKEN, nonce): lets the launcher verify server identity."""
     # The context prefix keeps this proof from ever matching an HMAC made for another purpose.
-    return hmac.new(AUTH_TOKEN.encode(), b"myos-healthz:" + nonce.encode(), "sha256").hexdigest()
+    return hmac.new(AUTH_TOKEN.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
 
 
 def write_token_file(path=None):
@@ -1040,7 +1040,7 @@ def _apps_rpc(token, method, params):
         _, sid = apps_relay.handle(
             {"jsonrpc": "2.0", "id": 0, "method": "initialize",
              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                        "clientInfo": {"name": "myos", "version": "1"}}}, ctx, None, upstream, ROOT)
+                        "clientInfo": {"name": "leobot", "version": "1"}}}, ctx, None, upstream, ROOT)
         apps_relay.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, ctx, sid, upstream, ROOT)
         _API_APP_SESSIONS[token] = sid
     reply, sid = apps_relay.handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},

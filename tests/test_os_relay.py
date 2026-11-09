@@ -54,13 +54,13 @@ class Protocol(unittest.TestCase):
 
 class Environment(unittest.TestCase):
     def test_workspace_comes_from_the_token_never_the_caller(self):
-        with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": "hq", "MYOS_APPS_TOKEN": "t", "MYOS_OS_TOKEN": "o"}):
+        with mock.patch.dict(os.environ, {"LEOBOT_WORKSPACE": "hq", "LEOBOT_APPS_TOKEN": "t", "LEOBOT_OS_TOKEN": "o"}):
             env = os_relay.env_for({"ws": "acme", "readonly": True, "apps_used": True})
-        self.assertEqual((env["MYOS_WORKSPACE"], env["MYOS_SHARED"], env["MYOS_READONLY"]), ("acme", "1", "1"))
+        self.assertEqual((env["LEOBOT_WORKSPACE"], env["LEOBOT_SHARED"], env["LEOBOT_READONLY"]), ("acme", "1", "1"))
         self.assertEqual(env[chat_session.APPS_USED_ENV], "1")
-        self.assertNotIn("MYOS_APPS_TOKEN", env)
-        self.assertNotIn("MYOS_OS_TOKEN", env)
-        self.assertNotIn("MYOS_READONLY", os_relay.env_for(CTX))
+        self.assertNotIn("LEOBOT_APPS_TOKEN", env)
+        self.assertNotIn("LEOBOT_OS_TOKEN", env)
+        self.assertNotIn("LEOBOT_READONLY", os_relay.env_for(CTX))
 
     def test_memory_is_not_written_from_a_shared_thread(self):
         text, failed = os_relay.run_osctl(["remember", "--bot", "cos", "--text", "x"], "", CTX, ROOT)
@@ -76,10 +76,10 @@ class Environment(unittest.TestCase):
 class SharedReads(unittest.TestCase):
     def guard(self, path, shared=True):
         args = mock.Mock(cmd="read-file", path=path, project=None)
-        env = {"MYOS_SHARED": "1"} if shared else {}
+        env = {"LEOBOT_SHARED": "1"} if shared else {}
         with mock.patch.object(osctl, "_owners", return_value={}), mock.patch.dict(os.environ, env, clear=False):
             if not shared:
-                os.environ.pop("MYOS_SHARED", None)
+                os.environ.pop("LEOBOT_SHARED", None)
             osctl._guard(args, "acme")
 
     def test_shared_reads_only_this_workspace_and_public_docs(self):
@@ -119,7 +119,7 @@ class SharedCommand(unittest.TestCase):
         cfg = json.loads(self.flag(cmd, "--mcp-config")[0])
         self.assertEqual(list(cfg["mcpServers"]), ["os"])
         self.assertTrue(cfg["mcpServers"]["os"]["url"].endswith(chat_session.OS_MCP_PATH))
-        self.assertNotIn("MYOS_OS_TOKEN", " ".join(cmd).replace("${MYOS_OS_TOKEN}", ""))  # token rides in env
+        self.assertNotIn("LEOBOT_OS_TOKEN", " ".join(cmd).replace("${LEOBOT_OS_TOKEN}", ""))  # token rides in env
 
     def test_web_stays_as_usual(self):
         cmd = self.cmd(with_web=True, os_port=8765, web_domains=["example.org"])

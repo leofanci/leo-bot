@@ -110,7 +110,7 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     skills. Brief/voice text is untrusted input, so it must not be able to steer
     the model into running commands, reading files or fetching URLs.
     """
-    from dashboard.engines.registry import for_job  # the engine its turn runs on (MYOS_ENGINE)
+    from dashboard.engines.registry import for_job  # the engine its turn runs on (LEOBOT_ENGINE)
 
     try:
         engine = for_job()

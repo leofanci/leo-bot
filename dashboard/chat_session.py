@@ -40,7 +40,7 @@ class ChatSession:
         self._last_bot = None  # bot that spoke last (server routes untagged turns to it)
         self._pending_bot = None
         # Workspace isolation, set by the server before each turn: osctl reads
-        # MYOS_WORKSPACE; deny_dirs are other workspaces' folders (no Read/Grep).
+        # LEOBOT_WORKSPACE; deny_dirs are other workspaces' folders (no Read/Grep).
         self.workspace = None
         self.deny_dirs = ()
         self.deny_files = ()  # single files, same rule (stores with every workspace)

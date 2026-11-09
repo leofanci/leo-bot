@@ -72,7 +72,7 @@ def test_migration_runs_once(self):               # a second load keeps ids and 
 def test_migration_keeps_a_stale_path(self):      # row kept, usable() False
 def test_new_links_default_to_edit(self):
 def test_add_same_path_twice_keeps_one_row(self):
-def test_refuses_inside_myos_and_glob_characters(self):
+def test_refuses_inside_leobot_and_glob_characters(self):
     for bad in (self.root / "projects", self.tmp / "app[1]", self.tmp / "a*"):
         with self.assertRaises(folders.FolderError): folders.normalize_path(str(bad), self.root)
 
@@ -144,9 +144,9 @@ def test_default_active_turns_cto_on_with_any_folder(self):
 def test_update_project_adds_and_never_rewrites_the_line(self):
 # tests/test_security_review.py, next to the existing _emit test
 def test_shared_osctl_never_shows_folders(self):
-    # osctl._emit with {"project": {"folders": [{"path": "/srv/app"}]}} under MYOS_SHARED
+    # osctl._emit with {"project": {"folders": [{"path": "/srv/app"}]}} under LEOBOT_SHARED
     self.assertNotIn("/srv/app", out.getvalue())
-def test_osctl_in_a_bot_turn_cannot_add_a_folder(self):  # MYOS_WORKSPACE set, --local-folder refused
+def test_osctl_in_a_bot_turn_cannot_add_a_folder(self):  # LEOBOT_WORKSPACE set, --local-folder refused
 ```
 
 - [ ] **Step 2: Run them.** `python3 -m unittest tests.test_folders tests.test_security_review -v`. Expected: the new tests FAIL.
@@ -211,7 +211,7 @@ class LiveClaudeFolders(unittest.TestCase):
 
 - [ ] **Step 3: Implement in `build_cmd`.** One `--add-dir` per `read_dirs` entry. Secret `Read` denies for each. `APP_TOOLS` when `read_dirs` is not empty. `Edit` and `Write` in `--tools` plus the scoped rules when `edit_dirs` is not empty. Rules use the `//<path>` form, with `**/<dir>/**` for never-write directories and `**/<name>` for files. Each `deny_dirs` entry also gets `Edit` and `Write` denies.
 
-- [ ] **Step 4: Run them, including live.** Expected: PASS. If the `My App (old)` deny rule does not hold, add `(` and `)` to the refused characters in `normalize_path`, add that to `test_refuses_inside_myos_and_glob_characters`, and rename the live fixture.
+- [ ] **Step 4: Run them, including live.** Expected: PASS. If the `My App (old)` deny rule does not hold, add `(` and `)` to the refused characters in `normalize_path`, add that to `test_refuses_inside_leobot_and_glob_characters`, and rename the live fixture.
 
 - [ ] **Step 5: Run the whole suite.** `python3 -m unittest discover -s tests 2>&1 | tail -4`. Expected: OK, after moving the `workspace_dir` and `file_search_mode` keywords in existing tests to the new names.
 
@@ -385,7 +385,7 @@ def test_person_payloads_hold_no_paths(self):
     # walk every GET a person can load (_person_get): the temp folder path never appears
 def test_row_flags(self):                 # missing, not_git, cant_write (chmod 500 folder)
 def test_bad_access_or_unknown_id_is_400(self):
-def test_add_refuses_a_folder_inside_myos(self):
+def test_add_refuses_a_folder_inside_leobot(self):
 def test_server_mode_has_no_chooser(self):
 def test_bot_turn_token_cannot_reach_folder_routes(self):
 ```

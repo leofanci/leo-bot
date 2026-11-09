@@ -358,7 +358,7 @@ def sensitive_path(rel):
 
 
 class TestNoUsageData(unittest.TestCase):
-    def test_myos_authored_data_paths_are_always_private(self):
+    def test_leobot_authored_data_paths_are_always_private(self):
         private_paths = (
             "projects/example/project.md",
             "projects/example/profiles/profile/content/plan.json",
@@ -406,7 +406,7 @@ class TestNoUsageData(unittest.TestCase):
                 hits.append(label)
         self.assertEqual(hits, [], "Old project branding is reachable from Git:\n" + "\n".join(hits))
 
-    def test_current_tree_uses_myos_product_name(self):
+    def test_current_tree_uses_leobot_product_name(self):
         hits = []
         for rel in tracked_paths():
             data = (ROOT / rel).read_bytes()

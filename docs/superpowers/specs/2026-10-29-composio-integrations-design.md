@@ -116,7 +116,7 @@ saves a grant). Shape:
 {
   "composio": {"api_key": "ak_...", "saved": 1761700000},
   "people": {
-    "ceo": {"composio_user_id": "myos-3f9c...", "session_id": "...", "mcp_url": "<composio session mcp url>"}
+    "ceo": {"composio_user_id": "leobot-3f9c...", "session_id": "...", "mcp_url": "<composio session mcp url>"}
   },
   "grants": {
     "hq": {"cos": {"gmail": "write", "googlecalendar": "write"}},
@@ -196,14 +196,14 @@ entry pointing back at the dashboard:
 ```
 --mcp-config '{"mcpServers":{"apps":{"type":"http",
   "url":"http://127.0.0.1:<port>/api/internal/apps/mcp",
-  "headers":{"Authorization":"Bearer ${MYOS_APPS_TOKEN}"}}}}'
+  "headers":{"Authorization":"Bearer ${LEOBOT_APPS_TOKEN}"}}}}'
 --allowedTools mcp__apps
 ```
 
 The token itself is **not** in argv: `ps` shows every process's arguments to
 every local user, while another user cannot read this process's environment.
-It goes in the child env as `MYOS_APPS_TOKEN` (added next to
-`MYOS_WORKSPACE` in `ChatSession.ask`). The builder verifies Claude Code
+It goes in the child env as `LEOBOT_APPS_TOKEN` (added next to
+`LEOBOT_WORKSPACE` in `ChatSession.ask`). The builder verifies Claude Code
 expands `${VAR}` inside an inline `--mcp-config`; if it does not, write the
 config to a `0600` file under `team/` (`mkstemp`) and delete it in the turn's
 `finally`.
@@ -505,7 +505,7 @@ builder's call within these needs:
 
 - Exact Composio endpoint shapes (verify against current docs), including the
   session lockdown fields and the `/link` body.
-- Whether Claude Code expands `${MYOS_APPS_TOKEN}` in an inline
+- Whether Claude Code expands `${LEOBOT_APPS_TOKEN}` in an inline
   `--mcp-config` (else the `0600` temp-file fallback in section 3).
 - UI placement and copy within section 6.
 - Exact app-intent regex and the known-reads list beyond the examples.

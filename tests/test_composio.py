@@ -77,7 +77,7 @@ class Client(unittest.TestCase):
         self.assertNotIn("multi_account", b)
         self.assertIs(b["manage_connections"]["enable"], False)
         self.assertIs(b["workbench"]["enable"], False)
-        self.assertTrue(b["user_id"].startswith("myos-"))
+        self.assertTrue(b["user_id"].startswith("leobot-"))
         self.assertEqual(self.sent[0].get_header("X-api-key"), "ak_secretkey123")
         self.assertTrue(self.sent[0].full_url.startswith(composio.BASE + "/tool_router/session"))
 
@@ -232,7 +232,7 @@ class Client(unittest.TestCase):
                                 {"id": "ca_g2", "toolkit": "gmail", "label": "Second inbox"}])
         url = self.sent[0].full_url
         self.assertIn("statuses=ACTIVE", url)
-        self.assertIn("user_ids=myos-", url)
+        self.assertIn("user_ids=leobot-", url)
 
     def test_rename_account(self):
         self.replies = [FakeResp({})]

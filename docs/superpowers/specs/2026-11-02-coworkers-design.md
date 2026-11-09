@@ -95,7 +95,7 @@ HQ (the holding) cannot be invited into.
   cannot be scoped to one workspace. The turn instead gets one HTTP MCP server
   on the dashboard (`/api/internal/os/mcp`, per-request token, this machine
   only) whose single tool runs osctl with the token's workspace and
-  `MYOS_SHARED`: `remember` refused, `read-file` only under `projects/<ws>/`
+  `LEOBOT_SHARED`: `remember` refused, `read-file` only under `projects/<ws>/`
   and the public docs folders. Web rules unchanged. The linked app's TokenSave
   summary is still injected by the server.
   Saving through a bot ("yes" on an approval in the thread) works for members:

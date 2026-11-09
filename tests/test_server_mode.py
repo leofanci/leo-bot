@@ -1,4 +1,4 @@
-"""MYOS_DEPLOYMENT=server: a stable owner token, Mac-only features off, install scripts sane."""
+"""LEOBOT_DEPLOYMENT=server: a stable owner token, Mac-only features off, install scripts sane."""
 import os
 import stat
 import subprocess
@@ -51,7 +51,7 @@ class Scripts(unittest.TestCase):
 
     def test_setup_binds_nothing_public_and_sets_server_mode(self):
         text = (ROOT / "scripts" / "server-setup.sh").read_text()
-        self.assertIn("MYOS_DEPLOYMENT=server", text)
+        self.assertIn("LEOBOT_DEPLOYMENT=server", text)
         self.assertNotIn("0.0.0.0", text)
 
     def test_server_still_listens_on_loopback_only(self):
@@ -62,8 +62,8 @@ class Scripts(unittest.TestCase):
 class DeploymentSettings(unittest.TestCase):
     def test_mode_comes_from_the_environment(self):
         self.assertEqual(deployment.mode({}), "mac")
-        self.assertEqual(deployment.mode({"MYOS_DEPLOYMENT": "server"}), "server")
-        self.assertEqual(deployment.mode({"MYOS_DEPLOYMENT": "other"}), "mac")
+        self.assertEqual(deployment.mode({"LEOBOT_DEPLOYMENT": "server"}), "server")
+        self.assertEqual(deployment.mode({"LEOBOT_DEPLOYMENT": "other"}), "mac")
 
     def test_the_server_reads_its_mode_from_one_place(self):
         self.assertIn("DEPLOYMENT = deployment_settings.mode()", (ROOT / "dashboard" / "server.py").read_text())
@@ -71,7 +71,7 @@ class DeploymentSettings(unittest.TestCase):
     def test_the_screen_shows_the_guides_commands(self):
         app = (ROOT / "dashboard" / "app.js").read_text()
         guide = (ROOT / "docs" / "server.md").read_text()
-        for line in ('ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
+        for line in ('ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
                      "scripts/leobot-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
             self.assertIn(line, app)
             self.assertIn(line, guide)

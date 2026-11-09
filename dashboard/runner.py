@@ -1,6 +1,6 @@
 """runner.py: run your own bot turns on this Mac, for a Leo Bot on a server.
 
-    python3 -m dashboard.runner --server https://myos.example --token-file ~/.myos-runner-token
+    python3 -m dashboard.runner --server https://leobot.example --token-file ~/.leobot-runner-token
 
 Connects out to the server, takes the turns you send, runs them on this machine's
 agent CLI and your own login, and streams the answers back. Each turn has no shell
@@ -28,7 +28,7 @@ from dashboard.engines.claude_code import ClaudeCodeEngine  # noqa: E402
 POLL_TIMEOUT = 40
 FLUSH_SECONDS = 0.25
 HEARTBEAT_SECONDS = 5   # how soon a Stop reaches a turn that is thinking
-STATE_FILE = Path.home() / ".myos-runner-sessions.json"
+STATE_FILE = Path.home() / ".leobot-runner-sessions.json"
 _CHAT_RE = re.compile(r"[0-9a-f-]{36}")
 _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}")
 _HOST_RE = re.compile(r"[a-z0-9][a-z0-9.-]{0,252}")
@@ -44,7 +44,7 @@ def server_url(raw):
     """The server's address. The token travels in every request, so https unless local."""
     parts = urllib.parse.urlsplit(raw.rstrip("/"))
     if parts.scheme not in ("http", "https") or not parts.hostname:
-        raise ValueError("--server: an https address, e.g. https://myos.example")
+        raise ValueError("--server: an https address, e.g. https://leobot.example")
     if parts.scheme == "http" and parts.hostname not in _LOCAL_HOSTS:
         raise ValueError("--server: use https. Your runner token would travel unencrypted.")
     return raw.rstrip("/")
@@ -185,7 +185,7 @@ def safe_job(job, client, engine, sessions, workdir):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Run your own Leo Bot turns on this Mac")
-    ap.add_argument("--server", required=True, help="your Leo Bot address, e.g. https://myos.example")
+    ap.add_argument("--server", required=True, help="your Leo Bot address, e.g. https://leobot.example")
     ap.add_argument("--token-file", required=True, help="file holding the runner token")
     ap.add_argument("--claude-bin", default="claude")
     args = ap.parse_args(argv)
@@ -206,7 +206,7 @@ def main(argv=None):
     status = engine.status()
     if not status["ok"]:
         sys.exit(f"Claude Code is not ready here: {status['detail']}")
-    workdir = tempfile.mkdtemp(prefix="myos-runner-")  # no project files: nothing here to read
+    workdir = tempfile.mkdtemp(prefix="leobot-runner-")  # no project files: nothing here to read
     sessions = Sessions()
     print(f"Connected to {args.server}. Your messages there now run on this Mac. Ctrl-C to stop.")
     backoff = 1

@@ -94,7 +94,7 @@ class CodexEngine(Engine):
     def turn_env(self, policy, tokens):
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
-                "MYOS_WORKSPACE": policy.workspace or "hq",
+                "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {})}
 
     def turn(self, session, text, policy, model, tokens):

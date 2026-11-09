@@ -594,9 +594,9 @@ class Pick(unittest.TestCase):
 
     def test_job_follows_its_turn(self):
         self.api()
-        with mock.patch.dict(os.environ, {"MYOS_ENGINE": "api:anthropic"}):
+        with mock.patch.dict(os.environ, {"LEOBOT_ENGINE": "api:anthropic"}):
             self.assertEqual(registry.for_job(self.root).id, "api:anthropic")
-        with mock.patch.dict(os.environ, {"MYOS_ENGINE": "api:gone"}), self.assertRaises(EngineRefused):
+        with mock.patch.dict(os.environ, {"LEOBOT_ENGINE": "api:gone"}), self.assertRaises(EngineRefused):
             registry.for_job(self.root)
 
     def test_terminal_defaults_to_the_shell(self):

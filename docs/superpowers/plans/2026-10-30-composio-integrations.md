@@ -18,7 +18,7 @@
 - Store: `team/integrations.json`, written with `bots._atomic_write` (mkstemp ⇒ `0600`), under one module lock.
 - Key never in any API response, prompt, argv, log, or tracked file. API shows only `{"configured": bool, "saved": ts}`.
 - Turn token: `secrets.token_hex(32)`, compared with `hmac.compare_digest`, life = one `_handle_ask` request, hard max age 1800 s.
-- Token goes to the child via env `MYOS_APPS_TOKEN`; `--mcp-config` header value is literally `Bearer ${MYOS_APPS_TOKEN}`.
+- Token goes to the child via env `LEOBOT_APPS_TOKEN`; `--mcp-config` header value is literally `Bearer ${LEOBOT_APPS_TOKEN}`.
 - Relay path: `POST /api/internal/apps/mcp`. Composio tools exposed: only `COMPOSIO_SEARCH_TOOLS`, `COMPOSIO_GET_TOOL_SCHEMAS`, `COMPOSIO_MULTI_EXECUTE_TOOL`.
 - Read verbs (first action word): `GET LIST FETCH SEARCH READ FIND RETRIEVE LOOKUP VIEW CHECK COUNT`.
 - Write verbs (any action word ⇒ not a read): `SEND REPLY FORWARD CREATE ADD INSERT UPDATE PATCH MODIFY EDIT REPLACE MOVE COPY DELETE REMOVE TRASH SHARE INVITE ACCEPT DECLINE SET APPLY MARK ARCHIVE UPLOAD`.
@@ -148,7 +148,7 @@ class Classify(unittest.TestCase):
 - Produces (all take `root=bots.ROOT` last):
   - `load(root) -> dict`; `public(root) -> {"configured": bool, "saved": float|None}`.
   - `api_key(root) -> str | None`; `set_key(key: str, root)` (rejects empty or whitespace, `ValueError`); `remove_key(root)` (also drops `people` sessions, keeps grants).
-  - `person(pid: str, root) -> dict`: ensures `composio_user_id = "myos-" + secrets.token_hex(8)`; returns the row.
+  - `person(pid: str, root) -> dict`: ensures `composio_user_id = "leobot-" + secrets.token_hex(8)`; returns the row.
   - `save_session(pid, session_id: str, mcp_url: str, root)`.
   - `grant(ws: str, bot: str, root) -> dict[str, str]` (default fallback per Global Constraints).
   - `set_grant(ws, bot, apps: dict[str, str], root)`: values only `"read"|"write"`, slugs `^[a-z0-9][a-z0-9_-]{0,63}$`, none in `BLOCKED_TOOLKITS`, else `ValueError`.
@@ -157,7 +157,7 @@ class Classify(unittest.TestCase):
 - [ ] **Step 1: Write failing tests** (temp root per test, like `tests/test_approvals.py` `Store`):
   - `test_key_write_only`: `set_key("ak_x")`; `public()` == `{"configured": True, "saved": <float>}`; `"ak_x" not in json.dumps(public())`.
   - `test_file_mode_0600`: after `set_key`, `oct(path.stat().st_mode & 0o777) == "0o600"`.
-  - `test_person_id_random_and_stable`: `person("ceo")["composio_user_id"]` starts `"myos-"`, same on second call, not containing `"ceo"`.
+  - `test_person_id_random_and_stable`: `person("ceo")["composio_user_id"]` starts `"leobot-"`, same on second call, not containing `"ceo"`.
   - `test_default_and_explicit_empty_grant`: `grant("hq","cos") == {"gmail":"write","googlecalendar":"write"}`; `grant("acme","cos") == {}`; after `set_grant("hq","cos",{})`, `grant("hq","cos") == {}`.
   - `test_set_grant_validates`: `ValueError` for `{"firecrawl":"write"}`, `{"gmail":"all"}`, `{"Bad Slug":"read"}`.
   - `test_remove_key_drops_sessions_keeps_grants`.
@@ -192,7 +192,7 @@ class Classify(unittest.TestCase):
   - All HTTP through one `_opener` built with a `urllib.request.HTTPRedirectHandler` subclass whose `redirect_request` returns `None` (3xx ⇒ `ComposioError`).
 
 - [ ] **Step 1: Write failing tests** patching `core.composio._opener.open` with a fake returning canned bodies (no network):
-  - `test_session_body_locked_down`: captured request JSON has `toolkits.disable` containing `"firecrawl"`, `manage_connections.enable is False`, `workbench.enable is False`, `user_id` starting `myos-`.
+  - `test_session_body_locked_down`: captured request JSON has `toolkits.disable` containing `"firecrawl"`, `manage_connections.enable is False`, `workbench.enable is False`, `user_id` starting `leobot-`.
   - `test_untrusted_mcp_url_rejected`: response `mcp.url = "https://evil.example/mcp"` → `ComposioError`; nothing saved.
   - `test_session_reused`: second `ensure_session` makes no request.
   - `test_redirect_not_followed`: `_opener.handlers` include the no-redirect handler; its `redirect_request(...)` returns `None`.
@@ -310,8 +310,8 @@ class Classify(unittest.TestCase):
 - Produces:
   - `server._needs_apps(text: str, grant: dict[str, str], explicit_skill: bool) -> bool` (spec section 5): `False` if `explicit_skill` or empty grant; `True` on `@apps`/`/apps` (via `_MENTION_RE`); Gmail granted and `_GMAIL_INTENT_RE` (compiled `re.I`: `\b(?:inbox|gmail|unread)\b|\bmy (?:e-?mails?|mail)\b|\breply to (?:him|her|them|this|that|the)\b`); Calendar granted and `_GCAL_INTENT_RE` (`google calendar|\b(?:invite|meeting|call) with\b`); Drive granted and `\b(?:google )?drive\b|google doc`; any other granted app: `\bmy <name-or-slug>\b` (slug underscores as spaces).
   - `ChatSession.apps_used: bool` (restored from `rec.get("apps_used")`), saved by `record_turn` as `"apps_used"`.
-  - `ChatSession._base_cmd(..., apps_port: int | None = None)`: when set, appends `--mcp-config <json>` (server `apps`, type `http`, URL `http://127.0.0.1:{port}/api/internal/apps/mcp`, header `Authorization: Bearer ${MYOS_APPS_TOKEN}`) and adds `mcp__apps` to `--allowedTools`. Keeps `--strict-mcp-config`.
-  - `ChatSession.ask(..., apps_token: str | None = None, apps_port: int | None = None)`: env gets `MYOS_APPS_TOKEN` only when given.
+  - `ChatSession._base_cmd(..., apps_port: int | None = None)`: when set, appends `--mcp-config <json>` (server `apps`, type `http`, URL `http://127.0.0.1:{port}/api/internal/apps/mcp`, header `Authorization: Bearer ${LEOBOT_APPS_TOKEN}`) and adds `mcp__apps` to `--allowedTools`. Keeps `--strict-mcp-config`.
+  - `ChatSession.ask(..., apps_token: str | None = None, apps_port: int | None = None)`: env gets `LEOBOT_APPS_TOKEN` only when given.
 - Turn flow in `_handle_ask` (after `_route_bot`, **before** the `_WRITE_TURN_RE` tag gate):
   1. `grant = integrations.grant(ws, bot_id)` if `integrations.api_key()` else `{}`; `app_turn = _needs_apps(user_msg, grant, bool(explicit))`.
   2. If `app_turn`: skip the tag gate, `skill = None`, no skill body, `may_write = False` (no `APPROVAL:` marker flow), `with_web = False`, `model = chat_session.ESCALATED_MODEL`, `sess.apps_used = True`, mint token with `{ws, bot: bot_id, chat: sess.session_id, room, person: bots.CEO}`.
@@ -336,13 +336,13 @@ class Classify(unittest.TestCase):
   - `test_app_turn_flags` (via `_captured`-style session that accepts `**kw`): app turn → `model == ESCALATED_MODEL`, `with_web False`, `apps_token` present, no tag-gate message although text contains "draft".
   - `test_followup_gets_same_token_teammate_none`; `test_token_revoked_after_request`; `test_apps_used_keeps_web_off` (second turn with `@web` → `with_web False`).
   - `test_no_key_no_apps` (no key → kwargs absent, behavior identical to today).
-  - `tests/test_chat_session.py`: `test_mcp_config_only_with_apps_port`, `test_token_not_in_argv` (token string absent from `_base_cmd(...)` list; `"${MYOS_APPS_TOKEN}"` present), `test_env_has_token` (patch `subprocess.Popen`, assert env).
+  - `tests/test_chat_session.py`: `test_mcp_config_only_with_apps_port`, `test_token_not_in_argv` (token string absent from `_base_cmd(...)` list; `"${LEOBOT_APPS_TOKEN}"` present), `test_env_has_token` (patch `subprocess.Popen`, assert env).
   - `tests/test_chat_store.py`: `test_apps_used_round_trip` (record_turn → restore → `apps_used True`).
   - `tests/test_ai_rules.py`: `test_rail_has_app_rules`, `test_write_gate_app_exception`.
 - [ ] **Step 2: Run** `python3 -m unittest tests.test_server_apps tests.test_chat_session tests.test_chat_store tests.test_ai_rules -v` → FAIL.
 - [ ] **Step 3: Implement** per Interfaces and Turn flow.
 - [ ] **Step 4: Run** same → PASS; then full suite `python3 -m unittest discover -s tests -t .` → `OK` (existing fakes untouched because app kwargs are only passed on app turns).
-- [ ] **Step 5: Builder check:** run one real `claude -p` with `--mcp-config` header `Bearer ${MYOS_APPS_TOKEN}` against a throwaway local HTTP echo (script in the scratchpad, not the repo) and confirm the header arrives expanded. If not expanded: switch to a `0600` `mkstemp` file under `team/` holding the config with the literal token, deleted in the request `finally`; update `test_token_not_in_argv` to assert the token is absent from argv and the file is gone after the turn.
+- [ ] **Step 5: Builder check:** run one real `claude -p` with `--mcp-config` header `Bearer ${LEOBOT_APPS_TOKEN}` against a throwaway local HTTP echo (script in the scratchpad, not the repo) and confirm the header arrives expanded. If not expanded: switch to a `0600` `mkstemp` file under `team/` holding the config with the literal token, deleted in the request `finally`; update `test_token_not_in_argv` to assert the token is absent from argv and the file is gone after the turn.
 - [ ] **Step 6: Commit** `git commit -m "Apps: mount the relay on app turns (escalated model, web off, own approval path)"`
 
 ---

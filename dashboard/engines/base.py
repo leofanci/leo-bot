@@ -26,7 +26,7 @@ class TurnPolicy:
     web: bool = False              # web tools allowed this turn
     web_domains: tuple = ()        # hosts the user typed (fetch only these)
     apps: bool = False             # connected-apps relay this turn
-    workspace: str = "hq"          # MYOS_WORKSPACE
+    workspace: str = "hq"          # LEOBOT_WORKSPACE
     read_dirs: tuple = ()          # linked folders this turn may read and search (absolute)
     edit_dirs: tuple = ()          # of those, the ones it may also change (a subset)
     deny_dirs: tuple = ()

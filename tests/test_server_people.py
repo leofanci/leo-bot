@@ -114,7 +114,7 @@ class Sharing(Base):
         init = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
         auth = {"Authorization": f"Bearer {tok}"}
         code, data, _ = request("POST", server.OS_RELAY_PATH, init, origin="", headers=auth)
-        self.assertEqual((code, data["result"]["serverInfo"]["name"]), (200, "myos"))
+        self.assertEqual((code, data["result"]["serverInfo"]["name"]), (200, "leobot"))
         for host, extra in ((PUBLIC, {}), (LOCAL, {"CF-Connecting-IP": "203.0.113.5"})):
             self.assertEqual(request("POST", server.OS_RELAY_PATH, init, host=host, origin="",
                                      headers={**auth, **extra})[0], 403)

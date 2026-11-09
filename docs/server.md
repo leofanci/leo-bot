@@ -20,10 +20,10 @@ Any Debian or Ubuntu server with 1 GB of memory is enough (Hetzner, DigitalOcean
 spare machine). From a checkout of this repo on your laptop:
 
 ```sh
-ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh
+ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh
 ```
 
-This creates a `myos` user, puts the code in its home folder, installs Claude Code
+This creates a `leobot` user, puts the code in its home folder, installs Claude Code
 and starts a service that restarts on its own. Leo Bot listens on `127.0.0.1:8766` only,
 so nothing is open to the internet yet. Read the script first if you like: it is short.
 
@@ -32,7 +32,7 @@ so nothing is open to the internet yet. Read the script first if you like: it is
 For your own messages to run on your Claude subscription:
 
 ```sh
-sudo -u myos -i claude auth login
+sudo -u leobot -i claude auth login
 ```
 
 Prefer API keys only? Skip this and add a key in HQ, Engines.
@@ -70,7 +70,7 @@ Add a public https address, then invite as usual: [Sharing a workspace](sharing.
 On a server you have one more option, your own domain with Caddy:
 
 ```
-myos.example {
+leobot.example {
     reverse_proxy 127.0.0.1:8766
 }
 ```
@@ -90,13 +90,13 @@ Run the setup script again. It pulls the latest code and restarts the service.
 ## Backups
 
 Everything of yours is in `projects/`, `chats/`, `team/` and `portfolio/` under
-the `myos` user's home folder. Back those folders up. `team/` holds your API keys, so keep the
+the `leobot` user's home folder. Back those folders up. `team/` holds your API keys, so keep the
 backup private.
 
 ## Good to know
 
-- The service runs as its own `myos` user, which holds only Leo Bot, so a bot's reach
+- The service runs as its own `leobot` user, which holds only Leo Bot, so a bot's reach
   on the server ends at that user's files.
 - The login token stays the same across restarts on a server. To change it, delete
-  `team/owner-token` and restart: `systemctl restart myos`.
-- Logs: `journalctl -u myos -f`.
+  `team/owner-token` and restart: `systemctl restart leobot`.
+- Logs: `journalctl -u leobot -f`.

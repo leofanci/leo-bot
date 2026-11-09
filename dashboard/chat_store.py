@@ -205,7 +205,7 @@ DEFAULT_PERSON_DAILY_CAP = 5.0  # dollars per invited person per rolling 24 hour
 
 def person_daily_cap():
     try:
-        return max(0.0, float(os.environ.get("MYOS_PERSON_DAILY_CAP", DEFAULT_PERSON_DAILY_CAP)))
+        return max(0.0, float(os.environ.get("LEOBOT_PERSON_DAILY_CAP", DEFAULT_PERSON_DAILY_CAP)))
     except ValueError:
         return DEFAULT_PERSON_DAILY_CAP
 
