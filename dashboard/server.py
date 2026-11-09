@@ -254,10 +254,17 @@ def pick_local_folder() -> dict:
     return {"path": path, "cancelled": False}
 
 
+# `open` runs these instead of showing them.
+_LAUNCHABLE_SUFFIXES = frozenset({".app", ".command", ".workflow", ".action", ".saver", ".prefpane", ".terminal"})
+
+
 def open_local_folder(path: str) -> None:
     """Open a validated linked directory in the platform file manager."""
     if DEPLOYMENT == "server":
         raise fileops.ActionError("myOS is on a server: there is no file manager to open")
+    target = Path(path)
+    if not target.is_dir() or target.suffix.lower() in _LAUNCHABLE_SUFFIXES:
+        raise fileops.ActionError("only a plain folder can be opened (not an app bundle)")
     if sys.platform == "darwin":
         command = ["/usr/bin/open", path]
     elif sys.platform.startswith("linux"):
