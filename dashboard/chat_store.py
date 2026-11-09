@@ -189,7 +189,10 @@ REACTION_NOTE_LINES = 8
 def reaction_note(rec):
     """People's reactions added since the thread's last bot reply, one line per message."""
     msgs = [m for m in (rec or {}).get("messages") or () if isinstance(m, dict)]
-    since = max((m.get("ts") or 0 for m in msgs if m.get("role") == "assistant"), default=0)
+    # The last bot reply, or the last emoji a bot put in its place (a reply of only a REACT line).
+    since = max([m.get("ts") or 0 for m in msgs if m.get("role") == "assistant"]
+                + [r.get("ts") or 0 for m in msgs for r in m.get("reactions") or ()
+                   if isinstance(r, dict) and r.get("bot")], default=0)
     lines = []
     for m in msgs:
         rows = [r for r in m.get("reactions") or () if isinstance(r, dict) and not r.get("bot")
@@ -233,6 +236,8 @@ def recap(rec, engine_id=None):
         msgs = msgs[int((state or {}).get("seen") or 0):]
     lines, size = [], 0
     for m in reversed(msgs):
+        if not (m.get("content") or "").strip() and not m.get("reactions"):
+            continue  # a reply that was only an emoji or an approval card
         who = m.get("by_name") or ("You" if m.get("role") == "user" else f"@{m.get('bot') or 'bot'}")
         line = f"{who}: {(m.get('content') or '').strip()}{_reactions_tag(m)}"
         size += len(line)
@@ -242,12 +247,17 @@ def recap(rec, engine_id=None):
     return RECAP_HEAD + "\n".join(reversed(lines)) if lines else ""
 
 
+def kept(m):
+    """A message with no text still worth saving: it holds an approval, deliverables or spend."""
+    return any(m.get(k) for k in ("approval", "deliverables", "tokens", "cost"))
+
+
 def _paths(value):
     return {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
 
 
 def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
-                by=None, by_name=None, shared=False, reactions=None):
+                by=None, by_name=None, shared=False, reactions=None, asked_at=None):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
@@ -259,7 +269,10 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     `shared` = this turn ran locked down (an invited person can see the thread);
     the chat keeps `shared` only while every turn did, so a thread with any
     full-tool history (file reads in its session) never reaches people.
-    `reactions` = [(bot_id, emoji)] the bots of this turn put on `user_msg`."""
+    `reactions` = [(bot_id, emoji)] the bots of this turn put on `user_msg`;
+    `asked_at` = when `user_msg` was sent (default: now).
+    A reply with no text (only an emoji, or only an approval) is still kept when it
+    carries an approval, deliverables or spend: cost roll-ups read the messages."""
     rec = load(sess.session_id) or {
         "id": sess.session_id,
         "title": title_from(user_msg),
@@ -270,7 +283,8 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     }
     if "engines" not in rec:  # an older record's turns all ran on Claude Code
         rec["engines"] = {"claude-code": {"seen": len(rec["messages"])}} if rec.get("started") else {}
-    asked = {"role": "user", "content": user_msg, **({"by": by, "by_name": by_name} if by else {})}
+    asked = {"role": "user", "content": user_msg, "ts": asked_at or time.time(),
+             **({"by": by, "by_name": by_name} if by else {})}
     rec["messages"].append(asked)
     for bot_id, emoji in reactions or ():
         e = clean_emoji(emoji)
@@ -279,13 +293,15 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
                 _react(asked, e, bot=bot_id, add_only=True)
             except ValueError:
                 break  # the message is full
-    if reply:
-        msg = {"role": "assistant", "content": reply, "ts": time.time()}
+    if reply or kept(meta or {}):
+        msg = {"role": "assistant", "content": reply or "", "ts": time.time()}
         if bot:
             msg["bot"] = bot
         msg.update({k: v for k, v in (meta or {}).items() if v is not None})
         rec["messages"].append(msg)
     for m in extra or []:
+        if not (m.get("content") or kept(m)):
+            continue
         rec["messages"].append({"role": "assistant", "ts": time.time(),
                                 **{k: v for k, v in m.items() if v is not None}})
     turn_cost = 0
