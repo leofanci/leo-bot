@@ -265,7 +265,7 @@ def _write_atomic(base, target, data):
         # Created after the checks: re-check the folder it landed in is still inside.
         if base not in target.parent.resolve().parents and target.parent.resolve() != base:
             raise ToolError("only files inside a linked folder with edit access can be changed")
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".myos-", suffix=".tmp")
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".leobot-", suffix=".tmp")
     except OSError as e:
         raise ToolError(f"could not write that file: {e.strerror or e}") from None
     try:

@@ -141,8 +141,8 @@ class ClaudeCodeFolders(unittest.TestCase):
         self.assertFalse(hasattr(p, "file_search"))
 
 
-@unittest.skipUnless(shutil.which("claude") and os.environ.get("MYOS_LIVE_CLAUDE"),
-                     "live probe: needs Claude Code and MYOS_LIVE_CLAUDE=1")
+@unittest.skipUnless(shutil.which("claude") and os.environ.get("LEOBOT_LIVE_CLAUDE"),
+                     "live probe: needs Claude Code and LEOBOT_LIVE_CLAUDE=1")
 class LiveClaudeFolders(unittest.TestCase):
     """One real haiku turn with build_cmd's real argv. Every write below is tried; only the
     two edit folders may change on disk."""

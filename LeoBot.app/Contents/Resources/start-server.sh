@@ -34,7 +34,7 @@ fi
 # with HMAC(token, nonce). Anything else holding the port (or a Leo Bot server from
 # another checkout) fails the proof. Python reads the token itself, so it never
 # appears in argv or goes over the wire.
-is_myos() {
+is_leobot() {
     "$PYTHON3" - "$URL" "$REPO/dashboard/.auth-token" <<'PY' 2>/dev/null
 import hmac, json, secrets, sys, urllib.request
 url, token_file = sys.argv[1], sys.argv[2]
@@ -42,11 +42,11 @@ token = open(token_file).read().strip()
 nonce = secrets.token_hex(16)
 with urllib.request.urlopen(f"{url}/healthz?nonce={nonce}", timeout=1) as r:
     proof = json.load(r).get("proof", "")
-want = hmac.new(token.encode(), b"myos-healthz:" + nonce.encode(), "sha256").hexdigest()
+want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
 sys.exit(0 if token and hmac.compare_digest(proof, want) else 1)
 PY
 }
-if is_myos; then
+if is_leobot; then
     echo "RUNNING"
     exit 0
 fi

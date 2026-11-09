@@ -144,7 +144,7 @@ def test_menus_share_one_toggle_that_tracks_its_own_button():
     js = APP_JS.read_text(encoding="utf-8")
     assert "function toggleMenu(btn, menu)" in js
     assert "previousElementSibling?.setAttribute" not in js   # brand menu's sibling is the compose button
-    assert 'toggleMenu(e.currentTarget, $("#brand-menu"))' in js
+    assert "brand-menu" not in js   # the workspace name is a label, not a menu
     assert "toggleMenu(e.currentTarget, e.currentTarget.nextElementSibling)" in js
 
 

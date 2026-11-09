@@ -157,7 +157,7 @@ class Flow(unittest.TestCase):
 class ReadOnly(unittest.TestCase):
     def run_osctl(self, *argv):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"MYOS_READONLY": "1"}), contextlib.redirect_stdout(out):
+        with mock.patch.dict(os.environ, {"LEOBOT_READONLY": "1"}), contextlib.redirect_stdout(out):
             osctl.main(list(argv))
         return json.loads(out.getvalue())
 

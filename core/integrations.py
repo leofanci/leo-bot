@@ -85,7 +85,7 @@ def remove_key(root=bots.ROOT):
 def person(pid, root=bots.ROOT):
     def fn(d):
         row = d.setdefault("people", {}).setdefault(pid, {})
-        row.setdefault("composio_user_id", "myos-" + secrets.token_hex(8))
+        row.setdefault("composio_user_id", "leobot-" + secrets.token_hex(8))
         return json.loads(json.dumps(row))
     return _update(root, fn)
 

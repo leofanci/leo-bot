@@ -117,19 +117,19 @@ class ClientSide(unittest.TestCase):
     def test_runner_turn_has_no_shell_or_files_and_reaches_only_the_server(self):
         sess = runner_client.JobSession({"chat": "c", "rail": "R", "model": "haiku"}, "/tmp/x", False)
         policy = runner_client.job_policy({"policy": {"workspace": "acme"}})
-        cmd = ClaudeCodeEngine().build_cmd(sess, policy, "haiku", os_url="https://myos.example/api/runner/os/mcp")
+        cmd = ClaudeCodeEngine().build_cmd(sess, policy, "haiku", os_url="https://leobot.example/api/runner/os/mcp")
         tools = cmd[cmd.index("--tools") + 1]
         self.assertEqual(tools, "")
         allowed = cmd[cmd.index("--allowedTools") + 1:cmd.index("--disallowedTools")]
         self.assertEqual(allowed, ["mcp__os"])
         config = json.loads(cmd[cmd.index("--mcp-config") + 1])["mcpServers"]["os"]
-        self.assertEqual(config["url"], "https://myos.example/api/runner/os/mcp")
-        self.assertEqual(config["headers"]["X-Runner-Token"], "${MYOS_RUNNER_TOKEN}")
+        self.assertEqual(config["url"], "https://leobot.example/api/runner/os/mcp")
+        self.assertEqual(config["headers"]["X-Runner-Token"], "${LEOBOT_RUNNER_TOKEN}")
         self.assertNotIn("myr_", " ".join(cmd))
 
     def test_runner_token_rides_in_env_not_argv(self):
         env = ClaudeCodeEngine().turn_env(TurnPolicy(shared=True), TurnTokens(os_token="t", runner_token="myr_x"))
-        self.assertEqual(env["MYOS_RUNNER_TOKEN"], "myr_x")
+        self.assertEqual(env["LEOBOT_RUNNER_TOKEN"], "myr_x")
 
 
 class Routes(sp.Base):

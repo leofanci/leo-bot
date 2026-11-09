@@ -10,7 +10,7 @@ options → pros/cons → one recommendation → what would change it.
 ## Workspace structure
 
 ```
-my-os/                          ← your clone; data folders below are gitignored
+leo-bot/                          ← your clone; data folders below are gitignored
 ├── database/data/os.db         ← derived SQLite index (disposable; rebuilt from files)
 ├── portfolio/
 │   ├── milestones.json         ← manually entered dates/events (copy from template)
@@ -56,7 +56,7 @@ Prerequisites: Python 3.10+ (stdlib only, nothing to `pip install`), the Claude 
 (`claude --version`), and for the macOS app, Xcode Command Line Tools.
 
 ```bash
-git clone <this repository> my-os && cd my-os
+git clone <this repository> leo-bot && cd leo-bot
 python3 dashboard/server.py   # open the login link it prints
 ```
 

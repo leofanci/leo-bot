@@ -149,18 +149,18 @@ WEB_TOOLS = ["WebSearch", "WebFetch"]
 # dashboard relay (server.APPS_RELAY_PATH). The turn token rides in the child's
 # env, never in argv (`ps` shows argv to every local user).
 APPS_MCP_PATH = "/api/internal/apps/mcp"
-APPS_TOKEN_ENV = "MYOS_APPS_TOKEN"
+APPS_TOKEN_ENV = "LEOBOT_APPS_TOKEN"
 # A shared thread (an invited person can see it): no Bash/Read/Glob/Grep at all,
 # because Claude Code runs read-only tools and shell reads (cat, `< file`) on any
 # path without asking. Its one Leo Bot tool is the osctl relay (os_relay.py).
 OS_MCP_PATH = "/api/internal/os/mcp"
-OS_TOKEN_ENV = "MYOS_OS_TOKEN"
-RUNNER_TOKEN_ENV = "MYOS_RUNNER_TOKEN"
+OS_TOKEN_ENV = "LEOBOT_OS_TOKEN"
+RUNNER_TOKEN_ENV = "LEOBOT_RUNNER_TOKEN"
 # Set on every turn of a thread that has read an app: osctl then refuses the
 # commands that send text off the machine (research-signal), like web-off does.
-APPS_USED_ENV = "MYOS_APPS_USED"
+APPS_USED_ENV = "LEOBOT_APPS_USED"
 # Which engine this turn runs on: `generate-*` jobs started inside it follow it.
-ENGINE_ENV = "MYOS_ENGINE"
+ENGINE_ENV = "LEOBOT_ENGINE"
 
 # Claude lets a turn Read its project's temp folder. The default one is shared
 # with every dev session in this repo (scratch files, task output), so bots get
@@ -173,7 +173,7 @@ def bot_tmpdir():
     global _BOT_TMPDIR
     with _BOT_TMPDIR_LOCK:
         if _BOT_TMPDIR is None:
-            _BOT_TMPDIR = tempfile.mkdtemp(prefix="myos-bots-")
+            _BOT_TMPDIR = tempfile.mkdtemp(prefix="leobot-bots-")
         return _BOT_TMPDIR
 
 
@@ -318,10 +318,10 @@ class ClaudeCodeEngine(Engine):
     def turn_env(self, policy, tokens):
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
-                "MYOS_WORKSPACE": policy.workspace or "hq",
+                "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(),
                 ENGINE_ENV: self.id,
-                **({"MYOS_READONLY": "1"} if policy.readonly else {}),
+                **({"LEOBOT_READONLY": "1"} if policy.readonly else {}),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),

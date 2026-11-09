@@ -545,9 +545,8 @@ async function renderRail(){
   const dms = _ROOMS.filter(r => r.kind === "dm");
   $("#rail").innerHTML = `
     <div class="rail-head">
-      <button class="ws-name" id="brand-btn" aria-haspopup="menu" aria-expanded="false"${person ? " disabled" : ""}>${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b>${icon("chevron")}</button>
+      <div class="ws-name" id="brand-btn">${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b></div>
       <button class="rail-ib" id="rail-compose" title="New thread" aria-label="New thread">${icon("compose")}</button>
-      <div class="menu brand-menu" id="brand-menu" role="menu"><a id="ws-logo-btn">Workspace logo</a></div>
     </div>
     <div class="rail-scroll">
       <nav class="nav">
@@ -582,8 +581,6 @@ async function renderRail(){
   });
   if ($("#new-room-btn")) $("#new-room-btn").onclick = e => { e.stopPropagation(); closeNav(); window.ChatRooms?.showCanvas(); navigate("#/room/new"); };
   $("#rail-compose").onclick = () => { closeNav(); window.ChatRooms?.newThread(); };
-  $("#brand-btn").onclick = e => { e.stopPropagation(); toggleMenu(e.currentTarget, $("#brand-menu")); };
-  $("#ws-logo-btn").onclick = () => { closeMenus(); closeNav(); window.ChatRooms?.showCanvas(); navigate(`#/workspace/${encodeURIComponent(w.id)}/logo`); };
   window.ChatRooms?.refresh();
   highlight();
 }
@@ -1427,9 +1424,9 @@ async function drawRunners(box, stillOn = () => true){
   box.querySelector("[data-runner-add]").onclick = async () => {
     try {
       const r = await jpost("/api/runners", { name: "My Mac" });
-      const cmd = `(umask 077; printf %s '${r.token}' > ~/.myos-runner-token); chmod 600 ~/.myos-runner-token\npython3 -m dashboard.runner --server ${location.origin} --token-file ~/.myos-runner-token`;
+      const cmd = `(umask 077; printf %s '${r.token}' > ~/.leobot-runner-token); chmod 600 ~/.leobot-runner-token\npython3 -m dashboard.runner --server ${location.origin} --token-file ~/.leobot-runner-token`;
       await drawRunners(box, stillOn);
-      box.querySelector(".runner-new").innerHTML = `<div class="help">On your Mac, inside a my-os checkout, with Claude Code logged in. This is shown once.</div><pre class="runner-cmd"></pre>`;
+      box.querySelector(".runner-new").innerHTML = `<div class="help">On your Mac, inside a leo-bot checkout, with Claude Code logged in. This is shown once.</div><pre class="runner-cmd"></pre>`;
       box.querySelector(".runner-cmd").textContent = cmd;
     } catch (err) { toast("✗ " + err.message); }
   };
@@ -1443,13 +1440,13 @@ function deploymentSection(where){
   const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
   if (where === "server") return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
     <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. To watch its log, run this on the server. Guide: docs/server.md.</div>
-    ${cmd("journalctl -u myos -f")}</section>`;
+    ${cmd("journalctl -u leobot -f")}</section>`;
   return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
-    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a my-os checkout here. They install Leo Bot, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
+    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a leo-bot checkout here. They install Leo Bot, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
     ${cmd(SERVER_STEPS.join("\n"))}</section>`;
 }
 const SERVER_STEPS = [
-  `ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
+  `ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
   "scripts/leobot-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
@@ -1460,7 +1457,7 @@ const ENGINE_MARKS = {
   openai: ["#10A37F", `<g fill="none" stroke="#fff" stroke-width="1.8"><ellipse cx="12" cy="12" rx="3" ry="7.2"/><ellipse cx="12" cy="12" rx="3" ry="7.2" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="3" ry="7.2" transform="rotate(120 12 12)"/></g>`],
   openrouter: ["#6366F1", `<g fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h5c3 0 3 8 6 8h5M4 16h5c3 0 3-8 6-8h5"/><path d="M18 6l2 2-2 2M18 14l2 2-2 2"/></g>`],
   ollama: ["#3B3B3B", `<g fill="#fff"><circle cx="12" cy="13" r="5.5"/><path d="M7.6 9.5L7 4.5l3.2 3zM16.4 9.5L17 4.5l-3.2 3z"/></g><circle cx="10" cy="12.6" r="1" fill="#3B3B3B"/><circle cx="14" cy="12.6" r="1" fill="#3B3B3B"/>`],
-  codex: ["#1F1F1F", `<path d="M7 8l4 4-4 4M13 16h5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
+  codex: ["linear-gradient(135deg,#8A8FFF,#3F3FE6)", `<path d="M7.5 18.5a4.2 4.2 0 0 1-.7-8.3 5.6 5.6 0 0 1 10.8-.9A4.7 4.7 0 0 1 17 18.5z" fill="#fff"/><path d="M9.6 11.2l2.4 2.2-2.4 2.2M13.4 15.7h2.6" fill="none" stroke="#4E52EE" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`],
   gemini: ["#4C7BF4", `<path d="M12 3c.6 5 4 8.4 9 9-5 .6-8.4 4-9 9-.6-5-4-8.4-9-9 5-.6 8.4-4 9-9z" fill="#fff"/>`],
   opencode: ["#2F6F6A", `<path d="M9 8l-4 4 4 4M15 8l4 4-4 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
   custom: ["#B08968", `<path d="M12 4l1.9 5.1L19 11l-5.1 1.9L12 18l-1.9-5.1L5 11l5.1-1.9z" fill="#fff"/>`],

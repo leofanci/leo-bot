@@ -18,9 +18,9 @@ from tests.test_index_projects import write
 
 
 def run(argv, ws=None, shared=False):
-    env = {"MYOS_WORKSPACE": ws or ""}
+    env = {"LEOBOT_WORKSPACE": ws or ""}
     if shared:
-        env["MYOS_SHARED"] = "1"
+        env["LEOBOT_SHARED"] = "1"
     buf = io.StringIO()
     with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(buf):
         code = osctl.main(argv)

@@ -16,10 +16,10 @@ class SpendCap(unittest.TestCase):
                 {"ts": time.time(), "by": "p1", "cost": 4.0},
                 {"ts": time.time(), "by": "p2", "cost": 9.0},
                 {"ts": time.time() - 200_000, "by": "p1", "cost": 9.0}]})
-            with mock.patch.dict(os.environ, {"MYOS_PERSON_DAILY_CAP": "5"}):
+            with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "5"}):
                 self.assertFalse(chat_store.over_cap("p1"))
                 self.assertTrue(chat_store.over_cap("p2"))
-            with mock.patch.dict(os.environ, {"MYOS_PERSON_DAILY_CAP": "0"}):
+            with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "0"}):
                 self.assertFalse(chat_store.over_cap("p2"))
 
 

@@ -237,7 +237,7 @@ class IndexSwapsWhole(Tmp):
 
 class Jobs(Tmp):
     def job_engine(self, env):
-        with mock.patch.dict(os.environ, {"MYOS_ENGINE": env}):
+        with mock.patch.dict(os.environ, {"LEOBOT_ENGINE": env}):
             return registry.for_job(self.root)
 
     def test_a_runner_job_never_lands_on_a_login(self):
@@ -311,9 +311,9 @@ class HostileRunner(unittest.TestCase):
 
 class RunnerClient(unittest.TestCase):
     def test_token_never_travels_in_the_clear(self):
-        self.assertEqual(runner_client.server_url("https://myos.example/"), "https://myos.example")
+        self.assertEqual(runner_client.server_url("https://leobot.example/"), "https://leobot.example")
         self.assertEqual(runner_client.server_url("http://127.0.0.1:8766"), "http://127.0.0.1:8766")
-        for bad in ("http://myos.example", "ftp://x", "myos.example", "http://127.0.0.1.evil.example"):
+        for bad in ("http://leobot.example", "ftp://x", "leobot.example", "http://127.0.0.1.evil.example"):
             with self.assertRaises(ValueError):
                 runner_client.server_url(bad)
 
@@ -475,13 +475,13 @@ class SharedThreadOsctl(Tmp):
 
     def test_a_shared_thread_never_sees_the_linked_folder_path(self):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
+        with mock.patch.dict(os.environ, {"LEOBOT_SHARED": "1"}), mock.patch("sys.stdout", out):
             osctl._emit({"project": {"entity": {"slug": "demo", "local_folder": "/srv/app"}}, "rows": [{"local_folder": "/x"}]})
         self.assertNotIn("local_folder", out.getvalue())
 
     def test_shared_osctl_never_shows_folders(self):
         out = io.StringIO()
-        with mock.patch.dict(os.environ, {"MYOS_SHARED": "1"}), mock.patch("sys.stdout", out):
+        with mock.patch.dict(os.environ, {"LEOBOT_SHARED": "1"}), mock.patch("sys.stdout", out):
             osctl._emit({"project": {"folders": [{"path": "/srv/app"}]}, "rows": [{"folders": ["/srv/x"]}]})
         self.assertNotIn("/srv/app", out.getvalue())
         self.assertNotIn("/srv/x", out.getvalue())
@@ -491,7 +491,7 @@ class SharedThreadOsctl(Tmp):
         self.addCleanup(shutil.rmtree, app, True)
         for argv in (["update-project", "--slug", "demo", "--local-folder", str(app)],
                      ["create-project", "--slug", "newco", "--local-folder", str(app)]):
-            with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": "demo"}), \
+            with mock.patch.dict(os.environ, {"LEOBOT_WORKSPACE": "demo"}), \
                     mock.patch("sys.stdout", io.StringIO()) as out:
                 self.assertEqual(osctl.main(argv), 1, argv)
             self.assertIn("only you can link", out.getvalue())
@@ -504,7 +504,7 @@ class SharedThreadOsctl(Tmp):
         self.assertEqual((out["entity"], out["title"]), ("demo", "x - entity: acme"))
 
     def test_a_milestone_from_a_workspace_stays_in_it(self):
-        with mock.patch.dict(os.environ, {"MYOS_WORKSPACE": "demo", "MYOS_SHARED": "1"}), \
+        with mock.patch.dict(os.environ, {"LEOBOT_WORKSPACE": "demo", "LEOBOT_SHARED": "1"}), \
                 mock.patch.object(osctl, "_owners", _NoCache(lambda: {"demo": "demo", "acme": "acme"})), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(osctl.main(["create-milestone", "--title", "t", "--date", "2030-01-01"]), 0)
@@ -650,7 +650,7 @@ class Files(Tmp):
         token.write_text("myr_x")
         token.chmod(0o644)
         with self.assertRaises(SystemExit) as caught:
-            runner_client.main(["--server", "https://myos.example", "--token-file", str(token)])
+            runner_client.main(["--server", "https://leobot.example", "--token-file", str(token)])
         self.assertIn("chmod 600", str(caught.exception))
         self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o644)
 
@@ -658,7 +658,7 @@ class Files(Tmp):
 
 class NoBotLinksAFolder(unittest.TestCase):
     """CodeQL #124's source is the owner-typed folder path. A bot reaches osctl only through the
-    relay or the api engine's osctl backend; both bind MYOS_WORKSPACE, so --local-folder is refused
+    relay or the api engine's osctl backend; both bind LEOBOT_WORKSPACE, so --local-folder is refused
     before anything is read or written."""
 
     def test_relay_osctl_refuses_local_folder_for_every_kind_of_turn(self):
@@ -678,7 +678,7 @@ class OddTokensAreRefusedNotCrashed(sp.Base):
     str compare_digest raises on it, which used to crash the request."""
 
     def test_non_ascii_owner_cookie_is_forbidden(self):
-        for cookie in ('myos_auth="\\351\\351"', "myos_auth=\xe9"):
+        for cookie in ('leobot_auth="\\351\\351"', "leobot_auth=\xe9"):
             with self.subTest(cookie):
                 code, _, _ = sp.request("GET", "/api/me", headers={"Cookie": cookie})
                 self.assertEqual(code, 403)

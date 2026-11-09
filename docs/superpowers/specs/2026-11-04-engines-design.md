@@ -84,8 +84,8 @@ ACP). Behavior is borrowed, no code.
 - Lockdown pieces: `SECRET_FILE_GLOBS`, `private_read_rules` (denies
   `~/.claude`), workspace `deny_dirs`/`deny_files`, the apps relay
   (`/api/internal/apps/mcp`), the osctl relay (`/api/internal/os/mcp`,
-  `os_relay.py`), `MYOS_WORKSPACE`, `MYOS_READONLY`, `MYOS_SHARED`,
-  `MYOS_APPS_USED`.
+  `os_relay.py`), `LEOBOT_WORKSPACE`, `LEOBOT_READONLY`, `LEOBOT_SHARED`,
+  `LEOBOT_APPS_USED`.
 
 ## Design
 
@@ -101,7 +101,7 @@ class TurnPolicy:            # computed by the server, same inputs as today
     web: bool                # WebSearch allowed this turn
     web_domains: tuple       # hosts the user typed (WebFetch only to these)
     apps: bool               # connected-apps relay this turn
-    workspace: str           # MYOS_WORKSPACE
+    workspace: str           # LEOBOT_WORKSPACE
     workspace_dir: str|None  # linked app folder, read-only
     file_search: bool        # Glob/Grep fallback on the linked folder
     deny_dirs: tuple
@@ -159,7 +159,7 @@ reads (the repo has no third-party Python dependencies; keep it that way).
 
   | Tool | When | How |
   |---|---|---|
-  | `osctl` | always | `os_relay.run_osctl` in-process with the turn's ctx (workspace, readonly, apps_used; `MYOS_SHARED` when shared) |
+  | `osctl` | always | `os_relay.run_osctl` in-process with the turn's ctx (workspace, readonly, apps_used; `LEOBOT_SHARED` when shared) |
   | `read_file` | not shared | Leo Bot checks the path itself: repo files minus `SECRET_FILE_GLOBS`, minus `deny_dirs`/`deny_files`, minus `~/.claude` and every per-person account dir; the linked folder only when `workspace_dir` is set |
   | `search_files` | not shared, `file_search` | Glob/Grep equivalent, same path check |
   | `web_search` | `web` | Anthropic format: the provider's server-side web search tool. OpenAI format: off unless the provider offers one (builder checks OpenRouter's) |
@@ -303,7 +303,7 @@ shared later, so a thread-wide engine cannot hold.
   `generate-*` job started inside a turn run on the sender's account (on the
   teammate bot's engine when it is shared-safe, else the shared engine). The
   server puts an account **reference** in the turn's osctl ctx
-  (`MYOS_ACCOUNT=<person-id|owner|workspace>`, set by `os_relay.env_for`,
+  (`LEOBOT_ACCOUNT=<person-id|owner|workspace>`, set by `os_relay.env_for`,
   never by the model); `generate.py` resolves it to the key itself. No secret value travels through osctl args or a model-visible env.
   Their messages carry the same account label.
 - Every bot message records `engine_id` and `account` (owner / person id /

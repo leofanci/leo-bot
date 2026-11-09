@@ -39,7 +39,7 @@ class Store(unittest.TestCase):
 
     def test_person_id_random_and_stable(self):
         a = integrations.person("ceo", self.root)["composio_user_id"]
-        self.assertTrue(a.startswith("myos-"))
+        self.assertTrue(a.startswith("leobot-"))
         self.assertNotIn("ceo", a)
         self.assertEqual(integrations.person("ceo", self.root)["composio_user_id"], a)
 

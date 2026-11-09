@@ -9,26 +9,26 @@
 set -euo pipefail
 
 TARGET="${1:-}"
-MYOS_USER="${MYOS_USER:-myos}"
+LEOBOT_USER="${LEOBOT_USER:-leobot}"
 if [ -z "$TARGET" ]; then
   echo "Usage: scripts/sync-to-server.sh user@server" >&2
   exit 1
 fi
 case "$TARGET" in -*|*[[:space:]]*) echo "Target must be user@server, not an option." >&2; exit 1 ;; esac
-case "$MYOS_USER" in ""|-*|*[!a-z0-9_-]*) echo "MYOS_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
+case "$LEOBOT_USER" in ""|-*|*[!a-z0-9_-]*) echo "LEOBOT_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REMOTE_HOME="$(ssh "$TARGET" "getent passwd $MYOS_USER | cut -d: -f6")"
+REMOTE_HOME="$(ssh "$TARGET" "getent passwd $LEOBOT_USER | cut -d: -f6")"
 if [ -z "$REMOTE_HOME" ]; then
-  echo "No $MYOS_USER user on $TARGET. Run scripts/server-setup.sh there first." >&2
+  echo "No $LEOBOT_USER user on $TARGET. Run scripts/server-setup.sh there first." >&2
   exit 1
 fi
-APP="$REMOTE_HOME/my-os"
+APP="$REMOTE_HOME/leo-bot"
 
-ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S systemctl stop myos"
+ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S systemctl stop leobot"
 # A failed copy must not leave Leo Bot stopped or the copied files open.
 PRIVATE="$APP/projects $APP/chats $APP/team $APP/portfolio"
 finish() {
-  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $MYOS_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start myos"
+  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $LEOBOT_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start leobot"
 }
 trap finish EXIT
 for dir in projects chats team portfolio; do

@@ -163,7 +163,7 @@ class FolderRoutes(sp.Base):
                 code, out, _ = self.post(route, body)
                 self.assertEqual(code, 400, out)
 
-    def test_add_refuses_a_folder_inside_myos(self):
+    def test_add_refuses_a_folder_inside_leobot(self):
         inside = self.root / "projects" / "acme" / "code"
         inside.mkdir()
         code, out, _ = self.post("add", {"ws": "acme", "path": str(inside)})

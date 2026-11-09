@@ -115,10 +115,10 @@ class ClaudeDriver(unittest.TestCase):
         self.assertIn("claude auth login", last[1])
 
     def test_turn_env_names_the_engine_and_is_never_inherited(self):
-        os.environ["MYOS_ENGINE"] = "api:leak"
-        self.addCleanup(os.environ.pop, "MYOS_ENGINE", None)
+        os.environ["LEOBOT_ENGINE"] = "api:leak"
+        self.addCleanup(os.environ.pop, "LEOBOT_ENGINE", None)
         env = ClaudeCodeEngine().turn_env(TurnPolicy(), cs.TurnTokens())
-        self.assertEqual(env["MYOS_ENGINE"], "claude-code")
+        self.assertEqual(env["LEOBOT_ENGINE"], "claude-code")
 
     def test_status_when_not_installed(self):
         row = ClaudeCodeEngine("no-such-binary-xyz").status()
