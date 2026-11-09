@@ -1220,43 +1220,67 @@ async function renderTeam(){
   let integ = { configured: false, connected: [] };
   let pv = null, link = "";
   const person = isPerson();
+  const opened = new Set();  // bots whose details are open: kept across redraws
   const draw = () => {
     const wsApps = Object.keys(integ.picked?.[_WS] || {}).sort();  // apps with an account ticked here
-    const depth = b => { let d = 0, cur = b; while (cur && cur.reports_to !== "ceo" && d < 5) { cur = botById(cur.reports_to); d++; } return d; };
-    const rows = _BOTS.map(b => {
+    const appName = slug => integ.apps_meta?.[slug]?.name || slug;
+    const grantsOf = b => integ.grants?.[_WS]?.[b.id] || {};
+    // One quiet line per bot; skills, app access and memory wait behind Details.
+    const onRow = b => {
+      const boss = b.reports_to === "ceo" ? "You" : (botById(b.reports_to)?.name || b.reports_to);
+      const c = costs.bots[b.id];
+      const apps = wsApps.filter(s => grantsOf(b)[s]).map(appName);
+      const meta = [`Reports to ${esc(boss)}`,
+        !person && c?.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"}${c.cost ? `, ${fmtCost(c.cost)}` : ""}` : "",
+        apps.length ? esc(apps.join(", ")) : ""].filter(Boolean).join(" · ");
       const own = new Set(b.skills);
       const covered = b.effective_skills.filter(s => !own.has(s));
-      const boss = b.reports_to === "ceo" ? "You (CEO)" : (botById(b.reports_to)?.name || b.reports_to);
-      const coverNote = b.covering.length ? `<small class="team-cover">covering for ${b.covering.map(c => esc(botById(c)?.name || c)).join(", ")}</small>` : "";
-      const offNote = !b.active ? `<small class="team-cover">off · skills handled by ${esc(botById(b.manager)?.name || "Chief of Staff")}</small>` : "";
-      return `<div class="post team-row${b.active ? "" : " off"}" style="margin-left:${depth(b) * 22}px">
+      const open = opened.has(b.id);
+      return `<div class="post team-row" data-bot="${esc(b.id)}">
         ${botAvatar(b)}
         <div class="t"><b>${esc(b.name)}</b> <span class="bot-handle">@${esc(b.handle)}</span>
-          <small>${esc(b.about)}</small>
-          <small>Reports to ${esc(boss)}</small>
-          <div class="team-skills">${b.skills.map(s => `<span class="tag">${esc(s)}</span>`).join("")}${covered.map(s => `<span class="tag covered" title="covering">${esc(s)}</span>`).join("")}</div>
-          ${coverNote}${offNote}
-          ${person ? "" : `<small class="team-usage">${(() => { const c = costs.bots[b.id]; return c && c.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"} · ${fmtUsage(c.tokens, c.cost)} (est., ${costs.days}d)` : `no replies in ${costs.days}d`; })()}
-            · <a class="mem-toggle" data-mem="${esc(b.id)}">Memory</a></small>`}
-          <div class="mem-box" hidden></div>
-          ${integ.configured && wsApps.length && _WS ? `<div class="app-grants">${wsApps.map(slug => {
-            const scope = integ.grants?.[_WS]?.[b.id]?.[slug];
-            return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(integ.apps_meta?.[slug]?.name || slug)} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
+          <small class="team-about">${esc(b.about)}</small><small class="team-meta">${meta}</small></div>
+        <button class="more team-more" data-bot-more="${esc(b.id)}" aria-expanded="${open}">Details</button>
+        ${person ? "" : b.locked ? `<span class="team-fixed" title="Other bots roll up to it">Always on</span>` : `<button class="more" data-bot-toggle="${esc(b.id)}" data-on="1">Switch off</button>`}
+        <div class="team-detail"${open ? "" : " hidden"}>
+          <div class="td-sec"><h4>Skills</h4><div class="team-skills">${b.skills.map(s => `<span class="tag">${esc(s)}</span>`).join("")}${covered.map(s => `<span class="tag covered">${esc(s)}</span>`).join("")}</div>
+            ${b.covering.length ? `<small>Outlined ones it covers for ${b.covering.map(x => esc(botById(x)?.name || x)).join(", ")}, switched off.</small>` : ""}</div>
+          ${!person && integ.configured && wsApps.length ? `<div class="td-sec"><h4>Apps</h4><div class="app-grants">${wsApps.map(slug => {
+            const scope = grantsOf(b)[slug];
+            return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(appName(slug))} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
               ${["", "read", "write"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
-          }).join("")}</div>` : ""}
+          }).join("")}</div><small>Read + write still asks you before anything that isn't a read.</small></div>` : ""}
+          ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
-        ${b.recommended && !b.active ? `<span class="tag">recommended</span>` : ""}
-        ${person ? "" : b.locked ? `<span class="tag">always on</span>` : `<button class="go" data-bot-toggle="${esc(b.id)}" data-on="${b.active ? 1 : 0}">${b.active ? "Switch off" : "Switch on"}</button>`}
       </div>`;
-    }).join("");
+    };
+    const offRow = b => `<div class="post team-row off">
+        ${botAvatar(b)}
+        <div class="t"><b>${esc(b.name)}</b> <small class="team-meta">${esc(botById(b.manager)?.name || "Chief of Staff")} handles its skills${b.recommended ? " · recommended here" : ""}</small></div>
+        ${person ? "" : `<button class="go" data-bot-toggle="${esc(b.id)}" data-on="0">Switch on</button>`}
+      </div>`;
+    const on = _BOTS.filter(b => b.active), off = _BOTS.filter(b => !b.active);
     const t = costs.total || {};
-    const grantHelp = !integ.configured || !(integ.connected || []).length ? ""
-      : wsApps.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>`
-      : `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>`;
-    $("#team-list").innerHTML = peopleSection(pv, link) + grantHelp
-      + `<div class="team-total">${!person && t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>${pv ? "</section>" : ""}`;
+    const noApps = !person && integ.configured && (integ.connected || []).length && !wsApps.length
+      ? `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>` : "";
+    $("#team-list").innerHTML = peopleSection(pv, link) + noApps
+      + `${!person && t.turns ? `<div class="team-total">Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>` : ""}
+        <div class="rowc">${on.map(onRow).join("")}</div>
+        ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}`;
     wirePeople();
-    $("#team-list").querySelectorAll("[data-mem]").forEach(a => a.onclick = () => toggleMemory(a.closest(".team-row"), a.dataset.mem));
+    $("#team-list").querySelectorAll("[data-bot-more]").forEach(btn => btn.onclick = () => {
+      const row = btn.closest(".team-row"), detail = row.querySelector(".team-detail"), id = btn.dataset.botMore;
+      const open = detail.hidden;
+      detail.hidden = !open;
+      btn.setAttribute("aria-expanded", String(open));
+      open ? opened.add(id) : opened.delete(id);
+      const mem = row.querySelector(".mem-box");
+      if (mem && open && mem.hidden) toggleMemory(row, id);
+    });
+    // Details left open survive a redraw: refill their memory.
+    $("#team-list").querySelectorAll(".team-row[data-bot]").forEach(row => {
+      if (opened.has(row.dataset.bot) && row.querySelector(".mem-box")) toggleMemory(row, row.dataset.bot);
+    });
     $("#team-list").querySelectorAll("[data-grant-bot]").forEach(sel => sel.onchange = async () => {
       const bot = sel.dataset.grantBot;
       // No prototype: an app slug is only ever a plain key here.
@@ -1308,7 +1332,7 @@ async function renderTeam(){
     <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · ${esc(_WS === "hq" ? "holding" : wsById(_WS)?.kind || "")}</div><h1 class="title">Team</h1></div></div>
     <div class="scroll"><div class="help">${person
       ? "Who works in this workspace: people and bots. Tag a bot with @handle in chat."
-      : `Who works in this workspace: ${_WS === "hq" ? "the bots (people join project workspaces, never HQ)" : "people you invited and the bots"}. Switched-off bots leave the sidebar and their skills go to their manager. Each workspace has its own team and memory. Tag a teammate with @handle in chat.`}</div><div id="team-list"></div>${person ? `<div id="team-runners"></div>` : ""}</div>`;
+      : `${_WS === "hq" ? "HQ's bots. People join project workspaces, never HQ." : "People you invited and this workspace's bots."} Tag a teammate with @handle in chat. A switched-off bot's skills go to its manager.`}</div><div id="team-list"></div>${person ? `<div id="team-runners"></div>` : ""}</div>`;
   if (person) drawRunners($("#team-runners"), stillOn);
   $("#team-list").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
   if (!_BOTS.length) _BOTS = (await api(`/api/bots?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).bots || [];
