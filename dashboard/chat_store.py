@@ -161,10 +161,15 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     for m in extra or []:
         rec["messages"].append({"role": "assistant", "ts": time.time(),
                                 **{k: v for k, v in m.items() if v is not None}})
+    turn_cost = 0
     for part in [meta or {}] + list(extra or []):
         for key in ("tokens", "cost"):
             if part.get(key):
                 rec[key] = (rec.get(key) or 0) + part[key]
+        turn_cost += part.get("cost") or 0
+    if turn_cost:  # per-turn ledger, so a person's recent spend can be summed
+        rec["spend"] = ((rec.get("spend") or [])[-200:]
+                        + [{"ts": time.time(), "by": by or "owner", "cost": turn_cost}])
     rec.update({
         "updated": time.time(),
         "scope": list(scope) if scope else None,
@@ -193,3 +198,29 @@ def record_turn(*args, **kwargs):
 
 
 record_turn.__doc__ = _record_turn.__doc__
+
+
+DEFAULT_PERSON_DAILY_CAP = 5.0  # dollars per invited person per rolling 24 hours; 0 = no cap
+
+
+def person_daily_cap():
+    try:
+        return max(0.0, float(os.environ.get("MYOS_PERSON_DAILY_CAP", DEFAULT_PERSON_DAILY_CAP)))
+    except ValueError:
+        return DEFAULT_PERSON_DAILY_CAP
+
+
+def spent_since(person_id, seconds=86_400):
+    """What this person's turns cost over the last `seconds`, across every chat."""
+    cutoff = time.time() - seconds
+    total = 0.0
+    for rec in records():
+        for row in rec.get("spend") or ():
+            if isinstance(row, dict) and row.get("by") == person_id and (row.get("ts") or 0) >= cutoff:
+                total += float(row.get("cost") or 0)
+    return total
+
+
+def over_cap(person_id):
+    cap = person_daily_cap()
+    return bool(cap) and spent_since(person_id) >= cap

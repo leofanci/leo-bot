@@ -56,6 +56,22 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
 _SHARED_BLOCKED = {"remember", "research-signal"}  # research-signal sends text off the machine
+# A thread invited people can see runs an ALLOWLIST: a new command is refused there until
+# someone adds it here (tests/test_case_variants.py fails on any command in neither set).
+_SHARED_ALLOWED = frozenset({
+    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
+    "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
+    "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
+    "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
+    "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "mark-done", "read-file", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
+    "update-brief-spec", "update-channel", "update-experiment", "update-feature",
+    "update-intake", "update-memo", "update-milestone", "update-phase", "update-post",
+    "update-profile", "update-project", "update-roadmap", "update-strategy",
+    "update-subsections", "update-technical", "update-validation-tab", "update-voice",
+})
 _SHARED_READ_PREFIXES = ("skills/", "docs/", "templates/", "prompts/", "bots/")
 # Args whose value names an existing entity (create commands mint new slugs,
 # which resolve to no owner and pass).
@@ -915,7 +931,7 @@ def main(argv=None):
         if os.environ.get("MYOS_SHARED"):
             if not ws:
                 raise fileops.ActionError("a shared thread runs inside one project workspace")
-            if args.cmd in _SHARED_BLOCKED:
+            if args.cmd in _SHARED_BLOCKED or args.cmd not in _SHARED_ALLOWED:
                 raise fileops.ActionError(f"{args.cmd} is not available in a thread invited people "
                                           "can see; the owner adds what the team should remember in Team")
         if ws:
