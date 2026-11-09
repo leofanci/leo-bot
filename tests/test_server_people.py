@@ -38,7 +38,7 @@ def request(method, path, body=None, *, owner=False, member=None, host=LOCAL, or
     if owner:
         jar.append(f"{server.AUTH_COOKIE}={server.AUTH_TOKEN}")
     if member:
-        jar.append(f"{server.MEMBER_COOKIE}={member}")
+        jar.append(f"{'__Host-' if host == PUBLIC else ''}{server.MEMBER_COOKIE}={member}")
     if jar:
         msg["Cookie"] = "; ".join(jar)
     if origin is None:
@@ -156,7 +156,7 @@ class InviteAndJoin(Base):
         cookie = hdrs["Set-Cookie"]
         self.assertIn("HttpOnly", cookie)
         self.assertIn("Secure", cookie)
-        token = re.match(rf"{server.MEMBER_COOKIE}=([^;]+)", cookie).group(1)
+        token = re.match(rf"__Host-{server.MEMBER_COOKIE}=([^;]+)", cookie).group(1)  # https: host-locked name
 
         code, me, _ = request("GET", "/api/me", member=token, host=PUBLIC)
         self.assertEqual((code, me["name"], me["ws"]), (200, "Pat", {"acme": "admin"}))

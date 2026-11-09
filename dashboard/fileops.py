@@ -1124,18 +1124,28 @@ def delete_profile(slug: str) -> dict:
     return {"slug": slug, "deleted": True}
 
 
-def delete_activity(title: str) -> dict:
+def delete_activity(title: str, entity_slug: str = "") -> dict:
+    """Delete one activity row: this exact title (and workspace, when given). Several rows
+    with the same title in different workspaces need the workspace named, never a blanket delete."""
     path = ROOT / "portfolio" / "activities.md"
     if not path.exists():
         raise ActionError("activities.md not found")
-    text = path.read_text(encoding="utf-8")
-    escaped = re.escape(title)
-    new_text, n = re.subn(
-        rf"^- \[[ x]\] {escaped}(?: — [^\n]*)?[ \t]*(?:\n|$)", "", text, flags=re.MULTILINE
-    )
-    if n == 0:
+    title, entity_slug = str(title or "").strip(), str(entity_slug or "").strip()
+    lines = path.read_text(encoding="utf-8").split("\n")
+    hits = []
+    for i, line in enumerate(lines):
+        m = re.match(r"^- \[[ x]\] (.*)$", line)
+        if not m:
+            continue
+        parts = [p.strip() for p in m.group(1).split(" — ")]
+        if title and parts[0] == title and (not entity_slug or f"entity: {entity_slug}" in parts[1:]):
+            hits.append(i)
+    if not hits:
         raise ActionError(f"activity '{title}' not found")
-    path.write_text(new_text, encoding="utf-8")
+    if len(hits) > 1:
+        raise ActionError(f"several activities are called '{title}': say which workspace")
+    del lines[hits[0]]
+    path.write_text("\n".join(lines), encoding="utf-8")
     reindex()
     return {"title": title, "deleted": True}
 

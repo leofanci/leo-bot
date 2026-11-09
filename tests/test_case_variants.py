@@ -81,24 +81,34 @@ class AcpToolIdentity(unittest.TestCase):
 class AppReadVerbs(unittest.TestCase):
     def test_read_word_with_call_out_is_not_a_read(self):
         from core import app_rules
-        for slug in ("ACME_GET_AND_RUN_SCRIPT", "ACME_FETCH_URL_AND_POST", "ACME_LIST_AND_DOWNLOAD"):
+        for slug in ("ACME_GET_AND_EXECUTE_SCRIPT", "ACME_FETCH_URL_AND_PUBLISH", "ACME_LIST_AND_SUBMIT"):
             self.assertFalse(app_rules.is_read(slug, "acme"), slug)
-        self.assertTrue(app_rules.is_read("ACME_LIST_ITEMS", "acme"))
+        for slug in ("ACME_LIST_ITEMS", "ACME_GET_A_PULL_REQUEST", "ACME_GET_POST", "ACME_LIST_SCHEDULE"):
+            self.assertTrue(app_rules.is_read(slug, "acme"), slug)
 
 
 class ActivityDelete(unittest.TestCase):
-    def test_delete_matches_whole_title_only(self):
+    def setUp(self):
         from dashboard import fileops
-        with tempfile.TemporaryDirectory() as tmp:
-            old = fileops.ROOT
-            fileops.ROOT = Path(tmp)
-            self.addCleanup(setattr, fileops, "ROOT", old)
-            (Path(tmp) / "portfolio").mkdir()
-            f = Path(tmp) / "portfolio" / "activities.md"
-            f.write_text("- [ ] Call — entity: acme\n- [ ] Call back later — entity: acme\n- [ ] Call\n")
-            with mock.patch.object(fileops, "reindex"):
-                fileops.delete_activity("Call")
-            self.assertEqual(f.read_text(), "- [ ] Call back later — entity: acme\n")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.fileops, self.f = fileops, Path(tmp.name) / "portfolio" / "activities.md"
+        self.f.parent.mkdir()
+        for p in (mock.patch.object(fileops, "ROOT", Path(tmp.name)), mock.patch.object(fileops, "reindex")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_delete_matches_whole_title_only(self):
+        self.f.write_text("- [ ] Call — entity: acme\n- [ ] Call back later — entity: acme\n")
+        self.fileops.delete_activity("Call")
+        self.assertEqual(self.f.read_text(), "- [ ] Call back later — entity: acme\n")
+
+    def test_same_title_in_two_workspaces_needs_the_workspace(self):
+        self.f.write_text("- [ ] Weekly review — entity: acme\n- [ ] Weekly review — entity: demo\n")
+        with self.assertRaises(self.fileops.ActionError):
+            self.fileops.delete_activity("Weekly review")
+        self.fileops.delete_activity("Weekly review", "demo")
+        self.assertEqual(self.f.read_text(), "- [ ] Weekly review — entity: acme\n")
 
 
 class TerminalResize(unittest.TestCase):
@@ -132,6 +142,8 @@ class AppReadUrlArguments(unittest.TestCase):
         from core import app_rules
         cat, grant = ["acme"], {"acme": "write"}
         self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "mail"})[0], "read")
+        for text in ("from:bob@example.com", "deploy.sh", "notes.txt"):  # an address or file name is not a link
+            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": text})[0], "read", text)
         for args in ({"url": "https://evil.example/?d=1"}, {"a": [{"b": "www.evil.test"}]}, {"q": "x.attacker.example"}):
             self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args)[0], "hold", args)
         self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"})[0], "refuse")
@@ -152,3 +164,26 @@ class SharedAndDeny(unittest.TestCase):
                 dirs = server._workspace_deny_dirs("mine", [])
             self.assertIn(str(root / "projects" / "other"), dirs)
             self.assertNotIn(str(root / "projects" / "mine"), dirs)
+
+
+class MemberCookieName(unittest.TestCase):
+    def test_https_uses_host_prefix(self):
+        from dashboard import server
+        h = server.Handler.__new__(server.Handler)
+        with mock.patch.object(server.Handler, "_secure", return_value="; Secure"):
+            self.assertEqual(h._member_name(), "__Host-" + server.MEMBER_COOKIE)
+        with mock.patch.object(server.Handler, "_secure", return_value=""):
+            self.assertEqual(h._member_name(), server.MEMBER_COOKIE)
+
+
+class MigrateRefusedMissing(unittest.TestCase):
+    def test_missing_path_in_a_refused_place_is_dropped(self):
+        home = Path.home().resolve()
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+        for raw, kept in ((str(home / ".ssh" / "nokeys-xyz"), False), (str(root / "projects" / "other-x"), False)):
+            with self.assertRaises(folders.FolderError):
+                folders.normalize_path(raw, root, must_exist=False)
+        # a harmless missing path passes the rules when existence is not required
+        out = folders.normalize_path(str(home / "Documents" / "missing-app-xyz"), root, must_exist=False)
+        self.assertTrue(out.endswith("missing-app-xyz"))

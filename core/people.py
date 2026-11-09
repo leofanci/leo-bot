@@ -160,10 +160,7 @@ def join(root=bots.ROOT, code=None, name=None, *, token=None):
         everyone = _people(root)
         if found:
             pid = found["id"]
-            # Fresh token on every join: a cookie planted on this device before the join
-            # (cookie tossing) must not stay valid for whoever planted it.
-            token_out = secrets.token_urlsafe(32)
-            everyone[pid]["token_hash"] = _hash(token_out)
+            token_out = token  # the device keeps its token, so its other browsers stay signed in
         else:
             pid = "p-" + secrets.token_hex(6)
             token_out = secrets.token_urlsafe(32)

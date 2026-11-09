@@ -102,20 +102,22 @@ def _below(path, base):
 
 def under(path, base) -> bool:
     """True when `path` is `base` or inside it, by file identity: a case variant on a
-    case-insensitive disk (or any other spelling of the same place) counts."""
+    case-insensitive disk counts. Cheap: the plain spelling is tried first, and the disk is
+    asked once, only for a path whose case-folded start matches `base`."""
     path, base = Path(path), Path(base)
-    for candidate in (path, *path.parents):
-        if candidate == base:
-            return True
-        try:
-            if os.path.samefile(candidate, base):
-                return True
-        except OSError:
-            continue
-    return False
+    if path == base or base in path.parents:
+        return True
+    bp, pp = base.parts, path.parts
+    if len(pp) < len(bp) or [p.casefold() for p in pp[:len(bp)]] != [p.casefold() for p in bp]:
+        return False  # not the same place under any case; symlinks are resolved by callers
+    head = Path(*pp[:len(bp)])
+    try:
+        return os.path.samefile(head, base)
+    except OSError:
+        return True  # base is not on disk (a deny entry): the case-folded match stands
 
 
-def normalize_path(value, root=bots.ROOT) -> str:
+def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     """Return one safe folder as a resolved absolute path, or "" for empty input."""
     raw = str(value or "").strip()
     if not raw:
@@ -127,10 +129,11 @@ def normalize_path(value, root=bots.ROOT) -> str:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise FolderError("local folder must be an absolute path")
-    if not path.exists():
-        raise FolderError(f"local folder does not exist: {path}")
-    if not path.is_dir():
-        raise FolderError(f"local folder is not a directory: {path}")
+    if must_exist:
+        if not path.exists():
+            raise FolderError(f"local folder does not exist: {path}")
+        if not path.is_dir():
+            raise FolderError(f"local folder is not a directory: {path}")
     resolved = path.resolve()
     if has_glob_chars(resolved):
         raise FolderError(_GLOB_MSG)
@@ -265,11 +268,14 @@ def _migrate(ws, root) -> dict:
         try:
             path = normalize_path(raw, root)
         except FolderError as e:
-            # Only a folder that has gone missing is kept (it may be a drive that is not mounted);
-            # a path the rules refuse is dropped, never kept as a readable folder.
-            gone = "does not exist" in str(e) and Path(raw).expanduser().is_absolute() \
-                and not has_glob_chars(raw) and not any(ord(c) < 32 for c in raw)
-            path = str(Path(raw).expanduser()) if gone else ""
+            # Only a folder that has gone missing is kept (it may be a drive that is not mounted),
+            # and only if every other rule would still accept it where it is.
+            path = ""
+            if "does not exist" in str(e):
+                try:
+                    path = normalize_path(raw, root, must_exist=False)
+                except FolderError:
+                    path = ""
         if path and not any(ord(c) < 32 for c in path):
             data["folders"].append({"id": "f1", "path": path, "name": PurePath(path).name or path,
                                     "access": READ})

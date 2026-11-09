@@ -743,8 +743,15 @@ def build_parser():
 JOB_DEADLINE = 1500  # seconds: a model job that hangs ends itself, whoever started it
 
 
+def _on_deadline(signum, frame):
+    # Raised inside whatever the job is doing: subprocess.run kills its child on the way
+    # out, so no model process is left running, and the process exits with a clear code.
+    raise SystemExit("generate.py: stopped after the job deadline")
+
+
 def _arm_deadline():
     if hasattr(signal, "SIGALRM"):
+        signal.signal(signal.SIGALRM, _on_deadline)
         signal.alarm(JOB_DEADLINE)
 
 
