@@ -55,10 +55,17 @@ if [ -z "$reached" ] || ! kill -0 "$TUNNEL" 2>/dev/null; then
   exit 1
 fi
 
+# The token must not sit in another program's argument list (`ps` shows it to every user
+# on this laptop), so the browser opens a private local page that redirects to the link.
+LAUNCH="$(mktemp -d)"
+chmod 700 "$LAUNCH"
+printf '<!doctype html><meta http-equiv="refresh" content="0;url=%s">' "$URL" > "$LAUNCH/open.html"
+chmod 600 "$LAUNCH/open.html"
+trap 'kill "$TUNNEL" 2>/dev/null || true; rm -rf "$LAUNCH"' EXIT INT TERM
 if command -v open >/dev/null; then
-  open "$URL"
+  open "$LAUNCH/open.html"
 elif command -v xdg-open >/dev/null; then
-  xdg-open "$URL"
+  xdg-open "$LAUNCH/open.html"
 else
   echo "Open this in your browser (it holds your login, keep it private): $URL"
 fi

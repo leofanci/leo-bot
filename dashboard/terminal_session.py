@@ -65,11 +65,23 @@ class TerminalSession:
     def resize(self, cols, rows):
         if self.fd is None:
             return
+        try:
+            cols, rows = int(cols), int(rows)
+        except (TypeError, ValueError):
+            return
+        cols, rows = max(1, min(cols, 1000)), max(1, min(rows, 1000))  # struct "H" overflows past 65535
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         try:
             fcntl.ioctl(self.fd, termios.TIOCSWINSZ, winsize)
             if self.pid:
                 os.kill(self.pid, signal.SIGWINCH)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _reap(pid):
+        try:
+            os.waitpid(pid, 0)
         except OSError:
             pass
 
@@ -80,6 +92,8 @@ class TerminalSession:
                 os.kill(self.pid, signal.SIGTERM)
             except OSError:
                 pass
+            # Reap the child so it never lingers as a zombie.
+            threading.Thread(target=self._reap, args=(self.pid,), daemon=True).start()
         if self.fd is not None:
             try:
                 os.close(self.fd)

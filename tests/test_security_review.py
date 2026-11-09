@@ -673,5 +673,27 @@ class NoBotLinksAFolder(unittest.TestCase):
                 self.assertRegex(text, "only you can link|read-only: you were consulted", (cmd, ctx))
 
 
+class OddTokensAreRefusedNotCrashed(sp.Base):
+    """A cookie or bearer token that decodes to non-ASCII text is just a wrong token:
+    str compare_digest raises on it, which used to crash the request."""
+
+    def test_non_ascii_owner_cookie_is_forbidden(self):
+        for cookie in ('myos_auth="\\351\\351"', "myos_auth=\xe9"):
+            with self.subTest(cookie):
+                code, _, _ = sp.request("GET", "/api/me", headers={"Cookie": cookie})
+                self.assertEqual(code, 403)
+
+    def test_non_ascii_bearer_is_unauthorized_on_both_relays(self):
+        live = server.os_relay.TOKENS.mint({"ws": "acme", "readonly": True})
+        self.addCleanup(server.os_relay.TOKENS.revoke, live)
+        live_apps = server.apps_relay.TOKENS.mint({"ws": "acme"})
+        self.addCleanup(server.apps_relay.TOKENS.revoke, live_apps)
+        for path in ("/api/internal/os/mcp", "/api/internal/apps/mcp"):
+            with self.subTest(path):
+                code, _, _ = sp.request("POST", path, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+                                        headers={"Authorization": "Bearer \xe9\xe9"})
+                self.assertIn(code, (401, 403))
+
+
 if __name__ == "__main__":
     unittest.main()

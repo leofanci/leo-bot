@@ -929,7 +929,8 @@ def _entity_slugs() -> set:
 
 
 def _need_free_slug(slug: str) -> None:
-    if slug in _entity_slugs():
+    # Case-blind: on a Mac's disk "Acme" and "acme" are the same folder.
+    if slug.lower() in {s.lower() for s in _entity_slugs()}:
         raise ActionError(f"'{slug}' is already used by a project, profile, channel or product: pick another")
 
 
@@ -1129,7 +1130,7 @@ def delete_activity(title: str) -> dict:
     text = path.read_text(encoding="utf-8")
     escaped = re.escape(title)
     new_text, n = re.subn(
-        rf"^- \[[ x]\] {escaped}[^\n]*\n?", "", text, flags=re.MULTILINE
+        rf"^- \[[ x]\] {escaped}(?: — [^\n]*)?[ \t]*(?:\n|$)", "", text, flags=re.MULTILINE
     )
     if n == 0:
         raise ActionError(f"activity '{title}' not found")
@@ -1228,6 +1229,7 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
         raise ActionError("title is required")
     if not entity:
         raise ActionError("entity (project slug) is required")
+    _need_known_entity(entity)  # an unknown one breaks the index, and with it every write
     portfolio = ROOT / "portfolio"
     portfolio.mkdir(exist_ok=True)
     path = portfolio / "activities.md"

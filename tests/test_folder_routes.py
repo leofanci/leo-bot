@@ -82,7 +82,7 @@ class FolderRoutes(sp.Base):
 
     def test_invited_person_gets_403_on_every_folder_route(self):
         folders.add("acme", str(self.app), root=self.root)
-        member = self.join("acme")
+        _, member = self.join("acme")
         for method, path, body in (("GET", "/api/folders?ws=acme", None),
                                    ("POST", "/api/folders/add", {"ws": "acme", "path": str(self.docs)}),
                                    ("POST", "/api/folders/remove", {"ws": "acme", "id": "f1"}),
@@ -104,7 +104,7 @@ class FolderRoutes(sp.Base):
         server.chat_store.save({"id": cid, "title": "t", "created": 1, "updated": 1, "room": "acme/general",
                                 "scope": ["acme", str(self.app)], "folder_paths": [str(self.app)], "shared": True,
                                 "messages": [{"role": "user", "content": "hi", "ts": 1}], "engines": {}})
-        member = self.join("acme")
+        _, member = self.join("acme")
         with mock.patch.object(server.db, "tree", return_value=tree):
             for path in ("/api/me", "/api/runners", "/api/schemas", "/api/skills-index", "/api/workspaces",
                          "/api/bots?ws=acme", "/api/rooms?ws=acme", "/api/people?ws=acme",

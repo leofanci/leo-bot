@@ -54,7 +54,7 @@ class Tokens:
             for live, (ctx, made) in list(self._live.items()):
                 if now - made > MAX_AGE:
                     del self._live[live]
-                elif hmac.compare_digest(live, token):
+                elif hmac.compare_digest(live.encode(), token.encode()):  # bytes: str raises on non-ASCII
                     return dict(ctx)
         return None
 

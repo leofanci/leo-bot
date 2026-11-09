@@ -101,14 +101,16 @@ class Join(Base):
         pid, token = people.join(self.root, c1, "Pat")
         _, c2 = self.invite(ws="demo", role="admin")
         pid2, token2 = people.join(self.root, c2, "ignored", token=token)
-        self.assertEqual((pid2, token2), (pid, token))
-        self.assertEqual(people.person_by_token(self.root, token)["ws"], {"acme": "member", "demo": "admin"})
+        self.assertEqual(pid2, pid)
+        self.assertNotEqual(token2, token)  # rotated: a cookie planted before the join dies
+        self.assertIsNone(people.person_by_token(self.root, token))
+        self.assertEqual(people.person_by_token(self.root, token2)["ws"], {"acme": "member", "demo": "admin"})
 
     def test_rejoin_keeps_the_higher_role(self):
         _, c1 = self.invite(role="admin")
         _, token = people.join(self.root, c1, "Pat")
         _, c2 = self.invite(role="member")
-        people.join(self.root, c2, "Pat", token=token)
+        _, token = people.join(self.root, c2, "Pat", token=token)
         self.assertEqual(people.person_by_token(self.root, token)["ws"]["acme"], "admin")
 
     def test_unknown_device_token_starts_a_new_person(self):
@@ -149,7 +151,7 @@ class Membership(Base):
     def test_remove_one_of_two_keeps_person(self):
         pid, token = self.join()
         _, c2 = self.invite(ws="demo")
-        people.join(self.root, c2, "Pat", token=token)
+        _, token = people.join(self.root, c2, "Pat", token=token)
         people.remove(self.root, "acme", pid)
         self.assertEqual(people.person_by_token(self.root, token)["ws"], {"demo": "member"})
 

@@ -854,6 +854,14 @@ def _skills_index():
     return out
 
 
+def _retire_threads(match):
+    """Unshare saved threads: the owner keeps them, people never see them again."""
+    for rec in chat_store.records():
+        if rec.get("shared") and match(rec):
+            rec["shared"] = False
+            chat_store.save(rec)
+
+
 def _chat_workspace(rec):
     """Workspace a saved thread belongs to (None: no record yet)."""
     if not rec:
@@ -1475,6 +1483,8 @@ def _approve_app_action(aid, arguments=None):
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "myOS/1.0"
+    # A client that opens a socket and sends nothing must not hold a thread forever.
+    timeout = 60
 
     def end_headers(self):
         self.send_header("Content-Security-Policy", (
@@ -1630,7 +1640,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # malformed cookies are simply unauthenticated
             return False
         value = jar.get(AUTH_COOKIE)
-        return bool(value and hmac.compare_digest(value.value, AUTH_TOKEN))
+        # Compare bytes: str compare_digest raises on non-ASCII input.
+        return bool(value and hmac.compare_digest(value.value.encode(), AUTH_TOKEN.encode()))
 
     def _authorized(self, *, require_origin=False):
         if not self._valid_host() or not self._valid_cookie():
@@ -1704,6 +1715,8 @@ class Handler(BaseHTTPRequestHandler):
             ctx = os_relay.TOKENS.lookup(auth[7:]) if auth.startswith("Bearer ") else None
             if rec is None or ctx is None or ctx.get("runner_owner") != rec["owner"]:
                 return self._send(403, {"error": "forbidden"})
+            if rec["owner"] != "owner" and ctx.get("ws") not in ((people.get(ROOT, rec["owner"]) or {}).get("ws") or {}):
+                return self._send(403, {"error": "forbidden"})  # removed from this workspace since the turn began
             try:
                 frame = self._read_json()
             except ValueError:
@@ -1916,6 +1929,7 @@ class Handler(BaseHTTPRequestHandler):
             if pid != viewer.get("id") and not people.can_remove(role, target["role"]):
                 return self._send(403, {"error": "you cannot remove them"})
             people.remove(ROOT, ws, pid)
+            runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
             for t in rooms._load_topics(ws, ROOT):  # a private channel forgets them too
@@ -1942,7 +1956,9 @@ class Handler(BaseHTTPRequestHandler):
             if not old or not rooms.can_see(old, viewer):
                 return self._send(403, {"error": "forbidden"})
         if path == "/api/rooms/delete":
-            rooms.delete_topic(ws, str(body.get("name") or ""), ROOT)
+            name = str(body.get("name") or "")
+            rooms.delete_topic(ws, name, ROOT)
+            _retire_threads(lambda rec: rec.get("room") == f"{ws}/t-{name}")  # never follow the name
             return self._send(200, {"ok": True})
         members = body.get("members") or []
         picked = body.get("people") or []
@@ -1956,6 +1972,9 @@ class Handler(BaseHTTPRequestHandler):
         old = body.get("replace") or None
         room_id = rooms.save_topic(ws, body.get("name"), members, body.get("lead"), ROOT,
                                    replace=old, private=private, people=picked)
+        if not old or room_id != f"{ws}/t-{old}":
+            # A name freed before this fix may still hold a deleted channel's threads: the owner's only.
+            _retire_threads(lambda rec: rec.get("room") == room_id)
         if old and room_id != f"{ws}/t-{old}":
             for rec in chat_store.records():  # renamed: its threads follow it
                 if rec.get("room") == f"{ws}/t-{old}":
@@ -2486,6 +2505,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         sock = self.connection
+        sock.settimeout(None)  # the terminal socket idles for as long as the tab is open
         lock = threading.Lock()
 
         def on_output(chunk):
@@ -2943,6 +2963,11 @@ class Handler(BaseHTTPRequestHandler):
                 slug = path[len("/api/project/"):-len("/delete")]
                 out = fileops.delete_project(slug)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
+                # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
+                for pid in people.forget_workspace(ROOT, out["slug"]):
+                    runners.revoke_owner(ROOT, pid)
+                _retire_threads(lambda rec: _chat_workspace(rec) == out["slug"])
+                engine_config.forget_workspace(out["slug"], ROOT)
                 ws_logos.remove(out["slug"], ROOT)
                 return self._send(200, {"ok": True, **out})
             if path.startswith("/api/project/") and path.endswith("/intake/new"):

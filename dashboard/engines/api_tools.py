@@ -124,18 +124,21 @@ def is_private_path(path, root, policy):
     if any(fnmatch.fnmatch(name, g.lower()) for g in SECRET_FILE_GLOBS):
         return True
     for private in _HOME_PRIVATE:
-        private = Path.home() / private
-        if path == private or private in path.parents:
+        if folders.under(path, Path.home() / private):
             return True
     for d in policy.deny_dirs:
-        if path == Path(d) or Path(d) in path.parents:
+        if folders.under(path, d):
             return True
-    if str(path) in {str(f) for f in policy.deny_files}:
+    if any(folders.under(path, f) for f in policy.deny_files):
         return True
+    if not folders.under(path, root):
+        return False
     try:
         rel = path.relative_to(root).as_posix().lower()
     except ValueError:
-        return False
+        # a case variant of the root: walk up to the ancestor that is the root
+        up = next(a for a in (path, *path.parents) if folders.under(a, root) and folders.under(root, a))
+        rel = path.relative_to(up).as_posix().lower()
     if rel.startswith(_PRIVATE_PREFIXES) or rel.endswith(_PRIVATE_SUFFIXES):
         return True
     parts = rel.split("/")
@@ -144,7 +147,7 @@ def is_private_path(path, root, policy):
 
 
 def _inside(path, base):
-    return path == base or base in path.parents
+    return folders.under(path, base)
 
 
 def read_file(raw, root, policy):

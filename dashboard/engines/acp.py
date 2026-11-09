@@ -8,6 +8,7 @@ threads, only on the owner's own Mac, no connected apps (spec section 5a).
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -20,7 +21,7 @@ PROTOCOL_VERSION = 1
 START_TIMEOUT = 60
 # A clean environment: never myOS's tokens, never a key from the server's own env.
 _ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
-OS_TOOL_MARKERS = ("mcp__os__", "os__osctl", "os_osctl", "os/osctl")
+OS_TOOL_NAMES = ("os__osctl", "os_osctl", "os/osctl")
 _OWN_TOOL_KINDS = ("", "other")  # an MCP tool. execute, edit, delete and the rest are the agent's own
 
 
@@ -31,8 +32,16 @@ def is_own_tool(tool_call):
     tc = tool_call or {}
     if str(tc.get("kind") or "").lower() not in _OWN_TOOL_KINDS:
         return False
-    title, call_id = str(tc.get("title") or "").lower(), str(tc.get("toolCallId") or "").lower()
-    return title.startswith(OS_TOOL_MARKERS) or call_id.startswith(OS_TOOL_MARKERS)
+    return any(_names_os_tool(str(tc.get(k) or "")) for k in ("title", "toolCallId"))
+
+
+def _names_os_tool(text):
+    """The text opens with one of myOS's tool names, whole: a longer name (`os__osctl_evil`)
+    or a command that merely starts with one does not count."""
+    low = text.strip().lower()
+    if low.startswith("mcp__os__"):
+        return True
+    return any(re.match(re.escape(n) + r"(?![a-z0-9_])", low) for n in OS_TOOL_NAMES)
 
 
 def permission_reply(params):
