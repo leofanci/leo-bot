@@ -74,7 +74,7 @@ cp -r skills/* ~/.claude/skills/
 
 ### Always on: run it on a server
 
-Run Leo Bot on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (HQ, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
+Run Leo Bot on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (Settings, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
 
 ### Linked folders
 

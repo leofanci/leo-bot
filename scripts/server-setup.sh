@@ -55,7 +55,7 @@ fi
 # Claude Code, so your own messages can run on your own Claude login.
 if ! as_user bash -c 'export PATH="$HOME/.local/bin:$PATH"; command -v claude' >/dev/null; then
   as_user bash -c 'curl -fsSL https://claude.ai/install.sh | bash' || \
-    echo "Claude Code did not install. Bots can still run on an API key (HQ, Engines)." >&2
+    echo "Claude Code did not install. Bots can still run on an API key (Settings, Engines)." >&2
 fi
 
 cat > /etc/systemd/system/leobot.service <<EOF

@@ -201,9 +201,8 @@ const ROUTES = [
   [/^\/operations$/,                            ()       => { setState("operations"); renderOperations(); }],
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
-  [/^\/integrations$/,                          ()       => { setState("integrations"); renderIntegrations(); }],
-  [/^\/engines$/,                               ()       => { setState("engines"); renderEngines(); }],
-  [/^\/folders$/,                               ()       => { setState("folders"); renderFolders(); }],
+  [/^\/settings(?:\/(engines|integrations|folders))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
+  [/^\/(engines|integrations|folders)$/,        ([t])    => location.replace(`#/settings/${t}`)],
   [/^\/files$/,                                 ()       => { setState("files"); renderFiles(); }],
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
@@ -552,11 +551,8 @@ async function renderRail(){
       <nav class="nav">
         ${person ? "" : `<a data-view="approvals">${icon("inbox")}<span class="rail-name">Approvals</span>${_APPROVALS.length ? `<span class="badge">${_APPROVALS.length}</span>` : ""}</a>
         ${w.id !== "hq" ? `<a data-view="files">${icon("folder")}<span class="rail-name">Files</span></a>` : ""}
-        <a data-view="folders">${icon("folder")}<span class="rail-name">Folders</span></a>
         <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>`}
         <a data-view="team">${icon("users")}<span class="rail-name">Team</span><span class="count">${_BOTS.filter(b => b.active).length}</span></a>
-        ${w.id === "hq" && !person ? `<a data-view="integrations">${icon("zap")}<span class="rail-name">Integrations</span></a>
-        <a data-view="engines">${icon("layers")}<span class="rail-name">Engines</span></a>` : ""}
       </nav>
       ${section("channels", "Channels", channels.map(roomRow).join(""),
         manage ? `<button class="add-btn" id="new-room-btn" title="New channel" aria-label="New channel">${icon("plus")}</button>` : "")}
@@ -565,7 +561,8 @@ async function renderRail(){
         <a data-view="needs">${icon("sun")}<span class="rail-name">Today</span></a>
         <a data-view="calendar">${icon("calendar")}<span class="rail-name">Calendar</span></a>
         <a data-view="operations">${icon("list-check")}<span class="rail-name">Operations</span></a>`)}
-    </div>`;
+    </div>
+    ${person ? "" : `<nav class="nav rail-foot"><a data-view="settings">${icon("settings")}<span class="rail-name">Settings</span></a></nav>`}`;
   $("#rail").querySelectorAll("[data-view]").forEach(a => a.onclick = () => {
     closeNav();
     window.ChatRooms?.showCanvas();
@@ -606,7 +603,7 @@ const KIND_META = {
   roadmap: ["map", "Roadmap", "Roadmap"], plan: ["route", "Go-to-market", "Go-to-market plan"],
   content: ["calendar", "Content", "Content plan"], brief: ["compose", "Post briefs", "Post brief"], voice: ["mic", "Voice", "Voice"],
 };
-const VIEW_LABEL = { content: "Content", files: "Files", folders: "Folders", team: "Team", approvals: "Approvals", integrations: "Integrations", engines: "Engines", calendar: "Calendar", needs: "Today", operations: "Operations" };
+const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", settings: "Settings", "settings/engines": "Settings", "settings/integrations": "Settings", "settings/folders": "Settings", calendar: "Calendar", needs: "Today", operations: "Operations" };
 const profileName = slug => _TREE.flatMap(p => p.profiles).find(x => x.slug === slug)?.name || slug;
 // "Instagram, TikTok": the channels of a deliverable's profile.
 const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === d.profile)?.channels || [])
@@ -964,8 +961,8 @@ async function renderFolders(){
   const ws = _WS;
   const wname = wsById(ws)?.name || (ws === "hq" ? "HQ" : ws);
   $("#main").innerHTML = `
-    <div class="topbar"><div><div class="crumbs">${esc(wname)} · settings</div><h1 class="title">Folders</h1></div></div>
-    <div class="scroll"><div class="help">Folders on this machine that this workspace's bots can work in. Bots read and search every folder here on your own private threads, and change files in Edit folders when you tag them (@bot, /skill or a DM). They cannot run tests, builds or git, and never touch git, editor or secret files. Invited people never see these folders.</div><div id="fold"></div></div>`;
+    ${settingsTop("folders")}
+    <div class="scroll"><div class="help">Folders on this machine that ${esc(wname)}'s bots can work in. Bots read and search every folder here on your own private threads, and change files in Edit folders when you tag them (@bot, /skill or a DM). They cannot run tests, builds or git, and never touch git, editor or secret files. Invited people never see these folders.</div><div id="fold"></div></div>`;
   if (isPerson()) { $("#fold").innerHTML = `<div class="empty">Only the owner manages folders.</div>`; return; }
   const draw = async () => {
     const d = await api(`/api/folders?ws=${encodeURIComponent(ws)}`).catch(e => ({ error: e.message }));
@@ -1074,9 +1071,7 @@ async function refreshViews(){
   if (v === "operations") return renderOperations();
   if (v === "team") return renderTeam();
   if (v === "approvals") return renderApprovals();
-  if (v === "integrations") return renderIntegrations();
-  if (v === "engines") return renderEngines();
-  if (v === "folders") return renderFolders();
+  if (v === "settings") return renderSettings(STATE.tab);
   if (v === "files") return renderFiles();
   if (v === "section") return renderProjectSection(STATE.project, STATE.section);
   if (v === "profile") return onProfileList(STATE.profile) ? renderProfile(STATE.profile) : undefined;
@@ -1112,7 +1107,7 @@ async function renderNeeds(){
       <span class="act">${esc(r.act)}</span></div>`).join("")}</div>`
     : `<div class="sec-empty"><p>Nothing planned for today.</p><p class="sec-hint">Posts, activities, and milestones scheduled for today show up here.</p></div>`;
   $("#main").innerHTML=`<div class="topbar"><div><div class="crumbs">${esc(dateLabel)}</div><h1 class="title">Tasks of the day</h1></div></div>
-    <div class="scroll"><p class="lead">Everything planned for today${rows.length?` — ${rows.length} item${rows.length===1?"":"s"}`:""}.</p>${body}</div>`;
+    <div class="scroll"><p class="lead">${rows.length?`Due today or overdue: ${plural(rows.length,"item")}.`:"Everything planned for today."}</p>${body}</div>`;
   rows.forEach((r,i)=>{ const el=$("#main").querySelector(`[data-need="${i}"]`); if(el) el.onclick=r.go; });
 }
 
@@ -1231,7 +1226,7 @@ async function renderTeam(){
     const t = costs.total || {};
     const grantHelp = !integ.configured || !(integ.connected || []).length ? ""
       : wsApps.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>`
-      : `<div class="help">No app account is ticked for this workspace yet. Tick one in HQ, Integrations.</div>`;
+      : `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>`;
     $("#team-list").innerHTML = (share !== null ? sharingSection(share) : "") + peopleSection(pv, link) + grantHelp
       + `<div class="team-total">${!person && t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>${pv ? "</section>" : ""}`;
     wirePeople();
@@ -1467,14 +1462,22 @@ function engineLogo(id, size){
   const [bg, glyph] = ENGINE_MARKS[key] || ENGINE_MARKS.custom;
   return `<span class="eng-logo" style="--s:${size || 40}px;background:${bg}"><svg viewBox="0 0 24 24" aria-hidden="true">${glyph}</svg></span>`;
 }
-// HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
+// Settings: setup screens in one place, open from any workspace (Folders shows the
+// current workspace's; Engines and Integrations cover them all).
+const SETTINGS_TABS = [["engines", "Engines"], ["integrations", "Integrations"], ["folders", "Folders"]];
+const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
+    <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
+function renderSettings(tab){
+  return tab === "integrations" ? renderIntegrations() : tab === "folders" ? renderFolders() : renderEngines();
+}
+
+// Settings, Engines: what runs the bots. Claude Code on this machine's login, or an API
 // key. Invited people only ever run on an API key.
 async function renderEngines(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
-    <div class="topbar"><div><div class="crumbs">HQ · settings</div><h1 class="title">Engines</h1></div></div>
+    ${settingsTop("engines")}
     <div class="scroll eng-page"><div class="help">Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div><div id="eng-runners"></div></div>`;
-  if (_WS !== "hq") { $("#eng").innerHTML = `<div class="empty">Engines live in HQ.</div>`; return; }
   let adding = null;
   const draw = async () => {
     const d = await api("/api/engines").catch(e => ({ error: e.message }));
@@ -1518,9 +1521,9 @@ async function renderEngines(){
           <input name="strong" placeholder="Strong model" aria-label="Strong model" value="${esc(f.models?.strong || "")}">
           <button class="btn sm primary" type="submit">Save</button><button class="btn sm ghost" type="button" data-cancel>Cancel</button></form>`;
       })();
-    const botRows = (d.bot_list || []).filter(g => g.bots.length).map(g => `<details class="eng-ws"><summary>${esc(g.ws_name)}<small>${g.bots.filter(b => d.bots?.[`${g.ws}/${b.id}`]).length || "no"} custom</small></summary>
+    const botRows = (d.bot_list || []).filter(g => g.bots.length).map(g => `<details class="eng-ws"><summary>${esc(g.ws_name)}<small>${(n => n ? `${n} custom` : "Default")(g.bots.filter(b => d.bots?.[`${g.ws}/${b.id}`]).length)}</small></summary>
         ${g.bots.map(b => `<div class="eng-choice"><label><span>${esc(b.icon || "")} ${esc(b.name)}</span>
-          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, "Same as its workspace")}</select></label></div>`).join("")}</details>`).join("");
+          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label></div>`).join("")}</details>`).join("");
     box.innerHTML = `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
         <p>Every bot can think with a different model. Connect a provider, then choose who uses it below.</p></section>
       <section class="integ-group"><h3>Your engines</h3><div class="eng-list">${rows}</div>
@@ -1533,7 +1536,7 @@ async function renderEngines(){
         <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
         ${(d.ws_list || []).map(w => `<div class="eng-choice"><label><span>${esc(w.name)} <em>workspace</em></span> <select data-choice="workspaces" data-scope="${esc(w.id)}">${opts(d.workspaces?.[w.id], usable, "Same as your messages")}</select></label></div>`).join("")}
       </section>
-      <section class="integ-group"><h3>Each bot</h3>${botRows || `<div class="empty">No bots yet.</div>`}</section>
+      <section class="integ-group"><h3>Each bot</h3><p class="eng-hint">Bots switched on in each workspace. Switch them on or off in Team.</p>${botRows || `<div class="empty">No bots yet.</div>`}</section>
       ${deploymentSection(d.deployment)}`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
     box.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { adding = b.dataset.edit; draw(); });
@@ -1579,9 +1582,8 @@ async function renderEngines(){
 async function renderIntegrations(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
-    <div class="topbar"><div><div class="crumbs">HQ · settings</div><h1 class="title">Integrations</h1></div></div>
+    ${settingsTop("integrations")}
     <div class="scroll"><div class="help">Connect your own apps through your Composio account. Bots read freely; anything else waits for your Approve. Switch apps on per bot in Team.</div><div id="integ"></div></div>`;
-  if (_WS !== "hq") { $("#integ").innerHTML = `<div class="empty">Integrations live in HQ.</div>`; return; }
   let polls = 0, replacing = false;
   // A logo that fails to load leaves its letter showing (error events do not bubble).
   $("#integ").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
@@ -3361,7 +3363,7 @@ async function renderEditProject(slug){
       ${flabel("Logo")}<p class="help"><a class="text-link" id="ep2-logo">Change logo</a></p>
       <p class="help">Slug <b>${esc(slug)}</b> is fixed — it's the identity used across files.</p>
     </div></div>`;
-  document.getElementById("ep2-folders").onclick=()=>{ if(_WS!==slug) window.Workspaces.switchTo(slug).then(()=>navigate("#/folders")); else navigate("#/folders"); };
+  document.getElementById("ep2-folders").onclick=()=>{ if(_WS!==slug) window.Workspaces.switchTo(slug).then(()=>navigate("#/settings/folders")); else navigate("#/settings/folders"); };
   document.getElementById("ep2-save").onclick=async()=>{
     const data=formVals($("#main"));
     try{ await jpost(`/api/project/${slug}/update`,data); toast("Project updated ✓"); await renderRail(); refreshViews(); history.back(); }

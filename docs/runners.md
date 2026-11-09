@@ -6,7 +6,7 @@ shared workspace. No port is opened on the Mac: it connects out to the server.
 
 ## Connect
 
-1. In Leo Bot: **Connect a Mac** (HQ, Engines for the owner; Team for invited people).
+1. In Leo Bot: **Connect a Mac** (Settings, Engines for the owner; Team for invited people).
    Copy the two commands. The token is shown once.
 2. On your Mac, inside a checkout of this repo, with Claude Code logged in
    (`claude auth status`), run them. Keep that terminal open.

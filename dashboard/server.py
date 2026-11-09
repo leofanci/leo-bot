@@ -1072,7 +1072,7 @@ def _engines_view():
     for w in spaces:
         project = next((p for p in projects if p.get("slug") == w["id"]), None)
         try:
-            roster = bots.team(ROOT, w["id"], project).to_api()
+            roster = [b for b in bots.team(ROOT, w["id"], project).to_api() if b["active"]]
         except Exception:  # a broken team file must not hide the rest of the screen
             continue
         bot_list.append({"ws": w["id"], "ws_name": w["name"],
@@ -1859,7 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(200, _folders_view(ws, projects))
 
     def _engines_post(self, path, body):
-        """HQ, Engines: owner only (the caller checked)."""
+        """Settings, Engines: owner only (the caller checked)."""
         if path == "/api/engines/provider":
             engine_config.upsert_provider(body, ROOT)
         elif path == "/api/engines/provider/remove":
