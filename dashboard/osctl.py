@@ -88,7 +88,7 @@ def _owners():
     for post in posts:
         owner = own.get(str(post.get("profile_slug") or "").lower())
         if owner:
-            own[str(post["id"]).lower()] = owner
+            own.setdefault(str(post["id"]).lower(), owner)  # an id never remaps a slug
     for ms in db._rows("SELECT id, entity_slug FROM milestones"):
         if ms.get("id"):
             # A milestone with no workspace entity (HQ's, or 'external') is HQ's: never a workspace's.

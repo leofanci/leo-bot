@@ -95,7 +95,8 @@ def _owner_token(deployment=None, path=None):
         pass
     token = secrets.token_urlsafe(32)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.fchmod(fd, 0o600)  # a file that already existed with a looser mode is tightened too
     with os.fdopen(fd, "w") as f:
         f.write(token)
     return token
@@ -143,11 +144,15 @@ LOGIN_REQUIRED_HTML = (
 _UPLOAD_DIR = None
 
 
+_UPLOAD_LOCK = threading.Lock()
+
+
 def upload_dir():
     global _UPLOAD_DIR
-    if _UPLOAD_DIR is None:
-        _UPLOAD_DIR = tempfile.mkdtemp(prefix="myos-uploads-")
-    return _UPLOAD_DIR
+    with _UPLOAD_LOCK:  # two first uploads at once must not make two folders
+        if _UPLOAD_DIR is None:
+            _UPLOAD_DIR = tempfile.mkdtemp(prefix="myos-uploads-")
+        return _UPLOAD_DIR
 
 
 def _dir_bytes(folder) -> int:
@@ -895,6 +900,7 @@ def _chat_workspace(rec):
 # after the lead. At most MAX_TEAMMATES extra runs per message, no chains.
 # --------------------------------------------------------------------------- #
 MAX_TEAMMATES = 2
+MAX_CONSULT_CHARS = 500  # a question a model wrote is bounded before it becomes a prompt
 _CONSULT_RE = re.compile(r"^[ \t>*_-]*CONSULT[*_ \t]+@([a-z][a-z0-9-]*)[*_ \t]*:[ \t]*(.+?)[ \t*_]*$",
                          re.M | re.I)
 _EXTRA = {"sess": None}  # the teammate run in flight (Stop kills it too)
@@ -913,7 +919,7 @@ class _RunFailed(Exception):
 def _extract_consults(text, team):
     """(text without CONSULT lines, [(bot_id, question)] for active teammates)."""
     handles = {b.handle: b.id for b in team.bots.values() if b.active}
-    asks = [(handles[h.lower()], q.strip()) for h, q in _CONSULT_RE.findall(text or "")
+    asks = [(handles[h.lower()], q.strip()[:MAX_CONSULT_CHARS]) for h, q in _CONSULT_RE.findall(text or "")
             if h.lower() in handles]
     return _CONSULT_RE.sub("", text or "").rstrip(), asks
 
@@ -958,7 +964,7 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
 
 
 def _followup_prompt(team, answers):
-    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {text.strip() or '(no answer)'}"
+    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {_extract_consults(approvals.extract(text)[0], team)[0].strip() or '(no answer)'}"
              for b, text in answers]
     return ("## Your teammates answered\n" + "\n".join(lines)
             + "\n\nContinue for the user in a few short lines. Don't consult again this turn.")
@@ -1288,7 +1294,7 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
 def stop_person_chat(pid, ws=None):
     """Close a person's live chat sessions: all of them, or (with `ws`) only those in that workspace."""
     slot = _PERSON_CHATS.get(pid)
-    if slot and (ws is None or _scope_slug(slot[1]) == ws):
+    if slot and (ws is None or _scope_slug(slot[1]) in (ws, None)):
         slot[0].close()
     extra = _EXTRA.get(pid)
     if extra is not None and (ws is None or getattr(extra, "workspace", ws) == ws):
@@ -2401,7 +2407,9 @@ class Handler(BaseHTTPRequestHandler):
             own = team.skills_of(b2)
             c_skill = _suggest_skill(question, among=own)
             c_skill = c_skill if c_skill in own else None
-            c_web = _needs_web(question, c_skill) and not apps_used  # app data in this thread
+            # A teammate never gets web the user did not ask for: the lead's own turn decides it,
+            # not a question the lead model wrote (it may echo text from a file or another person).
+            c_web = bool(with_web) and not apps_used  # app data in this thread
             c_model = (chat_session.ESCALATED_MODEL if (c_skill or c_web)
                        else chat_session.CHAT_MODEL)
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
@@ -3011,6 +3019,10 @@ class Handler(BaseHTTPRequestHandler):
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])
+                if _CHAT is not None and _scope_slug(_CHAT_SCOPE) == out["slug"]:
+                    _CHAT.close()
+                if _EXTRA["sess"] is not None and getattr(_EXTRA["sess"], "workspace", out["slug"]) == out["slug"]:
+                    _EXTRA["sess"].close()
                 _retire_threads(lambda rec: _chat_workspace(rec) == out["slug"])
                 engine_config.forget_workspace(out["slug"], ROOT)
                 ws_logos.remove(out["slug"], ROOT)

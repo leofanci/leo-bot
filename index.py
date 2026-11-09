@@ -119,7 +119,10 @@ def parse_checklist(text: str):
         for part in parts[1:]:
             fm = re.match(r"^(\w+):\s*(.*)$", part)
             if fm:
-                fields[fm.group(1).lower()] = clean_val(fm.group(2))
+                key = fm.group(1).lower()
+                if key in ("id", "entity") and key in fields:
+                    continue  # who a row belongs to is set once; a repeated key cannot take it over
+                fields[key] = clean_val(fm.group(2))
             else:
                 fields.setdefault("why", part)  # bare chunk = freeform why
         if title:
