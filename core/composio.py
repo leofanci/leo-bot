@@ -25,6 +25,11 @@ TIMEOUT = 30
 CATALOG_TTL = 3600
 CATALOG_MAX_PAGES = 20
 ACCOUNTS_MAX_PAGES = 10
+# Composio's answer for an app it has no shared login for, and what using your own takes.
+NO_MANAGED_AUTH = "ToolRouterV2_NoManagedAuth"
+OAUTH_REDIRECT = "https://backend.composio.dev/api/v3/toolkits/auth/callback"
+AUTH_CONFIGS_PAGE = "https://dashboard.composio.dev/~/project/auth-configs"
+_AUTH_CONFIG_RE = re.compile(r"ac_[A-Za-z0-9_-]{1,64}")
 _CATALOG = {}  # {"at": ts, "items": [...]}: one install, one Composio project
 LOGO_MAX_BYTES = 256 * 1024
 LOGO_TYPES = ("image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
@@ -159,7 +164,16 @@ def _session(pid, key, accounts, root):
     if saved.get("session_id") and saved.get("pin") == pin and trusted_mcp_url(saved.get("mcp_url")):
         return {"session_id": saved["session_id"], "mcp_url": saved["mcp_url"]}
     user_id = integrations.person(pid, root)["composio_user_id"]
-    sess = _parse_session(_json("POST", "/tool_router/session", _session_body(user_id, accounts), root))
+    body = _session_body(user_id, accounts)
+    try:
+        data = _json("POST", "/tool_router/session", body, root)
+    except ComposioError as e:
+        configs = {tk: own_auth_config(tk, root) for tk in accounts or {}} if e.reason == NO_MANAGED_AUTH else {}
+        configs = {tk: c for tk, c in configs.items() if c}
+        if not configs:
+            raise
+        data = _json("POST", "/tool_router/session", {**body, "auth_configs": configs}, root)
+    sess = _parse_session(data)
     integrations.save_session(pid, key, sess["session_id"], sess["mcp_url"], pin, root)
     return sess
 
@@ -216,10 +230,37 @@ def catalog(root=bots.ROOT):
     return items
 
 
+def own_auth_config(toolkit, root=bots.ROOT):
+    """The id of this project's own enabled auth config for an app, or None."""
+    q = urllib.parse.urlencode({"toolkit_slug": toolkit, "is_composio_managed": "false", "limit": "50"})
+    for i in _json("GET", "/auth_configs?" + q, None, root).get("items") or []:
+        if isinstance(i, dict) and i.get("status") == "ENABLED" and not i.get("is_composio_managed") \
+                and (i.get("toolkit") or {}).get("slug") == toolkit \
+                and isinstance(i.get("id"), str) and _AUTH_CONFIG_RE.fullmatch(i["id"]):
+            return i["id"]
+    return None
+
+
+def _link(sid, toolkit, root):
+    return _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/link", {"toolkit": toolkit}, root)
+
+
 def connect_link(pid, toolkit, root=bots.ROOT):
-    """{"url", "account_id"}: a link that adds one more account of this app."""
-    sid = _link_session(pid, root)["session_id"]
-    data = _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/link", {"toolkit": toolkit}, root)
+    """{"url", "account_id"}: a link that adds one more account of this app. An app
+    with no Composio-managed login uses the project's own auth config for it, or
+    returns {"needs_own_app": True, ...} with what setting one up takes."""
+    try:
+        data = _link(_link_session(pid, root)["session_id"], toolkit, root)
+    except ComposioError as e:
+        if e.reason != NO_MANAGED_AUTH:
+            raise
+        config = own_auth_config(toolkit, root)
+        if not config:
+            return {"needs_own_app": True, "redirect_uri": OAUTH_REDIRECT, "auth_configs_page": AUTH_CONFIGS_PAGE}
+        # One-off session: the saved link session stays free of any one app's config.
+        user_id = integrations.person(pid, root)["composio_user_id"]
+        body = {**_session_body(user_id), "auth_configs": {toolkit: config}}
+        data = _link(_parse_session(_json("POST", "/tool_router/session", body, root))["session_id"], toolkit, root)
     url = data.get("redirect_url") or data.get("url")
     if not url:
         raise ComposioError("Composio returned no connect link")
