@@ -941,9 +941,10 @@ def _need_known_entity(slug: str) -> None:
 def create_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     projects_dir = ROOT / "projects"
-    if (projects_dir / slug).exists() or (projects_dir / slug).is_symlink():
-        raise ActionError(f"project '{slug}' already exists")
     project_dir = _inside(projects_dir / slug, projects_dir, "project")
+    # Resolving to anything but projects/<slug> means a symlink sits there: taken, never followed.
+    if project_dir != Path(os.path.realpath(projects_dir)) / slug or project_dir.exists():
+        raise ActionError(f"project '{slug}' already exists")
     _need_free_slug(slug)
     name = _one_line(fields.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or "venture", "kind")
