@@ -2536,7 +2536,8 @@ class Handler(BaseHTTPRequestHandler):
                                     "question": question if asked_by else None}})
                 m2 = {"bot": b2, "content": "", "asked_by": asked_by or "user"}
                 msgs.append(m2)
-                answers.append((b2, run_teammate(b2, question, asked_by, m2)))
+                # The lead's follow-up reads the answer without its REACT line (m2 keeps it till below).
+                answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
             if asks and answers:
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
                 m3 = {"bot": bot_id, "content": ""}
@@ -2605,7 +2606,8 @@ class Handler(BaseHTTPRequestHandler):
                         sess, project_scope, user_msg, head["content"], bot=bot_id,
                         room=(room or {}).get("id"),
                         meta={k: v for k, v in head.items() if k not in ("bot", "content")},
-                        extra=[m for m in msgs[1:] if m.get("content")],
+                        extra=msgs[1:],  # record_turn drops the empty ones
+                        asked_at=turn_started,
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
                         shared=shared, reactions=reacts)
                 except (OSError, ValueError):

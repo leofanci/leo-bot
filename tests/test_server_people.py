@@ -461,8 +461,8 @@ class Ask(Base):
         self.assertIn("[From Pat, invited member of this workspace", seen["prompt"])
         rec = server.chat_store.load(Sess.session_id)
         self.assertEqual(rec["by"], self.pid)
-        self.assertEqual(rec["messages"][0], {"role": "user", "content": "hello team",
-                                              "by": self.pid, "by_name": "Pat"})
+        self.assertEqual({k: v for k, v in rec["messages"][0].items() if k != "ts"},
+                         {"role": "user", "content": "hello team", "by": self.pid, "by_name": "Pat"})
         self.assertFalse(server._BUSY)
 
 

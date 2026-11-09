@@ -4251,6 +4251,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     try { localStorage.setItem("roomThreads", JSON.stringify(roomThreads)); } catch {}
   }
   function showChat(msgs){
+    closePicker();
     history.length = 0; stream.innerHTML = "";
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach((m, i) => {
@@ -4258,6 +4259,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name).closest(".msg");
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
+      row.hidden = !rowHasBody(m);   // a reply that was only an emoji: kept for its index and spend
       paintReactions(row, m.reactions);
     });
     renderAppCards();
@@ -4731,7 +4733,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   // People toggle theirs; bots add theirs with a REACT line (server side).
   const REACT_EMOJI = ["👍", "❤️", "😂", "🎉", "🙏", "👀", "✅", "🔥", "🚀", "💯",
                        "🤔", "👏", "😮", "😢", "👎", "❌", "⚠️", "💡", "📌", "⏳"];
-  const myReactorId = () => isPerson() ? _ME.id : "ceo";
+  function myReactorId(){ return isPerson() ? _ME.id : "ceo"; }
   function reactorName(r){
     if (r.bot) return botById(r.bot)?.name || `@${r.bot}`;
     return r.by === myReactorId() ? "You" : r.by === "ceo" ? "Owner" : (r.by_name || "Teammate");
@@ -4752,23 +4754,39 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     }).join("");
     row.querySelector(".msg-main").appendChild(box);
   }
-  const picker = document.createElement("div");
-  picker.className = "react-picker";
-  picker.hidden = true;
-  picker.setAttribute("role", "dialog");
-  picker.setAttribute("aria-label", "Add reaction");
-  picker.innerHTML = REACT_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join("");
-  document.body.appendChild(picker);
-  let pickerRow = null;
-  function openPicker(row, anchor){
-    pickerRow = row;
-    picker.hidden = false;
-    const a = anchor.getBoundingClientRect(), w = picker.offsetWidth, h = picker.offsetHeight;
-    picker.style.left = `${Math.max(8, Math.min(a.right - w, innerWidth - w - 8))}px`;
-    picker.style.top = `${a.bottom + 4 + h > innerHeight ? Math.max(8, a.top - h - 4) : a.bottom + 4}px`;
-    picker.querySelector("button")?.focus();
+  // Function declarations only (hoisted): showChat, defined above, calls these.
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length); }
+  function reactPicker(){   // built on first use; its row and anchor live on the function
+    if (reactPicker.el) return reactPicker.el;
+    const el = reactPicker.el = document.createElement("div");
+    el.className = "react-picker";
+    el.hidden = true;
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "Add reaction");
+    el.innerHTML = REACT_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join("");
+    el.addEventListener("click", e => {
+      const b = e.target.closest("[data-emoji]");
+      if (b && reactPicker.row) toggleReaction(reactPicker.row, b.dataset.emoji);
+      closePicker(!!b);
+    });
+    document.body.appendChild(el);
+    return el;
   }
-  function closePicker(){ picker.hidden = true; pickerRow = null; }
+  function openPicker(row, anchor){
+    const el = reactPicker();
+    reactPicker.row = row; reactPicker.anchor = anchor;
+    el.hidden = false;
+    const a = anchor.getBoundingClientRect(), w = el.offsetWidth, h = el.offsetHeight;
+    el.style.left = `${Math.max(8, Math.min(a.right - w, innerWidth - w - 8))}px`;
+    el.style.top = `${a.bottom + 4 + h > innerHeight ? Math.max(8, a.top - h - 4) : a.bottom + 4}px`;
+    el.querySelector("button")?.focus();
+  }
+  function pickerOpen(){ return !!reactPicker.el && !reactPicker.el.hidden; }
+  function closePicker(refocus){
+    if (!pickerOpen()) return;
+    if (refocus && reactPicker.anchor?.isConnected) reactPicker.anchor.focus();
+    reactPicker.el.hidden = true; reactPicker.row = reactPicker.anchor = null;
+  }
   async function toggleReaction(row, emoji){
     const i = Number(row.dataset.i), id = activeChatId;
     if (!id || !Number.isInteger(i)) return;
@@ -4786,17 +4804,12 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const row = (add || pill)?.closest(".msg");
     if (!row?.dataset.i) return;
     e.stopPropagation();
-    if (add) return picker.hidden || pickerRow !== row ? openPicker(row, add) : closePicker();
+    if (add) return pickerOpen() && reactPicker.row === row ? closePicker() : openPicker(row, add);
     toggleReaction(row, pill.dataset.emoji);
   });
-  picker.addEventListener("click", e => {
-    const b = e.target.closest("[data-emoji]");
-    if (b && pickerRow) toggleReaction(pickerRow, b.dataset.emoji);
-    closePicker();
-  });
-  document.addEventListener("click", e => { if (!picker.hidden && !picker.contains(e.target)) closePicker(); });
-  document.addEventListener("keydown", e => { if (e.key === "Escape" && !picker.hidden) closePicker(); });
-  stream.addEventListener("scroll", () => { if (!picker.hidden) closePicker(); });
+  document.addEventListener("click", e => { if (pickerOpen() && !reactPicker.el.contains(e.target)) closePicker(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && pickerOpen()) { e.stopPropagation(); closePicker(true); } }, true);
+  stream.addEventListener("scroll", () => closePicker());
 
   // While a reply streams, one quiet "working… N steps" line sits under the
   // bot's name; it goes away when the reply is complete.
@@ -5177,7 +5190,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             }
             if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from); turnMeta.bot = obj.bot.id; }
             if (obj.msg_start) { startReply(obj.msg_start); pendingBreak = false; }
-            if (obj.deliverables) replyAt(obj.msg).meta.deliverables = obj.deliverables;
+            if (obj.deliverables) { const r = replyAt(obj.msg); r.meta.deliverables = obj.deliverables; r.bubble.closest(".msg").hidden = false; }
             if (obj.usage) {
               turnMeta.tokens = obj.usage.tokens; turnMeta.cost = obj.usage.cost;
               turnMeta.engine = obj.usage.engine; turnMeta.engine_label = obj.usage.engine_label;
@@ -5186,11 +5199,14 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.clean !== undefined) {
               const r = replyAt(obj.msg);
               r.bubble.innerHTML = formatChatText(obj.clean);
-              r.bubble.closest(".msg").hidden = !obj.clean;   // a reply that was only a reaction
+              r.bubble.closest(".msg").hidden = !rowHasBody({ ...r.meta, content: obj.clean });   // only a reaction
               if (r.bubble === bubble) full = obj.clean;
             }
             if (obj.reactions) paintReactions(userEl, obj.reactions);
-            if (obj.approval) { _APPROVALS.unshift(obj.approval); replyAt(obj.msg).meta.approval = obj.approval; }
+            if (obj.approval) {
+              const r = replyAt(obj.msg);
+              _APPROVALS.unshift(obj.approval); r.meta.approval = obj.approval; r.bubble.closest(".msg").hidden = false;
+            }
             if (obj.app_actions) {
               obj.app_actions.forEach(a => { if (!_APPROVALS.some(x => x.id === a.id)) _APPROVALS.unshift(a); });
               heldThisTurn = true;

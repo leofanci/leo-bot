@@ -131,6 +131,7 @@ span.mark{display:grid;place-items:center;font:var(--ui-weight-title) 8px/1 var(
 .msg{position:relative;display:grid;grid-template-columns:var(--ui-avatar) minmax(0,1fr);column-gap:var(--ui-space-2-5);padding:var(--ui-space-3) var(--ui-space-5);line-height:1.55}
 .msg+.msg{border-top:1px solid var(--ui-color-border-subtle)}
 .msg:hover{background:var(--ui-color-hover)}
+.msg[hidden]{display:none}
 .msg>.av{margin-top:1px}
 .msg-main{min-width:0}
 .mh{display:flex;align-items:baseline;gap:var(--ui-space-2);margin-bottom:2px}

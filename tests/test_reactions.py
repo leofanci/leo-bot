@@ -126,6 +126,13 @@ class Context(unittest.TestCase):
         rec["messages"].append({"role": "assistant", "bot": "cos", "content": "ok", "ts": 9})
         self.assertEqual(store.reaction_note(rec), "")  # older than the last reply
 
+    def test_note_not_repeated_after_an_emoji_only_reply(self):
+        rec = {"messages": [
+            {"role": "user", "content": "thanks", "reactions": [{"emoji": "👍", "bot": "cos", "ts": 5}]},
+            {"role": "assistant", "bot": "cos", "content": "Plan A.", "ts": 2,
+             "reactions": [{"emoji": "👍", "by": "ceo", "ts": 3}]}]}
+        self.assertEqual(store.reaction_note(rec), "")  # the bot already answered after it
+
     def test_note_reaches_the_next_turn(self):
         rec = {"messages": [{"role": "assistant", "bot": "cos", "content": "Plan A.", "ts": 2,
                              "reactions": [{"emoji": "👍", "by": "ceo", "ts": 3}]}]}
@@ -146,12 +153,26 @@ class BotTurn(unittest.TestCase):
                                                        for e in events if "reactions" in e for r in e["reactions"]])
         self.assertEqual([e["clean"] for e in events if "clean" in e][-1], "On it.")
 
-    def test_reaction_only_reply_leaves_no_message(self):
-        self.turn([[("delta", "REACT: 👍"), ("done", {"tokens": 10, "cost": 0.001})]], user_msg="@cmo thanks")
+    def test_reaction_only_reply_keeps_a_hidden_row_for_its_spend(self):
+        self.turn([[("delta", "REACT: 👍"), ("done", {"tokens": 10, "cost": 0.5})]], user_msg="@cmo thanks")
         rec = store.load(self.SID)
-        self.assertEqual([m["role"] for m in rec["messages"]], ["user"])
+        self.assertEqual([(m["role"], m["content"]) for m in rec["messages"]], [("user", "@cmo thanks"), ("assistant", "")])
         self.assertEqual(rec["messages"][0]["reactions"][0]["emoji"], "👍")
-        self.assertEqual(rec["tokens"], 10)  # the run still counts
+        self.assertEqual(rec["tokens"], 10)
+        with mock.patch.object(server.chat_store, "records", return_value=iter([{**rec, "room": "acme/general"}])):
+            costs = server._costs("acme", [test_teammates.VENTURE])
+        self.assertEqual(costs["bots"]["cmo"]["cost"], 0.5)  # Team totals still count the run
+        self.assertNotIn("@cmo: \n", store.recap(rec))  # the empty row is no context
+
+    def test_approval_only_reply_is_kept(self):
+        self.turn([[("delta", "APPROVAL: Pricing memo v1"), ("done", {})]])
+        msgs = store.load(self.SID)["messages"]
+        self.assertEqual((msgs[1]["content"], bool(msgs[1].get("approval"))), ("", True))
+
+    def test_user_message_has_its_send_time(self):
+        self.turn([[("delta", "Hi."), ("done", {})]], user_msg="@cmo hi")
+        msgs = store.load(self.SID)["messages"]
+        self.assertLessEqual(msgs[0]["ts"], msgs[1]["ts"])
 
     def test_marker_never_reaches_a_teammate(self):
         _, mates, _ = self.turn([
@@ -159,6 +180,16 @@ class BotTurn(unittest.TestCase):
             [("delta", "Done."), ("done", {})],
         ])
         self.assertNotIn("REACT", mates[0].prompt)
+
+    def test_follow_up_never_reads_a_teammate_marker(self):
+        real = server._followup_prompt
+        seen = []
+        with mock.patch.object(server, "_followup_prompt", side_effect=lambda t, a: seen.append(a) or real(t, a)), \
+                mock.patch.object(server, "_extract_reacts", wraps=server._extract_reacts) as spy:
+            self.turn([[("delta", "CONSULT @research: rivals?"), ("done", {})],
+                       [("delta", "Done."), ("done", {})]])
+        self.assertTrue(seen)
+        self.assertIn(mock.call("A at 19, B at 25, C at 39."), spy.call_args_list)  # answers pass through it
 
 
 class Record(unittest.TestCase):
