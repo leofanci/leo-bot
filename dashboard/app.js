@@ -1453,13 +1453,30 @@ const SERVER_STEPS = [
   "scripts/leobot-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
+// Simple original marks in each provider's colour, drawn inline so nothing loads from the network.
+const ENGINE_MARKS = {
+  claude: ["#D97757", `<g stroke="#fff" stroke-width="2.2" stroke-linecap="round"><path d="M12 4v16M4 12h16M6.3 6.3l11.4 11.4M17.7 6.3L6.3 17.7"/></g>`],
+  anthropic: ["#C96442", `<path d="M7 18l5-12 5 12M9 14h6" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
+  openai: ["#10A37F", `<g fill="none" stroke="#fff" stroke-width="1.8"><ellipse cx="12" cy="12" rx="3" ry="7.2"/><ellipse cx="12" cy="12" rx="3" ry="7.2" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="3" ry="7.2" transform="rotate(120 12 12)"/></g>`],
+  openrouter: ["#6366F1", `<g fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h5c3 0 3 8 6 8h5M4 16h5c3 0 3-8 6-8h5"/><path d="M18 6l2 2-2 2M18 14l2 2-2 2"/></g>`],
+  ollama: ["#3B3B3B", `<g fill="#fff"><circle cx="12" cy="13" r="5.5"/><path d="M7.6 9.5L7 4.5l3.2 3zM16.4 9.5L17 4.5l-3.2 3z"/></g><circle cx="10" cy="12.6" r="1" fill="#3B3B3B"/><circle cx="14" cy="12.6" r="1" fill="#3B3B3B"/>`],
+  codex: ["#1F1F1F", `<path d="M7 8l4 4-4 4M13 16h5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
+  gemini: ["#4C7BF4", `<path d="M12 3c.6 5 4 8.4 9 9-5 .6-8.4 4-9 9-.6-5-4-8.4-9-9 5-.6 8.4-4 9-9z" fill="#fff"/>`],
+  opencode: ["#2F6F6A", `<path d="M9 8l-4 4 4 4M15 8l4 4-4 4" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>`],
+  custom: ["#B08968", `<path d="M12 4l1.9 5.1L19 11l-5.1 1.9L12 18l-1.9-5.1L5 11l5.1-1.9z" fill="#fff"/>`],
+};
+function engineLogo(id, size){
+  const key = id === "claude-code" ? "claude" : id === "codex" ? "codex" : String(id || "").replace(/^(api|acp):/, "");
+  const [bg, glyph] = ENGINE_MARKS[key] || ENGINE_MARKS.custom;
+  return `<span class="eng-logo" style="--s:${size || 40}px;background:${bg}"><svg viewBox="0 0 24 24" aria-hidden="true">${glyph}</svg></span>`;
+}
 // HQ, Engines: what runs the bots. Claude Code on this machine's login, or an API
 // key. Invited people only ever run on an API key.
 async function renderEngines(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">HQ · settings</div><h1 class="title">Engines</h1></div></div>
-    <div class="scroll"><div class="help">What runs your bots. Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div><div id="eng-runners"></div></div>`;
+    <div class="scroll eng-page"><div class="help">Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   if (_WS !== "hq") { $("#eng").innerHTML = `<div class="empty">Engines live in HQ.</div>`; return; }
   let adding = null;
   const draw = async () => {
@@ -1473,18 +1490,22 @@ async function renderEngines(){
     const apiOnly = usable.filter(e => e.kind === "api");
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
-      return `<div class="post"><div class="t"><b>${esc(e.label)}</b><small>${esc(e.detail || "")}${p ? ` · fast: ${esc(p.models?.fast || "-")} · strong: ${esc(p.models?.strong || "-")}` : ""}${e.folder_edit === false ? " · Read-only in linked folders" : ""}</small></div>
-        <span class="tag">${e.ok ? "ready" : "not ready"}</span>
-        <button class="go" data-test="${esc(e.id)}">Test</button>
-        ${p ? `<button class="go" data-edit="${esc(p.id)}">Edit</button><button class="more" data-remove="${esc(p.id)}">Remove</button>` : ""}
-        ${e.acp ? `<button class="more" data-remove-acp="${esc(e.id.slice(4))}">Remove</button>` : ""}</div>`;
+      const models = p ? `<span class="eng-chip">fast · ${esc(p.models?.fast || "-")}</span><span class="eng-chip">strong · ${esc(p.models?.strong || "-")}</span>` : "";
+      const note = e.folder_edit === false ? `<span class="eng-chip warm">Read-only in linked folders</span>` : "";
+      return `<div class="eng-card">${engineLogo(e.id, 44)}
+        <div class="eng-body"><div class="eng-name"><b>${esc(e.label)}</b><span class="eng-state ${e.ok ? "on" : "off"}">${e.ok ? "Ready" : "Not ready"}</span></div>
+          ${e.detail ? `<div class="eng-detail">${esc(e.detail)}</div>` : ""}
+          ${models || note ? `<div class="eng-chips">${models}${note}</div>` : ""}</div>
+        <div class="eng-actions"><button class="btn sm" data-test="${esc(e.id)}">Test</button>
+          ${p ? `<button class="btn sm" data-edit="${esc(p.id)}">Edit</button><button class="btn sm ghost" data-remove="${esc(p.id)}">Remove</button>` : ""}
+          ${e.acp ? `<button class="btn sm ghost" data-remove-acp="${esc(e.id.slice(4))}">Remove</button>` : ""}</div></div>`;
     }).join("");
     const presets = Object.entries(d.presets || {}).filter(([k]) => !(d.providers || []).some(x => x.id === k));
     if (d.deployment === "server") drawRunners($("#eng-runners"), stillOn);
     const acpMine = (d.acp_agents || []).map(a => a.id);
     const acpAdd = d.deployment === "server" ? "" : Object.entries(d.acp_presets || {}).filter(([k]) => !acpMine.includes(k))
-      .map(([k, v]) => `<button class="btn sm" data-add-acp="${esc(k)}">Add ${esc(v.name)}</button>`).join("");
-    const form = adding === null ? `<div class="add-prov">${presets.map(([k, v]) => `<button class="btn sm" data-add="${esc(k)}">Add ${esc(v.name)}</button>`).join("")}<button class="btn sm ghost" data-add="custom">Add other</button>${acpAdd}</div>`
+      .map(([k, v]) => `<button class="eng-add" data-add-acp="${esc(k)}">${engineLogo("acp:" + k, 22)}<span>${esc(v.name)}</span></button>`).join("");
+    const form = adding === null ? `<div class="add-prov">${presets.map(([k, v]) => `<button class="eng-add" data-add="${esc(k)}">${engineLogo("api:" + k, 22)}<span>${esc(v.name)}</span></button>`).join("")}<button class="eng-add" data-add="custom">${engineLogo("custom", 22)}<span>Other (any OpenAI-compatible address)</span></button>${acpAdd}</div>`
       : (() => {
         const old = (d.providers || []).find(x => x.id === adding) || {};
         const pre = d.presets?.[adding] || {};
@@ -1500,14 +1521,23 @@ async function renderEngines(){
           <input name="strong" placeholder="Strong model" aria-label="Strong model" value="${esc(f.models?.strong || "")}">
           <button class="btn sm primary" type="submit">Save</button><button class="btn sm ghost" type="button" data-cancel>Cancel</button></form>`;
       })();
-    box.innerHTML = `${deploymentSection(d.deployment)}<section class="integ-group"><h3>Engines</h3>${rows}${form}</section>
+    const botRows = (d.bot_list || []).filter(g => g.bots.length).map(g => `<details class="eng-ws"><summary>${esc(g.ws_name)}<small>${g.bots.filter(b => d.bots?.[`${g.ws}/${b.id}`]).length || "no"} custom</small></summary>
+        ${g.bots.map(b => `<div class="eng-choice"><label><span>${esc(b.icon || "")} ${esc(b.name)}</span>
+          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, "Same as its workspace")}</select></label></div>`).join("")}</details>`).join("");
+    box.innerHTML = `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
+        <p>Every bot can think with a different model. Connect a provider, then choose who uses it below.</p></section>
+      <section class="integ-group"><h3>Your engines</h3><div class="eng-list">${rows}</div>
+        <h3 class="eng-sub">Connect another</h3>${form}</section>
       <section class="integ-group"><h3>Who runs on what</h3>
-        <div class="eng-choice"><label>Your messages <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
-        <div class="eng-choice"><label>Invited people <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
+        <p class="eng-hint">Most specific wins: a bot's own pick, then its workspace, then your default.</p>
+        <div class="eng-choice"><label><span>Your messages</span> <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
+        <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
-        ${(d.ws_list || []).map(w => `<div class="eng-choice"><label>${esc(w.name)} <select data-choice="workspaces" data-scope="${esc(w.id)}">${opts(d.workspaces?.[w.id], usable, "Same as your messages")}</select></label></div>`).join("")}
-        <div class="eng-choice"><label>Terminal <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
-      </section>`;
+        <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
+        ${(d.ws_list || []).map(w => `<div class="eng-choice"><label><span>${esc(w.name)} <em>workspace</em></span> <select data-choice="workspaces" data-scope="${esc(w.id)}">${opts(d.workspaces?.[w.id], usable, "Same as your messages")}</select></label></div>`).join("")}
+      </section>
+      <section class="integ-group"><h3>Each bot</h3>${botRows || `<div class="empty">No bots yet.</div>`}</section>
+      ${deploymentSection(d.deployment)}`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
     box.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { adding = b.dataset.edit; draw(); });
     box.querySelector("[data-cancel]")?.addEventListener("click", () => { adding = null; draw(); });
