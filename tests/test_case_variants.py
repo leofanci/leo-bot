@@ -136,7 +136,7 @@ class FolderCaseVariants(unittest.TestCase):
             with self.assertRaises(folders.FolderError, msg=variant):
                 folders.normalize_path(variant)
         docs = home / "Documents"
-        if docs.is_dir():
+        if docs in Path(folders.__file__).resolve().parents:
             with self.assertRaises(folders.FolderError):
                 folders.normalize_path(str(home / "documents"))  # parent of the Leo Bot checkout
 

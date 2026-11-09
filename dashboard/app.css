@@ -60,6 +60,7 @@ span.mark{display:grid;place-items:center;font:var(--ui-weight-title) 8px/1 var(
 .ws-name b{min-width:0;padding-bottom:.18em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:inherit}
 .ws-name svg.i{width:14px;height:14px;color:var(--ui-color-rail-muted)}
 .rail-scroll{flex:1;min-height:0;overflow:auto;padding:var(--ui-space-2) 0 var(--ui-space-4)}
+.rail-foot{flex:none;padding-top:var(--ui-space-2);padding-bottom:var(--ui-space-2);border-top:1px solid var(--ui-color-rail-hover)}
 .rail-ib{width:var(--ui-control-default);height:var(--ui-control-default);flex:none;display:grid;place-items:center;border:0;border-radius:var(--ui-radius-control);background:transparent;color:var(--ui-color-rail-text)}
 .rail-ib:hover{background:var(--ui-color-rail-hover);color:var(--ui-color-rail-text-strong)}
 .nav{display:flex;flex-direction:column;gap:1px;padding:0 var(--ui-space-2)}
@@ -805,6 +806,12 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .eng-ws{margin:8px 0;padding:4px 14px;border-radius:14px;background:var(--eng-warm);border:1px solid var(--eng-warm-line)}
 .eng-ws summary{cursor:pointer;padding:8px 0;font-weight:600;display:flex;justify-content:space-between}
 .eng-ws summary small{color:var(--ui-color-text-muted);font-weight:400}
+.eng-ws summary:focus-visible{box-shadow:none;color:var(--ui-color-accent)}
+.integ-key input,.integ-q,.eng-choice select,.integ-key select,#fold select,.app-grants select{min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit}
+.integ-key input:focus,.integ-q:focus,.eng-choice select:focus,.integ-key select:focus,#fold select:focus,.app-grants select:focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
+.integ-key input[type=password]{flex:1 1 220px;min-width:0}
+.settings-top{padding-bottom:0;border-bottom:0}
+.settings-top>div{flex:1;min-width:0}
 @media (max-width:640px){.eng-card{flex-wrap:wrap}.eng-actions{justify-content:flex-start}}
 .msg-via{display:block;color:var(--ui-color-text-muted);font-size:11px;margin-top:4px}
 .runner-cmd{white-space:pre-wrap;word-break:break-all;background:var(--ui-color-surface);border:1px solid var(--ui-color-border);border-radius:8px;padding:10px;font-size:12px}

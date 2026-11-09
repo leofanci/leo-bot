@@ -1,6 +1,6 @@
 # Engines: what runs your bots
 
-Pick them in HQ, Engines. Each reply says what it ran on.
+Pick them in Settings, Engines. Each reply says what it ran on.
 
 | Engine | Login | Where it can run | Who it can answer |
 |---|---|---|---|

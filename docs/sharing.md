@@ -96,7 +96,7 @@ that cookie at once.
   bots on your own turns later, like any document a teammate edits. Check it
   before acting on it.
 - Your own messages run on this machine's Claude Code login or an API key. Invited
-  people's messages only ever run on an API key you pick in HQ, Engines, billed to
+  people's messages only ever run on an API key you pick in Settings, Engines, billed to
   that key. Until you pick one, bots tell them so and nothing is spent. Each reply
   shows what it ran on.
 - Owner login works over the sharing address too, but the address travels
