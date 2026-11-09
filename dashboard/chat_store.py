@@ -9,12 +9,14 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 CHATS_DIR = Path(__file__).resolve().parent.parent / "chats"
 _ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 TITLE_MAX = 60
+_LOCK = threading.RLock()  # load-change-save of one chat must not interleave
 
 
 def _path(chat_id):
@@ -84,12 +86,13 @@ def records():
 
 def append_note(chat_id, bot, text):
     """One assistant line after the fact (an approved app action's result)."""
-    rec = load(chat_id)
-    if not rec:
-        return
-    rec.setdefault("messages", []).append({"role": "assistant", "bot": bot, "content": text, "ts": time.time()})
-    rec["updated"] = time.time()
-    save(rec)
+    with _LOCK:
+        rec = load(chat_id)
+        if not rec:
+            return
+        rec.setdefault("messages", []).append({"role": "assistant", "bot": bot, "content": text, "ts": time.time()})
+        rec["updated"] = time.time()
+        save(rec)
 
 
 RECAP_CHARS = 12_000
@@ -124,7 +127,7 @@ def _paths(value):
     return {p for p in value if isinstance(p, str)} if isinstance(value, (set, list, tuple)) else set()
 
 
-def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
+def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
                 by=None, by_name=None, shared=False):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
@@ -182,3 +185,11 @@ def record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, ex
         rec["room"] = room
     save(rec)
     return rec
+
+
+def record_turn(*args, **kwargs):
+    with _LOCK:
+        return _record_turn(*args, **kwargs)
+
+
+record_turn.__doc__ = _record_turn.__doc__

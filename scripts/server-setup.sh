@@ -13,6 +13,11 @@ MYOS_PORT="${MYOS_PORT:-8766}"  # not 8765, so it never collides with myOS on yo
 MYOS_REPO="${MYOS_REPO:-}"
 MYOS_BRANCH="${MYOS_BRANCH:-main}"
 
+case "$MYOS_USER" in ""|-*|*[!a-z0-9_-]*) echo "MYOS_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
+case "$MYOS_PORT" in ""|*[!0-9]*) echo "MYOS_PORT must be a number." >&2; exit 1 ;; esac
+case "$MYOS_BRANCH" in ""|-*|*[!A-Za-z0-9._/-]*) echo "MYOS_BRANCH has characters a branch name should not." >&2; exit 1 ;; esac
+case "$MYOS_REPO" in -*) echo "MYOS_REPO must be a git address, not an option." >&2; exit 1 ;; esac
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this as root (or with sudo)." >&2
   exit 1
@@ -44,7 +49,7 @@ as_user() { runuser -u "$MYOS_USER" -- env HOME="$HOME_DIR" "$@"; }
 if [ -d "$APP_DIR/.git" ]; then
   as_user git -C "$APP_DIR" pull --ff-only
 else
-  as_user git clone --branch "$MYOS_BRANCH" "$MYOS_REPO" "$APP_DIR"
+  as_user git clone --branch "$MYOS_BRANCH" -- "$MYOS_REPO" "$APP_DIR"
 fi
 
 # Claude Code, so your own messages can run on your own Claude login.
