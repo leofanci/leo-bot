@@ -93,3 +93,7 @@ LeoBot.app/Contents/_CodeSignature/
 
 # Bot on/off state + HQ memory (user data)
 /team/
+
+# Old app folder name: built binaries stay local
+myOS.app/Contents/MacOS/
+myOS.app/Contents/_CodeSignature/
