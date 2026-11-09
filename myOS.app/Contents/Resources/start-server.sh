@@ -42,7 +42,7 @@ token = open(token_file).read().strip()
 nonce = secrets.token_hex(16)
 with urllib.request.urlopen(f"{url}/healthz?nonce={nonce}", timeout=1) as r:
     proof = json.load(r).get("proof", "")
-want = hmac.new(token.encode(), nonce.encode(), "sha256").hexdigest()
+want = hmac.new(token.encode(), b"myos-healthz:" + nonce.encode(), "sha256").hexdigest()
 sys.exit(0 if token and hmac.compare_digest(proof, want) else 1)
 PY
 }

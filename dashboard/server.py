@@ -165,7 +165,8 @@ def restrict_new_files():
 
 def health_proof(nonce):
     """HMAC-SHA256(AUTH_TOKEN, nonce): lets the launcher verify server identity."""
-    return hmac.new(AUTH_TOKEN.encode(), nonce.encode(), "sha256").hexdigest()
+    # The context prefix keeps this proof from ever matching an HMAC made for another purpose.
+    return hmac.new(AUTH_TOKEN.encode(), b"myos-healthz:" + nonce.encode(), "sha256").hexdigest()
 
 
 def write_token_file(path=None):
@@ -1448,7 +1449,8 @@ def _approve_app_action(aid, arguments=None):
         live = {r["id"] for r in composio.accounts(rec["person"], ROOT)}
     except composio.ComposioError as e:
         raise _AppRefused(str(e)) from None
-    verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog)
+    verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog,
+                                      action.get("arguments"))
     if verdict != "hold":
         raise _AppRefused(f"{rec['bot']} may no longer do this")
     picks = integrations.accounts_for(rec["ws"], ROOT).get(toolkit) or []
@@ -2903,6 +2905,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.delete_activity(body.get("title", ""))})
             if path == "/api/local-folder/pick":
                 return self._send(200, {"ok": True, **pick_local_folder()})
+            if path in ("/api/project/new",) or (path.startswith("/api/project/") and path.endswith("/update")):
+                # Linking a folder widens what bots can read or edit: only from this page, never a bare request.
+                if isinstance(body, dict) and body.get("local_folder") and not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
             if path == "/api/project/new":
                 slug = (body.get("slug") or fileops._slugify(body.get("name", ""))).strip()
                 return self._send(200, {"ok": True, **fileops.create_project(slug, body)})

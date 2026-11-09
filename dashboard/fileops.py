@@ -79,6 +79,7 @@ from core.project_schemas import (
 from core.subsections import (
     DOC_META,
     add_doc_subsection,
+    config_path,
     ensure_config,
     load_config,
     normalize_doc_text,
@@ -1424,8 +1425,17 @@ def _normalize_doc_strict(project_slug: str, doc_key: str, text: str, cfg: dict)
     )
 
 
+def _need_inside_project(project_slug: str, *paths) -> None:
+    """Refuse a file that is, or sits behind, a symlink leading out of the project folder."""
+    base = _project_dir(project_slug).resolve()
+    for p in paths:
+        if p and (p.is_symlink() or not Path(p).resolve().is_relative_to(base)):
+            raise ActionError("path outside project")
+
+
 def update_subsections(project_slug: str, doc_key: str, titles: list[str]) -> dict:
-    _project_dir(project_slug)
+    _need_inside_project(project_slug, _project_doc_path(project_slug, doc_key),
+                         config_path(ROOT, project_slug))
     cfg = set_doc_subsections(load_config(ROOT, project_slug), doc_key, titles)
     save_config(ROOT, project_slug, cfg)
     doc_path = _project_doc_path(project_slug, doc_key)
@@ -1454,7 +1464,8 @@ def update_validation_tab(project_slug: str, titles: list[str]) -> dict:
 
 
 def add_subsection(project_slug: str, doc_key: str, title: str) -> dict:
-    _project_dir(project_slug)
+    _need_inside_project(project_slug, _project_doc_path(project_slug, doc_key),
+                         config_path(ROOT, project_slug))
     cfg = add_doc_subsection(load_config(ROOT, project_slug), doc_key, title)
     save_config(ROOT, project_slug, cfg)
     doc_path = _project_doc_path(project_slug, doc_key)

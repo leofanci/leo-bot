@@ -133,7 +133,7 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
     cat = list(catalog if catalog is not None else [a["slug"] for a in composio.catalog(root)])
     reads, notes = [], []
     for c in calls:
-        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat)
+        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"])
         if verdict == "refuse":
             notes.append(REFUSED.format(slug=c["tool_slug"]))
             continue

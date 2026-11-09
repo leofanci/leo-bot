@@ -173,8 +173,10 @@ def join(root=bots.ROOT, code=None, name=None, *, token=None):
         if not old or _RANK[inv["role"]] > _RANK.get(old, 0):
             mine[inv["ws"]] = inv["role"]
         inv["used"] = {"by": pid, "at": time.time()}
-        _save(root, "people.json", {"people": everyone})
+        # The invite is marked used first: if the second write fails, nobody holds a
+        # workspace seat that the invite could still hand out again.
         _save(root, "invites.json", {"invites": rows})
+        _save(root, "people.json", {"people": everyone})
         return pid, token_out
 
 

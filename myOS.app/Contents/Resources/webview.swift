@@ -207,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         if token.isEmpty { return false }
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let key = SymmetricKey(data: Data(token.utf8))
-        let want = HMAC<SHA256>.authenticationCode(for: Data(nonce.utf8), using: key)
+        let want = HMAC<SHA256>.authenticationCode(for: Data("myos-healthz:\(nonce)".utf8), using: key)
             .map { String(format: "%02x", $0) }.joined()
         guard let probe = URL(string: "\(url.absoluteString)/healthz?nonce=\(nonce)") else { return false }
         var req = URLRequest(url: probe)

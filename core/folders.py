@@ -264,8 +264,12 @@ def _migrate(ws, root) -> dict:
     if raw:
         try:
             path = normalize_path(raw, root)
-        except FolderError:
-            path = str(Path(raw).expanduser()) if Path(raw).expanduser().is_absolute() else ""
+        except FolderError as e:
+            # Only a folder that has gone missing is kept (it may be a drive that is not mounted);
+            # a path the rules refuse is dropped, never kept as a readable folder.
+            gone = "does not exist" in str(e) and Path(raw).expanduser().is_absolute() \
+                and not has_glob_chars(raw) and not any(ord(c) < 32 for c in raw)
+            path = str(Path(raw).expanduser()) if gone else ""
         if path and not any(ord(c) < 32 for c in path):
             data["folders"].append({"id": "f1", "path": path, "name": PurePath(path).name or path,
                                     "access": READ})

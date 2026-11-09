@@ -125,3 +125,13 @@ class FolderCaseVariants(unittest.TestCase):
         if docs.is_dir():
             with self.assertRaises(folders.FolderError):
                 folders.normalize_path(str(home / "documents"))  # parent of the myOS checkout
+
+
+class AppReadUrlArguments(unittest.TestCase):
+    def test_a_read_with_a_web_address_is_held_not_run(self):
+        from core import app_rules
+        cat, grant = ["acme"], {"acme": "write"}
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "mail"})[0], "read")
+        for args in ({"url": "https://evil.example/?d=1"}, {"a": [{"b": "www.evil.test"}]}, {"q": "x.attacker.example"}):
+            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args)[0], "hold", args)
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"})[0], "refuse")
