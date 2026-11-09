@@ -568,13 +568,23 @@ summary.pf-head::-webkit-details-marker{display:none}
 .invite-pending{display:flex;flex-direction:column;gap:var(--ui-space-1);margin:0 0 var(--ui-space-3)}
 .invite-row{display:flex;align-items:center;gap:var(--ui-space-2);font-size:var(--ui-type-control);color:var(--ui-color-text-muted)}
 .as-person #term-panel{display:none}
-.team-row.off{opacity:.55}
+.team-row{flex-wrap:wrap;align-items:flex-start;padding-block:var(--ui-space-3)}
+.team-row .av{margin-top:2px}
+.team-row.off{align-items:center;padding-block:var(--ui-space-2);opacity:.7}
+.team-row .team-about{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ui-color-text-secondary)}
+.team-row .team-meta{color:var(--ui-color-text-muted)}
+.team-fixed{align-self:center;font-size:var(--ui-type-label);color:var(--ui-color-text-muted);white-space:nowrap}
+.team-row .more,.team-row .go{align-self:center}
+.team-more[aria-expanded="true"]{background:var(--ui-color-hover);color:var(--ui-color-text)}
+.team-detail{flex-basis:100%;margin:var(--ui-space-2) 0 0 42px;padding-top:var(--ui-space-3);border-top:1px solid var(--ui-color-border-subtle);display:grid;gap:var(--ui-space-3)}
+.team-detail[hidden]{display:none}
+.td-sec h4{margin:0 0 var(--ui-space-1-5);font-size:var(--ui-type-caption);font-weight:var(--ui-weight-semibold);color:var(--ui-color-text-muted);text-transform:uppercase;letter-spacing:.04em}
+.td-sec>small{display:block;margin-top:var(--ui-space-1-5);color:var(--ui-color-text-muted);font-size:var(--ui-type-caption)}
+.td-sec .mem-box{margin-top:0}
+.team-sub{margin:var(--ui-space-5) 0 var(--ui-space-2);font-size:var(--ui-type-label);font-weight:var(--ui-weight-semibold);color:var(--ui-color-text-muted)}
 .team-skills{display:flex;flex-wrap:wrap;gap:var(--ui-space-1);margin-top:var(--ui-space-1-5)}
 .team-skills .tag.covered{background:none;box-shadow:inset 0 0 0 1px var(--ui-color-border)}
-.team-cover{color:var(--ui-color-text-muted);font-style:italic}
-.team-usage{color:var(--ui-color-text-muted)}
 .team-total{margin:0 0 var(--ui-space-2-5);color:var(--ui-color-text-muted);font-size:var(--ui-type-control)}
-.mem-toggle{color:var(--ui-color-accent);font-weight:var(--ui-weight-semibold);cursor:pointer}
 .mem-box{margin-top:var(--ui-space-2);padding:var(--ui-space-2) var(--ui-space-2-5);border:1px dashed var(--ui-color-border);border-radius:var(--ui-radius-control)}
 .mem-scope + .mem-scope{margin-top:var(--ui-space-3)}
 .mem-head{margin-bottom:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}
