@@ -214,6 +214,20 @@ def people_in(root=bots.ROOT, ws=None):
     return sorted(rows, key=lambda r: (-_RANK[r["role"]], r["joined"] or 0))
 
 
+def revoke_invites_by(root=bots.ROOT, ws=None, pid=None):
+    """Every live invite `pid` made for `ws` dies: a removed person cannot let themselves back in."""
+    with LOCK:
+        rows = _invites(root)
+        n = 0
+        for r in rows:
+            if r.get("by") == pid and r.get("ws") == ws and _live(r, time.time()):
+                r["revoked"] = time.time()
+                n += 1
+        if n:
+            _save(root, "invites.json", {"invites": rows})
+        return n
+
+
 def remove(root=bots.ROOT, ws=None, pid=None):
     """Drop `pid` from `ws`; a person left with no workspace is deleted (cookie dies)."""
     with LOCK:

@@ -3,7 +3,7 @@ comes back when a name is reused, and a removed teammate's runner stops at once.
 import json
 from unittest import mock
 
-from core import people, runners
+from core import approvals, people, runners
 from tests import test_server_people as sp
 
 server = sp.server
@@ -83,3 +83,30 @@ class Lifecycle(sp.Base):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class LifecycleRound2(Lifecycle):
+    def test_deleting_a_workspace_clears_its_approvals(self):
+        approvals.add(self.root, ws="acme", room="r", chat="c1", bot="cos", summary="old")
+        approvals.add(self.root, ws="demo", room="r", chat="c2", bot="cos", summary="keep")
+        self.assertEqual(request("POST", "/api/project/acme/delete", {}, owner=True)[0], 200)
+        self.assertEqual(approvals.pending(self.root, "acme"), [])
+        self.assertEqual(len(approvals.pending(self.root, "demo")), 1)
+
+    def test_a_removed_persons_invites_die_with_their_seat(self):
+        pid, admin_token = self.join("acme", role="admin", name="Ada")
+        pid = people.person_by_token(self.root, admin_token)["id"]
+        _, code = people.create_invite(self.root, ws="acme", role="member", by=pid)
+        self.assertEqual(request("POST", "/api/people/remove", {"ws": "acme", "id": pid}, owner=True)[0], 200)
+        with self.assertRaises(ValueError):
+            people.join(self.root, code, "Ada Again")
+
+    def test_removal_cuts_the_persons_live_turn_token(self):
+        _, token = self.join("acme", role="member", name="Pat")
+        pid = people.person_by_token(self.root, token)["id"]
+        os_token = server.os_relay.TOKENS.mint({"ws": "acme", "runner_owner": pid, "shared": True})
+        other = server.os_relay.TOKENS.mint({"ws": "acme", "runner_owner": "someone-else"})
+        self.addCleanup(server.os_relay.TOKENS.revoke, other)
+        self.assertEqual(request("POST", "/api/people/remove", {"ws": "acme", "id": pid}, owner=True)[0], 200)
+        self.assertIsNone(server.os_relay.TOKENS.lookup(os_token))
+        self.assertIsNotNone(server.os_relay.TOKENS.lookup(other))

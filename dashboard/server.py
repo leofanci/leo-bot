@@ -1952,6 +1952,10 @@ class Handler(BaseHTTPRequestHandler):
             if pid != viewer.get("id") and not people.can_remove(role, target["role"]):
                 return self._send(403, {"error": "you cannot remove them"})
             people.remove(ROOT, ws, pid)
+            people.revoke_invites_by(ROOT, ws, pid)
+            # A turn already running here ends too: close their session, cut its osctl token.
+            stop_person_chat(pid)
+            os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
@@ -2991,6 +2995,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/project/") and path.endswith("/delete"):
                 slug = path[len("/api/project/"):-len("/delete")]
                 out = fileops.delete_project(slug)
+                approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):

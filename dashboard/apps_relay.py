@@ -62,6 +62,13 @@ class Tokens:
         with self._lock:
             self._live.pop(token, None)
 
+    def revoke_where(self, **match):
+        """Revoke every live token whose context holds all of these values."""
+        with self._lock:
+            for live, (ctx, _) in list(self._live.items()):
+                if all(ctx.get(k) == v for k, v in match.items()):
+                    del self._live[live]
+
 
 TOKENS = Tokens()
 
