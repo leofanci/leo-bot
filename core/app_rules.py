@@ -20,10 +20,10 @@ READ_VERBS = frozenset("GET LIST FETCH SEARCH READ FIND RETRIEVE LOOKUP VIEW CHE
 WRITE_VERBS = frozenset((
     "SEND REPLY FORWARD CREATE ADD INSERT UPDATE PATCH MODIFY EDIT REPLACE MOVE COPY "
     "DELETE REMOVE TRASH SHARE INVITE ACCEPT DECLINE SET APPLY MARK ARCHIVE UPLOAD "
-    # Run code, call out, or change state while the name still opens with a read word.
-    "RUN EXECUTE TRIGGER CALL REQUEST DOWNLOAD SYNC CLICK NAVIGATE SCRAPE CRAWL PUBLISH POST PUT SUBMIT "
-    "START STOP CANCEL SCHEDULE ENABLE DISABLE EXPORT IMPORT RESET REVOKE AUTHORIZE CONNECT INVOKE "
-    "SUBSCRIBE UNSUBSCRIBE ASSIGN TRANSFER RENAME PIN UNPIN CLOSE REOPEN APPROVE REJECT").split())
+    # Mutating or call-out verbs that still can follow a read word. Common nouns (post, call,
+    # start, schedule, request, export) stay out: "GET_POST" and "LIST_SCHEDULE" are reads.
+    "EXECUTE INVOKE CLICK NAVIGATE SCRAPE CRAWL PUBLISH SUBMIT CANCEL DISABLE ENABLE IMPORT RESET "
+    "REVOKE AUTHORIZE SUBSCRIBE UNSUBSCRIBE RENAME REOPEN").split())
 
 # Noun-first or verb-without-read-verb names that only read.
 KNOWN_READS = frozenset({
@@ -86,7 +86,8 @@ def calls_in(name, args):
     return out
 
 
-_URLISH = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|ai|xyz|ru|cn|sh|example|test|info|me|to|tk|top|site|online)\b)", re.I)
+_EMAIL = re.compile(r"[^\s@/]+@[^\s@/]+")
+_URLISH = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|ai|xyz|ru|cn|example|test|info|top|site|online)\b)", re.I)
 
 
 def has_url(value, _depth=0) -> bool:
@@ -95,7 +96,7 @@ def has_url(value, _depth=0) -> bool:
     if _depth > 6:
         return True
     if isinstance(value, str):
-        return bool(_URLISH.search(value))
+        return bool(_URLISH.search(_EMAIL.sub(" ", value)))  # an address to search for is not a link
     if isinstance(value, dict):
         return any(has_url(k, _depth + 1) or has_url(v, _depth + 1) for k, v in value.items())
     if isinstance(value, (list, tuple)):

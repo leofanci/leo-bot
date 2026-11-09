@@ -101,10 +101,8 @@ class Join(Base):
         pid, token = people.join(self.root, c1, "Pat")
         _, c2 = self.invite(ws="demo", role="admin")
         pid2, token2 = people.join(self.root, c2, "ignored", token=token)
-        self.assertEqual(pid2, pid)
-        self.assertNotEqual(token2, token)  # rotated: a cookie planted before the join dies
-        self.assertIsNone(people.person_by_token(self.root, token))
-        self.assertEqual(people.person_by_token(self.root, token2)["ws"], {"acme": "member", "demo": "admin"})
+        self.assertEqual((pid2, token2), (pid, token))  # the device keeps its token
+        self.assertEqual(people.person_by_token(self.root, token)["ws"], {"acme": "member", "demo": "admin"})
 
     def test_rejoin_keeps_the_higher_role(self):
         _, c1 = self.invite(role="admin")

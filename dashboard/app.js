@@ -2463,7 +2463,7 @@ function evDetail(r){
     d.remove();
     if(r.kind==="activity"){
       try{
-        await jpost("/api/activity/delete",{title:r.title});
+        await jpost("/api/activity/delete",{title:r.title,entity:r.entity_slug||""});
         undoToast(`Activity "${r.title}" deleted`, async()=>{
           await jpost("/api/activity/new",{title:r.title,entity:r.entity_slug,date:r.date,time:r.time||"",time_end:r.time_end||"",type:r.type||"task"});
           refreshViews();

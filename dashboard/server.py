@@ -1285,12 +1285,13 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
         return sess
 
 
-def stop_person_chat(pid):
+def stop_person_chat(pid, ws=None):
+    """Close a person's live chat sessions: all of them, or (with `ws`) only those in that workspace."""
     slot = _PERSON_CHATS.get(pid)
-    if slot:
+    if slot and (ws is None or _scope_slug(slot[1]) == ws):
         slot[0].close()
     extra = _EXTRA.get(pid)
-    if extra is not None:
+    if extra is not None and (ws is None or getattr(extra, "workspace", ws) == ws):
         extra.close()
 
 
@@ -1625,6 +1626,11 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self._local_host() or self._public_host()
 
+    def _member_name(self):
+        """The member cookie's name. Over https it takes the `__Host-` prefix, which a browser only
+        accepts from this exact host: a sibling site cannot plant a cookie of that name."""
+        return "__Host-" + MEMBER_COOKIE if self._secure() else MEMBER_COOKIE
+
     def _cookie(self, name):
         jar = SimpleCookie()
         try:
@@ -1636,7 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _person(self):
         """The invited person behind the member cookie (core.people view) or None."""
-        p = people.person_by_token(ROOT, self._cookie(MEMBER_COOKIE))
+        p = people.person_by_token(ROOT, self._cookie(self._member_name()))
         return {"kind": "person", **p} if p and p["ws"] else None
 
     def _person_authorized(self, *, require_origin=False):
@@ -1651,7 +1657,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._person()
 
     def _member_cookie(self, token):
-        return (f"{MEMBER_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; "
+        return (f"{self._member_name()}={token}; HttpOnly; SameSite=Lax; Path=/; "
                 f"Max-Age={MEMBER_MAX_AGE}{self._secure()}")
 
     def _valid_cookie(self):
@@ -1913,7 +1919,7 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
         try:
             inv = people.invite_for(ROOT, code)
-            _, token = people.join(ROOT, code, (form.get("name") or [""])[0], token=self._cookie(MEMBER_COOKIE))
+            _, token = people.join(ROOT, code, (form.get("name") or [""])[0], token=self._cookie(self._member_name()))
         except ValueError as e:
             return self._page(400, "Invite", f"<h1>Could not join</h1><p>{html.escape(str(e))}</p>")
         self.send_response(303)
@@ -1954,7 +1960,7 @@ class Handler(BaseHTTPRequestHandler):
             people.remove(ROOT, ws, pid)
             people.revoke_invites_by(ROOT, ws, pid)
             # A turn already running here ends too: close their session, cut its osctl token.
-            stop_person_chat(pid)
+            stop_person_chat(pid, ws)
             os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
@@ -2929,7 +2935,7 @@ class Handler(BaseHTTPRequestHandler):
                 slug = path[len("/api/profile/"):-len("/delete")]
                 return self._send(200, {"ok": True, **fileops.delete_profile(slug)})
             if path == "/api/activity/delete":
-                return self._send(200, {"ok": True, **fileops.delete_activity(body.get("title", ""))})
+                return self._send(200, {"ok": True, **fileops.delete_activity(body.get("title", ""), body.get("entity", ""))})
             if path == "/api/local-folder/pick":
                 return self._send(200, {"ok": True, **pick_local_folder()})
             if path in ("/api/project/new",) or (path.startswith("/api/project/") and path.endswith("/update")):
@@ -3000,6 +3006,11 @@ class Handler(BaseHTTPRequestHandler):
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
                     runners.revoke_owner(ROOT, pid)
+                # Turns still running for the deleted workspace lose their tokens and sessions now.
+                os_relay.TOKENS.revoke_where(ws=out["slug"])
+                apps_relay.TOKENS.revoke_where(ws=out["slug"])
+                for pid in list(_PERSON_CHATS):
+                    stop_person_chat(pid, out["slug"])
                 _retire_threads(lambda rec: _chat_workspace(rec) == out["slug"])
                 engine_config.forget_workspace(out["slug"], ROOT)
                 ws_logos.remove(out["slug"], ROOT)

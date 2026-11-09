@@ -59,7 +59,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let target = action.request.url else { decisionHandler(.cancel); return }
         let scheme = target.scheme?.lowercased() ?? ""
-        if scheme == "about" || scheme == "blob" || scheme == "data" {
+        // The window itself never navigates to a data: or blob: page (a link in a bot's text could
+        // carry its own HTML); frames inside myOS pages may still use them.
+        let inMainFrame = action.targetFrame?.isMainFrame ?? true
+        if target.absoluteString == "about:blank" || ((scheme == "blob" || scheme == "data") && !inMainFrame) {
             decisionHandler(.allow); return
         }
         if scheme == "http", target.host == url.host, target.port == url.port {
