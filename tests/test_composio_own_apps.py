@@ -82,11 +82,37 @@ class OwnApps(unittest.TestCase):
             return {"session_id": "s9", "mcp": {"url": MCP}}
 
         with mock.patch.object(composio, "_json", side_effect=fake), \
+                mock.patch.object(composio, "catalog", return_value=[]), \
                 mock.patch.object(integrations, "accounts_for", return_value={"tiktok": ["ca_1"]}):
             sess = composio.ensure_session("ceo", "hq", self.root)
         self.assertEqual(sess["session_id"], "s9")
         self.assertNotIn("auth_configs", attempts[0])
         self.assertEqual(attempts[1]["auth_configs"], {"tiktok": "ac_mine"})
+
+    def test_fallback_leaves_managed_apps_on_their_own_login(self):
+        # A Gmail account made through Composio's login must not be switched to a
+        # custom Gmail config that happens to exist in the project.
+        self.configs = [config(), config(id="ac_gmail", slug="gmail")]
+        asked, attempts = [], []
+
+        def fake(method, path, body, root):
+            if path.startswith("/auth_configs"):
+                asked.append(path)
+                slug = path.split("toolkit_slug=")[1].split("&")[0]
+                return {"items": [c for c in self.configs if c["toolkit"]["slug"] == slug]}
+            attempts.append(body)
+            if len(attempts) == 1:
+                raise NO_MANAGED
+            return {"session_id": "s9", "mcp": {"url": MCP}}
+
+        cat = [{"slug": "gmail", "name": "Gmail", "logo": None, "auth": "managed"},
+               {"slug": "tiktok", "name": "TikTok", "logo": None, "auth": "own_app"}]
+        with mock.patch.object(composio, "_json", side_effect=fake), \
+                mock.patch.object(composio, "catalog", return_value=cat), \
+                mock.patch.object(integrations, "accounts_for", return_value={"gmail": ["ca_g"], "tiktok": ["ca_t"]}):
+            composio.ensure_session("ceo", "hq", self.root)
+        self.assertEqual(attempts[1]["auth_configs"], {"tiktok": "ac_mine"})
+        self.assertFalse(any("gmail" in p for p in asked))
 
 
 class ConnectButton(unittest.TestCase):

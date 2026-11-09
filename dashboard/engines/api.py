@@ -47,9 +47,9 @@ def set_backends(**kw):
 
 def friendly_status(status, name):
     if status in (401, 403):
-        return f"{name} refused the API key. Check it in HQ, Engines."
+        return f"{name} refused the API key. Check it in Settings, Engines."
     if status == 404:
-        return f"{name} does not know this model. Check the model names in HQ, Engines."
+        return f"{name} does not know this model. Check the model names in Settings, Engines."
     if status == 429:
         return f"{name} is rate limiting this key. Try again in a minute."
     if status == 402:
@@ -284,7 +284,7 @@ class ApiEngine(Engine):
         session._proc = cancel
         model = self.resolve_model(model)
         if not model:
-            yield ("error", f"{self.label} has no model set. Add one in HQ, Engines.")
+            yield ("error", f"{self.label} has no model set. Add one in Settings, Engines.")
             return
         fmt = self.provider.get("format")
         run = self._anthropic_turn if fmt == "anthropic" else self._openai_turn

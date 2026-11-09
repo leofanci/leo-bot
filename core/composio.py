@@ -168,8 +168,7 @@ def _session(pid, key, accounts, root):
     try:
         data = _json("POST", "/tool_router/session", body, root)
     except ComposioError as e:
-        configs = {tk: own_auth_config(tk, root) for tk in accounts or {}} if e.reason == NO_MANAGED_AUTH else {}
-        configs = {tk: c for tk, c in configs.items() if c}
+        configs = _own_configs(accounts or {}, root) if e.reason == NO_MANAGED_AUTH else {}
         if not configs:
             raise
         data = _json("POST", "/tool_router/session", {**body, "auth_configs": configs}, root)
@@ -239,6 +238,14 @@ def own_auth_config(toolkit, root=bots.ROOT):
                 and isinstance(i.get("id"), str) and _AUTH_CONFIG_RE.fullmatch(i["id"]):
             return i["id"]
     return None
+
+
+def _own_configs(toolkits, root):
+    """{toolkit: own auth config} for the apps Composio has no login for. An app it
+    does have one for keeps it: its accounts were made through that login."""
+    managed = {i["slug"] for i in catalog(root) if i.get("auth") == "managed"}
+    found = {tk: own_auth_config(tk, root) for tk in toolkits if tk not in managed}
+    return {tk: c for tk, c in found.items() if c}
 
 
 def _link(sid, toolkit, root):
