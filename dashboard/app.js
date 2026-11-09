@@ -4228,6 +4228,12 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       if (_ROOMS.length && !roomById(activeRoomId)) return selectRoom(wsRooms[_WS] || `${_WS}/general`);
       paintRoomHeader();
       if (!activeChatId && !history.length && !busy) showChat([]);   // welcome now knows the room
+      // The last thread is restored at load, before the roster: repaint once it is here (bot names).
+      else if (paintedBlind && _BOTS.length && !busy && history.length) {
+        const keep = stream.scrollTop, atEnd = stream.scrollHeight - keep - stream.clientHeight < 40;
+        showChat(history.slice());
+        if (!atEnd) stream.scrollTop = keep;
+      }
     },
   };
 
@@ -4250,8 +4256,10 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     else delete roomThreads[activeRoomId];
     try { localStorage.setItem("roomThreads", JSON.stringify(roomThreads)); } catch {}
   }
+  let paintedBlind = false;   // the open thread was drawn before the bot roster loaded
   function showChat(msgs){
     closePicker();
+    paintedBlind = !_BOTS.length;
     history.length = 0; stream.innerHTML = "";
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach((m, i) => {
