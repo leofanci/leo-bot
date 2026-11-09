@@ -775,7 +775,7 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .logo-actions{display:flex;flex-wrap:wrap;gap:var(--ui-space-2)}
 .logo-actions label.btn{cursor:pointer}
 
-/* HQ, Engines */
+/* Settings, Engines and Bots */
 .add-prov{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}
 .eng-form{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}
 .eng-form input,.eng-form select{min-width:0;flex:1 1 180px}

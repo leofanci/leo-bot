@@ -67,6 +67,21 @@ class SettingsScreen(unittest.TestCase):
         self.assertNotIn("settings", APP_JS.split("const PERSON_ROUTE =", 1)[1].split("\n", 1)[0])
         self.assertIn('isPerson() ? "" : `<button class="ws-btn ws-settings"', APP_JS)
 
+    def test_no_message_points_at_a_screen_that_is_gone(self):
+        # Engines, Integrations and sharing left HQ for Settings: errors must say where they are now.
+        import re
+        gone = re.compile(r"HQ, (?:Engines|Integrations|Team|Folders)|HQ · settings")
+        base = Path(server.HERE).parent
+        files = [*base.joinpath("dashboard").rglob("*.py"), *base.joinpath("dashboard").glob("*.js"),
+                 *base.joinpath("dashboard").glob("*.html"), *base.joinpath("dashboard").glob("*.css"),
+                 *base.joinpath("core").rglob("*.py"), *base.joinpath("docs").glob("*.md"), base / "README.md"]
+        stale = [str(f.relative_to(base)) for f in files if gone.search(f.read_text(errors="replace"))]
+        self.assertEqual(stale, [])
+
+    def test_hq_total_says_it_covers_every_workspace(self):
+        # HQ's spend adds up all workspaces, so it can exceed what HQ's own bots show.
+        self.assertIn('_WS === "hq" ? "All workspaces, last" : "Last"', APP_JS)
+
     def test_hq_bots_do_not_promise_a_workspace_engine(self):
         # HQ has no workspace-level pick: its bots fall back to your messages.
         self.assertIn('g.ws === "hq" ? "Same as your messages" : "Same as its workspace"', APP_JS)

@@ -12,8 +12,8 @@ from dashboard.engines.claude_code import ENGINE_ENV, ENGINE_ID, ClaudeCodeEngin
 from dashboard.engines.codex import ENGINE_ID as CODEX_ID, CodexEngine
 
 NO_PEOPLE_ENGINE = ("This workspace has no API key for invited people yet, so bots can't answer here. "
-                    "The owner can set one in HQ, Engines.")
-NO_SHARED_ENGINE = "{label} can't run in a thread invited people can see. Pick an engine for people in HQ, Engines."
+                    "The owner can pick one in Settings, Bots.")
+NO_SHARED_ENGINE = "{label} can't run in a thread invited people can see. Pick an engine for invited people in Settings, Bots."
 
 
 def on_server():
@@ -35,7 +35,7 @@ def get(engine_id, root=config.ROOT):
         provider = config.provider(engine_id[4:], root)
         if provider:
             return ApiEngine(provider, root)
-    raise EngineRefused(f"The engine {engine_id!r} is not set up. Check HQ, Engines.")
+    raise EngineRefused(f"The engine {engine_id!r} is not set up. Check Settings, Engines.")
 
 
 def default_id(data):

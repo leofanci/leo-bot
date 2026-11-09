@@ -1264,7 +1264,7 @@ async function renderTeam(){
     const noApps = !person && integ.configured && (integ.connected || []).length && !wsApps.length
       ? `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>` : "";
     $("#team-list").innerHTML = peopleSection(pv, link) + noApps
-      + `${!person && t.turns ? `<div class="team-total">Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>` : ""}
+      + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>` : ""}
         <div class="rowc">${on.map(onRow).join("")}</div>
         ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}`;
     wirePeople();

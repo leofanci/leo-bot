@@ -223,7 +223,7 @@ def _failure_text(text):
     text = str(text or "").strip()[:500]
     if not text or re.search(r"not logged in|please run /login|invalid api key", text, re.I):
         return ("Claude Code is not logged in on this machine. Run `claude auth login` here, "
-                "or pick an API key in HQ, Engines.")
+                "or add an API key in Settings, Engines and pick it in Settings, Bots.")
     return text
 
 
@@ -341,7 +341,7 @@ class ClaudeCodeEngine(Engine):
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1)
         except FileNotFoundError:
-            yield ("error", "Claude Code is not installed on this machine. Install it, or pick an API key in HQ, Engines.")
+            yield ("error", "Claude Code is not installed on this machine. Install it, or add an API key in Settings, Engines and pick it in Settings, Bots.")
             return
         session._started = True
         session._proc = proc
