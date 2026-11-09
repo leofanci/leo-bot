@@ -619,6 +619,21 @@ class PathsStayInside(Tmp):
                     call(bad)
         self.assertEqual(self.tree(), self.before)
 
+    def test_project_writers_never_follow_a_symlink_out(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "project.md").write_text("CANARY")
+        (self.data / "projects" / "dangling").symlink_to(self.root / "nowhere")
+        (self.data / "projects" / "linked").symlink_to(outside)
+        before = self.tree()
+        for call in (lambda: fileops.create_project("dangling", {}),
+                     lambda: fileops.create_project("linked", {}),
+                     lambda: fileops.update_project("linked", {"name": "n"})):
+            with self.assertRaises(fileops.ActionError):
+                call()
+        self.assertFalse((self.root / "nowhere").exists())
+        self.assertEqual(self.tree(), before)
+
 
 class LinkedAppCode(unittest.TestCase):
     def test_shared_threads_ask_the_index_for_no_source_code(self):
@@ -640,9 +655,6 @@ class Files(Tmp):
         self.assertEqual(stat.S_IMODE(token.stat().st_mode), 0o644)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class NoBotLinksAFolder(unittest.TestCase):
     """CodeQL #124's source is the owner-typed folder path. A bot reaches osctl only through the
@@ -659,3 +671,7 @@ class NoBotLinksAFolder(unittest.TestCase):
                     [cmd, "--slug", "no-such-slug-zz", "--local-folder", tempfile.gettempdir()], "", ctx)
                 self.assertTrue(failed, (cmd, ctx))
                 self.assertRegex(text, "only you can link|read-only: you were consulted", (cmd, ctx))
+
+
+if __name__ == "__main__":
+    unittest.main()
