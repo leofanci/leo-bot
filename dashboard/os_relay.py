@@ -14,8 +14,10 @@ gets one HTTP MCP server pointing back at the dashboard
 Arguments go to the process as a list (no shell); a body travels as `stdin`.
 """
 import os
+import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import apps_relay
@@ -91,16 +93,39 @@ def env_for(ctx):
     return env
 
 
+# A model job (generate-*, revise-post) runs on the owner's key. A shared thread gets a few at
+# once across everyone, and a timeout kills the whole job, not only osctl.
+_JOB_CMDS = ("generate-", "revise-post")
+_JOBS = threading.BoundedSemaphore(2)
+
+
+def _is_job(args):
+    return bool(args) and any(str(args[0]).startswith(c) for c in _JOB_CMDS)
+
+
 def run_osctl(args, stdin, ctx, root=bots.ROOT):
     """osctl as a child process; it finds the data itself (fileops.ROOT)."""
+    job = ctx.get("shared", True) and _is_job(args)
+    if job and not _JOBS.acquire(blocking=False):
+        return "other generate jobs are running; try again in a minute", True
     try:
-        out = subprocess.run([sys.executable, "-m", "dashboard.osctl", *args], input=stdin,
-                             capture_output=True, text=True, cwd=str(CODE_DIR), env=env_for(ctx),
-                             timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        return "the command took too long and was stopped", True
-    text = (out.stdout or "").strip() or (out.stderr or "").strip()[-2000:] or "(no output)"
-    return text[:MAX_OUT_CHARS], out.returncode != 0
+        proc = subprocess.Popen([sys.executable, "-m", "dashboard.osctl", *args], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                cwd=str(CODE_DIR), env=env_for(ctx), start_new_session=True)
+        try:
+            out, err = proc.communicate(stdin, timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.communicate()
+            return "the command took too long and was stopped", True
+    finally:
+        if job:
+            _JOBS.release()
+    text = (out or "").strip() or (err or "").strip()[-2000:] or "(no output)"
+    return text[:MAX_OUT_CHARS], proc.returncode != 0
 
 
 def handle(frame, ctx, root=bots.ROOT, runner=run_osctl):

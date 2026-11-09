@@ -45,3 +45,31 @@ class OpenFolder(unittest.TestCase):
             app.mkdir()
             with self.assertRaises(fileops.ActionError):
                 server.open_local_folder(str(app))
+
+
+class JobBoundTests(unittest.TestCase):
+    def test_shared_job_cap_and_kill(self):
+        import os_relay
+        ctx = {"ws": "demo", "shared": True}
+        held = [os_relay._JOBS.acquire(blocking=False) for _ in range(2)]
+        try:
+            text, failed = os_relay.run_osctl(["generate-brief", "--id", "x"], "", ctx)
+            self.assertTrue(failed)
+            self.assertIn("running", text)
+            text, _ = os_relay.run_osctl(["tree"], "", ctx)  # not a job: not capped
+            self.assertNotIn("generate jobs are running", text)
+        finally:
+            for ok in held:
+                if ok:
+                    os_relay._JOBS.release()
+
+    def test_timeout_kills_group(self):
+        import os_relay
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "fakepy"
+            fake.write_text("#!/bin/sh\nsleep 30\n")
+            fake.chmod(0o755)
+            with mock.patch.object(os_relay, "TIMEOUT", 1), mock.patch.object(os_relay.sys, "executable", str(fake)):
+                text, failed = os_relay.run_osctl(["tree"], "", {"ws": "demo", "shared": False})
+        self.assertTrue(failed)
+        self.assertIn("too long", text)
