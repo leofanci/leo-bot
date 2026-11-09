@@ -324,7 +324,9 @@ def execute(pid, ws, slug, arguments, account=None, root=bots.ROOT):
     """Run one approved tool call, exactly once, on one picked account."""
     sid = ensure_session(pid, ws, root)["session_id"]
     body = {"tool_slug": slug, "arguments": arguments or {}}
-    if account:
+    # One account of an app is the session's pin. Composio accepts "account" only
+    # when the app has several to choose from (multi-account on), and refuses it otherwise.
+    if account and any(account in ids and len(ids) > 1 for ids in integrations.accounts_for(ws, root).values()):
         body["account"] = account
     return _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/execute", body, root)
 

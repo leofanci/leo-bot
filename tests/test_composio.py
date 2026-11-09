@@ -157,15 +157,24 @@ class Client(unittest.TestCase):
             composio.execute("ceo", "hq", "GMAIL_SEND_EMAIL", {"to": "a@example.com"}, "ca_g1", self.root)
         self.assertEqual(len(self.sent), 1)
 
-    def test_execute_sends_slug_arguments_and_account(self):
+    def test_execute_one_account_is_the_pin(self):
+        # Composio refuses "account" unless the session has several to choose from
+        # (ToolRouterV2_BadRequest: multi-account selection is not enabled).
         self.pick(("ca_g1", "gmail"))
         self.saved()
         self.replies = [FakeResp({"data": {"id": "m1"}, "successful": True})]
         with self.patched():
             out = composio.execute("ceo", "hq", "GMAIL_SEND_EMAIL", {"to": "a@example.com"}, "ca_g1", self.root)
-        self.assertEqual(self.body(), {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"to": "a@example.com"},
-                                       "account": "ca_g1"})
+        self.assertEqual(self.body(), {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"to": "a@example.com"}})
         self.assertEqual(out["data"], {"id": "m1"})
+
+    def test_execute_names_the_account_when_there_is_a_choice(self):
+        self.pick(("ca_g1", "gmail"), ("ca_g2", "gmail"))
+        self.saved()
+        self.replies = [FakeResp({"data": {"id": "m1"}, "successful": True})]
+        with self.patched():
+            composio.execute("ceo", "hq", "GMAIL_SEND_EMAIL", {"to": "a@example.com"}, "ca_g2", self.root)
+        self.assertEqual(self.body()["account"], "ca_g2")
 
     def test_forward_parses_sse_reply(self):
         sse = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n'
