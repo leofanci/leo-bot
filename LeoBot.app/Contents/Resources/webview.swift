@@ -2,7 +2,7 @@ import Cocoa
 import CryptoKit
 import WebKit
 
-// myOS — the bundle's main executable is THIS compiled Cocoa app (a real
+// Leo Bot — the bundle's main executable is THIS compiled Cocoa app (a real
 // Mach-O), not a shell script. macOS LaunchServices refuses to launch an .app
 // whose CFBundleExecutable is an interpreted script (it times out with
 // errAETimeout / -1712), so the window must come up from a proper GUI binary.
@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         // Without a uiDelegate, WKWebView silently ignores <input type=file>
         // clicks — the chat's attach button looks dead. See runOpenPanel below.
         webView.uiDelegate = self
-        // The window only ever shows myOS itself: any other web address opens in the
+        // The window only ever shows Leo Bot itself: any other web address opens in the
         // default browser, so a link in a bot's text never loads inside the app window.
         webView.navigationDelegate = self
 
@@ -35,12 +35,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             backing: .buffered,
             defer: false
         )
-        window.title = "myOS"
+        window.title = "Leo Bot"
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden          // hide "myOS" text from title bar
+        window.titleVisibility = .hidden          // hide "Leo Bot" text from title bar
         window.isMovableByWindowBackground = true  // drag anywhere on the window
         window.contentView = webView
-        window.setFrameAutosaveName("myOSWindow")
+        window.setFrameAutosaveName("LeoBotWindow")
         window.center()
         window.makeKeyAndOrderFront(nil)
 
@@ -60,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         guard let target = action.request.url else { decisionHandler(.cancel); return }
         let scheme = target.scheme?.lowercased() ?? ""
         // The window itself never navigates to a data: or blob: page (a link in a bot's text could
-        // carry its own HTML); frames inside myOS pages may still use them.
+        // carry its own HTML); frames inside Leo Bot pages may still use them.
         let inMainFrame = action.targetFrame?.isMainFrame ?? true
         if target.absoluteString == "about:blank" || ((scheme == "blob" || scheme == "data") && !inMainFrame) {
             decisionHandler(.allow); return
@@ -151,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "Quit myOS",
+        appMenu.addItem(withTitle: "Quit Leo Bot",
                         action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let editItem = NSMenuItem()
@@ -248,14 +248,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return ok
     }
 
-    // The bundle lives at <repo>/myOS.app, so the repo is its parent directory.
+    // The bundle lives at <repo>/LeoBot.app, so the repo is its parent directory.
     private func repoPath() -> String {
         (Bundle.main.bundlePath as NSString).deletingLastPathComponent
     }
 
     private func showFailure(_ repo: String) {
         let alert = NSAlert()
-        alert.messageText = "myOS failed to start"
+        alert.messageText = "Leo Bot failed to start"
         alert.informativeText = "The dashboard server did not respond. Check \(repo)/dashboard/server.log for details."
         alert.runModal()
         NSApp.terminate(nil)
@@ -271,7 +271,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         """
         <html><body style="margin:0;background:#16181c;color:#9aa4af;\
         font:14px -apple-system,system-ui;display:flex;align-items:center;\
-        justify-content:center;height:100vh">Starting myOS…</body></html>
+        justify-content:center;height:100vh">Starting Leo Bot…</body></html>
         """
     }
 }

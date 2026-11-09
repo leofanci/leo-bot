@@ -4,7 +4,7 @@ Date: 2026-10-29. Status: approved design.
 
 ## Intent
 
-Let myOS bots work with the user's outside apps (Gmail first) so routine life
+Let Leo Bot bots work with the user's outside apps (Gmail first) so routine life
 and business chores can be handed off, the way Grok Bot, OpenMausBot and Rakazo
 do it. Round 1 adds the plumbing and one real job; scheduling and human
 teammates come in later rounds but must not be blocked by anything built here.
@@ -48,7 +48,7 @@ folder (separate license).
 - Tailored approval cards beyond Gmail, Google Calendar and Drive. Every
   other app gets the generic card (section 4); tailored cards are added per
   app later.
-- Wiring social publishing into the myOS content pipeline (posting an
+- Wiring social publishing into the Leo Bot content pipeline (posting an
   approved calendar post to its channel). Round 1 only makes the apps
   reachable; the link is a later round.
 - Multiple accounts per app (work + personal Gmail).
@@ -61,7 +61,7 @@ folder (separate license).
   in the UI after saving.
 - Anyone outside the user's team able to use the user's key.
 - Every chat turn paying the token cost of app tool schemas even when no app is
-  needed (myOS is token-lean by policy).
+  needed (Leo Bot is token-lean by policy).
 - Real account data (emails, addresses, workspace names) in tracked files,
   tests, or fixtures. Public repo; `tests/test_no_usage_data.py` must pass.
 
@@ -90,11 +90,11 @@ folder (separate license).
   network and Supabase pinned; the rest of the pinned set was picked from
   Composio's catalog for GTM work (section 6).
 - Composio first; invites/teammates next, as their own project.
-- **Calendar split:** the myOS calendar (`create-activity` / `get-busy` via
+- **Calendar split:** the Leo Bot calendar (`create-activity` / `get-busy` via
   osctl) stays the main calendar for work items. Google Calendar is used only
   when the user says "Google" explicitly or the event invites other people
   (they need a real invite). Calendar words alone do not trigger app tools;
-  the RAIL states this rule. Linking the two (e.g. mirroring myOS activities
+  the RAIL states this rule. Linking the two (e.g. mirroring Leo Bot activities
   into Google Calendar) is a future round.
 - **Google OAuth:** use Composio's managed ("ready-made") Google auth. No
   user-owned Google Cloud client this round. `connect_link` uses Composio's
@@ -125,7 +125,7 @@ saves a grant). Shape:
 }
 ```
 
-- `people` is keyed by myOS person id. Today only `ceo` exists
+- `people` is keyed by Leo Bot person id. Today only `ceo` exists
   (`core/bots.CEO`). Teammates later add rows; nothing else changes.
 - `composio_user_id` is a random id generated on first use. Never the user's
   email or name (nothing personal is sent to Composio as an id).
@@ -347,11 +347,11 @@ Token-lean, same spirit as `_needs_web` (`dashboard/server.py:490`):
   email(s)/mail", "reply to <someone/this email/thread>"), not bare
   "email"/"reply", which also mean content work such as newsletter copy; for
   Google Calendar, "google calendar", or a meeting/event with other people
-  (plain calendar words stay on the myOS calendar, see the calendar split
+  (plain calendar words stay on the Leo Bot calendar, see the calendar split
   above); for Drive, drive/google doc. Every other app triggers only on
   `@apps` or a possessive "my <app>" phrase ("my instagram stats", "check my
   supabase"). A bare app name never does: "write a LinkedIn post" is content
-  work for the myOS pipeline, not an app call.
+  work for the Leo Bot pipeline, not an app call.
 - An explicit `/skill` tag wins over app intent (it is a content turn).
 - Otherwise no `--mcp-config` (today's behavior).
 - App turns use `ESCALATED_MODEL`, like web turns. `_pick_model` would

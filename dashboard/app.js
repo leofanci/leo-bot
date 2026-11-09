@@ -367,12 +367,12 @@ let CURRENT_PROFILE_SLUG = null;
 // survive the full renderRail() that fires after every chat action / refresh.
 const OPEN = loadOpen();
 function loadOpen(){
-  try{ const o = JSON.parse(localStorage.getItem("myOS.rail.open") || "{}");
+  try{ const o = JSON.parse(localStorage.getItem("Leo Bot.rail.open") || "{}");
     return { projects:new Set(o.projects||[]), profiles:new Set(o.profiles||[]) }; }
   catch{ return { projects:new Set(), profiles:new Set() }; }
 }
 function saveOpen(){
-  localStorage.setItem("myOS.rail.open",
+  localStorage.setItem("Leo Bot.rail.open",
     JSON.stringify({ projects:[...OPEN.projects], profiles:[...OPEN.profiles] }));
 }
 // A node is open if it's in the OPEN set (persisted). Navigate actions below
@@ -468,7 +468,7 @@ function wsBadge(w){
 }
 
 // Uploaded workspace logo (versioned so a new upload shows at once); HQ falls
-// back to the myOS mark, a project to its initials.
+// back to the Leo Bot mark, a project to its initials.
 const wsLogoUrl = w => w?.logo ? `/api/workspace-logo/${encodeURIComponent(w.id)}?v=${encodeURIComponent(w.logo)}`
   : (w?.id === "hq" ? "/logo.svg" : null);
 
@@ -979,7 +979,7 @@ async function renderFolders(){
     const accessSel = (cur, attrs) => `<select ${attrs} aria-label="Access">${[["read", "Read"], ["edit", "Edit"]].map(([v, l]) =>
       `<option value="${v}"${cur === v ? " selected" : ""}>${l}</option>`).join("")}</select>`;
     const warn = r => [r.missing && "Missing on this machine", r.problem && esc(r.problem),
-      r.not_git && "Not a git repo: edits can't be undone easily", r.cant_write && "myOS can't write here"]
+      r.not_git && "Not a git repo: edits can't be undone easily", r.cant_write && "Leo Bot can't write here"]
       .filter(Boolean).map(t => `<span class="folder-warn">${t}</span>`).join("");
     const folderRows = rows.map(r => `<div class="post"><div class="t"><b>${esc(r.name)}</b><small>${esc(r.path)}</small>${warn(r)}</div>
         ${accessSel(r.access, `data-access="${esc(r.id)}"`)}
@@ -1421,7 +1421,7 @@ async function drawRunners(box, stillOn = () => true){
   const d = await api("/api/runners").catch(() => ({ runners: [] }));
   if (!stillOn() || !box.isConnected) return;
   box.innerHTML = `<section class="integ-group"><h3>Use your own Mac</h3>
-    <div class="help">Connect your Mac and your messages here run on it, on your own Claude login. Bots there can only use myOS: no files, no shell.</div>
+    <div class="help">Connect your Mac and your messages here run on it, on your own Claude login. Bots there can only use Leo Bot: no files, no shell.</div>
     ${(d.runners || []).map(r => `<div class="post"><div class="t"><b>${esc(r.name)}</b><small>${r.online ? "online" : "offline"}</small></div><button class="more" data-runner-off="${esc(r.id)}">Remove</button></div>`).join("")}
     <button class="btn sm" data-runner-add>Connect a Mac</button><div class="runner-new"></div></section>`;
   box.querySelector("[data-runner-add]").onclick = async () => {
@@ -1438,14 +1438,14 @@ async function drawRunners(box, stillOn = () => true){
   });
 }
 
-// Where this myOS runs, and how to move it to a server of your own (docs/server.md).
+// Where this Leo Bot runs, and how to move it to a server of your own (docs/server.md).
 function deploymentSection(where){
   const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
-  if (where === "server") return `<section class="integ-group"><h3>Where myOS runs</h3>
+  if (where === "server") return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
     <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. To watch its log, run this on the server. Guide: docs/server.md.</div>
     ${cmd("journalctl -u myos -f")}</section>`;
-  return `<section class="integ-group"><h3>Where myOS runs</h3>
-    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run myOS on a server of your own. Replace your-server, then run these from a my-os checkout here. They install myOS, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen myOS. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
+  return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
+    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a my-os checkout here. They install Leo Bot, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
     ${cmd(SERVER_STEPS.join("\n"))}</section>`;
 }
 const SERVER_STEPS = [
@@ -3376,10 +3376,10 @@ async function renderWsLogo(id){
         ${url ? `<img class="logo-preview" src="${esc(url)}" alt="">` : `<span class="logo-preview t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}
         <div class="logo-actions">
           <label class="btn primary">${icon("plus")} Upload image<input type="file" id="logo-file" accept="image/png,image/jpeg,image/webp" hidden></label>
-          ${w.logo ? `<button class="btn" id="logo-remove">${w.id === "hq" ? "Use the myOS logo" : "Remove"}</button>` : ""}
+          ${w.logo ? `<button class="btn" id="logo-remove">${w.id === "hq" ? "Use the Leo Bot logo" : "Remove"}</button>` : ""}
         </div>
       </div>
-      <p class="help">PNG, JPEG or WebP. Shown in the workspace bar and at the top of the sidebar, resized to ${LOGO_PX}px square. ${w.id === "hq" ? "Without one, HQ shows the myOS logo." : "Without one, the project shows its initials."}</p>
+      <p class="help">PNG, JPEG or WebP. Shown in the workspace bar and at the top of the sidebar, resized to ${LOGO_PX}px square. ${w.id === "hq" ? "Without one, HQ shows the Leo Bot logo." : "Without one, the project shows its initials."}</p>
     </div></div>`;
   const done = async msg => { toast(msg); await renderRail(); renderWsLogo(id); };
   $("#logo-file").onchange = async e => {

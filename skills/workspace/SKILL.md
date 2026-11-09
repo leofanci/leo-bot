@@ -3,7 +3,7 @@ name: workspace
 description: Master dispatcher for the GTM Operating System. Use at session start, when intent is unclear, or when the user says fill tabs / left panel / divide spec across project sections. Routes to the right skill and maps content to the six dashboard project tabs (not product roadmap rows only).
 ---
 
-# myOS — Dispatcher
+# Leo Bot — Dispatcher
 
 Decision memos: 2-4 options, pros/cons, one recommendation. Tab map + write gate live in system prompt (TAB ROUTING, WRITE GATE) — do not repeat them here.
 

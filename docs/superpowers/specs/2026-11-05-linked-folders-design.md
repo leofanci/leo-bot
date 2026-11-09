@@ -4,7 +4,7 @@
 
 Today a workspace links one folder (`local_folder` in `project.md`), HQ links none, and bots may
 only read it. Comparable agent tools let a bot work in any folder, set per channel or per bot, and
-save there. myOS bots should be able to do real work in the owner's folders, without losing the
+save there. Leo Bot bots should be able to do real work in the owner's folders, without losing the
 walls between workspaces or showing anything to invited people.
 
 ## Goals
@@ -21,7 +21,7 @@ walls between workspaces or showing anything to invited people.
 
 - A free shell. Bots still cannot run tests, builds or git on Claude Code and API-key engines. It
   needs a sandbox and is separate work.
-- Moving myOS's own data out of the repo checkout. Separate work.
+- Moving Leo Bot's own data out of the repo checkout. Separate work.
 - Edit access on Codex. Its sandbox has no per-path rule for the never-write list, and its shell
   stays off. It stays read-only, and the Engines screen says so.
 - Edit access on ACP agents. They stay as they are until checked against a real agent.
@@ -33,7 +33,7 @@ walls between workspaces or showing anything to invited people.
 
 - An invited person, a shared thread or a runner turn reaches a linked folder or sees its path.
 - A bot reads or writes another workspace's folder, unless the owner linked it to both.
-- A bot writes anywhere in the myOS checkout other than through osctl.
+- A bot writes anywhere in the Leo Bot checkout other than through osctl.
 - A bot changes which folders are linked or their access.
 - A bot writes a file that makes code run on its own later, such as a git hook.
 - An existing link gains write access without the owner choosing it.
@@ -121,7 +121,7 @@ its `CLAUDE.md` or `AGENTS.md` before working there and to name every file chang
 File tool schemas now load on every private turn in a workspace with folders. That costs more
 tokens than today's only-on-code-questions rule, and it is the price of always being able to search.
 
-The bot's process keeps starting in the myOS folder on Claude Code and API-key engines. The osctl
+The bot's process keeps starting in the Leo Bot folder on Claude Code and API-key engines. The osctl
 permission rule and `--resume` both depend on that starting folder. Folder files are not injected
 into the prompt.
 
@@ -180,7 +180,7 @@ when it is the same as, inside, or contains a folder this turn has. A deny rule 
 block the owner's own link. HQ keeps today's behaviour of no deny list, and only gets edit access to
 HQ's own folders.
 
-`normalize_local_folder` keeps its checks and adds one: a folder inside the myOS checkout is
+`normalize_local_folder` keeps its checks and adds one: a folder inside the Leo Bot checkout is
 refused. Links like that from before this change count as stale after the migration.
 
 ### Screen
@@ -189,7 +189,7 @@ A Folders section on the workspace settings page, and on an equivalent page for 
 
 - A row per folder: name, path, Read/Edit switch, Open, Unlink.
 - A row shows a warning when the folder is missing on this machine, when it is not in a git repo
-  ("edits can't be undone easily"), and when myOS can't write to it.
+  ("edits can't be undone easily"), and when Leo Bot can't write to it.
 - Add folder: the existing chooser on a Mac, a typed path on a server.
 - Channels and bots: each shows "All folders" until limited, then per folder None, Read or Edit.
 
@@ -219,7 +219,7 @@ turn instead of looking it up by slug.
 - API tools: every refusal in the never-write list, symlink out, `..`, a pipe, oversized content,
   writing with no edit folders, a read folder.
 - Walls: another workspace's folder refused on every engine that enforces it, same folder linked to
-  two workspaces works, nested links work, a folder inside myOS refused.
+  two workspaces works, nested links work, a folder inside Leo Bot refused.
 - Invited people: no route or payload reveals a path, and settings routes refuse them.
 - `osctl` inside a bot turn cannot change folders.
 - Tag gate and `may_edit`: an untagged save word still stops; `/skill`, `@bot`, DM and continuation

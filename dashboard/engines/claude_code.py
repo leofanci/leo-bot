@@ -1,7 +1,7 @@
 """claude_code.py: the claude-code engine. Runs `claude -p` in stream-json mode.
 
 Bash is restricted to the osctl CLI, so the agent can ONLY mutate GTM state via
-`python -m dashboard.osctl`; Read is always available for myOS. Glob/Grep and
+`python -m dashboard.osctl`; Read is always available for Leo Bot. Glob/Grep and
 linked-folder access are loaded only when a turn explicitly needs file-search
 fallback. TokenSave retrieval happens once in the server before the model
 starts, so the agent cannot skip or repeat it. No MCP, no default system prompt:
@@ -81,7 +81,7 @@ def web_fetch_rules(domains):
     return [r for d in domains for r in (f"WebFetch(domain:{d})", f"WebFetch(domain:www.{d})")]
 
 
-# myOS data changes go through osctl ONLY: Write/Edit load only for edit folders and
+# Leo Bot data changes go through osctl ONLY: Write/Edit load only for edit folders and
 # are allowed only inside them, so the authored-files-are-truth invariant holds.
 # Permissions are assembled per turn: linked-folder permissions exist only on turns with folders.
 # Passed as separate --allowedTools args — do not join with spaces.
@@ -152,7 +152,7 @@ APPS_MCP_PATH = "/api/internal/apps/mcp"
 APPS_TOKEN_ENV = "MYOS_APPS_TOKEN"
 # A shared thread (an invited person can see it): no Bash/Read/Glob/Grep at all,
 # because Claude Code runs read-only tools and shell reads (cat, `< file`) on any
-# path without asking. Its one myOS tool is the osctl relay (os_relay.py).
+# path without asking. Its one Leo Bot tool is the osctl relay (os_relay.py).
 OS_MCP_PATH = "/api/internal/os/mcp"
 OS_TOKEN_ENV = "MYOS_OS_TOKEN"
 RUNNER_TOKEN_ENV = "MYOS_RUNNER_TOKEN"
@@ -248,7 +248,7 @@ class ClaudeCodeEngine(Engine):
         #   --system-prompt        REPLACES Claude Code's default prompt with RAIL.
         #   --tools Bash Read [Glob Grep] [Edit Write] [WebSearch WebFetch]  search
         #                          tools load only with linked folders, Edit/Write
-        #                          only with edit folders; myOS data stays osctl-only.
+        #                          only with edit folders; Leo Bot data stays osctl-only.
         #   --add-dir             one per linked folder this turn may read.
         #   Edit(//dir/**)        allowed per edit folder; the never-write list inside
         #                          it, and every deny dir, are denied (deny wins).

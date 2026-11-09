@@ -1,4 +1,4 @@
-"""deployment.py: where this myOS runs, read from its environment.
+"""deployment.py: where this Leo Bot runs, read from its environment.
 
 MYOS_DEPLOYMENT is "server" on a server (set by scripts/server-setup.sh), else this is a Mac.
 """

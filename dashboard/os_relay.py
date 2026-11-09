@@ -1,4 +1,4 @@
-"""os_relay.py — the one myOS tool of a shared thread's bot.
+"""os_relay.py — the one Leo Bot tool of a shared thread's bot.
 
 A thread an invited person can see (core.people) runs with no shell and no
 file tools: Claude Code lets read-only tools and shell commands (Read, cat,
@@ -37,7 +37,7 @@ CODE_DIR = Path(__file__).resolve().parent.parent  # where `-m dashboard.osctl` 
 
 TOOL_SPEC = {
     "name": TOOL,
-    "description": ("Run one myOS command (the osctl CLI) in this workspace. `args` = the words "
+    "description": ("Run one Leo Bot command (the osctl CLI) in this workspace. `args` = the words "
                     "after `python3 -m dashboard.osctl`, one per item, e.g. "
                     "[\"get-project\", \"--slug\", \"acme\"]. Long bodies go in `stdin` instead of --text. "
                     "Returns the command's JSON output."),

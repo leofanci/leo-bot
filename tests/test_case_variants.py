@@ -138,7 +138,7 @@ class FolderCaseVariants(unittest.TestCase):
         docs = home / "Documents"
         if docs.is_dir():
             with self.assertRaises(folders.FolderError):
-                folders.normalize_path(str(home / "documents"))  # parent of the myOS checkout
+                folders.normalize_path(str(home / "documents"))  # parent of the Leo Bot checkout
 
 
 class AppReadUrlArguments(unittest.TestCase):

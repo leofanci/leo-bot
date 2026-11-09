@@ -125,7 +125,7 @@ def project(slug):
 ```
 
 - [ ] **Step 4: Run, expect PASS.** `python3 -m unittest tests.test_db_project -v`
-- [ ] **Step 5: Commit.** `git add dashboard/db.py tests/test_db_project.py && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(db): project(slug) aggregate for the project-section views"`
+- [ ] **Step 5: Commit.** `git add dashboard/db.py tests/test_db_project.py && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(db): project(slug) aggregate for the project-section views"`
 
 ---
 
@@ -297,7 +297,7 @@ def run_plan(brand_slug, params):
 ```
 
 - [ ] **Step 4: Run both, expect PASS.**
-- [ ] **Step 5: Commit.** `git add dashboard/fileops.py tests/test_fileops_posts.py tests/test_fileops_plan_args.py && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(fileops): post CRUD, authored-json reader, plan wrapper"`
+- [ ] **Step 5: Commit.** `git add dashboard/fileops.py tests/test_fileops_posts.py tests/test_fileops_plan_args.py && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(fileops): post CRUD, authored-json reader, plan wrapper"`
 
 ---
 
@@ -337,7 +337,7 @@ def run_plan(brand_slug, params):
 
 - [ ] **Step 3: Verify.**
 ```bash
-cd /path/to/myOS && python3 dashboard/server.py & SRV=$!; sleep 2
+cd /path/to/Leo Bot && python3 dashboard/server.py & SRV=$!; sleep 2
 echo "project:"; curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8765/api/project/acme
 ADD=$(curl -s -X POST http://127.0.0.1:8765/api/channel/demo/posts -H 'Content-Type: application/json' -d '{"date":"2026-06-30","platform":"tiktok","pillar":"Test"}'); echo "$ADD"
 PID=$(printf '%s' "$ADD" | python3 -c "import sys,json;print(json.load(sys.stdin)['id'])")
@@ -346,7 +346,7 @@ kill $SRV 2>/dev/null
 ```
 Expected: project → `200`; add → `{"ok":true,"id":"m-…"}`; delete → `{"ok":true,…,"deleted":true}`.
 
-- [ ] **Step 4: Commit.** `git add dashboard/server.py && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(server): /api/project read + post CRUD/plan write routes"`
+- [ ] **Step 4: Commit.** `git add dashboard/server.py && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(server): /api/project read + post CRUD/plan write routes"`
 
 ---
 
@@ -396,7 +396,7 @@ async function renderRail(){
       </nav>
     </div>`).join("");
   $("#rail").innerHTML = `
-    <div class="brand"><span class="mark"></span><b>myOS</b></div>
+    <div class="brand"><span class="mark"></span><b>Leo Bot</b></div>
     <div class="navlabel label">Across everything</div>
     <nav class="nav">
       <a data-view="needs"><span class="ico">◉</span> Needs you</a>
@@ -428,7 +428,7 @@ async function renderOperations(){ $("#main").innerHTML=`<div class="topbar"><di
 ```
 
 - [ ] **Step 3: Smoke-test the rail.** Run the server; confirm Acme shows the six sections + a "Social profiles" group with Demo/Sample indented; clicking a section / a profile / Calendar switches the center. Stop.
-- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(dashboard): project-scoped rail with sections + Social-profiles group"`
+- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(dashboard): project-scoped rail with sections + Social-profiles group"`
 
 ---
 
@@ -499,7 +499,7 @@ async function renderProjectSection(slug, section){
 > If `--amber-soft`/`--amber` aren't defined in `:root`, add: `--amber:#c98a1a; --amber-soft:rgba(201,138,26,.16);`.
 
 - [ ] **Step 3: Smoke-test** each section for Acme (Overview shows stage/validation/pace + memo cards; Experiments shows the WTP probe; Product shows the 9 features; others show clean empty states). Stop.
-- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(dashboard): data-driven project-section views"`
+- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(dashboard): data-driven project-section views"`
 
 ---
 
@@ -633,7 +633,7 @@ function openGuidelines(slug){
 > The old `renderChannel` had a `guidelinesEditor`/`cards`/`act` set — they are fully replaced by the above. Remove any now-unused leftovers so there are no dead functions.
 
 - [ ] **Step 4: Smoke-test** Demo: filter chips switch the list; the draft shows **Review →**, ideas show **Write it →**; **＋ Add idea** adds; **⋯** edits/deletes; **⚙ Guidelines** opens, refines, saves; **✦ Generate ideas** opens (cancel to avoid spend). Stop.
-- [ ] **Step 5: Commit.** `git add dashboard/app.html && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(dashboard): plain-language content list with stages, actions, authoring"`
+- [ ] **Step 5: Commit.** `git add dashboard/app.html && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(dashboard): plain-language content list with stages, actions, authoring"`
 
 ---
 
@@ -691,7 +691,7 @@ async function renderTimeline(){
 ```
 
 - [ ] **Step 3: Smoke-test** the **Calendar** nav item: month grid, all seven days, today highlighted, items on days, ‹ Today › nav. Stop.
-- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(dashboard): month-calendar view (all seven days, month nav)"`
+- [ ] **Step 4: Commit.** `git add dashboard/app.html && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(dashboard): month-calendar view (all seven days, month nav)"`
 
 ---
 
@@ -699,7 +699,7 @@ async function renderTimeline(){
 
 - [ ] **Step 1: Full suite** — `python3 -m unittest discover -s tests -v` → all PASS (Phase 1's 3 + `test_db_project` (1) + `test_fileops_posts` (2) + `test_fileops_plan_args` (2) = 8).
 - [ ] **Step 2: Update `docs/guide.md`** layout section: note that each **project** exposes Overview / Problem & validation / Experiments / Positioning & pricing / Product / Operations, with **Social profiles** nested inside; content uses plain stages (Idea → Draft → Scheduled → Published) with **＋ Add idea** / **✦ Generate ideas** / Edit / Delete; and **Calendar** is a month grid. Keep the rest intact.
-- [ ] **Step 3: Commit.** `git add docs/guide.md && git -c user.name='myOS' -c user.email='you@example.com' commit -m "docs: project workspace, content stages, calendar"`
+- [ ] **Step 3: Commit.** `git add docs/guide.md && git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "docs: project workspace, content stages, calendar"`
 
 ---
 

@@ -1,4 +1,4 @@
-# myOS — Running & Usage Guide
+# Leo Bot — Running & Usage Guide
 
 A local-first operating system for running a portfolio of projects, products,
 profiles, and content from your machine. Files are the source of truth; everything
@@ -18,14 +18,14 @@ No other install. No server, no database to run, no `npm`.
 ## Quick start — the dashboard
 
 ```bash
-cd /path/to/myOS
+cd /path/to/Leo Bot
 python3 dashboard/server.py
 ```
 
 It re-indexes from your files, then prints:
 
 ```
-myOS dashboard → http://127.0.0.1:8765/?token=<per-run token>
+Leo Bot dashboard → http://127.0.0.1:8765/?token=<per-run token>
 ```
 
 Open that link: the token is exchanged for a login cookie. A plain
@@ -150,7 +150,7 @@ python3 index.py
 ## Where things live
 
 ```
-myOS/
+Leo Bot/
 ├── docs/                    ← this guide
 ├── database/                ← all DB stuff (the only db-related folder)
 │   ├── migrations/          ← schema (0001_init.sql); index.py applies *.sql in order

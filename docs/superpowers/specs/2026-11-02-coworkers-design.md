@@ -2,7 +2,7 @@
 
 ## Intent
 
-myOS is one person's OS today: one login (the owner token), one bot chat in
+Leo Bot is one person's OS today: one login (the owner token), one bot chat in
 flight at a time, every screen full-trust. A project often has a small team
 around it. They should be able to join that project's workspace and talk with
 the owner and the bots in the same channels, without getting the owner's
@@ -26,7 +26,7 @@ code is not used (different stack); only the behavior.
 
 ## Non-goals
 
-- No hosted myOS run for other owners. Each owner runs their own server.
+- No hosted Leo Bot run for other owners. Each owner runs their own server.
 - No passwords, email, SSO. Identity is the device cookie the invite link
   gives (Buzz keeps a private key on the device; this is the same idea).
 - Members do not get Content, Files, Calendar, Operations, Approvals,

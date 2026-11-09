@@ -1,4 +1,4 @@
-"""api.py: the api engine. myOS runs the agent loop over HTTP on a provider's API key.
+"""api.py: the api engine. Leo Bot runs the agent loop over HTTP on a provider's API key.
 
 Two wire formats: Anthropic Messages and OpenAI-compatible Chat Completions
 (OpenAI, OpenRouter, DeepSeek, Fireworks, Ollama, LM Studio). Stdlib urllib only.
@@ -233,7 +233,7 @@ class ApiEngine(Engine):
     # ---- HTTP --------------------------------------------------------- #
     def _open(self, path, payload, cancel=None):
         p = self.provider
-        headers = {"Content-Type": "application/json", "User-Agent": "myOS"}
+        headers = {"Content-Type": "application/json", "User-Agent": "Leo Bot"}
         if p.get("format") == "anthropic":
             headers.update({"x-api-key": p.get("key") or "", "anthropic-version": ANTHROPIC_VERSION})
         elif p.get("key"):

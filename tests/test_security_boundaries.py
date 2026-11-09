@@ -188,7 +188,7 @@ class LoginAndLocalFilesTest(unittest.TestCase):
         self.assertEqual(h_out["code"], 200)
         body = json.loads(h_out["body"])
         want = hmac.new(server.AUTH_TOKEN.encode(), b"myos-healthz:abc123", "sha256").hexdigest()
-        self.assertEqual(body, {"app": "myOS", "proof": want})
+        self.assertEqual(body, {"app": "Leo Bot", "proof": want})
         self.assertNotIn(server.AUTH_TOKEN.encode(), h_out["body"])
 
     def test_request_log_redacts_login_token(self):
@@ -239,7 +239,7 @@ class LoginAndLocalFilesTest(unittest.TestCase):
 
     def test_launcher_log_is_owner_only_without_a_global_umask(self):
         # Only the log: a global umask 077 would reach the integrated terminal too.
-        script = (Path(__file__).resolve().parents[1] / "myOS.app" / "Contents" / "Resources"
+        script = (Path(__file__).resolve().parents[1] / "LeoBot.app" / "Contents" / "Resources"
                   / "start-server.sh").read_text(encoding="utf-8")
         lines = [ln for ln in script.splitlines() if "LOGFILE" in ln and not ln.startswith(("LOGFILE", "#"))]
         self.assertNotIn("umask 077", [ln.strip().split("#")[0].strip() for ln in script.splitlines()])

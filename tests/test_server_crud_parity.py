@@ -99,7 +99,7 @@ class CrudParityRoutesTest(unittest.TestCase):
     # Opening a linked folder moved to /api/folders/open (tests/test_folder_routes.py).
 
     def _outside(self):
-        """Linked folders live next to myOS, never inside it."""
+        """Linked folders live next to Leo Bot, never inside it."""
         d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, d, True)
         return d

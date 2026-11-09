@@ -1,5 +1,5 @@
 #!/bin/bash
-# Started by the myOS app (the Swift main executable) — finds python, sets a
+# Started by the Leo Bot app (the Swift main executable) — finds python, sets a
 # usable PATH (so the server can spawn `claude`/node), starts the dashboard
 # server in the background, and prints "PID <n>" so the app can stop it later.
 # Never sources .zprofile (too slow); probes known paths directly.
@@ -24,14 +24,14 @@ done
 [ -z "$PYTHON3" ] && PYTHON3="$(command -v python3 2>/dev/null)"
 
 if [ -z "$PYTHON3" ]; then
-    osascript -e 'display alert "myOS" message "python3 not found. Install from python.org."' >/dev/null 2>&1
+    osascript -e 'display alert "Leo Bot" message "python3 not found. Install from python.org."' >/dev/null 2>&1
     echo "NOPYTHON"
     exit 1
 fi
 
 # Already running? Nothing to do — the app will just connect. Only trust the
 # server that wrote THIS checkout's token file: it must answer a random nonce
-# with HMAC(token, nonce). Anything else holding the port (or a myOS server from
+# with HMAC(token, nonce). Anything else holding the port (or a Leo Bot server from
 # another checkout) fails the proof. Python reads the token itself, so it never
 # appears in argv or goes over the wire.
 is_myos() {
@@ -64,7 +64,7 @@ done
 NODE_BIN="${NVM_CLAUDE:-$NVM_BIN}"
 export PATH="${NODE_BIN:+$NODE_BIN:}/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:$PATH"
 
-# Port taken? Stop it only if it is a stale myOS server; never kill a
+# Port taken? Stop it only if it is a stale Leo Bot server; never kill a
 # foreign program — tell the user instead.
 for pid in $(/usr/sbin/lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null); do
     if ps -o command= -p "$pid" 2>/dev/null | grep -q "dashboard/server.py"; then
@@ -72,7 +72,7 @@ for pid in $(/usr/sbin/lsof -ti tcp:"$PORT" -sTCP:LISTEN 2>/dev/null); do
         sleep 0.5
         kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
     else
-        osascript -e "display alert \"myOS\" message \"Port $PORT is used by another program. Quit it, then reopen myOS.\"" >/dev/null 2>&1
+        osascript -e "display alert \"Leo Bot\" message \"Port $PORT is used by another program. Quit it, then reopen Leo Bot.\"" >/dev/null 2>&1
         echo "PORTBUSY"
         exit 1
     fi

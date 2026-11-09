@@ -5,7 +5,7 @@ Status: approved, implementing
 
 ## Problem
 
-"myOS" had no GTM home. Go-to-market was scattered: `channels` memo buried under
+"Leo Bot" had no GTM home. Go-to-market was scattered: `channels` memo buried under
 Positioning & pricing, `launch` memo in Overview, experiments in sec03, activities in
 Calendar/Ops — with no object representing a go-to-market *motion* and no view tying a
 channel to the activities that execute it, the experiments that validate it, and the

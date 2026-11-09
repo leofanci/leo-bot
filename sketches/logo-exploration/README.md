@@ -1,4 +1,4 @@
-## myOS logo exploration
+## Leo Bot logo exploration
 
 ### Brief
 Bold, futuristic, AI-native, but simple. Apple-like icon clarity and friendliness. Abstract operating-system symbol. Must survive app-icon and small navigation sizes.
@@ -15,7 +15,7 @@ Two loops imply input and output, human and system, thought and action. Most int
 Four modules form one continuous operating system. Friendliest and most modular, but risks reading as generic collaboration software.
 
 ### Shared choices
-- Warm myOS accent: `#B54A2B`
+- Warm Leo Bot accent: `#B54A2B`
 - Neutral ink: `#25231F`
 - Native SF Pro wordmark
 - Rounded app-icon container with flat, high-contrast geometry

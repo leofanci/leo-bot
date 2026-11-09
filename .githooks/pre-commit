@@ -4,5 +4,5 @@ set -eu
 repo_root=$(git rev-parse --show-toplevel)
 cd "$repo_root"
 
-echo "Checking staged files for private myOS data..."
+echo "Checking staged files for private Leo Bot data..."
 exec python3 -m unittest tests.test_no_usage_data

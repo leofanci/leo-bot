@@ -1,6 +1,6 @@
 """acp.py: any agent CLI that speaks ACP (Agent Client Protocol: JSON-RPC over stdio).
 
-Covers Gemini CLI, OpenCode and future CLIs without one adapter each. myOS is the
+Covers Gemini CLI, OpenCode and future CLIs without one adapter each. Leo Bot is the
 client: it answers permission requests (denying all but its own MCP tools) and
 offers no file or terminal access of its own. Agents may still run read-only tools
 without asking, so every ACP agent is a full-disk engine: only the owner's private
@@ -19,14 +19,14 @@ from dashboard.engines.codex import FULL_DISK_NOTE
 
 PROTOCOL_VERSION = 1
 START_TIMEOUT = 60
-# A clean environment: never myOS's tokens, never a key from the server's own env.
+# A clean environment: never Leo Bot's tokens, never a key from the server's own env.
 _ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "USER", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME")
 OS_TOOL_NAMES = ("os__osctl", "os_osctl", "os/osctl")
 _OWN_TOOL_KINDS = ("", "other")  # an MCP tool. execute, edit, delete and the rest are the agent's own
 
 
 def is_own_tool(tool_call):
-    """True when a permission request is for myOS's own MCP tool. A title can hold the
+    """True when a permission request is for Leo Bot's own MCP tool. A title can hold the
     model's own text (`echo mcp__os__; rm -rf ~`), so the name must lead it, and the
     kind must not be one of the agent's own tools."""
     tc = tool_call or {}
@@ -36,7 +36,7 @@ def is_own_tool(tool_call):
 
 
 def _names_os_tool(text):
-    """The text opens with one of myOS's tool names, whole: a longer name (`os__osctl_evil`)
+    """The text opens with one of Leo Bot's tool names, whole: a longer name (`os__osctl_evil`)
     or a command that merely starts with one does not count."""
     low = text.strip().lower()
     if low.startswith("mcp__os__"):
@@ -45,7 +45,7 @@ def _names_os_tool(text):
 
 
 def permission_reply(params):
-    """Allow only myOS's own tools. Any other request is rejected."""
+    """Allow only Leo Bot's own tools. Any other request is rejected."""
     options = params.get("options") or []
     wanted = ("allow_once", "allow_always") if is_own_tool(params.get("toolCall")) else ("reject_once", "reject_always")
     for kind in wanted:

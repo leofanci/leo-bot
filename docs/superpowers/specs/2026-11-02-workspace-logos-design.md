@@ -4,16 +4,16 @@
 
 Each workspace (HQ and every project) gets its own picture in the workspace
 bar and at the top of the sidebar, so a company's logo marks its workspace.
-The myOS logo follows the graphite and indigo palette of the 2026-10-24
+The Leo Bot logo follows the graphite and indigo palette of the 2026-10-24
 redesign.
 
 ## Behavior
 
-- **Defaults.** HQ shows the myOS logo; a project shows its initials on its
+- **Defaults.** HQ shows the Leo Bot logo; a project shows its initials on its
   hue, as before.
 - **Upload.** "Workspace logo" in the sidebar's workspace menu, or "Change
   logo" in Project settings, opens a page with a preview, Upload image, and
-  Remove (HQ: "Use the myOS logo"). PNG, JPEG or WebP.
+  Remove (HQ: "Use the Leo Bot logo"). PNG, JPEG or WebP.
 - The browser redraws the picked image on a 256px square canvas and sends that
   PNG, so the stored file is small and carries no camera metadata (EXIF
   location).
@@ -35,5 +35,5 @@ redesign.
 - `POST /api/workspace-logo {ws, data}` (base64) and
   `POST /api/workspace-logo/remove {ws}` need the session cookie and a
   same-origin `Origin`, like the integrations endpoints.
-- `myOS.app`'s `AppIcon.icns` is rendered from `dashboard/logo.svg`;
+- `LeoBot.app`'s `AppIcon.icns` is rendered from `dashboard/logo.svg`;
   `scripts/ensure-app.sh` re-signs the app when the icon changes.

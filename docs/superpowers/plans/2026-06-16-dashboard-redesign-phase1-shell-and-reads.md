@@ -23,7 +23,7 @@ This workspace is not yet a git repo; the plan assumes commits.
 
 Run:
 ```bash
-cd /path/to/myOS
+cd /path/to/Leo Bot
 git init
 ```
 Expected: `Initialized empty Git repository …`
@@ -484,7 +484,7 @@ async function renderRail(){
       </div>
     </div>`).join("");
   $("#rail").innerHTML=`
-    <div class="brand"><span class="mark"></span><b>myOS</b></div>
+    <div class="brand"><span class="mark"></span><b>Leo Bot</b></div>
     <div class="navlabel label">Across everything</div>
     <nav class="nav">
       <a data-view="timeline"><span class="ico">◷</span> Timeline</a>

@@ -2,13 +2,13 @@
 
 ## Intent
 
-Every bot turn in myOS runs `claude -p` (Claude Code) on the owner's own Claude
-login. That ties myOS to one vendor and to one person's subscription. Three
+Every bot turn in Leo Bot runs `claude -p` (Claude Code) on the owner's own Claude
+login. That ties Leo Bot to one vendor and to one person's subscription. Three
 things need more than that:
 
-- Someone who downloads myOS may use Codex, another agent CLI, or only have an
+- Someone who downloads Leo Bot may use Codex, another agent CLI, or only have an
   API key.
-- A team server (myOS on a VPS) should not depend on one member's personal
+- A team server (Leo Bot on a VPS) should not depend on one member's personal
   login.
 
 An **engine** is what runs a bot's turn. This design adds an engine layer with
@@ -27,7 +27,7 @@ ACP). Behavior is borrowed, no code.
   - **acp**: any CLI that speaks ACP (Agent Client Protocol: JSON-RPC over
     stdio). Covers Gemini CLI, Grok CLI, OpenCode and future ones without one
     adapter each.
-  - **api**: myOS's own agent loop over HTTP. Two wire formats: Anthropic
+  - **api**: Leo Bot's own agent loop over HTTP. Two wire formats: Anthropic
     Messages and OpenAI-compatible Chat Completions. OpenAI-compatible covers
     OpenAI, OpenRouter, DeepSeek, Fireworks and local servers (Ollama, LM
     Studio).
@@ -63,7 +63,7 @@ ACP). Behavior is borrowed, no code.
 - API keys or per-person engine tokens readable by any bot turn, listed in any
   API response, or written to a tracked file.
 - One person's message answered on another person's subscription, ever.
-- myOS storing a subscription token, or reusing a CLI's login outside that CLI.
+- Leo Bot storing a subscription token, or reusing a CLI's login outside that CLI.
 - One person's turn billed to another person's API key without it being
   visible in the thread.
 
@@ -142,7 +142,7 @@ lands alone and must not change any behavior.
 
 ### 3. api driver
 
-myOS runs the loop: send messages plus tool schemas, stream the reply, run the
+Leo Bot runs the loop: send messages plus tool schemas, stream the reply, run the
 tools the model calls, send results, repeat. Stdlib `urllib` with streaming
 reads (the repo has no third-party Python dependencies; keep it that way).
 
@@ -150,20 +150,20 @@ reads (the repo has no third-party Python dependencies; keep it that way).
 - **Providers:** a provider is `{name, format: "anthropic"|"openai", base_url,
   key_ref, models: {fast, strong}}`. Presets: Anthropic, OpenAI, OpenRouter,
   Ollama (local, no key). Custom entries allowed.
-- **History:** no CLI transcript exists, so myOS stores each API thread's
+- **History:** no CLI transcript exists, so Leo Bot stores each API thread's
   messages itself: `chats/<id>.messages.jsonl` beside the chat record, same
   privacy as chat records. A long thread is trimmed oldest-first to a token
   budget, keeping the first (snapshot) message.
-- **Tools myOS defines.** Nothing else exists, so the policy is enforced by
+- **Tools Leo Bot defines.** Nothing else exists, so the policy is enforced by
   construction:
 
   | Tool | When | How |
   |---|---|---|
   | `osctl` | always | `os_relay.run_osctl` in-process with the turn's ctx (workspace, readonly, apps_used; `MYOS_SHARED` when shared) |
-  | `read_file` | not shared | myOS checks the path itself: repo files minus `SECRET_FILE_GLOBS`, minus `deny_dirs`/`deny_files`, minus `~/.claude` and every per-person account dir; the linked folder only when `workspace_dir` is set |
+  | `read_file` | not shared | Leo Bot checks the path itself: repo files minus `SECRET_FILE_GLOBS`, minus `deny_dirs`/`deny_files`, minus `~/.claude` and every per-person account dir; the linked folder only when `workspace_dir` is set |
   | `search_files` | not shared, `file_search` | Glob/Grep equivalent, same path check |
   | `web_search` | `web` | Anthropic format: the provider's server-side web search tool. OpenAI format: off unless the provider offers one (builder checks OpenRouter's) |
-  | `web_fetch` | `web` | myOS fetches; only hosts in `web_domains` (same rule as `web_fetch_rules`) |
+  | `web_fetch` | `web` | Leo Bot fetches; only hosts in `web_domains` (same rule as `web_fetch_rules`) |
   | connected apps | `apps`, not shared | call the apps relay handler in-process, same token checks and held-for-approval sends |
 
 - `shared_safe = True`: in a shared turn only `osctl` (plus web when
@@ -181,7 +181,7 @@ reads (the repo has no third-party Python dependencies; keep it that way).
 
 - Always `--sandbox read-only` and `--ignore-user-config` so the user's own
   Codex config (their MCP servers, profiles) never loads into a bot turn.
-- myOS's MCP relays through `-c mcp_servers.<name>.url=...` and
+- Leo Bot's MCP relays through `-c mcp_servers.<name>.url=...` and
   `bearer_token_env_var` (Codex supports streamable HTTP MCP with a bearer env
   var, per `codex mcp add --help`).
 - Event mapping from Codex JSONL to the tuples; the builder records the
@@ -200,14 +200,14 @@ One driver for any ACP CLI. Config per agent: `{name, command, args}`
 (e.g. Gemini CLI with its ACP flag, an OpenCode or Grok ACP mode, Zed's
 Claude Code ACP adapter).
 
-- myOS is the ACP client: `initialize`, `session/new` with myOS's MCP relays in
+- Leo Bot is the ACP client: `initialize`, `session/new` with Leo Bot's MCP relays in
   `mcpServers`, `session/prompt`, stream `session/update`, answer
   `session/request_permission`.
-- myOS denies every permission request except calls to its own MCP tools.
+- Leo Bot denies every permission request except calls to its own MCP tools.
   This is not a lockdown by itself: agents may run read-only tools without
   asking. So `shared_safe = False` for every ACP agent, always, unless a
   specific agent gets its own verified flags (then it becomes its own driver).
-- File writes the agent asks for are denied (myOS writes go through osctl).
+- File writes the agent asks for are denied (Leo Bot writes go through osctl).
 - Every ACP agent is a **full-disk engine** (section 5a).
 
 ### 5a. Full-disk engines (Codex, ACP agents)
@@ -293,7 +293,7 @@ shared later, so a thread-wide engine cannot hold.
   `team/accounts/<person-id>/`.
 - Subscriptions are not connected here. A person who wants to use their own
   subscription uses a runner (section 10), where they sign in on their own
-  machine through the CLI's own flow and myOS never touches the login.
+  machine through the CLI's own flow and Leo Bot never touches the login.
 - `team/accounts/` is 0700, and every account dir is denied to every turn
   (Read deny rules for claude-code, path check for api, osctl private prefix).
 - **Who pays:** a turn runs on the account of the person who sent the message.
@@ -326,7 +326,7 @@ shared later, so a thread-wide engine cannot hold.
 ### 10. Runners: the workspace on a server, the engine on a person's Mac
 
 A team server (VPS) holds the workspace: channels, people, files, osctl. A
-**runner** is myOS on a person's own Mac, connected out to that server, that
+**runner** is Leo Bot on a person's own Mac, connected out to that server, that
 runs the turns that person sends, on that person's own engine login. No tunnel,
 and each subscription only ever serves its owner. Prior art:
 Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
@@ -349,7 +349,7 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
   tuples back to `POST /api/runner/events/<turn>`; the server forwards them to
   the thread like local events. Heartbeat every 20 s; a missed heartbeat
   marks the runner offline.
-- **Tools:** a runner turn always uses the shared policy: its only myOS tool is
+- **Tools:** a runner turn always uses the shared policy: its only Leo Bot tool is
   osctl through `/api/runner/os/mcp`, a new path that accepts the runner token
   **and** the turn token of a turn leased to that runner (the local-only
   `/api/internal/os/mcp` stays local-only). The runner's own files are not the
@@ -381,7 +381,7 @@ Buzz (`buzz-acp` connects agent CLIs to the relay from anywhere).
 These rules apply to every case:
 
 - `deployment: "mac" | "server"` gates every Mac-only feature (folder
-  chooser, opening Finder, `myOS.app`, full-disk engines), not only engines.
+  chooser, opening Finder, `LeoBot.app`, full-disk engines), not only engines.
 - Every secret lives in one place per data root (`engines.json`,
   `integrations.json`, `team/`), never in code or env baked into an image.
 - Each `done` event's tokens and cost are stored per run with `engine_id` and

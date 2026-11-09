@@ -4,7 +4,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-ICNS = Path(__file__).resolve().parent.parent / "myOS.app" / "Contents" / "Resources" / "AppIcon.icns"
+ICNS = Path(__file__).resolve().parent.parent / "LeoBot.app" / "Contents" / "Resources" / "AppIcon.icns"
 
 
 def _png_1024(icns):

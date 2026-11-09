@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-06-17-os-restructure-project-profile-channel-design.md`
 
-**Commit identity for every task:** `git -c user.name='myOS' -c user.email='you@example.com'`
+**Commit identity for every task:** `git -c user.name='Leo Bot' -c user.email='you@example.com'`
 
 **Invariant (never break):** files = truth; `os.db` is derived/read-only (dashboard opens `mode=ro`, never writes it); every dashboard write mutates a FILE via `fileops.py` then calls `reindex()`. Stdlib-only, no new deps.
 
@@ -246,7 +246,7 @@ Expected: PASS (empty build creates the new schema; CHECK rejects `brand`).
 
 ```bash
 git add database/migrations/0001_init.sql index.py tests/test_schema.py
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(schema): Project/Profile/Channel/Product model + post_channels"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(schema): Project/Profile/Channel/Product model + post_channels"
 ```
 
 ---
@@ -435,7 +435,7 @@ Expected: PASS.
 
 ```bash
 git add index.py tests/test_index_projects.py
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(index): walk projects/ tree → project/profile/channel/product"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(index): walk projects/ tree → project/profile/channel/product"
 ```
 
 ---
@@ -515,7 +515,7 @@ Expected: PASS.
 
 ```bash
 git add dashboard/db.py tests/test_db_tree.py tests/test_db_project.py
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(db): tree/project read layer over profiles + channels + products"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(db): tree/project read layer over profiles + channels + products"
 ```
 
 ---
@@ -579,7 +579,7 @@ Expected: all PASS (schema, index, db ×2, fileops ×2).
 
 ```bash
 git add dashboard/fileops.py tests/test_fileops_posts.py tests/test_fileops_plan_args.py
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(fileops): profile-level posts with channel targets; channel guidelines"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(fileops): profile-level posts with channel targets; channel guidelines"
 ```
 
 ---
@@ -629,7 +629,7 @@ Run: `python3 -m unittest discover -s tests -v` → all PASS.
 
 ```bash
 git add dashboard/server.py dashboard/app.html
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "feat(dashboard): profile boards, channel guidelines, product section"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "feat(dashboard): profile boards, channel guidelines, product section"
 ```
 
 ---
@@ -673,7 +673,7 @@ Expected: no matches. Then the full suite:
 
 ```bash
 git add skills README.md templates docs/guide.md generate.py prompts
-git -c user.name='myOS' -c user.email='you@example.com' commit -m "docs: nomenclature sweep to project/profile/channel/product"
+git -c user.name='Leo Bot' -c user.email='you@example.com' commit -m "docs: nomenclature sweep to project/profile/channel/product"
 ```
 
 ---

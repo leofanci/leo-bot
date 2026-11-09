@@ -13,7 +13,7 @@ class TokenSaveBridge(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.ext = tempfile.TemporaryDirectory()  # linked folders live next to myOS
+        self.ext = tempfile.TemporaryDirectory()  # linked folders live next to Leo Bot
         self.addCleanup(self.ext.cleanup)
         self.app = Path(self.ext.name).resolve() / "apps" / "acme"
         self.app.mkdir(parents=True)

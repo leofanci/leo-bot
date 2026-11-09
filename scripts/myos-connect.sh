@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Open myOS running on your server, from your laptop, over SSH:
+# Open Leo Bot running on your server, from your laptop, over SSH:
 #
 #   scripts/myos-connect.sh user@server [port]
 #
@@ -51,7 +51,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 sleep 1
 if [ -z "$reached" ] || ! kill -0 "$TUNNEL" 2>/dev/null; then
-  echo "myOS did not answer through the connection. Is the service running on $TARGET?" >&2
+  echo "Leo Bot did not answer through the connection. Is the service running on $TARGET?" >&2
   exit 1
 fi
 
@@ -70,5 +70,5 @@ else
   echo "Open this in your browser (it holds your login, keep it private): $URL"
 fi
 
-echo "Connected to myOS on $TARGET. Ctrl-C to disconnect; myOS keeps running there."
+echo "Connected to Leo Bot on $TARGET. Ctrl-C to disconnect; Leo Bot keeps running there."
 wait "$TUNNEL"

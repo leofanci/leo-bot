@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleExecutable</key>
-  <string>myOS</string>
+  <string>LeoBot</string>
   <key>CFBundleIdentifier</key>
   <string>org.example.myos</string>
   <key>CFBundleName</key>
-  <string>myOS</string>
+  <string>Leo Bot</string>
   <key>CFBundleDisplayName</key>
-  <string>myOS</string>
+  <string>Leo Bot</string>
   <key>CFBundleVersion</key>
   <string>1.0</string>
   <key>CFBundleShortVersionString</key>

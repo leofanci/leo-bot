@@ -1,4 +1,4 @@
-# myOS Dashboard — Redesign Design Spec
+# Leo Bot Dashboard — Redesign Design Spec
 
 Date: 2026-06-16
 Status: approved visual direction; functional design under review

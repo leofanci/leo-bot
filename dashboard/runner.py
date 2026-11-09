@@ -1,10 +1,10 @@
-"""runner.py: run your own bot turns on this Mac, for a myOS on a server.
+"""runner.py: run your own bot turns on this Mac, for a Leo Bot on a server.
 
     python3 -m dashboard.runner --server https://myos.example --token-file ~/.myos-runner-token
 
 Connects out to the server, takes the turns you send, runs them on this machine's
 agent CLI and your own login, and streams the answers back. Each turn has no shell
-and no file tools: its only myOS tool is osctl, which runs on the server.
+and no file tools: its only Leo Bot tool is osctl, which runs on the server.
 """
 import argparse
 import json
@@ -184,8 +184,8 @@ def safe_job(job, client, engine, sessions, workdir):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Run your own myOS turns on this Mac")
-    ap.add_argument("--server", required=True, help="your myOS address, e.g. https://myos.example")
+    ap = argparse.ArgumentParser(description="Run your own Leo Bot turns on this Mac")
+    ap.add_argument("--server", required=True, help="your Leo Bot address, e.g. https://myos.example")
     ap.add_argument("--token-file", required=True, help="file holding the runner token")
     ap.add_argument("--claude-bin", default="claude")
     args = ap.parse_args(argv)
@@ -216,7 +216,7 @@ def main(argv=None):
             backoff = 1
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
-                sys.exit("The server refused this token. Create a new one in myOS.")
+                sys.exit("The server refused this token. Create a new one in Leo Bot.")
             time.sleep(backoff)
             backoff = min(backoff * 2, 30)
             continue

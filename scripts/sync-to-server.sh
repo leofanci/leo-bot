@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Copy your myOS data from this machine to your server, once, when you move:
+# Copy your Leo Bot data from this machine to your server, once, when you move:
 #
 #   scripts/sync-to-server.sh user@server
 #
 # Copies your projects, chats, team and portfolio (all gitignored), then re-indexes
-# and restarts myOS there. Nothing on the server is deleted. Stop using the copy on
+# and restarts Leo Bot there. Nothing on the server is deleted. Stop using the copy on
 # this machine afterwards, or the two will drift apart.
 set -euo pipefail
 
@@ -25,7 +25,7 @@ fi
 APP="$REMOTE_HOME/my-os"
 
 ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S systemctl stop myos"
-# A failed copy must not leave myOS stopped or the copied files open.
+# A failed copy must not leave Leo Bot stopped or the copied files open.
 PRIVATE="$APP/projects $APP/chats $APP/team $APP/portfolio"
 finish() {
   ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $MYOS_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start myos"

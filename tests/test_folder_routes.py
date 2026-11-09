@@ -168,7 +168,7 @@ class FolderRoutes(sp.Base):
         inside.mkdir()
         code, out, _ = self.post("add", {"ws": "acme", "path": str(inside)})
         self.assertEqual(code, 400)
-        self.assertIn("myOS", out["error"])
+        self.assertIn("Leo Bot", out["error"])
         self.assertEqual(folders.load("acme", self.root)["folders"], [])
 
     def test_server_mode_has_no_chooser(self):

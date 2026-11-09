@@ -12,7 +12,7 @@ class CrudTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        # Linked folders may not sit inside myOS (fileops.ROOT): they live next to it.
+        # Linked folders may not sit inside Leo Bot (fileops.ROOT): they live next to it.
         self._ext = tempfile.TemporaryDirectory()
         self.ext = Path(self._ext.name)
         root = self.root
