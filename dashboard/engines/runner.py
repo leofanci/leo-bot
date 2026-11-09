@@ -1,6 +1,6 @@
 """runner.py: the engine that sends a turn to the sender's own Mac (core/runners.py).
 
-A runner turn always runs under the shared policy: its one myOS tool is osctl over
+A runner turn always runs under the shared policy: its one Leo Bot tool is osctl over
 HTTPS back to this server. The runner's Mac is not the workspace, and the prompt
 must never be able to reach that person's files, so no file or shell tools.
 """

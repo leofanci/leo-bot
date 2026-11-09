@@ -1,12 +1,12 @@
 # Runners: your messages on your own Mac
 
-When myOS lives on a server, a person can connect their own Mac. Their messages
+When Leo Bot lives on a server, a person can connect their own Mac. Their messages
 then run on that Mac, on their own Claude login, and the answers come back to the
 shared workspace. No port is opened on the Mac: it connects out to the server.
 
 ## Connect
 
-1. In myOS: **Connect a Mac** (HQ, Engines for the owner; Team for invited people).
+1. In Leo Bot: **Connect a Mac** (HQ, Engines for the owner; Team for invited people).
    Copy the two commands. The token is shown once.
 2. On your Mac, inside a checkout of this repo, with Claude Code logged in
    (`claude auth status`), run them. Keep that terminal open.
@@ -22,7 +22,7 @@ token file other users on the Mac could read.
 ## What a bot can do on your Mac
 
 Nothing on the Mac itself. A runner turn has no shell, no file tools and no connected
-apps. Its one myOS tool is osctl, which runs on the server, in that workspace. The
+apps. Its one Leo Bot tool is osctl, which runs on the server, in that workspace. The
 same rule as any shared thread, checked the same way.
 
 ## Good to know

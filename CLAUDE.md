@@ -1,4 +1,4 @@
-# myOS CLAUDE.md
+# Leo Bot CLAUDE.md
 
 ## PUBLIC REPO: zero usage data (absolute)
 

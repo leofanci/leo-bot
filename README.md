@@ -1,4 +1,4 @@
-# myOS — Claude Code Skills (v2)
+# Leo Bot — Claude Code Skills (v2)
 
 A 23-skill operating system for running a portfolio of projects, products, profiles,
 and social channels from Claude Code — problem validation, GTM strategy, product
@@ -74,11 +74,11 @@ cp -r skills/* ~/.claude/skills/
 
 ### Always on: run it on a server
 
-Run myOS on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (HQ, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
+Run Leo Bot on a small server and it stays on when your laptop is closed: [docs/server.md](docs/server.md). Bots run on your Claude login or an API key (HQ, Engines), and people you invite never use your login: [docs/sharing.md](docs/sharing.md).
 
 ### Linked folders
 
-Each workspace, HQ included, can link any number of folders on the machine running myOS
+Each workspace, HQ included, can link any number of folders on the machine running Leo Bot
 (the workspace's Folders screen). Each folder is **Edit** or **Read**, and a channel or a
 bot can be limited to some folders or to read access. Bots read and search them on your
 private threads. On Claude Code and API-key engines, a tagged message (@bot, /skill, a DM)
@@ -94,7 +94,7 @@ The app's launcher binary is not committed: build it from source once after clon
 
 ```bash
 scripts/build-app.sh   # needs Xcode Command Line Tools
-open myOS.app
+open LeoBot.app
 ```
 
 Without the app, run `python3 dashboard/server.py` and open the login link it prints (it contains a per-run token; a plain `http://127.0.0.1:8765` shows a login-required page).
@@ -225,11 +225,11 @@ FUTURE (plugs into visual_brief.genai_prompt_draft)
 
 ## License
 
-myOS is source-available under the [PolyForm Shield License 1.0.0](LICENSE).
+Leo Bot is source-available under the [PolyForm Shield License 1.0.0](LICENSE).
 
 - Allowed: using it for anything, including running your own business;
   modifying it; sharing copies and forks (keep the `LICENSE` file with them).
-- Not allowed: offering a product or service that competes with myOS, such as
+- Not allowed: offering a product or service that competes with Leo Bot, such as
   reselling it, rebranding it, or hosting it as a paid service.
 - Want to build a competing product? That needs a separate license: open an
   issue to ask.
@@ -248,7 +248,7 @@ machine settings. Never publish or zip the working directory itself. Export only
 Git-tracked content from a clean commit:
 
 ```bash
-scripts/export-public.sh /tmp/myOS-public.zip
+scripts/export-public.sh /tmp/LeoBot-public.zip
 ```
 
 The exporter refuses a dirty tree and uses `git archive`, so ignored local data
@@ -263,7 +263,7 @@ git config core.hooksPath .githooks
 ```
 
 The pre-commit hook scans the exact staged snapshot and blocks every file under
-`projects/`, `portfolio/`, and other myOS data directories—even if it was added
+`projects/`, `portfolio/`, and other Leo Bot data directories—even if it was added
 with `git add -f`. It also blocks databases, logs, credentials, secrets, personal
 paths, private project terms, and unapproved network hosts. The pre-push hook
 checks the complete committed history again before anything leaves the machine.

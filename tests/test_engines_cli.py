@@ -154,7 +154,7 @@ class AcpDriver(Base):
             prompt = next(x for x in lines if x.get("method") == "session/prompt")
             self.assertTrue(prompt["params"]["prompt"][0]["text"].startswith("RAIL\n\n"))
             refused = next(x for x in lines if x.get("id") == 900)
-            self.assertEqual(refused["result"]["outcome"]["optionId"], "no")  # not myOS's own tool
+            self.assertEqual(refused["result"]["outcome"]["optionId"], "no")  # not Leo Bot's own tool
             denied = next(x for x in lines if x.get("id") == 901)
             self.assertIn("error", denied)  # no file access offered
 

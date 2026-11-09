@@ -88,8 +88,8 @@ dashboard/os.db
 dashboard/.auth-token
 
 # Built locally by scripts/build-app.sh (never commit binaries)
-myOS.app/Contents/MacOS/
-myOS.app/Contents/_CodeSignature/
+LeoBot.app/Contents/MacOS/
+LeoBot.app/Contents/_CodeSignature/
 
 # Bot on/off state + HQ memory (user data)
 /team/

@@ -1,11 +1,11 @@
-# Running myOS on a server
+# Running Leo Bot on a server
 
-Run myOS on a small server and it stays on when your laptop is closed: bots keep
+Run Leo Bot on a small server and it stays on when your laptop is closed: bots keep
 working, people you invite can reach it, and you open it from anywhere.
 
-There are three ways to run myOS. They use the same code.
+There are three ways to run Leo Bot. They use the same code.
 
-| | Where myOS runs | How you open it | What runs your bots |
+| | Where Leo Bot runs | How you open it | What runs your bots |
 |---|---|---|---|
 | **On your Mac** | your Mac | the app | your Claude login or an API key |
 | **On a server** (this guide) | a server | your browser, over SSH | your Claude login on the server, or an API key |
@@ -24,7 +24,7 @@ ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/
 ```
 
 This creates a `myos` user, puts the code in its home folder, installs Claude Code
-and starts a service that restarts on its own. myOS listens on `127.0.0.1:8766` only,
+and starts a service that restarts on its own. Leo Bot listens on `127.0.0.1:8766` only,
 so nothing is open to the internet yet. Read the script first if you like: it is short.
 
 ## 2. Log in to Claude (optional)
@@ -45,9 +45,9 @@ From a checkout of this repo on your laptop:
 scripts/myos-connect.sh root@your-server
 ```
 
-Your browser opens myOS through the SSH connection. Every owner screen works,
-including the terminal, because to myOS this counts as this machine. Close it with
-Ctrl-C; myOS keeps running on the server.
+Your browser opens Leo Bot through the SSH connection. Every owner screen works,
+including the terminal, because to Leo Bot this counts as this machine. Close it with
+Ctrl-C; Leo Bot keeps running on the server.
 
 ## 4. Move your data
 
@@ -95,7 +95,7 @@ backup private.
 
 ## Good to know
 
-- The service runs as its own `myos` user, which holds only myOS, so a bot's reach
+- The service runs as its own `myos` user, which holds only Leo Bot, so a bot's reach
   on the server ends at that user's files.
 - The login token stays the same across restarts on a server. To change it, delete
   `team/owner-token` and restart: `systemctl restart myos`.

@@ -1,4 +1,4 @@
-# myOS — AI Integration Engine
+# Leo Bot — AI Integration Engine
 
 **Date:** 2026-06-17
 **Status:** Approved design, ready for implementation plan
@@ -136,7 +136,7 @@ Owns one long-lived `claude` process for the dashboard run:
 - The allowlist covers everything the agent needs, so there are **no permission prompts**
   (no hangs). `Write`/`Edit` disallowed → it physically cannot free-form the file tree.
 
-**RAIL system prompt (essence):** "You operate a myOS whose source of truth is authored
+**RAIL system prompt (essence):** "You operate a Leo Bot whose source of truth is authored
 files. Mutate state ONLY by running `python -m dashboard.osctl <cmd>`. Never write or edit
 files directly. After acting, confirm briefly what you changed."
 

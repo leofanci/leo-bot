@@ -1,4 +1,4 @@
-# myOS AI Integration Engine — Implementation Plan
+# Leo Bot AI Integration Engine — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -14,7 +14,7 @@
 - **Authored files are the source of truth**; `database/data/os.db` is a derived, READ-ONLY index rebuilt by `fileops.reindex()`. Never write `os.db` directly.
 - **The dashboard mutates files via `fileops`, then reindexes.** The chat agent mutates ONLY via `python -m dashboard.osctl`; it is denied `Write`/`Edit`.
 - **UI-first:** every AI surface lives inside the dashboard window; the user never hand-edits files.
-- **Repo:** `/path/to/myOS` (branch: main). Work on a feature branch.
+- **Repo:** `/path/to/Leo Bot` (branch: main). Work on a feature branch.
 - **Test runner:** `python -m unittest` from the repo root (CWD must be repo root). Full suite: `python -m unittest discover -s tests -v`.
 - **Import convention for `osctl`:** insert repo root on `sys.path`, then `from dashboard import fileops` — so test overrides of `dashboard.fileops.ROOT` are seen by `osctl`.
 
@@ -103,7 +103,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'dashboard.osctl'`.
 
 ```python
 # dashboard/osctl.py
-"""osctl.py — the single mutation entry point for the myOS AI agent.
+"""osctl.py — the single mutation entry point for the Leo Bot AI agent.
 
 Wraps dashboard/fileops.py mutations as a stdlib argparse CLI. Each subcommand
 validates input, calls fileops (which writes authored files and reindexes), and
@@ -130,7 +130,7 @@ def _fields(args, keys):
 
 
 def _build_parser():
-    parser = argparse.ArgumentParser(prog="osctl", description="myOS mutation CLI")
+    parser = argparse.ArgumentParser(prog="osctl", description="Leo Bot mutation CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("create-project")
@@ -620,7 +620,7 @@ In `dashboard/server.py`, after the existing `import fileops` line, add:
 import chat_session  # noqa: E402
 
 RAIL = (
-    "You operate a myOS whose source of truth is authored files. "
+    "You operate a Leo Bot whose source of truth is authored files. "
     "Mutate state ONLY by running `python -m dashboard.osctl <command>` "
     "(e.g. create-project, create-profile, create-channel, add-post, "
     "create-activity, create-milestone, mark-done, update-post, set-status). "

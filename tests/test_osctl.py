@@ -45,7 +45,7 @@ class T(unittest.TestCase):
         self.assertIn("already exists", out["error"])
 
     def test_create_project_with_local_folder(self):
-        outside = tempfile.TemporaryDirectory()  # linked folders live next to myOS
+        outside = tempfile.TemporaryDirectory()  # linked folders live next to Leo Bot
         self.addCleanup(outside.cleanup)
         app_dir = Path(outside.name) / "apps" / "acme-app"
         app_dir.mkdir(parents=True)

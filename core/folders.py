@@ -154,10 +154,10 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     filesystem_root = Path(resolved.anchor).resolve()
     if any(_same(resolved, p) for p in (filesystem_root, home, workspace_root)):
         raise FolderError("local folder must be a specific app directory")
-    # A parent of myOS (for example ~/Documents/GitHub) would expose this repo
+    # A parent of Leo Bot (for example ~/Documents/GitHub) would expose this repo
     # and every sibling app when passed to Claude as an allowed directory.
     if under(workspace_root, resolved):
-        raise FolderError("local folder cannot contain the myOS workspace")
+        raise FolderError("local folder cannot contain the Leo Bot workspace")
     # Claude's config holds every bot session's transcript, all workspaces.
     if under(resolved, home / ".claude"):
         raise FolderError("local folder cannot be inside the Claude config folder")
@@ -171,15 +171,15 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     # "Open folder" would launch an app bundle instead of showing it.
     if any(part.lower().endswith(".app") for part in resolved.parts):
         raise FolderError("local folder cannot be an app bundle")
-    # myOS's own data is written only through osctl; a link inside it would bypass that.
+    # Leo Bot's own data is written only through osctl; a link inside it would bypass that.
     if under(resolved, workspace_root):
-        raise FolderError("local folder cannot be inside the myOS folder")
+        raise FolderError("local folder cannot be inside the Leo Bot folder")
     return str(resolved)
 
 
 # ---- store ------------------------------------------------------------------ #
 def _inside_root(path, root) -> Path:
-    """`path` resolved, refused unless it stays inside the myOS folder: a project folder that
+    """`path` resolved, refused unless it stays inside the Leo Bot folder: a project folder that
     is a symlink to elsewhere never gets the store written or read through it."""
     real = os.path.normpath(os.path.realpath(path))
     base = os.path.realpath(root)

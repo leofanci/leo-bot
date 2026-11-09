@@ -6,7 +6,7 @@ turn.completed {usage}; failures are error {message} and turn.failed {error}.
 `exec resume <id>` has no --sandbox flag, so the sandbox goes through -c everywhere.
 
 Every turn: read-only sandbox, no user config, shell tool off, connectors and
-sub-agents off, osctl through myOS's own MCP relay. Codex still keeps tools of its
+sub-agents off, osctl through Leo Bot's own MCP relay. Codex still keeps tools of its
 own that no flag lists (a live probe in the PR shows them), so this is a full-disk
 engine: only the owner's private threads, only on the owner's own Mac, no connected
 apps (registry.pick and spec section 5a). It is never shared_safe.

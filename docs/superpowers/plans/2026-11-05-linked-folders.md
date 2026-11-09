@@ -21,7 +21,7 @@
 - Shared threads, runner turns and invited people get no folders and no folder paths.
 - Codex and ACP never receive edit folders.
 - No free shell. The Claude Code Bash allow rule stays osctl-only.
-- The bot process keeps starting in the myOS folder.
+- The bot process keeps starting in the Leo Bot folder.
 
 ## Review Focus
 
@@ -373,7 +373,7 @@ def test_person_never_gets_folder_paths(self):       # _for_person output, list_
   - `POST /api/folders/add {ws, path, access?}`, `/remove {ws, id}`, `/access {ws, id, access}`, `/limit {ws, kind, key, limit}`, `/open {ws, id}`
 - Remove `/api/project/<slug>/folder/open`.
 - Screen: `renderFolders(ws)` at route `/folders`, linked from the workspace settings page for a project and from the HQ rail next to Engines. `localFolderField` on new and edit project forms is replaced by a link to it. The new-project form keeps one optional folder field, which calls `folders.add` after creation.
-- Row warnings, exact text: "Missing on this machine", "Not a git repo: edits can't be undone easily", "myOS can't write here".
+- Row warnings, exact text: "Missing on this machine", "Not a git repo: edits can't be undone easily", "Leo Bot can't write here".
 - Engines screen, on Codex and ACP rows, exact text: "Read-only in linked folders".
 
 - [ ] **Step 1: Write the failing tests.**

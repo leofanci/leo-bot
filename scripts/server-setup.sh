@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Install myOS as an always-on service on a Debian or Ubuntu server. From a checkout
+# Install Leo Bot as an always-on service on a Debian or Ubuntu server. From a checkout
 # on your laptop:
 #
 #   ssh root@your-server "MYOS_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh
 #
-# Safe to run again: it updates the code and restarts the service. myOS listens on
+# Safe to run again: it updates the code and restarts the service. Leo Bot listens on
 # 127.0.0.1 only. Nothing is exposed until you add a tunnel (docs/sharing.md).
 set -euo pipefail
 
 MYOS_USER="${MYOS_USER:-myos}"
-MYOS_PORT="${MYOS_PORT:-8766}"  # not 8765, so it never collides with myOS on your own Mac
+MYOS_PORT="${MYOS_PORT:-8766}"  # not 8765, so it never collides with Leo Bot on your own Mac
 MYOS_REPO="${MYOS_REPO:-}"
 MYOS_BRANCH="${MYOS_BRANCH:-main}"
 
@@ -23,7 +23,7 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 if [ -z "$MYOS_REPO" ]; then
-  echo "Set MYOS_REPO to the git address of your myOS repo (see the top of this script)." >&2
+  echo "Set MYOS_REPO to the git address of your Leo Bot repo (see the top of this script)." >&2
   exit 1
 fi
 case "$MYOS_REPO" in  # the server has no key for your GitHub account: clone over https
@@ -60,7 +60,7 @@ fi
 
 cat > /etc/systemd/system/myos.service <<EOF
 [Unit]
-Description=myOS
+Description=Leo Bot
 After=network-online.target
 Wants=network-online.target
 
@@ -91,12 +91,12 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if [ -z "$up" ]; then
-  echo "myOS did not start. See why with: journalctl -u myos -n 50" >&2
+  echo "Leo Bot did not start. See why with: journalctl -u myos -n 50" >&2
   exit 1
 fi
 
 echo
-echo "myOS is running on this server, on 127.0.0.1:$MYOS_PORT."
+echo "Leo Bot is running on this server, on 127.0.0.1:$MYOS_PORT."
 echo
 echo "Next:"
 echo "  1. Log in to Claude here, for your own messages (skip it to use only API keys):"

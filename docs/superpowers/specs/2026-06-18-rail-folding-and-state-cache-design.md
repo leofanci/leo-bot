@@ -44,7 +44,7 @@ Add disclosure (collapse/expand) behavior to the rail hierarchy.
 ### State + persistence
 
 - Module-level `OPEN = { projects: Set<slug>, profiles: Set<slug> }`.
-- Persisted to `localStorage` (key `myOS.rail.open`) as two string arrays, so
+- Persisted to `localStorage` (key `Leo Bot.rail.open`) as two string arrays, so
   folds survive the full `renderRail` that fires after every chat action and
   `refreshViews()`.
 - Toggling a triangle mutates `OPEN`, persists to `localStorage`, and calls
@@ -75,7 +75,7 @@ Give the agent the current structure up front so it stops foraging.
 - Output: a compact plain-text outline. Shape:
 
   ```
-  ## Current myOS state
+  ## Current Leo Bot state
   acme (brand)
     profile demo "Demo Brand"
       channel demo-tiktok (tiktok)
@@ -105,7 +105,7 @@ Give the agent the current structure up front so it stops foraging.
 
 Append one instruction:
 
-> "The current myOS state is provided to you at the start of each turn — do
+> "The current Leo Bot state is provided to you at the start of each turn — do
 > not explore with Read/Grep/Glob to discover existing structure; act
 > directly with osctl."
 

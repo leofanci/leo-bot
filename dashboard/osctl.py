@@ -1,4 +1,4 @@
-"""osctl.py — the single mutation entry point for the myOS AI agent.
+"""osctl.py — the single mutation entry point for the Leo Bot AI agent.
 
 Wraps dashboard/fileops.py mutations as a stdlib argparse CLI. Each subcommand
 validates input, calls fileops (which writes authored files and reindexes), and
@@ -187,7 +187,7 @@ def _fields(args, keys):
 
 
 def _build_parser():
-    parser = argparse.ArgumentParser(prog="osctl", description="myOS mutation CLI")
+    parser = argparse.ArgumentParser(prog="osctl", description="Leo Bot mutation CLI")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("tree", help="Print current project/profile/channel structure")

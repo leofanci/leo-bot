@@ -21,7 +21,7 @@ Pick them in HQ, Engines. Each reply says what it ran on.
 
 ## Why Codex and other CLIs stay on your Mac
 
-Those CLIs keep tools of their own that myOS can't fully switch off, so a bot on one
+Those CLIs keep tools of their own that Leo Bot can't fully switch off, so a bot on one
 may be able to read any file your user can. They run only where that equals you running
 the CLI in your own terminal: your private threads, on your own machine, with no
 connected apps. A thread anyone else can see moves to the people key, or tells you to
@@ -33,7 +33,7 @@ pick one. Claude Code and API keys are locked down in shared threads (see
 On Claude Code and API-key engines, bots can change files in a workspace's Edit folders
 on a tagged message, never git, editor or secret files. **Codex and other CLIs over ACP
 are read-only in linked folders**: their own tools have no per-folder rule for that
-never-write list, so myOS never gives them edit access, and the Engines screen says so.
+never-write list, so Leo Bot never gives them edit access, and the Engines screen says so.
 
 ## Keys
 

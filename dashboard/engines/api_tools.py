@@ -1,7 +1,7 @@
-"""api_tools.py: the tools myOS itself defines for the api engine.
+"""api_tools.py: the tools Leo Bot itself defines for the api engine.
 
 No CLI runs here, so nothing else exists: a tool the policy does not allow is
-never offered, and every path and host is checked by myOS.
+never offered, and every path and host is checked by Leo Bot.
 
   osctl         always; runs on the server with the turn's workspace bound
   read_file     not shared; repo and the turn's linked folders minus every private path
@@ -68,7 +68,7 @@ print(json.dumps(hits))
 
 OSCTL_SPEC = {
     "name": "osctl",
-    "description": ("Run one myOS command (the osctl CLI) in this workspace. `args` = the words after "
+    "description": ("Run one Leo Bot command (the osctl CLI) in this workspace. `args` = the words after "
                     "`python3 -m dashboard.osctl`, one per item, e.g. [\"get-project\", \"--slug\", \"acme\"]. "
                     "Long bodies go in `stdin` instead of --text. Returns the command's JSON output."),
     "input_schema": {"type": "object", "properties": {
@@ -77,7 +77,7 @@ OSCTL_SPEC = {
 }
 READ_SPEC = {
     "name": "read_file",
-    "description": "Read one text file by path (relative to the myOS folder, or an absolute path inside a linked folder).",
+    "description": "Read one text file by path (relative to the Leo Bot folder, or an absolute path inside a linked folder).",
     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}},
                      "required": ["path"], "additionalProperties": False},
 }
@@ -409,7 +409,7 @@ def web_fetch(url, policy, opener=None):
             raise ToolError(f"{parts.hostname} was not named in the message, so it cannot be fetched")
         if not _public_host(parts.hostname):
             raise ToolError(f"{parts.hostname} is not a public address")
-        req = urllib.request.Request(url, headers={"User-Agent": "myOS", "Accept": "text/html,text/plain,*/*"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Leo Bot", "Accept": "text/html,text/plain,*/*"})
         try:
             with opener.open(req, timeout=FETCH_TIMEOUT) as resp:
                 raw = resp.read(MAX_FETCH_BYTES)

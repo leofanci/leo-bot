@@ -59,7 +59,7 @@ FORBIDDEN_DIRECTORIES = {
     ".aws", ".direnv", ".netlify", ".ssh", ".terraform", ".vercel", ".wrangler",
 }
 
-# Everything myOS authors for the user is private, regardless of its contents.
+# Everything Leo Bot authors for the user is private, regardless of its contents.
 # These path rules make `git add -f` insufficient to bypass the privacy gate.
 PRIVATE_DATA_PREFIXES = (
     ("projects",),

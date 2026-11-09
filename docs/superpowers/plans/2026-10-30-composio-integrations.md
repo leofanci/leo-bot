@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let myOS bots use the user's Composio-connected apps (Gmail first) through a server-side relay where reads run, every other action waits on an Approve click, and the Composio key never reaches a bot.
+**Goal:** Let Leo Bot bots use the user's Composio-connected apps (Gmail first) through a server-side relay where reads run, every other action waits on an Approve click, and the Composio key never reaches a bot.
 
 **Architecture:** Pure rules (`core/app_rules.py`) decide read / hold / refuse per tool slug. A gitignored store (`core/integrations.py`) holds key, per-person sessions and per-bot grants. A stdlib client (`core/composio.py`) talks to Composio. An MCP relay on the dashboard server (`dashboard/apps_relay.py`) is the only thing bots talk to; held actions become `app_action` rows in `core/approvals.py` with server-built previews (`core/app_preview.py`). `_handle_ask` decides per turn whether to mount the relay.
 

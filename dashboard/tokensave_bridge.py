@@ -1,4 +1,4 @@
-"""Small, read-only TokenSave adapter for the embedded myOS consultant.
+"""Small, read-only TokenSave adapter for the embedded Leo Bot consultant.
 
 The chat process may call only this module, never arbitrary TokenSave install,
 sync, edit, or administration commands. A project slug is resolved through its
@@ -41,7 +41,7 @@ def _linked_workspace(project_slug: str, active_project=None, folder=None) -> st
         else os.environ.get("WORKSPACE_ACTIVE_PROJECT", "").strip()
     )
     if not active_slug:
-        raise BridgeError("TokenSave bridge requires an active myOS project")
+        raise BridgeError("TokenSave bridge requires an active Leo Bot project")
     if project_slug != active_slug:
         raise BridgeError("requested project is not the active linked project")
     try:
@@ -148,7 +148,7 @@ def context(project_slug: str, task: str, *, active_project=None, include_code=T
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Read-only TokenSave bridge for myOS")
+    parser = argparse.ArgumentParser(description="Read-only TokenSave bridge for Leo Bot")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("context")

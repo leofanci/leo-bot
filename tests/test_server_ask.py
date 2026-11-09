@@ -113,7 +113,7 @@ class SSE(unittest.TestCase):
                                "channels": [{"slug": "demo-tiktok", "name": "TikTok",
                                              "platform": "tiktok"}]}]}]
         text = _captured_prompt({"messages": [{"role": "user", "content": "do a thing"}]}, tree)
-        self.assertIn("## Current myOS state", text)
+        self.assertIn("## Current Leo Bot state", text)
         self.assertIn("### acme id=pr1 (brand)", text)
         self.assertIn("## Request\ndo a thing", text)
 
@@ -147,7 +147,7 @@ class SSE(unittest.TestCase):
         }, tree)
         self.assertIsNone(seen["workspace_dir"])
         self.assertIn("App workspace unavailable", seen["text"])
-        self.assertIn("Do not inspect the myOS source tree", seen["text"])
+        self.assertIn("Do not inspect the Leo Bot source tree", seen["text"])
 
     def test_tokensave_without_link_spends_no_model_turn(self):
         sink = io.BytesIO()
@@ -397,7 +397,7 @@ class ComposeTurnPrompt(unittest.TestCase):
             user_msg="hi", context="", skill=None,
             session=self._sess(), projects=tree,
         )
-        self.assertIn("## Current myOS state", text)
+        self.assertIn("## Current Leo Bot state", text)
         self.assertNotIn("resumed session", text)
 
     def test_resume_continuation_keeps_skill_stub(self):
@@ -408,7 +408,7 @@ class ComposeTurnPrompt(unittest.TestCase):
             user_msg="yes save it", context="", skill=None,
             session=s, projects=tree,
         )
-        self.assertNotIn("## Current myOS state", text)
+        self.assertNotIn("## Current Leo Bot state", text)
         self.assertIn("resumed session", text)
         self.assertIn("continuing", text)
         self.assertNotIn("Tab map + write gate", text)
@@ -438,7 +438,7 @@ class StateSnapshot(unittest.TestCase):
 
     def test_empty_tree(self):
         out = server.state_snapshot([])
-        self.assertTrue(out.startswith("## Current myOS state"))
+        self.assertTrue(out.startswith("## Current Leo Bot state"))
         self.assertIn("(no projects yet)", out)
 
     def test_nested_outline(self):

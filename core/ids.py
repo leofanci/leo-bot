@@ -1,4 +1,4 @@
-"""ids.py — canonical composed ID scheme for the myOS.
+"""ids.py — canonical composed ID scheme for the Leo Bot.
 
 Every referencable UI thing gets a short numeric ID composed from its ancestry.
 
