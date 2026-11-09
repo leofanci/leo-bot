@@ -128,7 +128,7 @@ span.mark{display:grid;place-items:center;font:var(--ui-weight-title) 8px/1 var(
 .ctx b{color:var(--ui-color-accent)}
 .msg .tool-chip{margin:var(--ui-space-1) 0}
 /* one left-aligned row per message, 1px divider between rows */
-.msg{display:grid;grid-template-columns:var(--ui-avatar) minmax(0,1fr);column-gap:var(--ui-space-2-5);padding:var(--ui-space-3) var(--ui-space-5);line-height:1.55}
+.msg{position:relative;display:grid;grid-template-columns:var(--ui-avatar) minmax(0,1fr);column-gap:var(--ui-space-2-5);padding:var(--ui-space-3) var(--ui-space-5);line-height:1.55}
 .msg+.msg{border-top:1px solid var(--ui-color-border-subtle)}
 .msg:hover{background:var(--ui-color-hover)}
 .msg>.av{margin-top:1px}
@@ -150,6 +150,25 @@ span.mark{display:grid;place-items:center;font:var(--ui-weight-title) 8px/1 var(
 .msg.streaming .b:empty::after{content:"";display:inline-block;width:28px;height:8px;
   background:radial-gradient(circle,currentColor 2.5px,transparent 3px) 0 50%/10px 8px repeat-x;color:var(--ui-color-text-muted);animation:typing 1.2s infinite}
 @keyframes typing{0%,100%{opacity:.3}50%{opacity:.9}}
+/* emoji reactions: a hover button on saved rows, chips under the message, one picker */
+.react-add{position:absolute;top:var(--ui-space-1-5);right:var(--ui-space-4);width:var(--ui-control-default);height:var(--ui-control-default);display:grid;place-items:center;
+  border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text-muted);
+  opacity:0;pointer-events:none;transition:opacity var(--ui-motion-fast)}
+.msg[data-i]:hover .react-add,.msg[data-i] .react-add:focus-visible{opacity:1;pointer-events:auto}
+.react-add:hover{color:var(--ui-color-text)}
+@media (hover:none){.msg[data-i] .react-add{opacity:1;pointer-events:auto}}
+.reacts{display:flex;flex-wrap:wrap;gap:var(--ui-space-1);margin-top:var(--ui-space-1-5)}
+.react-pill{display:inline-flex;align-items:center;gap:var(--ui-space-1);height:24px;padding:0 var(--ui-space-2);border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-card);
+  background:var(--ui-color-surface-subtle);color:var(--ui-color-text-secondary);font:var(--ui-weight-medium) var(--ui-type-caption)/1 var(--ui-font-sans)}
+.react-pill .re{font-size:var(--ui-type-control)}
+.react-pill:hover{border-color:var(--ui-color-border-strong)}
+.react-pill.mine{border-color:var(--ui-color-accent-line);background:var(--ui-color-accent-soft);color:var(--ui-color-accent)}
+.msg:not([data-i]) .react-pill{cursor:default}
+.react-picker{position:fixed;z-index:60;display:grid;grid-template-columns:repeat(5,32px);gap:var(--ui-space-0-5);padding:var(--ui-space-1-5);
+  border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-menu);background:var(--ui-color-surface);box-shadow:var(--ui-shadow-menu)}
+.react-picker[hidden]{display:none}
+.react-picker button{width:32px;height:32px;border:0;border-radius:var(--ui-radius-control);background:transparent;font-size:var(--ui-type-title);line-height:1}
+.react-picker button:hover,.react-picker button:focus-visible{background:var(--ui-color-hover)}
 .deliv-list{display:flex;flex-direction:column;gap:var(--ui-space-1);margin-top:var(--ui-space-1-5)}
 .deliv-row{display:flex;align-items:center;gap:var(--ui-space-2-5);max-width:520px;padding:var(--ui-space-2) var(--ui-space-2-5);border:1px solid var(--ui-color-border-subtle);border-radius:var(--ui-radius-card);background:var(--ui-color-surface-subtle)}
 .deliv-ic{display:grid;place-items:center;color:var(--ui-color-text-muted)}

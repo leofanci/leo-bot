@@ -92,6 +92,8 @@ that cookie at once.
   deleted or a bot is switched off, its threads move to #general for you only.
 - Two people can talk with bots at the same time in different threads. A
   thread that is mid-reply asks the other person to wait.
+- Invited people can react with emoji on any thread they can read. Everyone in
+  the thread sees who reacted; bots see the reactions on their next turn.
 - What invited people save through a bot (intake, memos, posts) is read by
   bots on your own turns later, like any document a teammate edits. Check it
   before acting on it.

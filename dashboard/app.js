@@ -4234,7 +4234,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   // ── saved chats: each is its own claude session (server chat_store) ─────
   // Active chat id survives reloads; its transcript is loaded from the server.
   let activeChatId = null;
-  let seenCount = -1;   // messages of the open thread last shown from the server (pollThread)
+  let seenSig = null;   // messages + reactions of the open thread last shown from the server (pollThread)
+  const threadSig = msgs => `${msgs.length}:` + msgs.map(m =>
+    (m.reactions || []).map(r => `${r.emoji}${r.bot || r.by}`).join(",")).join("|");
   let threadUsage = { tokens: 0, cost: 0 };   // running total of the open thread
   const chatListEl = document.getElementById("chat-list");
   const chatTitleEl = document.getElementById("chat-title");
@@ -4251,10 +4253,12 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function showChat(msgs){
     history.length = 0; stream.innerHTML = "";
     if (!msgs || !msgs.length) return showWelcome();
-    msgs.forEach(m => {
+    msgs.forEach((m, i) => {
       history.push(m);
-      const b = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name);
-      if (m.role === "assistant") decorateReply(b.closest(".msg"), m);
+      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name).closest(".msg");
+      row.dataset.i = i;   // its index in the saved thread: what a reaction points at
+      if (m.role === "assistant") decorateReply(row, m);
+      paintReactions(row, m.reactions);
     });
     renderAppCards();
     stream.scrollTop = stream.scrollHeight;
@@ -4280,7 +4284,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (seq !== chatSeq) return;
     if (!rec) { setActiveChat(null); showChat([]); return; }
     setActiveChat(rec.id, rec.title, rec.scope && rec.scope[0]); showChat(rec.messages);
-    seenCount = (rec.messages || []).length;
+    seenSig = threadSig(rec.messages || []);
     threadUsage = { tokens: rec.tokens || 0, cost: rec.cost || 0 };
     statusEl.textContent = "Ready";
   }
@@ -4348,8 +4352,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const rec = await fetch(`/api/chats/${encodeURIComponent(id)}`).then(r => r.ok ? r.json() : null).catch(() => null);
       if (!rec || busy || id !== activeChatId || seq !== chatSeq) return;
       const msgs = rec.messages || [];
-      if (msgs.length !== seenCount) {
-        seenCount = msgs.length;
+      const sig = threadSig(msgs);
+      if (sig !== seenSig) {
+        seenSig = sig;
         const atEnd = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 40;
         const keep = stream.scrollTop;
         showChat(msgs);
@@ -4707,7 +4712,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function addMsg(role, text, bot, askedBy, ts, by, byName){
     const div = document.createElement("div");
     div.className = "msg " + (role === "user" ? "me" : "ai");
-    div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>`;
+    div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>
+      <button type="button" class="react-add" title="Add reaction" aria-label="Add reaction">${icon("smile")}</button>`;
     div.querySelector("time").textContent = clock(ts);
     if (role === "user") {
       const who = senderOf(by, byName);
@@ -4720,6 +4726,77 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     stream.scrollTop = stream.scrollHeight;
     return bubble;
   }
+
+  // ── emoji reactions (Slack-style): chips under a message, one picker ──
+  // People toggle theirs; bots add theirs with a REACT line (server side).
+  const REACT_EMOJI = ["👍", "❤️", "😂", "🎉", "🙏", "👀", "✅", "🔥", "🚀", "💯",
+                       "🤔", "👏", "😮", "😢", "👎", "❌", "⚠️", "💡", "📌", "⏳"];
+  const myReactorId = () => isPerson() ? _ME.id : "ceo";
+  function reactorName(r){
+    if (r.bot) return botById(r.bot)?.name || `@${r.bot}`;
+    return r.by === myReactorId() ? "You" : r.by === "ceo" ? "Owner" : (r.by_name || "Teammate");
+  }
+  function paintReactions(row, rows){
+    row.querySelector(".reacts")?.remove();
+    const groups = new Map();
+    (rows || []).forEach(r => { if (r?.emoji) groups.set(r.emoji, [...(groups.get(r.emoji) || []), r]); });
+    if (!groups.size) return;
+    const me = myReactorId();
+    const box = document.createElement("div");
+    box.className = "reacts";
+    box.innerHTML = [...groups].map(([e, rs]) => {
+      const mine = rs.some(r => !r.bot && r.by === me);
+      const names = rs.map(reactorName).join(", ");
+      return `<button type="button" class="react-pill${mine ? " mine" : ""}" data-emoji="${esc(e)}" title="${esc(names)}"
+        aria-pressed="${mine}" aria-label="${esc(`${e} ${rs.length}: ${names}`)}"><span class="re">${esc(e)}</span><span class="rc">${rs.length}</span></button>`;
+    }).join("");
+    row.querySelector(".msg-main").appendChild(box);
+  }
+  const picker = document.createElement("div");
+  picker.className = "react-picker";
+  picker.hidden = true;
+  picker.setAttribute("role", "dialog");
+  picker.setAttribute("aria-label", "Add reaction");
+  picker.innerHTML = REACT_EMOJI.map(e => `<button type="button" data-emoji="${e}" aria-label="React ${e}">${e}</button>`).join("");
+  document.body.appendChild(picker);
+  let pickerRow = null;
+  function openPicker(row, anchor){
+    pickerRow = row;
+    picker.hidden = false;
+    const a = anchor.getBoundingClientRect(), w = picker.offsetWidth, h = picker.offsetHeight;
+    picker.style.left = `${Math.max(8, Math.min(a.right - w, innerWidth - w - 8))}px`;
+    picker.style.top = `${a.bottom + 4 + h > innerHeight ? Math.max(8, a.top - h - 4) : a.bottom + 4}px`;
+    picker.querySelector("button")?.focus();
+  }
+  function closePicker(){ picker.hidden = true; pickerRow = null; }
+  async function toggleReaction(row, emoji){
+    const i = Number(row.dataset.i), id = activeChatId;
+    if (!id || !Number.isInteger(i)) return;
+    const res = await fetch(`/api/chats/${encodeURIComponent(id)}/react`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ i, emoji }),
+    }).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (id !== activeChatId || !row.isConnected) return;
+    if (!res) { statusEl.textContent = "Reaction not saved"; return; }
+    if (history[i]) history[i].reactions = res.reactions;
+    paintReactions(row, res.reactions);
+    if (!busy) seenSig = threadSig(history);
+  }
+  stream.addEventListener("click", e => {
+    const add = e.target.closest(".react-add"), pill = e.target.closest(".react-pill");
+    const row = (add || pill)?.closest(".msg");
+    if (!row?.dataset.i) return;
+    e.stopPropagation();
+    if (add) return picker.hidden || pickerRow !== row ? openPicker(row, add) : closePicker();
+    toggleReaction(row, pill.dataset.emoji);
+  });
+  picker.addEventListener("click", e => {
+    const b = e.target.closest("[data-emoji]");
+    if (b && pickerRow) toggleReaction(pickerRow, b.dataset.emoji);
+    closePicker();
+  });
+  document.addEventListener("click", e => { if (!picker.hidden && !picker.contains(e.target)) closePicker(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !picker.hidden) closePicker(); });
+  stream.addEventListener("scroll", () => { if (!picker.hidden) closePicker(); });
 
   // While a reply streams, one quiet "working… N steps" line sits under the
   // bot's name; it goes away when the reply is complete.
@@ -4756,7 +4833,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   // merely starts with "Approval" or "Consult" stays visible.
   const APPROVAL_LINE_RE = /^[ \t>*_-]*APPROVAL:.*$/gm;
   const CONSULT_LINE_RE = /^[ \t>*_-]*CONSULT[*_ \t]+@[a-z][a-z0-9-]*[*_ \t]*:.*$/gim;
-  const hideMarkers = text => text.replace(APPROVAL_LINE_RE, "").replace(CONSULT_LINE_RE, "").trimEnd();
+  // server.py _REACT_RE: a line holding nothing but emoji
+  const REACT_LINE_RE = /^[ \t>*_-]*REACT[*_ \t]*:(?:[ \t,*_]|\p{Extended_Pictographic}|\p{Emoji_Component}|‍)+$/gimu;
+  const hideMarkers = text => text.replace(APPROVAL_LINE_RE, "").replace(CONSULT_LINE_RE, "").replace(REACT_LINE_RE, "").trimEnd();
   const CONTINUATION_RE = /\b(yes|yep|yeah|ok|okay|sure|go ahead|save|commit|do it|approved|looks good|next tab|proceed|continue|save all)\b/i;
   const CTX_PORTFOLIO_KW = /\b(all posts|other posts|how many posts|list posts|what posts|calendar|timeline|projects?|profiles?|portfolio)\b/i;
 
@@ -5048,7 +5127,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     };
     startReply(null);
     const replyAt = i => (Number.isInteger(i) && replies[i]) || replies[replies.length - 1];
-    let pendingBreak = false;
+    let pendingBreak = false, reload = false, stored = false;
 
     chatAbort = new AbortController();
     try {
@@ -5094,6 +5173,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
                 stream.insertBefore(note, userEl);
               }
               setActiveChat(obj.chat_id, obj.title, obj.project);
+              stored = true;
             }
             if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from); turnMeta.bot = obj.bot.id; }
             if (obj.msg_start) { startReply(obj.msg_start); pendingBreak = false; }
@@ -5106,8 +5186,10 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.clean !== undefined) {
               const r = replyAt(obj.msg);
               r.bubble.innerHTML = formatChatText(obj.clean);
+              r.bubble.closest(".msg").hidden = !obj.clean;   // a reply that was only a reaction
               if (r.bubble === bubble) full = obj.clean;
             }
+            if (obj.reactions) paintReactions(userEl, obj.reactions);
             if (obj.approval) { _APPROVALS.unshift(obj.approval); replyAt(obj.msg).meta.approval = obj.approval; }
             if (obj.app_actions) {
               obj.app_actions.forEach(a => { if (!_APPROVALS.some(x => x.id === a.id)) _APPROVALS.unshift(a); });
@@ -5127,6 +5209,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       }
 
       if (full) history.push({ role: "assistant", content: full });
+      reload = stored;   // a zero-model note (tag gate, allowance) is not in the saved thread: keep it on screen
       await refreshChatStatus("Ready");
     } catch(e) {
       if (e.name === "AbortError") {
@@ -5149,6 +5232,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
         openDeliverable({ ...saved[0], bot: replies.find(r => r.meta.deliverables?.length)?.meta.bot });
       if (hadPending || heldThisTurn || replies.some(r => r.meta.approval)) renderRail().catch(() => {});   // inbox count
       renderAppCards();
+      // Re-read the saved thread: this turn's rows get their index (reactions) and final form.
+      if (reload) { seenSig = null; pollThread(); }
     }
   }
 

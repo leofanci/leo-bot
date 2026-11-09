@@ -88,6 +88,14 @@ tests, builds or git: they name the files they changed and you review them in yo
 Codex and other CLIs stay read-only. Invited people, shared threads and runners never reach
 a linked folder or see its path.
 
+### Reactions
+
+Hover any saved message in a thread and pick an emoji; click a chip to add or take back
+yours, hover it to see who reacted. You, invited people (on threads they can read) and
+bots all react. A bot reacts to the message it answers with one line `REACT: 👀` in its
+reply, and a reply of only that line shows as the emoji alone. Bots see people's reactions
+as context on their next turn; a reaction never triggers an action.
+
 ### Dashboard (macOS app)
 
 The app's launcher binary is not committed: build it from source once after cloning. With the repo hooks enabled (`git config core.hooksPath .githooks`), every pull or checkout that changes the app's source rebuilds it automatically.

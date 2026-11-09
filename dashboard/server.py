@@ -931,6 +931,29 @@ def _extract_consults(text, team):
     return _CONSULT_RE.sub("", text or "").rstrip(), asks
 
 
+# A bot reacts to the message it answers with one line `REACT: 👀` (Slack-style).
+# Only a line that holds nothing but emoji is a marker; the rest stays prose.
+MAX_BOT_REACTS = 3
+_REACT_RE = re.compile(r"^[ \t>*_-]*REACT[*_ \t]*:[ \t]*(.+?)[ \t*_]*(?:\n|$)", re.M | re.I)
+
+
+def _extract_reacts(text):
+    """(text without REACT lines, [emoji]) — at most MAX_BOT_REACTS, no repeats."""
+    got = []
+
+    def take(m):
+        parts = [p for p in re.split(r"[\s,]+", m.group(1)) if p]
+        emojis = [chat_store.clean_emoji(p) for p in parts]
+        if not parts or not all(emojis):
+            return m.group(0)
+        for e in emojis:
+            if e not in got and len(got) < MAX_BOT_REACTS:
+                got.append(e)
+        return ""
+    clean = _REACT_RE.sub(take, text or "")
+    return (clean.rstrip() if got else text or ""), got
+
+
 def _plan_teammates(team, lead, handoff_from, user_msg, asks):
     """[(bot_id, question, asked_by)]: the lead's consults, then co-tagged bots."""
     out, seen = [], {lead}
@@ -1356,6 +1379,16 @@ def _room_for_chat(rec, team, ws, projects):
     spaces = {w["id"] for w in _workspaces(projects)}
     rid = rooms.room_of_chat(rec, ids, spaces)
     return rooms.get_room(rid, team, ROOT) if rooms.split_id(rid)[0] == ws else None
+
+
+def _person_can_read(rec, person, projects):
+    """An invited person sees this saved thread: their workspace, a room and thread open to them."""
+    ws = _chat_workspace(rec) if rec else None
+    ws = _known_ws(ws, projects) if ws in person["ws"] else None
+    if not ws:
+        return False
+    team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
+    return rooms.chat_visible(rec, _room_for_chat(rec, team, ws, projects), person)
 
 
 def _for_person(rec):
@@ -2083,11 +2116,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"chats": chats})
             if path.startswith("/api/chats/"):
                 rec = chat_store.load(path[len("/api/chats/"):])
-                ws = mine(_chat_workspace(rec)) if rec else None
-                if ws:
-                    team = bots.team(ROOT, ws, next((p for p in projects if p.get("slug") == ws), None))
-                    if rooms.chat_visible(rec, _room_for_chat(rec, team, ws, projects), person):
-                        return self._send(200, _for_person(rec))
+                if _person_can_read(rec, person, projects):
+                    return self._send(200, _for_person(rec))
                 return self._send(404, {"error": "chat not found"})
         except ValueError as e:
             return self._send(400, {"error": str(e)})
@@ -2114,6 +2144,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._people_post(path, body, person)
             if path in ("/api/rooms", "/api/rooms/delete"):
                 return self._rooms_post(path, body, person)
+            if path.startswith("/api/chats/") and path.endswith("/react"):
+                chat_id = path[len("/api/chats/"):-len("/react")]
+                if not _person_can_read(chat_store.load(chat_id), person, db.tree()):
+                    return self._send(404, {"error": "chat not found"})
+                return self._react_post(chat_id, body, by=person["id"], by_name=person["name"])
         except LookupError as e:
             return self._send(404, {"error": str(e)})
         except ValueError as e:
@@ -2122,6 +2157,13 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._send(500, {"error": "internal error"})
         return self._send(403, {"error": "forbidden"})
+
+    def _react_post(self, chat_id, body, by, by_name=None):
+        """Toggle one emoji on message `i` of a thread the caller may read."""
+        rows = chat_store.toggle_reaction(chat_id, body.get("i"), body.get("emoji"), by=by, by_name=by_name)
+        if rows is None:
+            return self._send(404, {"error": "no such message"})
+        return self._send(200, {"reactions": rows})
 
     # -- AI chat (drives a persistent guard-railed ChatSession via SSE) --- #
     def _handle_ask(self, body, viewer=OWNER):
@@ -2344,6 +2386,9 @@ class Handler(BaseHTTPRequestHandler):
         missed = chat_store.recap(saved_rec, engine.id)
         if missed:
             text = f"{missed}\n\n{text}"
+        reacted = chat_store.reaction_note(saved_rec)  # emoji people added since the last reply
+        if reacted:
+            text = f"{reacted}\n\n{text}"
         # A fresh start after a used folder was unlinked: the thread's visible messages, once.
         pending = getattr(sess, "pending_recap", None)
         if pending:
@@ -2375,6 +2420,7 @@ class Handler(BaseHTTPRequestHandler):
         # This turn's replies in order: the lead, then any teammates it pulled in
         # (or that were co-tagged), then the lead's follow-up.
         msgs = [{"bot": bot_id, "content": ""}]
+        reacts = []  # (bot_id, emoji) the bots of this turn put on the user's message
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
         web_domains = chat_session.user_web_domains(user_msg)
@@ -2478,8 +2524,10 @@ class Handler(BaseHTTPRequestHandler):
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_text = run(sess, text, model, with_web, msgs[0], **folder_kw, **apps_kw)
+            lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
+            reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
-            if asks:
+            if asks or lead_reacts:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
             answers = []
@@ -2524,6 +2572,14 @@ class Handler(BaseHTTPRequestHandler):
                                     bot=bot_id, summary=summary)
                 msgs[i]["approval"] = rec["id"]
                 emit({"approval": rec, "msg": i})
+            for i, m in enumerate(msgs):  # every bot of the turn may react to the message
+                clean, got = _extract_reacts(m["content"])
+                if got:
+                    m["content"] = clean
+                    emit({"clean": clean, "msg": i})
+                    reacts.extend((m["bot"], e) for e in got)
+            if reacts:
+                emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
             for m in msgs[1:]:  # a teammate never asks for approval or consults on its own
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
         except (BrokenPipeError, ConnectionResetError):
@@ -2541,6 +2597,9 @@ class Handler(BaseHTTPRequestHandler):
                 os_relay.TOKENS.revoke(apps_kw["os_token"])
             if isinstance(getattr(sess, "session_id", None), str):
                 try:
+                    for m in msgs:  # a stopped turn: no marker line is ever saved
+                        m["content"], got = _extract_reacts(m["content"])
+                        reacts.extend((m["bot"], e) for e in got)
                     head = msgs[0]
                     chat_store.record_turn(
                         sess, project_scope, user_msg, head["content"], bot=bot_id,
@@ -2548,7 +2607,7 @@ class Handler(BaseHTTPRequestHandler):
                         meta={k: v for k, v in head.items() if k not in ("bot", "content")},
                         extra=[m for m in msgs[1:] if m.get("content")],
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
-                        shared=shared)
+                        shared=shared, reactions=reacts)
                 except (OSError, ValueError):
                     traceback.print_exc()
             try:
@@ -3303,6 +3362,8 @@ class Handler(BaseHTTPRequestHandler):
                     _CHAT = None
                     _CHAT_SCOPE = None
                 return self._send(200, {"ok": True})
+            if path.startswith("/api/chats/") and path.endswith("/react"):
+                return self._react_post(path[len("/api/chats/"):-len("/react")], body, by=bots.CEO)
             if path.startswith("/api/chats/") and path.endswith("/delete"):
                 chat_id = path[len("/api/chats/"):-len("/delete")]
                 if _CHAT is not None and getattr(_CHAT, "session_id", None) == chat_id:
