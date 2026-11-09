@@ -1603,6 +1603,7 @@ async function renderIntegrations(){
       try {
         const slug = b.dataset.connect, before = accts(slug).length;
         const { url, account_id } = await jpost("/api/integrations/connect", { toolkit: slug });
+        if (!/^https:\/\//i.test(String(url || ""))) throw new Error("the connect link is not a secure web address");
         window.open(url, "_blank", "noopener");
         b.textContent = "Waiting…"; b.disabled = true;
         polls = 0;

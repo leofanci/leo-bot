@@ -86,13 +86,30 @@ def calls_in(name, args):
     return out
 
 
-def decide(slug, grant, catalog):
+_URLISH = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|ai|xyz|ru|cn|sh|example|test|info|me|to|tk|top|site|online)\b)", re.I)
+
+
+def has_url(value, _depth=0) -> bool:
+    """True when any string in the arguments looks like a web address: a "read" that takes a
+    URL can make the app fetch an attacker's host with the mail in the query."""
+    if _depth > 6:
+        return True
+    if isinstance(value, str):
+        return bool(_URLISH.search(value))
+    if isinstance(value, dict):
+        return any(has_url(k, _depth + 1) or has_url(v, _depth + 1) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return any(has_url(v, _depth + 1) for v in value)
+    return False
+
+
+def decide(slug, grant, catalog, arguments=None):
     """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant."""
     tk = toolkit_of(slug, catalog)
     if tk is None:
         return "refuse", None
     if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
         return "refuse", tk
-    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS:
+    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments):
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk

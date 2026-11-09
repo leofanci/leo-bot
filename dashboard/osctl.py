@@ -55,7 +55,7 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # A shared thread (os_relay: an invited person can see it). It reads the team memory,
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
-_SHARED_BLOCKED = {"remember"}
+_SHARED_BLOCKED = {"remember", "research-signal"}  # research-signal sends text off the machine
 _SHARED_READ_PREFIXES = ("skills/", "docs/", "templates/", "prompts/", "bots/")
 # Args whose value names an existing entity (create commands mint new slugs,
 # which resolve to no owner and pass).

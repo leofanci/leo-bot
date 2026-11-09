@@ -9,7 +9,7 @@ import WebKit
 // The Python dashboard server is started asynchronously via start-server.sh so
 // the launch acknowledges immediately and we never block app startup.
 
-final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     var serverPID: Int32 = 0
@@ -25,6 +25,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         // Without a uiDelegate, WKWebView silently ignores <input type=file>
         // clicks — the chat's attach button looks dead. See runOpenPanel below.
         webView.uiDelegate = self
+        // The window only ever shows myOS itself: any other web address opens in the
+        // default browser, so a link in a bot's text never loads inside the app window.
+        webView.navigationDelegate = self
 
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900),
@@ -50,6 +53,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.startServerAndLoad()
         }
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let target = action.request.url else { decisionHandler(.cancel); return }
+        let scheme = target.scheme?.lowercased() ?? ""
+        if scheme == "about" || scheme == "blob" || scheme == "data" {
+            decisionHandler(.allow); return
+        }
+        if scheme == "http", target.host == url.host, target.port == url.port {
+            decisionHandler(.allow); return
+        }
+        if scheme == "http" || scheme == "https" { NSWorkspace.shared.open(target) }
+        decisionHandler(.cancel)
     }
 
     // WKWebView calls this when the page triggers an <input type=file>. Without
@@ -207,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate {
         if token.isEmpty { return false }
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let key = SymmetricKey(data: Data(token.utf8))
-        let want = HMAC<SHA256>.authenticationCode(for: Data(nonce.utf8), using: key)
+        let want = HMAC<SHA256>.authenticationCode(for: Data("myos-healthz:\(nonce)".utf8), using: key)
             .map { String(format: "%02x", $0) }.joined()
         guard let probe = URL(string: "\(url.absoluteString)/healthz?nonce=\(nonce)") else { return false }
         var req = URLRequest(url: probe)

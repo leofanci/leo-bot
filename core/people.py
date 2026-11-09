@@ -173,8 +173,10 @@ def join(root=bots.ROOT, code=None, name=None, *, token=None):
         if not old or _RANK[inv["role"]] > _RANK.get(old, 0):
             mine[inv["ws"]] = inv["role"]
         inv["used"] = {"by": pid, "at": time.time()}
-        _save(root, "people.json", {"people": everyone})
+        # The invite is marked used first: if the second write fails, nobody holds a
+        # workspace seat that the invite could still hand out again.
         _save(root, "invites.json", {"invites": rows})
+        _save(root, "people.json", {"people": everyone})
         return pid, token_out
 
 
@@ -210,6 +212,20 @@ def people_in(root=bots.ROOT, ws=None):
         if ws in v["ws"]:
             rows.append({"id": pid, "name": v["name"], "joined": v["joined"], "role": v["ws"][ws]})
     return sorted(rows, key=lambda r: (-_RANK[r["role"]], r["joined"] or 0))
+
+
+def revoke_invites_by(root=bots.ROOT, ws=None, pid=None):
+    """Every live invite `pid` made for `ws` dies: a removed person cannot let themselves back in."""
+    with LOCK:
+        rows = _invites(root)
+        n = 0
+        for r in rows:
+            if r.get("by") == pid and r.get("ws") == ws and _live(r, time.time()):
+                r["revoked"] = time.time()
+                n += 1
+        if n:
+            _save(root, "invites.json", {"invites": rows})
+        return n
 
 
 def remove(root=bots.ROOT, ws=None, pid=None):

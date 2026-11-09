@@ -104,6 +104,7 @@ def _owner_token(deployment=None, path=None):
 AUTH_TOKEN = _owner_token()
 MAX_JSON_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BYTES = 8 * 1024 * 1024
+MAX_UPLOAD_TOTAL_BYTES = 256 * 1024 * 1024  # all pasted images of one server run
 MAX_WS_PAYLOAD = 1024 * 1024
 UPLOAD_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
 VENDOR_TYPES = {".css": "text/css", ".js": "application/javascript",
@@ -149,6 +150,16 @@ def upload_dir():
     return _UPLOAD_DIR
 
 
+def _dir_bytes(folder) -> int:
+    total = 0
+    for entry in os.scandir(folder):
+        try:
+            total += entry.stat(follow_symlinks=False).st_size
+        except OSError:
+            pass
+    return total
+
+
 def remove_uploads():
     global _UPLOAD_DIR
     if _UPLOAD_DIR:
@@ -165,7 +176,8 @@ def restrict_new_files():
 
 def health_proof(nonce):
     """HMAC-SHA256(AUTH_TOKEN, nonce): lets the launcher verify server identity."""
-    return hmac.new(AUTH_TOKEN.encode(), nonce.encode(), "sha256").hexdigest()
+    # The context prefix keeps this proof from ever matching an HMAC made for another purpose.
+    return hmac.new(AUTH_TOKEN.encode(), b"myos-healthz:" + nonce.encode(), "sha256").hexdigest()
 
 
 def write_token_file(path=None):
@@ -971,6 +983,11 @@ def _workspace_deny_dirs(ws, projects, kept=()):
         return folders.turn_denies(kept, [], own_removed)
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
+    # Folders on disk too: a project the index has not seen yet is just as private.
+    on_disk = ROOT / "projects"
+    for d in (on_disk.iterdir() if on_disk.is_dir() else ()):
+        if d.is_dir() and d.name.lower() != ws.lower() and not d.name.startswith("."):
+            dirs.append(d)
     dirs += [Path(p) for p in folders.turn_denies(
         kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
     dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
@@ -1448,7 +1465,8 @@ def _approve_app_action(aid, arguments=None):
         live = {r["id"] for r in composio.accounts(rec["person"], ROOT)}
     except composio.ComposioError as e:
         raise _AppRefused(str(e)) from None
-    verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog)
+    verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog,
+                                      action.get("arguments"))
     if verdict != "hold":
         raise _AppRefused(f"{rec['bot']} may no longer do this")
     picks = integrations.accounts_for(rec["ws"], ROOT).get(toolkit) or []
@@ -1460,9 +1478,14 @@ def _approve_app_action(aid, arguments=None):
     if account not in live:
         raise _AppRefused(f"that {toolkit} account is not connected")
     try:
-        approvals.claim(aid, ROOT)
+        claimed = approvals.claim(aid, ROOT)
     except ValueError as e:
         raise _AppRefused(str(e)) from None
+    # Run what was claimed, not the copy read before: a second edit in between must not slip through.
+    action = claimed.get("action") or action
+    if (action.get("slug"), action.get("arguments")) != (rec["action"]["slug"], rec["action"]["arguments"]):
+        out_rec = approvals.finish(aid, "failed", "Changed while it was being approved; nothing was sent.", ROOT)
+        return out_rec
     try:
         out = composio.execute(rec["person"], rec["ws"], action["slug"], action["arguments"], account, ROOT)
         if isinstance(out, dict) and (out.get("successful") is False
@@ -1929,6 +1952,10 @@ class Handler(BaseHTTPRequestHandler):
             if pid != viewer.get("id") and not people.can_remove(role, target["role"]):
                 return self._send(403, {"error": "you cannot remove them"})
             people.remove(ROOT, ws, pid)
+            people.revoke_invites_by(ROOT, ws, pid)
+            # A turn already running here ends too: close their session, cut its osctl token.
+            stop_person_chat(pid)
+            os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
@@ -2399,6 +2426,8 @@ class Handler(BaseHTTPRequestHandler):
                             "room": (room or {}).get("id"), "person": bots.CEO}),
                        "apps_port": self.server.server_address[1]}
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
+            if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
+                apps_relay.TOKENS.revoke(apps_kw["apps_token"])
             apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
                                                          "shared": shared}),
@@ -2903,6 +2932,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.delete_activity(body.get("title", ""))})
             if path == "/api/local-folder/pick":
                 return self._send(200, {"ok": True, **pick_local_folder()})
+            if path in ("/api/project/new",) or (path.startswith("/api/project/") and path.endswith("/update")):
+                # Linking a folder widens what bots can read or edit: only from this page, never a bare request.
+                if isinstance(body, dict) and body.get("local_folder") and not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
             if path == "/api/project/new":
                 slug = (body.get("slug") or fileops._slugify(body.get("name", ""))).strip()
                 return self._send(200, {"ok": True, **fileops.create_project(slug, body)})
@@ -2962,6 +2995,7 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/api/project/") and path.endswith("/delete"):
                 slug = path[len("/api/project/"):-len("/delete")]
                 out = fileops.delete_project(slug)
+                approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
@@ -3202,6 +3236,8 @@ class Handler(BaseHTTPRequestHandler):
                 ext = (body.get("ext", "png") or "png").lstrip(".").lower()
                 if ext not in UPLOAD_EXTENSIONS:
                     raise ValueError("unsupported upload type")
+                if _dir_bytes(upload_dir()) + len(data) > MAX_UPLOAD_TOTAL_BYTES:
+                    raise ValueError("too many uploads this session; restart myOS to clear them")
                 fd, fpath = tempfile.mkstemp(suffix=f".{ext}", prefix="workspace_img_",
                                              dir=upload_dir())
                 with os.fdopen(fd, "wb") as f:

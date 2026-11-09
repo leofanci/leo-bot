@@ -79,6 +79,7 @@ from core.project_schemas import (
 from core.subsections import (
     DOC_META,
     add_doc_subsection,
+    config_path,
     ensure_config,
     load_config,
     normalize_doc_text,
@@ -1424,8 +1425,21 @@ def _normalize_doc_strict(project_slug: str, doc_key: str, text: str, cfg: dict)
     )
 
 
+def _need_inside_project(project_slug: str, *paths) -> None:
+    """Refuse a file that is, or sits behind, a symlink leading out of the project folder."""
+    base = os.path.realpath(str(_project_dir(project_slug)))
+    for p in paths:
+        if not p:
+            continue
+        real = os.path.realpath(str(p))
+        if not real.startswith(base + os.sep) or os.path.normpath(str(p)) != os.path.normpath(real).replace(
+                os.path.realpath(str(ROOT)), str(ROOT), 1):
+            raise ActionError("path outside project")
+
+
 def update_subsections(project_slug: str, doc_key: str, titles: list[str]) -> dict:
-    _project_dir(project_slug)
+    _need_inside_project(project_slug, _project_doc_path(project_slug, doc_key),
+                         config_path(ROOT, project_slug))
     cfg = set_doc_subsections(load_config(ROOT, project_slug), doc_key, titles)
     save_config(ROOT, project_slug, cfg)
     doc_path = _project_doc_path(project_slug, doc_key)
@@ -1454,7 +1468,8 @@ def update_validation_tab(project_slug: str, titles: list[str]) -> dict:
 
 
 def add_subsection(project_slug: str, doc_key: str, title: str) -> dict:
-    _project_dir(project_slug)
+    _need_inside_project(project_slug, _project_doc_path(project_slug, doc_key),
+                         config_path(ROOT, project_slug))
     cfg = add_doc_subsection(load_config(ROOT, project_slug), doc_key, title)
     save_config(ROOT, project_slug, cfg)
     doc_path = _project_doc_path(project_slug, doc_key)
@@ -1701,6 +1716,7 @@ def delete_experiment(project_slug: str, stem: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 def _require_strategy(project_slug: str, stem: str) -> str:
+    _project_dir(project_slug)  # a symlinked project folder is refused here too
     stem = _safe_component(stem, "strategy stem")
     known = {s["stem"] for s in gtm_store.load_strategies(ROOT, project_slug)}
     if stem not in known:
@@ -1737,6 +1753,7 @@ def _bare_phase_id(project_slug: str, phase_id: str, phases: list) -> str:
 
 
 def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
+    _project_dir(project_slug)
     phases = gtm_store.load_phases(ROOT, project_slug)
     phase_id = _bare_phase_id(project_slug, phase_id, phases)
     match = next((p for p in phases if p["id"] == phase_id), None)
@@ -1752,6 +1769,7 @@ def update_phase(project_slug: str, phase_id: str, fields: dict) -> dict:
 
 
 def delete_phase(project_slug: str, phase_id: str) -> dict:
+    _project_dir(project_slug)
     phases = gtm_store.load_phases(ROOT, project_slug)
     phase_id = _bare_phase_id(project_slug, phase_id, phases)
     if not any(p["id"] == phase_id for p in phases):

@@ -105,6 +105,19 @@ def resolve_chat(chat, status, root=bots.ROOT):
         return n
 
 
+def forget_workspace(ws, root=bots.ROOT):
+    """A deleted workspace: its approvals (and held app actions) go, so a project made later
+    with the same slug starts with an empty inbox. A running app action is left to finish."""
+    if not isinstance(ws, str) or not ws or ws == bots.HQ:
+        return 0
+    with LOCK:
+        rows = load(root)
+        keep = [r for r in rows if r.get("ws") != ws or r.get("status") == "running"]
+        if len(keep) != len(rows):
+            _save(root, keep)
+        return len(rows) - len(keep)
+
+
 def move_room(old, new, root=bots.ROOT):
     """A renamed channel keeps its approvals: repoint every row at `new`."""
     with LOCK:
