@@ -26,6 +26,8 @@ _SKIP_FILES = {"subsections.json", "project.md"}
 
 
 def _project_dir(root, slug):
+    if not isinstance(slug, str) or not slug or slug in (".", "..") or "/" in slug or "\\" in slug:
+        raise ValueError("invalid project slug")
     return Path(root) / "projects" / slug
 
 
@@ -36,7 +38,7 @@ def snapshot(root, slug):
     if not base.is_dir():
         return out
     for f in base.rglob("*"):
-        if not f.is_file():
+        if f.is_symlink() or not f.is_file():  # a link could point outside the project
             continue
         rel = f.relative_to(base).as_posix()
         if rel.split("/", 1)[0] in _SKIP_TOP or rel in _SKIP_FILES or f.name.startswith("."):
@@ -46,6 +48,8 @@ def snapshot(root, slug):
 
 
 def _read_json(path):
+    if path.is_symlink():
+        return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
