@@ -46,6 +46,8 @@ svg.i{width:var(--ui-icon);height:var(--ui-icon);flex:none;stroke:currentColor;f
 .ws-btn.ws-add{background:transparent;color:var(--ui-color-rail-text);box-shadow:inset 0 0 0 1.5px var(--ui-color-rail-muted)}
 .ws-btn.ws-add:hover{color:var(--ui-color-rail-text-strong);box-shadow:inset 0 0 0 1.5px var(--ui-color-rail-text)}
 .ws-btn.ws-add::before{display:none}
+.ws-btn.ws-settings{margin-top:auto;background:transparent;color:var(--ui-color-rail-text)}
+.ws-btn.ws-settings:hover,.ws-btn.ws-settings.active{background:var(--ui-color-rail-hover);color:var(--ui-color-rail-text-strong)}
 
 /* ---------- sidebar ---------- */
 .side{display:flex;flex-direction:column;background:var(--ui-color-rail);color:var(--ui-color-rail-text)}
@@ -60,7 +62,6 @@ span.mark{display:grid;place-items:center;font:var(--ui-weight-title) 8px/1 var(
 .ws-name b{min-width:0;padding-bottom:.18em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:inherit}
 .ws-name svg.i{width:14px;height:14px;color:var(--ui-color-rail-muted)}
 .rail-scroll{flex:1;min-height:0;overflow:auto;padding:var(--ui-space-2) 0 var(--ui-space-4)}
-.rail-foot{flex:none;padding-top:var(--ui-space-2);padding-bottom:var(--ui-space-2);border-top:1px solid var(--ui-color-rail-hover)}
 .rail-ib{width:var(--ui-control-default);height:var(--ui-control-default);flex:none;display:grid;place-items:center;border:0;border-radius:var(--ui-radius-control);background:transparent;color:var(--ui-color-rail-text)}
 .rail-ib:hover{background:var(--ui-color-rail-hover);color:var(--ui-color-rail-text-strong)}
 .nav{display:flex;flex-direction:column;gap:1px;padding:0 var(--ui-space-2)}
@@ -804,9 +805,7 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .eng-hint{margin:0 0 var(--ui-space-2);color:var(--ui-color-text-muted);font-size:13px}
 .eng-choice em{font-style:normal;color:var(--ui-color-text-muted);font-size:12px;margin-left:4px}
 .eng-ws{margin:8px 0;padding:4px 14px;border-radius:14px;background:var(--eng-warm);border:1px solid var(--eng-warm-line)}
-.eng-ws summary{cursor:pointer;padding:8px 0;font-weight:600;display:flex;justify-content:space-between}
-.eng-ws summary small{color:var(--ui-color-text-muted);font-weight:400}
-.eng-ws summary:focus-visible{box-shadow:none;color:var(--ui-color-accent)}
+.eng-ws h4{margin:10px 0 2px;font-size:14px;font-weight:600}
 .integ-key input,.integ-q,.eng-choice select,.integ-key select,#fold select,.app-grants select{min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit}
 .integ-key input:focus,.integ-q:focus,.eng-choice select:focus,.integ-key select:focus,#fold select:focus,.app-grants select:focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
 .integ-key input[type=password]{flex:1 1 220px;min-width:0}
@@ -822,3 +821,10 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .folder-add input[name=path]{flex:1 1 260px;min-width:0}
 .folder-limits{display:flex;flex-wrap:wrap;gap:8px 16px;margin:6px 0 0 12px}
 .folder-pick{display:flex;align-items:center;gap:6px;font-size:var(--ui-type-label)}
+
+/* Settings covers the whole machine: it takes over the window, outside any workspace. */
+.app.settings-open,.app.settings-open.canvas-hidden{grid-template-columns:var(--ws-bar-w) minmax(0,1fr);grid-template-areas:"ws canvas"}
+.app.settings-open #rail,.app.settings-open #chat-dock,.app.settings-open #term-panel,.app.settings-open .canvas-resize{display:none}
+.app.settings-open .right-col{display:flex;position:relative;inset:auto;z-index:auto;width:auto;border-left:0;box-shadow:none}
+.app.settings-open .settings-top,.app.settings-open .eng-page,.app.settings-open #main>.scroll{padding-inline:max(var(--ui-page-padding),calc((100% - 760px)/2))}
+@media (max-width:860px){.app.settings-open,.app.settings-open.canvas-hidden{grid-template-columns:minmax(0,1fr);grid-template-areas:"canvas"}}

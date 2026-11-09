@@ -244,4 +244,4 @@ class AcpEngine(Engine):
         path = shutil.which(self.agent["command"])
         return {"id": self.id, "label": self.label, "kind": self.kind, "installed": bool(path), "ok": bool(path),
                 "full_disk": True, "acp": True,
-                "detail": f"{FULL_DISK_NOTE} Your private threads only." if path else "not installed"}
+                "detail": f"{FULL_DISK_NOTE} Used only on your private threads." if path else "not installed"}

@@ -1,6 +1,6 @@
 # Engines: what runs your bots
 
-Pick them in Settings, Engines. Each reply says what it ran on.
+Connect them in Settings, Engines, and pick who uses them in Settings, Bots. Each reply says what it ran on.
 
 | Engine | Login | Where it can run | Who it can answer |
 |---|---|---|---|
@@ -33,7 +33,7 @@ pick one. Claude Code and API keys are locked down in shared threads (see
 On Claude Code and API-key engines, bots can change files in a workspace's Edit folders
 on a tagged message, never git, editor or secret files. **Codex and other CLIs over ACP
 are read-only in linked folders**: their own tools have no per-folder rule for that
-never-write list, so Leo Bot never gives them edit access, and the Engines screen says so.
+never-write list, so Leo Bot never gives them edit access, and Settings, Engines says so.
 
 ## Keys
 

@@ -201,8 +201,10 @@ const ROUTES = [
   [/^\/operations$/,                            ()       => { setState("operations"); renderOperations(); }],
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
-  [/^\/settings(?:\/(engines|integrations|folders))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
-  [/^\/(engines|integrations|folders)$/,        ([t])    => location.replace(`#/settings/${t}`)],
+  [/^\/settings(?:\/(engines|bots|integrations|access))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
+  [/^\/settings\/folders$/,                     ()       => location.replace("#/folders")],
+  [/^\/(engines|integrations)$/,                ([t])    => location.replace(`#/settings/${t}`)],
+  [/^\/folders$/,                               ()       => { setState("folders"); renderFolders(); }],
   [/^\/files$/,                                 ()       => { setState("files"); renderFiles(); }],
   [/^\/room\/new$/,                              ()       => renderRoomForm(null)],
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
@@ -257,6 +259,7 @@ function parseRoute(hash){
   if (isPerson() && !PERSON_ROUTE.test(path)) path = "/team";
   ROUTE_SEQ += 1;
   $("#main")?.classList.toggle("form-view", /\/(?:new|edit|setup|add|log|generate|revise)$/.test(path));
+  $("#app")?.classList.toggle("settings-open", /^\/settings\b/.test(path));
   CURRENT_POST = null;
   CURRENT_PROFILE_SLUG = null;
   setState("route");
@@ -477,9 +480,27 @@ function renderWsBar(){
     const url = wsLogoUrl(w);
     return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
   }).join("")
-    + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`);
+    + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`)
+    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}</button>`);
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
   if ($("#new-project-btn")) $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
+  if ($("#ws-settings")) $("#ws-settings").onclick = () => STATE.view === "settings" ? closeSettings() : openSettings();
+}
+
+// Settings covers the whole machine, so it takes over the window (.settings-open)
+// and closing it returns to exactly where you were.
+let _BEFORE_SETTINGS = null;
+function openSettings(){
+  _BEFORE_SETTINGS = { hash: location.hash, hidden: !!$("#app")?.classList.contains("canvas-hidden") };
+  closeNav();
+  window.ChatRooms?.showCanvas();
+  navigate("#/settings");
+}
+function closeSettings(){
+  const back = _BEFORE_SETTINGS;
+  _BEFORE_SETTINGS = null;
+  navigate(back?.hash || defaultRoute());
+  if (!back || back.hidden) window.ChatRooms?.hideCanvas();
 }
 
 async function switchWorkspace(ws){
@@ -492,7 +513,7 @@ async function switchWorkspace(ws){
   if (changed) {   // new company: back to the conversation, canvas closed but ready on its content
     window.ChatRooms?.hideCanvas();
     navigate(isPerson() ? "#/team" : ws === "hq" ? "#/calendar" : "#/content");
-  }
+  } else if (STATE.view === "settings") closeSettings();
 }
 window.Workspaces = { switchTo: switchWorkspace, current: () => _WS };
 
@@ -551,6 +572,7 @@ async function renderRail(){
       <nav class="nav">
         ${person ? "" : `<a data-view="approvals">${icon("inbox")}<span class="rail-name">Approvals</span>${_APPROVALS.length ? `<span class="badge">${_APPROVALS.length}</span>` : ""}</a>
         ${w.id !== "hq" ? `<a data-view="files">${icon("folder")}<span class="rail-name">Files</span></a>` : ""}
+        <a data-view="folders">${icon("link")}<span class="rail-name">Linked folders</span></a>
         <a data-view="content">${icon("layers")}<span class="rail-name">Content</span></a>`}
         <a data-view="team">${icon("users")}<span class="rail-name">Team</span><span class="count">${_BOTS.filter(b => b.active).length}</span></a>
       </nav>
@@ -561,8 +583,7 @@ async function renderRail(){
         <a data-view="needs">${icon("sun")}<span class="rail-name">Today</span></a>
         <a data-view="calendar">${icon("calendar")}<span class="rail-name">Calendar</span></a>
         <a data-view="operations">${icon("list-check")}<span class="rail-name">Operations</span></a>`)}
-    </div>
-    ${person ? "" : `<nav class="nav rail-foot"><a data-view="settings">${icon("settings")}<span class="rail-name">Settings</span></a></nav>`}`;
+    </div>`;
   $("#rail").querySelectorAll("[data-view]").forEach(a => a.onclick = () => {
     closeNav();
     window.ChatRooms?.showCanvas();
@@ -603,7 +624,7 @@ const KIND_META = {
   roadmap: ["map", "Roadmap", "Roadmap"], plan: ["route", "Go-to-market", "Go-to-market plan"],
   content: ["calendar", "Content", "Content plan"], brief: ["compose", "Post briefs", "Post brief"], voice: ["mic", "Voice", "Voice"],
 };
-const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", settings: "Settings", "settings/engines": "Settings", "settings/integrations": "Settings", "settings/folders": "Settings", calendar: "Calendar", needs: "Today", operations: "Operations" };
+const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", folders: "Linked folders", calendar: "Calendar", needs: "Today", operations: "Operations" };
 const profileName = slug => _TREE.flatMap(p => p.profiles).find(x => x.slug === slug)?.name || slug;
 // "Instagram, TikTok": the channels of a deliverable's profile.
 const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === d.profile)?.channels || [])
@@ -613,6 +634,7 @@ const delivChannels = d => (_TREE.flatMap(p => p.profiles).find(x => x.slug === 
 function canvasCrumbs(){
   const p = wsProject();
   const path = (location.hash || "").replace(/^#/, "").replace(/\?.*$/, "");
+  if (/^\/settings\b/.test(path)) return [];
   const crumbs = [[p ? p.name : (wsById(_WS)?.name || "HQ"), defaultRoute()]];
   const prof = STATE.profile || CURRENT_PROFILE_SLUG;
   let m;
@@ -629,7 +651,7 @@ function canvasCrumbs(){
 
 function renderCanvasNav(){
   const nav = $("#canvas-nav"); if (!nav) return;
-  const p = wsProject();
+  const p = STATE.view === "settings" ? null : wsProject();
   const crumbs = canvasCrumbs();
   nav.hidden = false;
   nav.innerHTML = `<div class="cn-row">
@@ -649,7 +671,7 @@ function renderCanvasNav(){
     </div>`;
   nav.querySelectorAll("[data-go]").forEach(a => a.onclick = () => navigate(a.dataset.go));
   nav.querySelector("[data-cn-files]")?.addEventListener("click", () => navigate("#/files"));
-  nav.querySelector("[data-cn-close]").onclick = () => window.ChatRooms?.hideCanvas();
+  nav.querySelector("[data-cn-close]").onclick = () => STATE.view === "settings" ? closeSettings() : window.ChatRooms?.hideCanvas();
   nav.querySelector("[data-cn-more]")?.addEventListener("click", e => {
     e.stopPropagation();
     toggleMenu(e.currentTarget, e.currentTarget.nextElementSibling);
@@ -961,7 +983,7 @@ async function renderFolders(){
   const ws = _WS;
   const wname = wsById(ws)?.name || (ws === "hq" ? "HQ" : ws);
   $("#main").innerHTML = `
-    ${settingsTop("folders")}
+    <div class="topbar"><div><div class="crumbs">${esc(wname)}</div><h1 class="title">Linked folders</h1></div></div>
     <div class="scroll"><div class="help">Folders on this machine that ${esc(wname)}'s bots can work in. Bots read and search every folder here on your own private threads, and change files in Edit folders when you tag them (@bot, /skill or a DM). They cannot run tests, builds or git, and never touch git, editor or secret files. Invited people never see these folders.</div><div id="fold"></div></div>`;
   if (isPerson()) { $("#fold").innerHTML = `<div class="empty">Only the owner manages folders.</div>`; return; }
   const draw = async () => {
@@ -1001,7 +1023,7 @@ async function renderFolders(){
       <section class="integ-group"><h3>Bots</h3>
         ${(d.team || []).map(b => limitRow("bots", b.id, `${b.name} (@${b.handle})`, d.bots?.[b.id])).join("")}</section>` : "";
     const broken = d.damaged ? `<div class="folder-warn">This workspace's folders.json is damaged, so bots get no folders and changes are refused. Fix the file by hand or delete it, then reload.</div>` : "";
-    box.innerHTML = `<section class="integ-group"><h3>Linked folders</h3>${broken}${folderRows}${add}</section>${layers}`;
+    box.innerHTML = `<section class="integ-group">${broken}${folderRows}${add}</section>${layers}`;
     const call = async (route, body) => {
       try { await jpost(`/api/folders/${route}`, { ws, ...body }); await draw(); }
       catch (err) { toast("✗ " + err.message); await draw(); }
@@ -1048,6 +1070,9 @@ function highlight(){
   const canvasOpen = !document.getElementById("app")?.classList.contains("canvas-hidden");
   document.querySelectorAll("#rail [data-view]").forEach(a=>mark(a,canvasOpen&&STATE.view===a.dataset.view&&!STATE.project&&!STATE.profile&&!STATE.channelGuidelines));
   document.querySelectorAll("#rail [data-room]").forEach(a=>mark(a,a.dataset.room===window.ChatRooms?.current()));
+  const inSettings = STATE.view === "settings";
+  document.querySelectorAll("#ws-bar [data-ws]").forEach(b=>b.classList.toggle("active",!inSettings&&b.dataset.ws===_WS));
+  document.getElementById("ws-settings")?.classList.toggle("active",inSettings);
   requestAnimationFrame(()=>document.querySelector("#rail [aria-current='page']")?.scrollIntoView({block:"nearest"}));
 }
 function selectGlobal(v){ navigate(`#/${v}`); }
@@ -1072,6 +1097,7 @@ async function refreshViews(){
   if (v === "team") return renderTeam();
   if (v === "approvals") return renderApprovals();
   if (v === "settings") return renderSettings(STATE.tab);
+  if (v === "folders") return renderFolders();
   if (v === "files") return renderFiles();
   if (v === "section") return renderProjectSection(STATE.project, STATE.section);
   if (v === "profile") return onProfileList(STATE.profile) ? renderProfile(STATE.profile) : undefined;
@@ -1174,7 +1200,7 @@ function peopleSection(pv, link){
       </div>
       ${link ? `<div class="invite-link"><input readonly value="${esc(link)}" aria-label="Invite link"><button class="btn" id="inv-copy">Copy</button>
         <small>Works once. Send it to one person; they open it, type their name and join.</small></div>` : ""}`
-      : `<div class="help">To invite people, ${myRole() === "owner" ? "set the sharing address in HQ, Team first" : "the owner has to set a sharing address first"}.</div>`;
+      : `<div class="help">To invite people, ${myRole() === "owner" ? "set the sharing address in Settings, Access first" : "the owner has to set a sharing address first"}.</div>`;
     const pend = pv.invites || [];
     if (pend.length) invite += `<div class="invite-pending">${pend.map(i => `<div class="invite-row"><span class="tag">${esc(i.role)}</span>
         <small>expires ${esc(when(i.expires))}</small><button class="btn sm ghost" data-inv-rm="${esc(i.id)}">Revoke</button></div>`).join("")}</div>`;
@@ -1192,7 +1218,7 @@ async function renderTeam(){
   const stillOn = routeGuard();
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
-  let pv = null, link = "", share = null;
+  let pv = null, link = "";
   const person = isPerson();
   const draw = () => {
     const wsApps = Object.keys(integ.picked?.[_WS] || {}).sort();  // apps with an account ticked here
@@ -1227,7 +1253,7 @@ async function renderTeam(){
     const grantHelp = !integ.configured || !(integ.connected || []).length ? ""
       : wsApps.length ? `<div class="help">Connected apps per bot. Read + write still asks you before anything that is not a read.</div>`
       : `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>`;
-    $("#team-list").innerHTML = (share !== null ? sharingSection(share) : "") + peopleSection(pv, link) + grantHelp
+    $("#team-list").innerHTML = peopleSection(pv, link) + grantHelp
       + `<div class="team-total">${!person && t.turns ? `Last ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)` : ""}</div><div class="rowc">${rows}</div>${pv ? "</section>" : ""}`;
     wirePeople();
     $("#team-list").querySelectorAll("[data-mem]").forEach(a => a.onclick = () => toggleMemory(a.closest(".team-row"), a.dataset.mem));
@@ -1277,12 +1303,6 @@ async function renderTeam(){
         pv = out; draw(); toast("Removed ✓");
       } catch (e) { toast("✗ " + e.message); }
     });
-    const form = box.querySelector("#share-form");
-    if (form) form.onsubmit = async e => {
-      e.preventDefault();
-      try { share = (await jpost("/api/sharing", { url: form.url.value })).public_url || ""; draw(); toast("Sharing address saved ✓"); }
-      catch (err) { toast("✗ " + err.message); }
-    };
   };
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · ${esc(_WS === "hq" ? "holding" : wsById(_WS)?.kind || "")}</div><h1 class="title">Team</h1></div></div>
@@ -1296,7 +1316,6 @@ async function renderTeam(){
   if (!person) {
     costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
     integ = await api("/api/integrations").catch(() => integ);
-    if (_WS === "hq") share = (await api("/api/sharing").catch(() => ({}))).public_url || "";
   }
   if (stillOn()) draw();
 }
@@ -1462,22 +1481,40 @@ function engineLogo(id, size){
   const [bg, glyph] = ENGINE_MARKS[key] || ENGINE_MARKS.custom;
   return `<span class="eng-logo" style="--s:${size || 40}px;background:${bg}"><svg viewBox="0 0 24 24" aria-hidden="true">${glyph}</svg></span>`;
 }
-// Settings: setup screens in one place, open from any workspace (Folders shows the
-// current workspace's; Engines and Integrations cover them all).
-const SETTINGS_TABS = [["engines", "Engines"], ["integrations", "Integrations"], ["folders", "Folders"]];
+// Settings: only what applies to the whole machine, across every workspace.
+// What belongs to one project (Linked folders, Team) stays in that project.
+const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]];
 const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
     <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
 function renderSettings(tab){
-  return tab === "integrations" ? renderIntegrations() : tab === "folders" ? renderFolders() : renderEngines();
+  return tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
 }
 
-// Settings, Engines: what runs the bots. Claude Code on this machine's login, or an API
-// key. Invited people only ever run on an API key.
-async function renderEngines(){
+// Settings, Access: how people reach this Leo Bot, and where it runs.
+async function renderAccess(){
+  const stillOn = routeGuard();
+  $("#main").innerHTML = `${settingsTop("access")}<div class="scroll eng-page" id="access"></div>`;
+  const [share, eng] = await Promise.all([api("/api/sharing").catch(() => ({})), api("/api/engines").catch(() => ({}))]);
+  if (!stillOn()) return;
+  const box = $("#access");
+  box.innerHTML = sharingSection(share.public_url || "") + deploymentSection(eng.deployment);
+  const form = box.querySelector("#share-form");
+  form.onsubmit = async e => {
+    e.preventDefault();
+    try { form.url.value = (await jpost("/api/sharing", { url: form.url.value })).public_url || ""; toast("Sharing address saved ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+  };
+}
+
+// Settings, Engines: what can run the bots. Settings, Bots: who runs on what.
+// Claude Code on this machine's login, or an API key. Invited people only ever run on an API key.
+async function renderEngines(tab = "engines"){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
-    ${settingsTop("engines")}
-    <div class="scroll eng-page"><div class="help">Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key you pick here. Keys stay on this machine and no bot can read them.</div><div id="eng"></div><div id="eng-runners"></div></div>`;
+    ${settingsTop(tab)}
+    <div class="scroll eng-page"><div class="help">${tab === "bots"
+      ? "Your own messages can use this machine's Claude Code login or an API key. Invited people's messages only ever run on an API key."
+      : "Keys stay on this machine and no bot can read them."}</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   let adding = null;
   const draw = async () => {
     const d = await api("/api/engines").catch(e => ({ error: e.message }));
@@ -1491,7 +1528,7 @@ async function renderEngines(){
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
       const models = p ? `<span class="eng-chip">fast · ${esc(p.models?.fast || "-")}</span><span class="eng-chip">strong · ${esc(p.models?.strong || "-")}</span>` : "";
-      const note = e.folder_edit === false ? `<span class="eng-chip warm">Read-only in linked folders</span>` : "";
+      const note = e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "";
       return `<div class="eng-card">${engineLogo(e.id, 44)}
         <div class="eng-body"><div class="eng-name"><b>${esc(e.label)}</b><span class="eng-state ${e.ok ? "on" : "off"}">${e.ok ? "Ready" : "Not ready"}</span></div>
           ${e.detail ? `<div class="eng-detail">${esc(e.detail)}</div>` : ""}
@@ -1501,7 +1538,7 @@ async function renderEngines(){
           ${e.acp ? `<button class="btn sm ghost" data-remove-acp="${esc(e.id.slice(4))}">Remove</button>` : ""}</div></div>`;
     }).join("");
     const presets = Object.entries(d.presets || {}).filter(([k]) => !(d.providers || []).some(x => x.id === k));
-    if (d.deployment === "server") drawRunners($("#eng-runners"), stillOn);
+    if (tab === "engines" && d.deployment === "server") drawRunners($("#eng-runners"), stillOn);
     const acpMine = (d.acp_agents || []).map(a => a.id);
     const acpAdd = d.deployment === "server" ? "" : Object.entries(d.acp_presets || {}).filter(([k]) => !acpMine.includes(k))
       .map(([k, v]) => `<button class="eng-add" data-add-acp="${esc(k)}">${engineLogo("acp:" + k, 22)}<span>${esc(v.name)}</span></button>`).join("");
@@ -1521,23 +1558,22 @@ async function renderEngines(){
           <input name="strong" placeholder="Strong model" aria-label="Strong model" value="${esc(f.models?.strong || "")}">
           <button class="btn sm primary" type="submit">Save</button><button class="btn sm ghost" type="button" data-cancel>Cancel</button></form>`;
       })();
-    const botRows = (d.bot_list || []).filter(g => g.bots.length).map(g => `<details class="eng-ws"><summary>${esc(g.ws_name)}<small>${(n => n ? `${n} custom` : "Default")(g.bots.filter(b => d.bots?.[`${g.ws}/${b.id}`]).length)}</small></summary>
+    const wsCards = (d.bot_list || []).filter(g => g.bots.length).map(g => `<section class="eng-ws"><h4>${esc(g.ws_name)}</h4>
+        ${g.ws === "hq" ? "" : `<div class="eng-choice eng-ws-all"><label><span>Whole workspace</span> <select data-choice="workspaces" data-scope="${esc(g.ws)}">${opts(d.workspaces?.[g.ws], usable, "Same as your messages")}</select></label></div>`}
         ${g.bots.map(b => `<div class="eng-choice"><label><span>${esc(b.icon || "")} ${esc(b.name)}</span>
-          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label></div>`).join("")}</details>`).join("");
-    box.innerHTML = `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
-        <p>Every bot can think with a different model. Connect a provider, then choose who uses it below.</p></section>
+          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label></div>`).join("")}</section>`).join("");
+    box.innerHTML = tab === "engines" ? `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
+        <p>Every bot can think with a different model. Connect a provider here, then choose who uses it in Bots.</p></section>
       <section class="integ-group"><h3>Your engines</h3><div class="eng-list">${rows}</div>
-        <h3 class="eng-sub">Connect another</h3>${form}</section>
-      <section class="integ-group"><h3>Who runs on what</h3>
+        <h3 class="eng-sub">Connect another</h3>${form}</section>` : `
+      <section class="integ-group"><h3>Defaults</h3>
         <p class="eng-hint">Most specific wins: a bot's own pick, then its workspace, then your default.</p>
         <div class="eng-choice"><label><span>Your messages</span> <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
         <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
-        ${(d.ws_list || []).map(w => `<div class="eng-choice"><label><span>${esc(w.name)} <em>workspace</em></span> <select data-choice="workspaces" data-scope="${esc(w.id)}">${opts(d.workspaces?.[w.id], usable, "Same as your messages")}</select></label></div>`).join("")}
       </section>
-      <section class="integ-group"><h3>Each bot</h3><p class="eng-hint">Bots switched on in each workspace. Switch them on or off in Team.</p>${botRows || `<div class="empty">No bots yet.</div>`}</section>
-      ${deploymentSection(d.deployment)}`;
+      <section class="integ-group"><h3>By workspace</h3><p class="eng-hint">Only bots switched on in that workspace. Switch them on or off in its Team.</p>${wsCards || `<div class="empty">No bots yet.</div>`}</section>`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
     box.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { adding = b.dataset.edit; draw(); });
     box.querySelector("[data-cancel]")?.addEventListener("click", () => { adding = null; draw(); });
@@ -3363,7 +3399,7 @@ async function renderEditProject(slug){
       ${flabel("Logo")}<p class="help"><a class="text-link" id="ep2-logo">Change logo</a></p>
       <p class="help">Slug <b>${esc(slug)}</b> is fixed — it's the identity used across files.</p>
     </div></div>`;
-  document.getElementById("ep2-folders").onclick=()=>{ if(_WS!==slug) window.Workspaces.switchTo(slug).then(()=>navigate("#/settings/folders")); else navigate("#/settings/folders"); };
+  document.getElementById("ep2-folders").onclick=()=>{ if(_WS!==slug) window.Workspaces.switchTo(slug).then(()=>navigate("#/folders")); else navigate("#/folders"); };
   document.getElementById("ep2-save").onclick=async()=>{
     const data=formVals($("#main"));
     try{ await jpost(`/api/project/${slug}/update`,data); toast("Project updated ✓"); await renderRail(); refreshViews(); history.back(); }

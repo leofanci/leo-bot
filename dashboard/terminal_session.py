@@ -1,6 +1,6 @@
 """terminal_session.py — a shell or agent CLI attached to a PTY.
 
-The bottom integrated terminal runs it here (Settings, Engines picks which); bytes are bridged to the
+The bottom integrated terminal runs it here (Settings, Bots picks which); bytes are bridged to the
 browser's xterm.js over the /ws/terminal WebSocket. Content writes must still
 go through osctl — see `dashboard/ai_rules.py` and CLAUDE.md.
 """
