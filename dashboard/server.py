@@ -2168,6 +2168,9 @@ class Handler(BaseHTTPRequestHandler):
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
+        if person and chat_store.over_cap(person["id"]):
+            return self._sse_message("You have used today's allowance for this workspace. "
+                                     "Try again tomorrow, or ask the owner to raise it.")
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
                 if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
         if chat_id:

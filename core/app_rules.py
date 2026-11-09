@@ -21,6 +21,7 @@ WRITE_VERBS = frozenset((
     "SEND REPLY FORWARD CREATE ADD INSERT UPDATE PATCH MODIFY EDIT REPLACE MOVE COPY "
     "DELETE REMOVE TRASH SHARE INVITE ACCEPT DECLINE SET APPLY MARK ARCHIVE UPLOAD "
     "EXECUTE INVOKE CLICK NAVIGATE SCRAPE CRAWL PUBLISH SUBMIT CANCEL DISABLE ENABLE IMPORT RESET "
+    "GENERATE ENRICH VERIFY VALIDATE TEST PING WEBHOOK EMIT FIRE DISPATCH BROADCAST NOTIFY POKE "
     "REVOKE AUTHORIZE SUBSCRIBE UNSUBSCRIBE RENAME REOPEN APPROVE REJECT ASSIGN TRANSFER").split())
 # Words that are a verb OR the thing a read is about ("GET_POST", "LIST_SCHEDULE", "GET_CALL"). They
 # count as a write only when a joiner puts them in verb position ("SEARCH_AND_POST").
@@ -115,6 +116,21 @@ def has_url(value, strip_emails=False, _depth=0) -> bool:
     return False
 
 
+MAX_READ_ARG_CHARS = 2000  # a read takes a search term or an id, not a document
+
+
+def _size(value, _depth=0):
+    if _depth > 6:
+        return MAX_READ_ARG_CHARS + 1
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, dict):
+        return sum(len(str(k)) + _size(v, _depth + 1) for k, v in value.items())
+    if isinstance(value, (list, tuple)):
+        return sum(_size(v, _depth + 1) for v in value)
+    return 0
+
+
 def decide(slug, grant, catalog, arguments=None):
     """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant."""
     tk = toolkit_of(slug, catalog)
@@ -122,6 +138,7 @@ def decide(slug, grant, catalog, arguments=None):
         return "refuse", None
     if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
         return "refuse", tk
-    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS):
+    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS) \
+            and _size(arguments) <= MAX_READ_ARG_CHARS:
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk

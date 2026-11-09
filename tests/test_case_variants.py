@@ -162,6 +162,11 @@ class SharedAndDeny(unittest.TestCase):
     def test_research_signal_blocked_in_shared_threads(self):
         from dashboard import osctl
         self.assertIn("research-signal", osctl._SHARED_BLOCKED)
+        import argparse
+        names = {n for a in osctl._build_parser()._actions
+                 if isinstance(a, argparse._SubParsersAction) for n in a.choices}
+        self.assertEqual(names - osctl._SHARED_ALLOWED - set(osctl._SHARED_BLOCKED), set())
+        self.assertFalse(osctl._SHARED_ALLOWED & set(osctl._SHARED_BLOCKED))
 
     def test_deny_dirs_include_unindexed_projects(self):
         from dashboard import server
