@@ -189,10 +189,13 @@ REACTION_NOTE_LINES = 8
 def reaction_note(rec):
     """People's reactions added since the thread's last bot reply, one line per message."""
     msgs = [m for m in (rec or {}).get("messages") or () if isinstance(m, dict)]
-    # The last bot reply, or the last emoji a bot put in its place (a reply of only a REACT line).
-    since = max([m.get("ts") or 0 for m in msgs if m.get("role") == "assistant"]
-                + [r.get("ts") or 0 for m in msgs for r in m.get("reactions") or ()
-                   if isinstance(r, dict) and r.get("bot")], default=0)
+    # Since the last turn was sent: its prompt held every reaction older than that. Older
+    # threads' user messages have no time: then the last bot reply or bot emoji ends it.
+    asked = [m["ts"] for m in msgs if m.get("role") == "user" and m.get("ts")]
+    since = asked[-1] if asked else max(
+        [m.get("ts") or 0 for m in msgs if m.get("role") == "assistant"]
+        + [r.get("ts") or 0 for m in msgs for r in m.get("reactions") or ()
+           if isinstance(r, dict) and r.get("bot")], default=0)
     lines = []
     for m in msgs:
         rows = [r for r in m.get("reactions") or () if isinstance(r, dict) and not r.get("bot")
