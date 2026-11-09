@@ -1667,13 +1667,28 @@ async function renderIntegrations(){
     const wireConnect = root => root.querySelectorAll("[data-connect]").forEach(b => b.onclick = async () => {
       try {
         const slug = b.dataset.connect, before = accts(slug).length;
-        const { url, account_id } = await jpost("/api/integrations/connect", { toolkit: slug });
+        const res = await jpost("/api/integrations/connect", { toolkit: slug });
+        const row = b.closest(".integ-row");
+        if (res.needs_own_app) {
+          const name = esc(row.querySelector(".t b")?.textContent || slug);
+          row.parentElement.querySelector(".integ-setup")?.remove();
+          row.insertAdjacentHTML("afterend", `<div class="integ-setup"><b>${name} needs your own developer app</b>
+            <p>Composio has no shared login for ${name}, so you register one app, once.</p>
+            <ol><li>On ${name}'s developer site, create an app and add this redirect URL:<code>${esc(res.redirect_uri)}</code></li>
+              <li><a href="${esc(res.auth_configs_page)}" target="_blank" rel="noopener">Open Auth Configs in Composio</a>, create one for ${name} with your own credentials, and paste the client ID and secret.</li>
+              <li>Come back and press Set up again.</li></ol></div>`);
+          return;
+        }
+        const { url, account_id } = res;
         if (!/^https:\/\//i.test(String(url || ""))) throw new Error("the connect link is not a secure web address");
         window.open(url, "_blank", "noopener");
         b.textContent = "Waiting…"; b.disabled = true;
+        // The Mac window can block a popup opened after a network wait: always offer a real link.
+        b.insertAdjacentHTML("beforebegin", `<a class="link-btn" href="${esc(url)}" target="_blank" rel="noopener">Open sign-in page</a>`);
         polls = 0;
         const tick = async () => {
-          if (!stillOn() || ++polls > 100) return;  // 3 s × 100 = 5 min
+          if (!stillOn()) return;
+          if (++polls > 100) return draw();  // 3 s × 100 = 5 min
           const s = await api("/api/integrations").catch(() => null);
           const now = (s?.accounts || []).filter(a => a.toolkit === slug);
           if (account_id ? now.some(a => a.id === account_id) : now.length > before) return draw();

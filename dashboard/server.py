@@ -3193,7 +3193,7 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         return self._send(200, composio.connect_link(bots.CEO, toolkit, ROOT))
                     except composio.ComposioError as e:
-                        return self._send(502, {"ok": False, "error": str(e)})
+                        return self._send(502, {"ok": False, "error": f"{e} ({e.reason})" if e.reason else str(e)})
                 if path == "/api/integrations/accounts":
                     ws = _strict_ws(body.get("ws"))
                     integrations.set_account(ws, body.get("account"), bool(body.get("on")), ROOT)

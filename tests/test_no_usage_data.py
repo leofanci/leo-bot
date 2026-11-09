@@ -107,6 +107,8 @@ PUBLIC_NETWORK_HOSTS = {
     # Composio REST API (connected apps, core/composio.py): a public vendor host.
     b"backend.composio.dev", b"composio.dev",  # + sign-up link in the Integrations panel
     b"docs.composio.dev",  # "Where to find it" link for the project API key (Integrations panel)
+    b"dashboard.composio.dev",  # where an app's own auth config is created (core/composio.py)
+    b"connect.composio.dev",  # sign-in link host in the connect tests
     # API engine provider presets (dashboard/engines/config.py).
     b"api.anthropic.com", b"api.openai.com", b"openrouter.ai",
     # Server install (scripts/server-setup.sh, docs/server.md).

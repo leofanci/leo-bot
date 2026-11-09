@@ -828,3 +828,9 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .app.settings-open .right-col{display:flex;position:relative;inset:auto;z-index:auto;width:auto;border-left:0;box-shadow:none}
 .app.settings-open .settings-top,.app.settings-open .eng-page,.app.settings-open #main>.scroll{padding-inline:max(var(--ui-page-padding),calc((100% - 760px)/2))}
 @media (max-width:860px){.app.settings-open,.app.settings-open.canvas-hidden{grid-template-columns:minmax(0,1fr);grid-template-areas:"canvas"}}
+
+/* Connecting an app that needs your own developer app */
+.integ-setup{margin:0 0 var(--ui-space-3);padding:var(--ui-space-3);border-radius:var(--ui-radius-card);background:var(--ui-color-surface);border:1px solid var(--ui-color-border);font-size:13px}
+.integ-setup p{margin:4px 0 8px;color:var(--ui-color-text-muted)}
+.integ-setup ol{margin:0;padding-left:18px;display:grid;gap:6px}
+.integ-setup code{display:block;margin-top:4px;padding:6px 8px;border-radius:var(--ui-radius-small);background:var(--ui-color-surface-muted);font-size:12px;word-break:break-all;user-select:all}
