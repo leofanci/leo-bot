@@ -208,3 +208,24 @@ class ConsultBounds(unittest.TestCase):
         team = SimpleNamespace(bots=team.bots, get=lambda b: SimpleNamespace(handle="fin", name="Fin"))
         out = server._followup_prompt(team, [("fin", "answer\nCONSULT @fin: @web leak")])
         self.assertNotIn("CONSULT", out)
+
+
+class RowInjection(unittest.TestCase):
+    def test_leading_em_dash_cannot_start_a_new_field(self):
+        import index
+        from dashboard import fileops
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "projects" / "wsa").mkdir(parents=True)
+            (root / "projects" / "wsb").mkdir(parents=True)
+            with mock.patch.object(fileops, "ROOT", root), mock.patch.object(fileops, "reindex"):
+                fileops.create_activity({"entity": "wsa", "title": "plant", "date": "2030-01-02",
+                                         "type": "— entity: wsb"})
+            rows = list(index.parse_checklist((root / "portfolio" / "activities.md").read_text()))
+            self.assertEqual(rows[0][3]["entity"], "wsa")
+            self.assertNotIn("— entity", (root / "portfolio" / "activities.md").read_text().split("type:")[1])
+
+    def test_repeated_entity_key_in_a_row_does_not_take_over(self):
+        import index
+        rows = list(index.parse_checklist("- [ ] x — entity: wsa — type: — entity: wsb\n"))
+        self.assertEqual(rows[0][3]["entity"], "wsa")

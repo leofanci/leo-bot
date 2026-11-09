@@ -900,6 +900,13 @@ def _one_line(value, label: str) -> str:
     return text
 
 
+def _row_value(value, label: str) -> str:
+    """A value for one field of a ' — '-separated row: one line, and no em dash at all. A value
+    that begins with one ('— entity: other') would join the row's key prefix into a separator and
+    become a field of its own, so the dash is replaced rather than only the exact separator."""
+    return _one_line(value, label).replace("\u2014", "-")
+
+
 def _flat(value, label: str) -> str:
     """Free text typed into a box (a bio, a topic): pasted line breaks become spaces."""
     return _one_line(" ".join(str(value if value is not None else "").split()), label)
@@ -1238,8 +1245,8 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
     bots (osctl) never pass it."""
     # One row per line, " — " between fields, in a file every workspace shares: a line break
     # would write a row into another workspace, so each value stays on its one line.
-    entity = _one_line(fields.get("entity") or "", "entity")
-    title = _one_line(fields.get("title") or "", "title").replace(" — ", " - ")
+    entity = _row_value(fields.get("entity") or "", "entity")
+    title = _row_value(fields.get("title") or "", "title")
     if not title:
         raise ActionError("title is required")
     if not entity:
@@ -1248,8 +1255,8 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
     portfolio = ROOT / "portfolio"
     portfolio.mkdir(exist_ok=True)
     path = portfolio / "activities.md"
-    date = _one_line(fields.get("date") or "", "date").replace(" — ", " ")
-    date_end = _one_line(fields.get("date_end") or "", "date_end").replace(" — ", " ")
+    date = _row_value(fields.get("date") or "", "date")
+    date_end = _row_value(fields.get("date_end") or "", "date_end")
     time, time_end = _validate_times(date, date_end, (fields.get("time") or "").strip(),
                                      (fields.get("time_end") or "").strip())
     overlaps = find_overlaps(date, time, time_end) if time else []
@@ -1257,7 +1264,7 @@ def create_activity(fields: dict, allow_overlap: bool = False) -> dict:
         clash = ", ".join(f"{o['time']}-{o['time_end']}" for o in overlaps)  # no names: workspaces stay private
         raise ActionError(f"{date} {time}-{time_end} overlaps booked time: {clash}. "
                           "Pick a free slot (osctl get-busy) or ask the user.")
-    type_ = _one_line(fields.get("type") or "task", "type").replace(" — ", " ")
+    type_ = _row_value(fields.get("type") or "task", "type")
     priority = (fields.get("priority") or "").strip()
     existing_ids: set[str] = set()
     if path.exists():
