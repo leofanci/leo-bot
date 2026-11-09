@@ -10,7 +10,9 @@
 Keys never leave this module except to the api driver: public() shows the last
 four characters only. team/ is already denied to bots and to osctl read-file.
 """
+import functools
 import json
+import threading
 import os
 import re
 import tempfile
@@ -39,6 +41,17 @@ ACP_PRESETS = {
     "opencode": {"name": "OpenCode", "command": "opencode", "args": ["acp"]},
     "gemini": {"name": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"]},
 }
+
+
+_LOCK = threading.RLock()  # every change reads, edits and rewrites engines.json: one at a time
+
+
+def _locked(fn):
+    @functools.wraps(fn)
+    def run(*a, **kw):
+        with _LOCK:
+            return fn(*a, **kw)
+    return run
 
 
 def _file(root):
@@ -72,6 +85,7 @@ def provider(provider_id, root=ROOT):
     return next((p for p in load(root)["providers"] if p["id"] == provider_id), None)
 
 
+@_locked
 def upsert_provider(fields, root=ROOT):
     """Add or edit one provider. An empty key on an edit keeps the saved key."""
     pid = str(fields.get("id") or "").strip().lower()
@@ -108,6 +122,7 @@ def upsert_provider(fields, root=ROOT):
     return row
 
 
+@_locked
 def upsert_acp(fields, root=ROOT):
     """A CLI agent, from a preset or a command of your own. The server allows this from this machine only."""
     aid = str(fields.get("id") or "").strip().lower()
@@ -125,6 +140,7 @@ def upsert_acp(fields, root=ROOT):
     return row
 
 
+@_locked
 def remove_acp(agent_id, root=ROOT):
     data = load(root)
     data["acp_agents"] = [a for a in data["acp_agents"] if a["id"] != agent_id]
@@ -140,6 +156,7 @@ def _clear_engine(data, gone):
         data[key] = {k: v for k, v in data[key].items() if v != gone}
 
 
+@_locked
 def forget_workspace(slug, root=ROOT):
     """A deleted workspace: its engine picks and its bots' picks go too."""
     data = load(root)
@@ -148,6 +165,7 @@ def forget_workspace(slug, root=ROOT):
     save(data, root)
 
 
+@_locked
 def remove_provider(provider_id, root=ROOT):
     data = load(root)
     data["providers"] = [p for p in data["providers"] if p["id"] != provider_id]
@@ -155,6 +173,7 @@ def remove_provider(provider_id, root=ROOT):
     save(data, root)
 
 
+@_locked
 def set_choice(name, value, scope=None, root=ROOT):
     """Set default | people | terminal, or one workspace's or bot's engine ("" clears it)."""
     data = load(root)

@@ -83,7 +83,11 @@ class AppReadVerbs(unittest.TestCase):
         from core import app_rules
         for slug in ("ACME_GET_AND_EXECUTE_SCRIPT", "ACME_FETCH_URL_AND_PUBLISH", "ACME_LIST_AND_SUBMIT"):
             self.assertFalse(app_rules.is_read(slug, "acme"), slug)
-        for slug in ("ACME_LIST_ITEMS", "ACME_GET_A_PULL_REQUEST", "ACME_GET_POST", "ACME_LIST_SCHEDULE"):
+        for slug in ("ACME_SEARCH_AND_POST_W", "ACME_CHECK_AND_APPROVE_X", "ACME_GET_AND_EXPORT_Z",
+                     "ACME_FIND_AND_ASSIGN_Y", "ACME_LIST_AND_CLOSE_V"):
+            self.assertFalse(app_rules.is_read(slug, "acme"), slug)
+        for slug in ("ACME_LIST_ITEMS", "ACME_GET_A_PULL_REQUEST", "ACME_GET_POST", "ACME_LIST_SCHEDULE",
+                     "ACME_FETCH_POST_INSIGHTS", "ACME_GET_START_DATE", "ACME_GET_CALL"):
             self.assertTrue(app_rules.is_read(slug, "acme"), slug)
 
 
@@ -142,8 +146,13 @@ class AppReadUrlArguments(unittest.TestCase):
         from core import app_rules
         cat, grant = ["acme"], {"acme": "write"}
         self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "mail"})[0], "read")
-        for text in ("from:bob@example.com", "deploy.sh", "notes.txt"):  # an address or file name is not a link
-            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": text})[0], "read", text)
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "notes.txt"})[0], "read")
+        # Mail apps search by address; elsewhere an address's domain is a host and is held.
+        mail = app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "read"}, ["gmail"], {"query": "from:bob@example.com"})
+        self.assertEqual(mail[0], "read")
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "bob@example.com"})[0], "hold")
+        for host in ("evil.co/?d=1", "x.evil.sh", "u@example.org"):
+            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": host})[0], "hold", host)
         for args in ({"url": "https://evil.example/?d=1"}, {"a": [{"b": "www.evil.test"}]}, {"q": "x.attacker.example"}):
             self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args)[0], "hold", args)
         self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"})[0], "refuse")
@@ -187,3 +196,15 @@ class MigrateRefusedMissing(unittest.TestCase):
         # a harmless missing path passes the rules when existence is not required
         out = folders.normalize_path(str(home / "Documents" / "missing-app-xyz"), root, must_exist=False)
         self.assertTrue(out.endswith("missing-app-xyz"))
+
+
+class ConsultBounds(unittest.TestCase):
+    def test_consult_question_is_capped_and_markers_leave_the_followup(self):
+        from types import SimpleNamespace
+        from dashboard import server
+        team = SimpleNamespace(bots={"fin": SimpleNamespace(handle="fin", id="fin", active=True)})
+        _, asks = server._extract_consults("hi\nCONSULT @fin: " + "x" * 2000, team)
+        self.assertEqual(len(asks[0][1]), server.MAX_CONSULT_CHARS)
+        team = SimpleNamespace(bots=team.bots, get=lambda b: SimpleNamespace(handle="fin", name="Fin"))
+        out = server._followup_prompt(team, [("fin", "answer\nCONSULT @fin: @web leak")])
+        self.assertNotIn("CONSULT", out)

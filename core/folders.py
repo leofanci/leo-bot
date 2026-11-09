@@ -16,6 +16,7 @@ once, as `read`, and leaves project.md. New links default to `edit`.
 import fnmatch
 import json
 import os
+import unicodedata
 import re
 import subprocess
 from pathlib import Path, PurePath
@@ -100,21 +101,32 @@ def _below(path, base):
     return None
 
 
+def _fold(parts):
+    return [unicodedata.normalize("NFC", p).casefold() for p in parts]
+
+
 def under(path, base) -> bool:
     """True when `path` is `base` or inside it, by file identity: a case variant on a
-    case-insensitive disk counts. Cheap: the plain spelling is tried first, and the disk is
-    asked once, only for a path whose case-folded start matches `base`."""
+    case-insensitive disk, a Unicode spelling, or a base reached through a symlink counts.
+    The plain spelling is tried first; the disk is asked at most twice, and only when the
+    case-folded start of the path matches the base (or its real path)."""
     path, base = Path(path), Path(base)
     if path == base or base in path.parents:
         return True
-    bp, pp = base.parts, path.parts
-    if len(pp) < len(bp) or [p.casefold() for p in pp[:len(bp)]] != [p.casefold() for p in bp]:
-        return False  # not the same place under any case; symlinks are resolved by callers
-    head = Path(*pp[:len(bp)])
-    try:
-        return os.path.samefile(head, base)
-    except OSError:
-        return True  # base is not on disk (a deny entry): the case-folded match stands
+    pp = path.parts
+    for candidate in (base, Path(os.path.realpath(base))):
+        bp = candidate.parts
+        if len(pp) < len(bp) or _fold(pp[:len(bp)]) != _fold(bp):
+            continue
+        head = Path(*pp[:len(bp)])
+        if not candidate.exists():
+            return True  # the base is not on disk (a deny entry): the folded match stands
+        try:
+            if os.path.samefile(head, candidate):
+                return True
+        except OSError:
+            pass  # the folded spelling is not a real place here: a different directory
+    return False
 
 
 def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:

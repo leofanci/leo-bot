@@ -20,10 +20,12 @@ READ_VERBS = frozenset("GET LIST FETCH SEARCH READ FIND RETRIEVE LOOKUP VIEW CHE
 WRITE_VERBS = frozenset((
     "SEND REPLY FORWARD CREATE ADD INSERT UPDATE PATCH MODIFY EDIT REPLACE MOVE COPY "
     "DELETE REMOVE TRASH SHARE INVITE ACCEPT DECLINE SET APPLY MARK ARCHIVE UPLOAD "
-    # Mutating or call-out verbs that still can follow a read word. Common nouns (post, call,
-    # start, schedule, request, export) stay out: "GET_POST" and "LIST_SCHEDULE" are reads.
     "EXECUTE INVOKE CLICK NAVIGATE SCRAPE CRAWL PUBLISH SUBMIT CANCEL DISABLE ENABLE IMPORT RESET "
-    "REVOKE AUTHORIZE SUBSCRIBE UNSUBSCRIBE RENAME REOPEN").split())
+    "REVOKE AUTHORIZE SUBSCRIBE UNSUBSCRIBE RENAME REOPEN APPROVE REJECT ASSIGN TRANSFER").split())
+# Words that are a verb OR the thing a read is about ("GET_POST", "LIST_SCHEDULE", "GET_CALL"). They
+# count as a write only when a joiner puts them in verb position ("SEARCH_AND_POST").
+NOUNISH_VERBS = frozenset("POST PUT CALL REQUEST SCHEDULE EXPORT START STOP PIN SYNC CLOSE DOWNLOAD RUN TRIGGER CONNECT".split())
+JOINERS = frozenset(("AND", "THEN", "OR"))
 
 # Noun-first or verb-without-read-verb names that only read.
 KNOWN_READS = frozenset({
@@ -63,7 +65,9 @@ def is_read(slug, toolkit):
     if slug in KNOWN_READS:
         return True
     words = [w for w in re.split(r"[^A-Z0-9]+", slug[len(toolkit) + 1:].upper()) if w]
-    return bool(words) and words[0] in READ_VERBS and not WRITE_VERBS.intersection(words)
+    if not words or words[0] not in READ_VERBS or WRITE_VERBS.intersection(words):
+        return False
+    return not any(w in NOUNISH_VERBS and words[i - 1] in JOINERS for i, w in enumerate(words) if i)
 
 
 def calls_in(name, args):
@@ -87,20 +91,27 @@ def calls_in(name, args):
 
 
 _EMAIL = re.compile(r"[^\s@/]+@[^\s@/]+")
-_URLISH = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|ai|xyz|ru|cn|example|test|info|top|site|online)\b)", re.I)
+_HOSTISH = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.([a-z]{2,24})\b)", re.I)
+# A final label that is a file type, not a top-level domain ("notes.txt", "report.pdf").
+_FILE_TYPES = frozenset("txt md pdf png jpg jpeg gif svg csv tsv json xml html htm doc docx xls xlsx ppt pptx zip gz "
+                        "tar py js ts tsx jsx css log yml yaml toml ini cfg rtf eml ics".split())
+# Mail and calendar apps take addresses as search terms; they do not contact the address.
+ADDRESS_SAFE_TOOLKITS = frozenset({"gmail", "outlook", "googlecalendar"})
 
 
-def has_url(value, _depth=0) -> bool:
+def has_url(value, strip_emails=False, _depth=0) -> bool:
     """True when any string in the arguments looks like a web address: a "read" that takes a
-    URL can make the app fetch an attacker's host with the mail in the query."""
+    URL can make the app fetch an attacker's host with the mail in the query. `strip_emails`
+    drops whole addresses first (mail apps only; elsewhere an address's domain is checked)."""
     if _depth > 6:
         return True
     if isinstance(value, str):
-        return bool(_URLISH.search(_EMAIL.sub(" ", value)))  # an address to search for is not a link
+        text = _EMAIL.sub(" ", value) if strip_emails else value
+        return any(m.group(1) is None or m.group(1).lower() not in _FILE_TYPES for m in _HOSTISH.finditer(text))
     if isinstance(value, dict):
-        return any(has_url(k, _depth + 1) or has_url(v, _depth + 1) for k, v in value.items())
+        return any(has_url(k, strip_emails, _depth + 1) or has_url(v, strip_emails, _depth + 1) for k, v in value.items())
     if isinstance(value, (list, tuple)):
-        return any(has_url(v, _depth + 1) for v in value)
+        return any(has_url(v, strip_emails, _depth + 1) for v in value)
     return False
 
 
@@ -111,6 +122,6 @@ def decide(slug, grant, catalog, arguments=None):
         return "refuse", None
     if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
         return "refuse", tk
-    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments):
+    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS):
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk

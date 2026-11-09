@@ -1135,10 +1135,14 @@ def delete_activity(title: str, entity_slug: str = "") -> dict:
     hits = []
     for i, line in enumerate(lines):
         m = re.match(r"^- \[[ x]\] (.*)$", line)
-        if not m:
+        if not m or not title:
             continue
-        parts = [p.strip() for p in m.group(1).split(" — ")]
-        if title and parts[0] == title and (not entity_slug or f"entity: {entity_slug}" in parts[1:]):
+        body = m.group(1)
+        if body != title and not body.startswith(title + " — "):
+            continue  # the whole title, so "Call" never matches "Call back" (a title may hold " — ")
+        extra = [p.strip() for p in body[len(title):].split(" — ") if p.strip()]
+        has_entity = any(p.startswith("entity:") for p in extra)
+        if not entity_slug or f"entity: {entity_slug}" in extra or not has_entity:
             hits.append(i)
     if not hits:
         raise ActionError(f"activity '{title}' not found")
