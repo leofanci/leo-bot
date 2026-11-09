@@ -12,7 +12,7 @@ There are three ways to run Leo Bot. They use the same code.
 | **Server + runners** | a server | your browser | each person's own Mac, on their own login ([below](#people-using-their-own-subscription)) |
 
 Whichever you pick, invited people's messages never run on your Claude login: they
-use an API key you choose in Settings, Engines, or their own runner.
+use an API key you choose in Settings, Bots, or their own runner.
 
 ## 1. Set up the server
 
@@ -75,7 +75,7 @@ leobot.example {
 }
 ```
 
-Then Settings, Engines: pick the API key that answers invited people.
+Then Settings, Bots: pick the API key that answers invited people.
 
 ## People using their own subscription
 

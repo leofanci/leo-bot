@@ -1,4 +1,4 @@
-"""Settings holds the setup screens, and the per-bot engine picker lists the real team."""
+"""Settings is machine-wide; what belongs to one project stays in that project."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +7,7 @@ from unittest import mock
 from dashboard import server
 
 APP_JS = (Path(server.HERE) / "app.js").read_text()
+APP_CSS = (Path(server.HERE) / "app.css").read_text()
 
 
 class BotPickerRoster(unittest.TestCase):
@@ -31,21 +32,40 @@ class BotPickerRoster(unittest.TestCase):
 
 
 class SettingsScreen(unittest.TestCase):
-    def test_rail_has_settings_and_not_the_screens_it_holds(self):
-        self.assertIn('data-view="settings"', APP_JS)
-        for view in ("integrations", "engines", "folders"):
-            self.assertNotIn(f'data-view="{view}"', APP_JS)
+    def test_gear_lives_at_the_bottom_of_the_workspace_bar(self):
+        bar = APP_JS.split("function renderWsBar(){", 1)[1].split("async function switchWorkspace", 1)[0]
+        self.assertIn('id="ws-settings"', bar)
+        self.assertNotIn('data-view="settings"', APP_JS)
+        self.assertIn(".ws-settings{margin-top:auto", APP_CSS)
 
-    def test_each_tab_has_a_route_and_old_links_still_land(self):
-        self.assertIn("/^\\/settings(?:\\/(engines|integrations|folders))?$/", APP_JS)
-        self.assertIn("/^\\/(engines|integrations|folders)$/", APP_JS)
+    def test_tabs_hold_only_machine_wide_things(self):
+        self.assertIn("/^\\/settings(?:\\/(engines|bots|integrations|access))?$/", APP_JS)
+        self.assertIn('["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]', APP_JS)
 
-    def test_settings_opens_from_any_workspace(self):
-        self.assertNotIn("Engines live in HQ", APP_JS)
-        self.assertNotIn("Integrations live in HQ", APP_JS)
+    def test_old_links_still_land(self):
+        self.assertIn("/^\\/(engines|integrations)$/", APP_JS)
+        self.assertIn("/^\\/settings\\/folders$/", APP_JS)
+
+    def test_settings_is_not_inside_a_workspace(self):
+        crumbs = APP_JS.split("function canvasCrumbs(){", 1)[1].split("\n}", 1)[0]
+        self.assertIn('if (/^\\/settings\\b/.test(path)) return [];', crumbs)
+        self.assertIn('classList.toggle("settings-open"', APP_JS.split("function parseRoute(hash){", 1)[1].split("\n}", 1)[0])
+        self.assertIn(".app.settings-open #rail", APP_CSS)
+
+    def test_linked_folders_are_per_project(self):
+        self.assertIn('data-view="folders"', APP_JS)
+        self.assertIn("/^\\/folders$/", APP_JS)
+        self.assertNotIn('["folders", "Folders"]', APP_JS)
+
+    def test_sharing_address_moved_out_of_team(self):
+        team = APP_JS.split("async function renderTeam(){", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("sharingSection", team)
+        self.assertIn("sharingSection", APP_JS.split("async function renderAccess(){", 1)[1].split("\n}\n", 1)[0])
+        self.assertIn("Settings, Access", APP_JS)
 
     def test_invited_people_stay_out(self):
         self.assertNotIn("settings", APP_JS.split("const PERSON_ROUTE =", 1)[1].split("\n", 1)[0])
+        self.assertIn('isPerson() ? "" : `<button class="ws-btn ws-settings"', APP_JS)
 
     def test_hq_bots_do_not_promise_a_workspace_engine(self):
         # HQ has no workspace-level pick: its bots fall back to your messages.

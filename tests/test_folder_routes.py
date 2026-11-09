@@ -206,7 +206,7 @@ class EnginesScreen(unittest.TestCase):
         self.assertFalse(rows["codex"]["folder_edit"])
         self.assertFalse(rows["acp:demo"]["folder_edit"])
         js = (Path(server.HERE) / "app.js").read_text()
-        self.assertIn("Read-only in linked folders", js)
+        self.assertIn("Can read linked folders, can't edit them", js)
 
 
 if __name__ == "__main__":

@@ -75,8 +75,8 @@ class Guards(unittest.TestCase):
         self.assertIn("/api/approvals/${encodeURIComponent(a.id)}/${verb}", card)
 
     def test_integrations_route_and_rail(self):
-        self.assertIn("(engines|integrations|folders)", APP_JS)
-        self.assertIn('data-view="settings"', APP_JS)
+        self.assertIn("(engines|integrations)", APP_JS)
+        self.assertIn('id="ws-settings"', APP_JS)
 
 
 if __name__ == "__main__":

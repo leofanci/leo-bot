@@ -157,6 +157,6 @@ class CodexEngine(Engine):
             row["ok"] = out.returncode == 0
         except (OSError, subprocess.SubprocessError):
             pass
-        row["detail"] = (f"logged in. {FULL_DISK_NOTE} Your private threads only."
+        row["detail"] = (f"logged in. {FULL_DISK_NOTE} Used only on your private threads."
                          if row["ok"] else "run: codex login")
         return row

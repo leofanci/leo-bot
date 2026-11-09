@@ -1078,7 +1078,7 @@ def _engines_view():
         bot_list.append({"ws": w["id"], "ws_name": w["name"],
                          "bots": [{"id": b["id"], "name": b["name"], "icon": b.get("icon")} for b in roster]})
     return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
-            "ws_list": [w for w in spaces if w["id"] != bots.HQ], "bot_list": bot_list}
+            "bot_list": bot_list}
 
 
 def _shared_room(ws, room):
@@ -1965,7 +1965,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "you cannot invite with that role"})
             base = people.public_url(ROOT)
             if not base:
-                raise ValueError("set the sharing address first (HQ, Team)")
+                raise ValueError("set the sharing address first (Settings, Access)")
             rec, code = people.create_invite(ROOT, ws=ws, role=want, expiry=body.get("expiry") or "7d",
                                              by=viewer.get("id") or bots.CEO)
             return self._send(200, {"invite": rec, "link": f"{base}/join/{code}", **_people_view(ws, viewer)})
