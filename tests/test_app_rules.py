@@ -20,6 +20,20 @@ class Classify(unittest.TestCase):
             ("GOOGLECALENDAR_QUICK_ADD", "googlecalendar"): False,
             ("SUPABASE_EXECUTE_PROJECT_DATABASE_QUERY", "supabase"): False,
             ("GOOGLE_MAPS_CREATE_TILES_SESSION", "google_maps"): False,
+            ("GOOGLE_MAPS_TILES_CREATE_SESSION", "google_maps"): False,
+            # Noun-first reads (names as Composio lists them now).
+            ("GOOGLECALENDAR_FREE_BUSY_QUERY", "googlecalendar"): True,
+            ("GOOGLECALENDAR_EVENTS_LIST_ALL_CALENDARS", "googlecalendar"): True,
+            ("GOOGLE_MAPS_GEOCODE_LOCATION", "google_maps"): True,
+            ("GOOGLE_MAPS_GET2D_TILE", "google_maps"): True,
+            ("GOOGLE_MAPS_MAPS_EMBED_API", "google_maps"): True,
+            ("GOOGLE_MAPS_GEOLOCATE", "google_maps"): True,
+            # Noun-first names that change something stay writes.
+            ("GOOGLECALENDAR_EVENTS_WATCH", "googlecalendar"): False,
+            ("GOOGLECALENDAR_EVENTS_IMPORT", "googlecalendar"): False,
+            ("GOOGLECALENDAR_EVENTS_MOVE", "googlecalendar"): False,
+            ("GOOGLECALENDAR_CALENDAR_LIST_INSERT", "googlecalendar"): False,
+            ("GOOGLECALENDAR_CALENDAR_LIST_DELETE", "googlecalendar"): False,
         }
         for (slug, tk), want in cases.items():
             self.assertIs(app_rules.is_read(slug, tk), want, slug)
