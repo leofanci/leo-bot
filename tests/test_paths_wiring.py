@@ -16,7 +16,6 @@ SYSPATH_ALLOWED = {
     "dashboard/runner.py",    # inserts the checkout on sys.path before core imports
     "dashboard/osctl.py",     # same
     "dashboard/os_relay.py",  # CODE_DIR is the bot working dir (code)
-    "dashboard/server.py",    # Task 3 rewires server.py
 }
 ROOT_RE = re.compile(r"=\s*Path\(__file__\)\.resolve\(\)\.parent\.parent(\.parent)?\s*$")
 

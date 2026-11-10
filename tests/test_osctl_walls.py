@@ -88,7 +88,8 @@ class Walls(unittest.TestCase):
     def test_read_file_refuses_a_secret_in_any_letter_case(self):
         write(self.root / "dashboard" / ".auth-token", "DUMMY")
         write(self.root / "team" / "engines.json", "{}")
-        for ws, path in ((None, "team/ENGINES.JSON"), (None, "dashboard/.AUTH-TOKEN"), ("acme", "dashboard/.Auth-Token")):
+        write(self.root / "run" / "auth-token", "DUMMY")
+        for ws, path in ((None, "team/ENGINES.JSON"), (None, "dashboard/.AUTH-TOKEN"), (None, "run/auth-token"), ("acme", "dashboard/.Auth-Token")):
             with self.subTest(path):
                 code, out = run(["read-file", "--path", path], ws=ws)
                 self.assertEqual(code, 1, out)

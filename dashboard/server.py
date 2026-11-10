@@ -32,9 +32,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(ROOT))
+HERE = Path(__file__).resolve().parent  # dashboard/ in the checkout: app.html, assets, vendor
+CODE = HERE.parent  # sys.path setup only; the checkout is paths.CODE
+sys.path.insert(0, str(CODE))
 sys.path.insert(0, str(HERE))
 import db                # noqa: E402
 import fileops           # noqa: E402
@@ -42,7 +42,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots    # noqa: E402
+from core import bots, paths, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -78,7 +78,8 @@ DEPLOYMENT = deployment_settings.mode()
 # Browsers keep cookies per host, not per port: over the SSH connection a server and the
 # Mac's own Leo Bot are both 127.0.0.1, and one cookie name would log each out of the other.
 AUTH_COOKIE = "leobot_server_auth" if DEPLOYMENT == "server" else "leobot_auth"
-OWNER_TOKEN_FILE = ROOT / "team" / "owner-token"
+ROOT = paths.DATA  # user data (projects, chats, team...); code is paths.CODE
+OWNER_TOKEN_FILE = paths.DATA / "team" / "owner-token"
 
 
 def _owner_token(deployment=None, path=None):
@@ -117,7 +118,7 @@ RAIL = CHAT_RAIL
 # the macOS app reads it from this owner-only file, a terminal user gets it in
 # the printed URL. A plain GET / (another local account, a port scanner) gets
 # nothing. See do_GET "/" and write_token_file().
-TOKEN_FILE = HERE / ".auth-token"
+TOKEN_FILE = paths.TOKEN_FILE
 _TOKEN_IN_LOG = re.compile(r"([?&]token=|/join/)[^&\s\"?]*")
 # An invited person's device cookie (core.people); the owner keeps AUTH_COOKIE.
 MEMBER_COOKIE = "leobot_member"
@@ -192,6 +193,57 @@ def write_token_file(path=None):
     with os.fdopen(fd, "w") as f:
         f.write(AUTH_TOKEN)
     os.chmod(path, 0o600)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, TypeError, ValueError, OverflowError):
+        return isinstance(pid, int) and pid > 0  # exists, just not ours
+    return True
+
+
+def _server_answers(port):
+    """True when the server on `port` proves, with the healthz nonce proof against the
+    token in TOKEN_FILE, that it is the Leo Bot that wrote that file."""
+    import urllib.request
+    try:
+        token = Path(TOKEN_FILE).read_text().strip()
+        nonce = secrets.token_hex(8)
+        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/healthz?nonce={nonce}", timeout=2) as r:
+            got = json.loads(r.read().decode())
+        want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
+        return bool(token) and hmac.compare_digest(str(got.get("proof", "")), want)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def acquire_pid_lock(port):
+    """One server per home folder. A pid file naming a live pid whose healthz proof
+    verifies refuses the start; anything else (dead pid, reused pid, junk) is replaced."""
+    path = paths.PID_FILE
+    try:
+        held = json.loads(path.read_text())
+        pid, held_port = held["pid"], held["port"]
+        if _pid_alive(pid) and _server_answers(held_port):
+            sys.exit(f"Leo Bot is already running (pid {pid}, port {held_port}).")
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"pid": os.getpid(), "port": int(port)}, f)
+
+
+def release_pid_lock():
+    try:
+        if json.loads(paths.PID_FILE.read_text()).get("pid") == os.getpid():  # never a newer run's lock
+            paths.PID_FILE.unlink()
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def remove_token_file(path=None):
@@ -394,7 +446,7 @@ def state_snapshot(projects, only=None):
 # relevant skill here and injects only its SKILL.md body into the prompt. No
 # discovery overhead, no leaked built-in commands. Pure string match — no extra
 # model call.
-SKILLS_DIR = ROOT / "skills"
+SKILLS_DIR = paths.CODE / "skills"
 
 # Ordered: first match wins, so put the more specific / earlier-in-loop skills
 # first (e.g. problem-validation before gtm-assessment).
@@ -1027,15 +1079,27 @@ def _workspace_deny_dirs(ws, projects, kept=()):
     dirs += [Path(p) for p in folders.turn_denies(
         kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
     dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
-    dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave", ROOT / "private"]  # the owner's machine state
-    return tuple(dict.fromkeys(str(d) for d in dirs))
+    dirs += [paths.CODE / ".remember", paths.CODE / ".superpowers", paths.CODE / ".tokensave",
+             paths.CODE / "private"]  # the owner's machine state
+    # The home folder's non-data parts: token and pid, logs, update backups.
+    dirs += [paths.RUN, paths.LOGS, paths.BACKUPS]
+    return _both_spellings(dirs)
+
+
+def _both_spellings(items):
+    """Deny rules match text: add the resolved spelling (macOS /var is /private/var)."""
+    out = []
+    for d in items:
+        out += [str(d), str(Path(d).resolve())]
+    return tuple(dict.fromkeys(out))
 
 
 def _workspace_deny_files(ws):
     """Single files with every workspace in them (the index databases)."""
     if ws == bots.HQ:
         return ()
-    return tuple(str(f) for f in (ROOT / "os.db", HERE / "os.db", HERE / "data.db"))
+    legacy = (paths.CODE / "os.db", paths.CODE / "dashboard" / "os.db", paths.CODE / "dashboard" / "data.db")
+    return _both_spellings((db.DB_PATH, *legacy, paths.SETTINGS))
 
 
 CLI_NOTE = (
@@ -1222,7 +1286,7 @@ def _folder_gone(sess_or_rec, linked):
 
 
 def _fresh_with_recap(rec):
-    sess = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+    sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     sess.pending_recap = chat_store.recap(rec) or None
     return sess
 
@@ -1234,10 +1298,10 @@ def _reopen(rec, scope, linked):
     rec_slug = _scope_slug(rec.get("scope")) if rec else None
     same = rec and (rec_slug == _scope_slug(scope) or (rec_slug is None and not _used_paths(rec)))
     if not same:
-        return chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
+    return chat_session.ChatSession.restore(str(paths.CODE), RAIL, rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
@@ -1261,7 +1325,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if new:
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
         _CHAT_SCOPE = scope
         return _CHAT
     if chat_id and (_CHAT is None or getattr(_CHAT, "session_id", None) != chat_id):
@@ -1282,7 +1346,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if _CHAT is None or _scope_slug(_CHAT_SCOPE) != _scope_slug(scope):
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     _CHAT_SCOPE = scope
     return _CHAT
 
@@ -1327,7 +1391,7 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
         if cur is not None:
             cur.close()
         rec = chat_store.load(chat_id) if (chat_id and not new) else None
-        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
         _PERSON_CHATS[pid] = [sess, scope]
         return sess
 
@@ -2456,7 +2520,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
-            c = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+            c = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
             c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
@@ -2640,7 +2704,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-        term = terminal_session.TerminalSession(cmd=engine_registry.terminal_cmd(ROOT), cwd=str(ROOT))
+        term = terminal_session.TerminalSession(cmd=engine_registry.terminal_cmd(ROOT), cwd=str(paths.CODE))
         term.start(on_output)
 
         buf = b""
@@ -2696,8 +2760,9 @@ class Handler(BaseHTTPRequestHandler):
             # checkout's token file (HMAC of the nonce), without sending the token.
             nonce = (parse_qs(urlparse(self.path).query).get("nonce") or [""])[0]
             if nonce:
-                return self._send(200, {"app": "Leo Bot", "proof": health_proof(nonce)})
-            return self._send(200, {"app": "Leo Bot"})
+                return self._send(200, {"app": "Leo Bot", "version": version.current(),
+                                        "proof": health_proof(nonce)})
+            return self._send(200, {"app": "Leo Bot", "version": version.current()})
         if path in ("/", "/index.html"):
             token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
             # Compare bytes: str compare_digest raises on non-ASCII input.
@@ -3395,15 +3460,22 @@ def main():
         except (AttributeError, ValueError):
             pass
 
+    paths.ensure_dirs()
+    if not sys.stdout.isatty():  # the app and the service redirect here; keep it owner-only
+        log = open(os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a",
+                   buffering=1, encoding="utf-8")
+        os.chmod(paths.SERVER_LOG, 0o600)
+        sys.stdout = sys.stderr = log
     restrict_new_files()
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-reindex", action="store_true", help="skip the startup re-index")
     args = ap.parse_args()
+    acquire_pid_lock(args.port)  # before the re-index: a second start must not touch the index
 
     if not args.no_reindex:
         print("Re-indexing os.db from source files...")
-        r = subprocess.run([sys.executable, str(ROOT / "index.py"), str(ROOT)],
+        r = subprocess.run([sys.executable, str(paths.CODE / "index.py"), str(paths.DATA)],
                            capture_output=True, text=True)
         sys.stdout.write(r.stdout)
         if r.returncode != 0:
@@ -3411,6 +3483,7 @@ def main():
             # One bad file must not keep an always-on Leo Bot down: with an earlier index it
             # starts on that, says so in the log, and writes stay refused until it is fixed.
             if not db.db_exists():
+                release_pid_lock()
                 sys.exit("startup re-index failed — fix source files and retry")
             print("WARNING: re-index failed; running on the last good index. Fix the file above.", file=sys.stderr)
 
@@ -3427,11 +3500,16 @@ def main():
         remove_uploads()
         chat_session.remove_bot_tmpdir()
         remove_token_file()
+        release_pid_lock()
 
     # Quitting LeoBot.app (Cmd+Q) sends SIGTERM to this PID; clean up children before exiting.
     signal.signal(signal.SIGTERM, lambda *a: (_shutdown_children(), sys.exit(0)))
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except OSError:
+        release_pid_lock()
+        raise
     write_token_file()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive

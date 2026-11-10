@@ -188,7 +188,7 @@ class LoginAndLocalFilesTest(unittest.TestCase):
         self.assertEqual(h_out["code"], 200)
         body = json.loads(h_out["body"])
         want = hmac.new(server.AUTH_TOKEN.encode(), b"leobot-healthz:abc123", "sha256").hexdigest()
-        self.assertEqual(body, {"app": "Leo Bot", "proof": want})
+        self.assertEqual(body, {"app": "Leo Bot", "version": server.version.current(), "proof": want})
         self.assertNotIn(server.AUTH_TOKEN.encode(), h_out["body"])
 
     def test_request_log_redacts_login_token(self):
@@ -211,6 +211,16 @@ class LoginAndLocalFilesTest(unittest.TestCase):
                 osctl.main(["read-file", "--path", "dashboard/.auth-token"])
         self.assertIn("secret files are not readable", out.getvalue())
         self.assertNotIn('"content"', out.getvalue())
+
+    def test_osctl_read_file_refuses_home_token_name(self):
+        from dashboard import osctl
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(fileops, "ROOT", Path(d)):
+            (Path(d) / "run").mkdir()
+            (Path(d) / "run" / "auth-token").write_text("secret", encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                osctl.main(["read-file", "--path", "run/auth-token"])
+        self.assertIn("secret files are not readable", out.getvalue())
 
     def test_token_file_is_owner_only_and_removed(self):
         with tempfile.TemporaryDirectory() as d:

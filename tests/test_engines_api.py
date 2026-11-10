@@ -439,7 +439,7 @@ class FileRules(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         for rel in ("docs/a.md", "team/engines.json", "team/x.md", "chats/c.json", "projects/acme/a.md",
-                    "projects/demo/b.md", ".env", "dashboard/.auth-token"):
+                    "projects/demo/b.md", ".env", "dashboard/.auth-token", "run/auth-token"):
             f = self.root / rel
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_text("data")
@@ -454,7 +454,7 @@ class FileRules(unittest.TestCase):
 
     def test_refused(self):
         for path in ("team/engines.json", "team/x.md", "chats/c.json", "projects/demo/b.md", ".env",
-                     "dashboard/.auth-token", "../outside", "/etc/hosts", "docs/../team/x.md"):
+                     "dashboard/.auth-token", "run/auth-token", "../outside", "/etc/hosts", "docs/../team/x.md"):
             with self.assertRaises(api_tools.ToolError, msg=path):
                 self.read(path)
 

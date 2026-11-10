@@ -23,7 +23,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from core import folders
+from core import folders, paths
 from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 
 
@@ -118,7 +118,13 @@ def private_read_rules(repo_dir):
     cfg = os.environ.get("CLAUDE_CONFIG_DIR")
     if cfg:
         private.append(Path(cfg).expanduser())
+    # The home folder's token and pid, logs, update backups and settings; the old in-checkout
+    # log name stays denied for clones that still write there.
+    home_parts = [paths.RUN, paths.LOGS, paths.BACKUPS]
+    spellings = lambda d: dict.fromkeys((str(d), str(Path(d).resolve())))  # noqa: E731  (macOS /var)
     return [*(f"Read(/{d}/**)" for d in private),
+            *(f"Read(/{s}/**)" for d in home_parts for s in spellings(d)),
+            *(f"Read(/{s})" for s in spellings(paths.SETTINGS)),
             f"Read(/{Path(repo_dir).resolve() / 'dashboard' / 'server.log'})"]
 # Tools loaded EVERY turn. Skills are NOT loaded via the Skill tool — that costs
 # ~4k tok of discovery (35 descriptions, incl. useless built-ins) just to let the
