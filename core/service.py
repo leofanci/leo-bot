@@ -185,6 +185,9 @@ def install(port: int = DEFAULT_PORT, server: bool = False) -> str:
         f.write_text(systemd_unit(sys.executable, paths.CODE, port, paths.HOME, server, hardened=False))
         _check(_run(_ctl("daemon-reload")), "systemctl daemon-reload")
         _check(_run(_ctl("restart", UNIT)), "systemctl restart")
+        if not _wait_active(5):
+            raise RuntimeError("the service did not start even with reduced hardening; "
+                               f"see: journalctl --user -u {UNIT}")
         note = " Hardening was reduced because this system does not allow it."
     return f"Background service installed (systemd, port {port})." + note + _linger_hint()
 

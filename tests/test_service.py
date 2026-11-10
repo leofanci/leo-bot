@@ -62,7 +62,11 @@ class FakeHome(unittest.TestCase):
                   mock.patch.object(paths, "ensure_dirs")):
             p.start()
             self.addCleanup(p.stop)
-        r = mock.patch("core.service.subprocess.run", return_value=done())
+        def default(argv, **k):
+            if argv[:3] == ["systemctl", "--user", "is-active"]:
+                return done(0, "active\n")
+            return done()
+        r = mock.patch("core.service.subprocess.run", side_effect=default)
         self.run_ = r.start()
         self.addCleanup(r.stop)
 
@@ -122,6 +126,7 @@ class MacTests(FakeHome):
 
     def test_status_running(self):
         service.install()
+        self.run_.side_effect = None
         self.run_.return_value = done(0, "state = running\n")
         self.assertEqual(service.status(), {"installed": True, "running": True, "kind": "launchd"})
         self.run_.return_value = done(113, "", "not found")
@@ -147,17 +152,22 @@ class LinuxTests(FakeHome):
         f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
         self.assertIn("LEOBOT_DEPLOYMENT=server", f.read_text())
 
-    def _fake(self, active, status):
+    def _fake(self, active, status, recovers=False):
+        state = {"active": active}
+
         def run(argv, **k):
+            if "restart" in argv and recovers:
+                state["active"] = True
             if argv[:3] == ["systemctl", "--user", "is-active"]:
-                return done(0 if active else 3, "active\n" if active else "failed\n")
+                on = state["active"]
+                return done(0 if on else 3, "active\n" if on else "failed\n")
             if "show" in argv:
                 return done(0, f"ExecMainStatus={status}\nResult=exit-code\n")
             return done()
         self.run_.side_effect = run
 
     def test_sandbox_failure_falls_back_to_reduced_hardening(self):
-        self._fake(False, 226)
+        self._fake(False, 226, recovers=True)
         with mock.patch("core.service.time.sleep"), \
                 mock.patch("core.service.time.monotonic", side_effect=[0, 1, 5, 11, 12, 13]):
             msg = service.install()
@@ -165,6 +175,13 @@ class LinuxTests(FakeHome):
         self.assertNotIn("ProtectSystem", f.read_text())
         self.assertIn("Hardening was reduced", msg)
         self.assertTrue(any(a[:3] == ["systemctl", "--user", "restart"] for a in self.argvs()))
+
+    def test_still_failing_after_reduced_hardening_raises(self):
+        self._fake(False, 226)
+        with mock.patch("core.service.time.sleep"), \
+                mock.patch("core.service.time.monotonic", side_effect=[0, 11, 12, 20, 30]):
+            with self.assertRaises(RuntimeError):
+                service.install()
 
     def test_other_failure_keeps_hardening(self):
         self._fake(False, 1)
@@ -180,9 +197,13 @@ class LinuxTests(FakeHome):
         self.assertEqual(service.port(), 9123)
 
     def test_linger_hint(self):
-        self.run_.side_effect = lambda argv, **k: done(0, "Linger=no\n") if argv[0] == "loginctl" else done()
+        self.run_.side_effect = lambda argv, **k: (
+            done(0, "Linger=no\n") if argv[0] == "loginctl"
+            else done(0, "active\n") if "is-active" in argv else done())
         self.assertIn("enable-linger", service.install())
-        self.run_.side_effect = lambda argv, **k: done(0, "Linger=yes\n") if argv[0] == "loginctl" else done()
+        self.run_.side_effect = lambda argv, **k: (
+            done(0, "Linger=yes\n") if argv[0] == "loginctl"
+            else done(0, "active\n") if "is-active" in argv else done())
         self.assertNotIn("enable-linger", service.install())
 
     def test_stop_start_restart_status_uninstall(self):
@@ -191,7 +212,6 @@ class LinuxTests(FakeHome):
             self.run_.reset_mock()
             fn()
             self.assertEqual(self.argvs()[0], ["systemctl", "--user", verb, "leobot"])
-        self.run_.return_value = done(0, "active\n")
         self.assertEqual(service.status(), {"installed": True, "running": True, "kind": "systemd"})
         service.uninstall()
         self.assertFalse(service.installed())
