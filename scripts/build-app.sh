@@ -26,6 +26,11 @@ if [ -n "$OUT" ]; then
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
     cp "$SRCAPP/Contents/Info.plist" "$APP/Contents/Info.plist"
     cp "$SRCAPP/Contents/Resources/"* "$APP/Contents/Resources/"
+    # A Finder/Dock launch carries no environment: record a custom home in the bundle.
+    rm -f "$APP/Contents/Resources/leobot-home"
+    if [ -n "${LEOBOT_HOME:-}" ] && [ "${LEOBOT_HOME%/}" != "$HOME/.leobot" ]; then
+        printf '%s\n' "${LEOBOT_HOME%/}" > "$APP/Contents/Resources/leobot-home"
+    fi
 fi
 mkdir -p "$APP/Contents/MacOS"
 swiftc -O -o "$APP/Contents/MacOS/LeoBot" "$SRCAPP/Contents/Resources/webview.swift" \

@@ -14,6 +14,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var webView: WKWebView!
     var serverPID: Int32 = 0
     let port = 8765
+    // Retry timing: ping every retryInterval; after startGrace of silence (and no
+    // update running) start the server once; give up after totalWait.
+    let retryInterval: TimeInterval = 2.0
+    let startGrace: TimeInterval = 30.0
+    let totalWait: TimeInterval = 90.0
     var url: URL { URL(string: "http://127.0.0.1:\(port)")! }
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -174,10 +179,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // watching: a restart (an update, a crash) is ridden out instead of shown as a failure.
     private func startServerAndLoad() {
         let repo = repoPath()
-        runStartScript(repo)
+        if !isUpdating() { runStartScript(repo) }
 
-        // Retry every 2 s for up to 90 s (the indexer runs before the server serves).
-        if !waitUp(repo, seconds: 90) {
+        // Retry every retryInterval for up to totalWait (the indexer runs before the server serves).
+        if !waitUp(repo, startAfter: startGrace) {
             DispatchQueue.main.async { [weak self] in self?.showFailure() }
             return
         }
@@ -189,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     private func runStartScript(_ repo: String) {
+        serverPID = 0
         guard let script = Bundle.main.path(forResource: "start-server", ofType: "sh") else { return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -208,25 +214,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
     }
 
-    // True once a ping succeeds; checks every 2.0 s for up to `seconds`.
-    private func waitUp(_ repo: String, seconds: Int) -> Bool {
-        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+    // True once a ping succeeds, polling every retryInterval for up to totalWait.
+    // If nothing answers for startGrace, start the server once, but never while the
+    // updater holds its lock (it stops, backs up and restarts the server itself).
+    private func waitUp(_ repo: String, startAfter: TimeInterval) -> Bool {
+        let begin = Date()
+        var started = false
         while true {
             if ping(repo) { return true }
-            if Date() >= deadline { return false }
-            Thread.sleep(forTimeInterval: 2.0)
+            let elapsed = Date().timeIntervalSince(begin)
+            if elapsed >= totalWait { return false }
+            if !started && elapsed >= startAfter && !isUpdating() {
+                started = true
+                runStartScript(repo)
+            }
+            Thread.sleep(forTimeInterval: retryInterval)
         }
     }
 
+    // True while core/updater.py holds run/update.lock (it takes flock LOCK_EX on it).
+    private func isUpdating() -> Bool {
+        let path = (homePath() as NSString).appendingPathComponent("run/update.lock")
+        let fd = open(path, O_RDONLY)
+        if fd < 0 { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) != 0 { return true }
+        flock(fd, LOCK_UN)
+        return false
+    }
+
     // While the app is open: when the server stops answering (an update restarts it),
-    // start it again if nobody has and retry for 90 s before giving up; once it is
-    // back, reload the dashboard.
+    // only poll; start it ourselves after startGrace of silence with no update running.
+    // Once it is back, reload the dashboard.
     private func watch(_ repo: String) {
         while true {
-            Thread.sleep(forTimeInterval: 2.0)
+            Thread.sleep(forTimeInterval: retryInterval)
             if ping(repo) { continue }
-            runStartScript(repo)
-            if !waitUp(repo, seconds: 90) {
+            if !waitUp(repo, startAfter: startGrace) {
                 DispatchQueue.main.async { [weak self] in self?.showFailure() }
                 return
             }
@@ -244,8 +268,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return URL(string: "http://127.0.0.1:\(port)/?token=\(token)") ?? url
     }
 
+    // Refuses a token file that is a symlink, not ours, or readable by group/other.
     private func readToken(_ repo: String) -> String {
         let file = (homePath() as NSString).appendingPathComponent("run/auth-token")
+        var st = stat()
+        if lstat(file, &st) != 0 { return "" }
+        if (st.st_mode & S_IFMT) != S_IFREG { return "" }
+        if st.st_uid != getuid() { return "" }
+        if (st.st_mode & 0o077) != 0 { return "" }
         return (try? String(contentsOfFile: file, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
@@ -282,6 +312,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // The home folder: $LEOBOT_HOME, else ~/.leobot (token, pid lock and log live here).
     private func homePath() -> String {
         if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], !h.isEmpty { return h }
+        // Finder/Dock launches carry no environment: build-app.sh --out records a custom home here.
+        if let f = Bundle.main.path(forResource: "leobot-home", ofType: nil),
+           let h = (try? String(contentsOfFile: f, encoding: .utf8))?
+               .trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty { return h }
         return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot")
     }
 
@@ -291,8 +325,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let parent = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
         let marker = (parent as NSString).appendingPathComponent("dashboard/server.py")
         if FileManager.default.fileExists(atPath: marker) { return parent }
-        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], !h.isEmpty {
-            return (h as NSString).appendingPathComponent("app")
+        if ProcessInfo.processInfo.environment["LEOBOT_HOME"] != nil || Bundle.main.path(forResource: "leobot-home", ofType: nil) != nil {
+            return (homePath() as NSString).appendingPathComponent("app")
         }
         return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot/app")
     }
@@ -307,7 +341,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     func applicationWillTerminate(_: Notification) {
-        if serverPID > 0 { kill(serverPID, SIGTERM) }
+        // Only a pid from this run that is still a dashboard/server.py process.
+        if serverPID > 0 && isLeoBotServer(serverPID) { kill(serverPID, SIGTERM) }
+    }
+
+    private func isLeoBotServer(_ pid: Int32) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-p", String(pid), "-o", "command="]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return false }
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        proc.waitUntilExit()
+        return text.contains("dashboard/server.py")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }
