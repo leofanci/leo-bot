@@ -482,6 +482,7 @@ class UninstallTests(CliBase):
 class ServiceWiringTests(CliBase):
     def test_stop_goes_through_service(self):
         self.service.installed.return_value = True
+        self.service.kind.return_value = "launchd"
         with mock.patch.object(leobot, "status_info", return_value={"running": True, "pid": 4242, "port": 9001}), \
                 mock.patch.object(leobot, "_wait_stopped", return_value=True), \
                 mock.patch.object(leobot.os, "kill") as kill:
@@ -490,6 +491,28 @@ class ServiceWiringTests(CliBase):
         self.service.stop.assert_called_once()
         kill.assert_not_called()
         self.assertIn("stopped", out)
+        self.assertIn("next login", out)
+
+    def test_start_notes_port_mismatch(self):
+        self.service.installed.return_value = True
+        self.service.port.return_value = 9001
+        up = {"running": True, "pid": 1, "port": 9001}
+        down = {"running": False, "pid": None, "port": None}
+        with mock.patch.object(leobot, "_proof_ok", return_value=True):
+            with mock.patch.object(leobot, "status_info", side_effect=[down, up, up]):
+                code, _, err = run("start", "--port", "9555")
+            self.assertIn("9001", err)
+            with mock.patch.object(leobot, "status_info", side_effect=[down, up, up]):
+                code, _, err = run("start")
+            self.assertEqual(err, "")
+
+    def test_service_install_reports_no_answer(self):
+        self.service.install.return_value = "ok"
+        with mock.patch.object(leobot, "_stop_if_running", return_value=None), \
+                mock.patch.object(leobot, "_wait_ready", return_value=None):
+            code, _, err = run("service", "install")
+        self.assertEqual(code, 1)
+        self.assertIn("server.log", err)
 
     def test_start_goes_through_service(self):
         self.service.installed.return_value = True
@@ -505,7 +528,8 @@ class ServiceWiringTests(CliBase):
 
     def test_service_cli(self):
         self.service.install.return_value = "installed it"
-        with mock.patch.object(leobot, "_stop_if_running", return_value=None):
+        with mock.patch.object(leobot, "_stop_if_running", return_value=None), \
+                mock.patch.object(leobot, "_wait_ready", return_value=9100):
             code, out, _ = run("service", "install", "--port", "9100", "--server")
         self.assertEqual(code, 0)
         self.service.install.assert_called_once_with(port=9100, server=True)

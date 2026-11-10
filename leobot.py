@@ -115,13 +115,15 @@ def _login_url(port) -> str:
 # ------------------------------------------------------------------- commands
 
 def cmd_start(args) -> int:
+    explicit = args.port is not None
+    args.port = args.port or DEFAULT_PORT
     info = status_info()
     if info["running"]:
         print(f"Leo Bot is already running at {_url(info['port'] or args.port)}")
         return 0
     paths.ensure_dirs()
     if service.installed():  # the service manager owns the server: never spawn a second one
-        return _start_service(args)
+        return _start_service(args, explicit)
     fd = os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         log = os.fdopen(fd, "ab")
@@ -147,19 +149,32 @@ def cmd_start(args) -> int:
     return 1
 
 
-def _start_service(args) -> int:
+def _wait_ready(fallback_port):
+    """Wait for the server to answer with proof; returns its port, or None."""
+    end = time.monotonic() + START_WAIT
+    while time.monotonic() < end:
+        info = status_info()
+        port = info["port"] or fallback_port
+        if info["running"] and _proof_ok(port):
+            return port
+        time.sleep(0.25)
+    return None
+
+
+def _start_service(args, explicit=False) -> int:
+    sp = service.port()
+    if explicit and isinstance(sp, int) and sp != args.port:
+        print(f"Note: the background service uses port {sp}, not {args.port}. "
+              f"Change it with: leobot service install --port {args.port}", file=sys.stderr)
     try:
         service.start()
     except Exception as e:  # noqa: BLE001
         print(f"Could not start the background service ({e}). See {paths.SERVER_LOG}", file=sys.stderr)
         return 1
-    end = time.monotonic() + START_WAIT
-    while time.monotonic() < end:
-        info = status_info()
-        if info["running"] and _proof_ok(info["port"] or args.port):
-            print(f"Leo Bot is running at {_url(info['port'] or args.port)}")
-            return 0
-        time.sleep(0.25)
+    port = _wait_ready(sp if isinstance(sp, int) else args.port)
+    if port:
+        print(f"Leo Bot is running at {_url(port)}")
+        return 0
     print(f"Leo Bot did not start. See {paths.SERVER_LOG}", file=sys.stderr)
     return 1
 
@@ -174,7 +189,9 @@ def cmd_stop(args=None) -> int:
             return 1
         if info["running"] and _wait_stopped(STOP_WAIT):
             paths.PID_FILE.unlink(missing_ok=True)
-            print("Leo Bot stopped.")
+            until = ("`leobot start` or your next login" if service.kind() == "launchd"
+                     else "`leobot start` or a reboot")
+            print(f"Leo Bot stopped. It stays stopped until {until}.")
             return 0
         info = status_info()
     if not info["running"]:
@@ -228,7 +245,7 @@ def _restart(port) -> None:
 
 def cmd_open(args=None) -> int:
     if not status_info()["running"]:
-        rc = cmd_start(argparse.Namespace(port=DEFAULT_PORT))
+        rc = cmd_start(argparse.Namespace(port=None))
         if rc:
             return rc
     port = status_info()["port"] or DEFAULT_PORT
@@ -657,6 +674,10 @@ def cmd_service(args) -> int:
             if not service.installed():
                 _stop_if_running()  # a loose detached server would hold the pid lock
             print(service.install(port=args.port, server=args.server))
+            if not _wait_ready(args.port):
+                print(f"The service is installed but Leo Bot did not answer. See {paths.SERVER_LOG}",
+                      file=sys.stderr)
+                return 1
         elif args.action == "uninstall":
             service.uninstall()
             print("Background service removed.")
@@ -679,7 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("open", help="start if needed, then open Leo Bot (default)")
     p = sub.add_parser("start", help="start the server")
-    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--port", type=int, default=None)
     sub.add_parser("stop", help="stop the server")
     p = sub.add_parser("status", help="show server and folders")
     p.add_argument("--json", action="store_true")

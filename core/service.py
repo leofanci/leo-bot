@@ -1,10 +1,13 @@
 """Run the server as a per-user background service: a launchd agent on macOS, a systemd
 user unit on Linux. No sudo. File locations derive from Path.home() at call time."""
+import getpass
 import os
 import platform
 import plistlib
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from core import paths
@@ -65,7 +68,7 @@ def _sd_env(key: str, value: str) -> str:
     return f'Environment="{pair}"'
 
 
-def systemd_unit(python: str, code: Path, port: int, home: Path, server: bool) -> str:
+def systemd_unit(python: str, code: Path, port: int, home: Path, server: bool, hardened: bool = True) -> str:
     script = str(Path(code) / "dashboard" / "server.py")
     exec_start = " ".join(_sd_arg(a) for a in (python, script, "--port", str(port)))
     lines = ["[Unit]", "Description=Leo Bot server", "",
@@ -77,8 +80,10 @@ def systemd_unit(python: str, code: Path, port: int, home: Path, server: bool) -
              _sd_env("PATH", _extra_path())]
     if server:
         lines.append("Environment=LEOBOT_DEPLOYMENT=server")
-    lines += ["NoNewPrivileges=true", "PrivateTmp=true", "",
-              "[Install]", "WantedBy=default.target", ""]
+    lines.append("NoNewPrivileges=true")
+    if hardened:
+        lines += ["PrivateTmp=true", "ProtectSystem=full"]
+    lines += ["", "[Install]", "WantedBy=default.target", ""]
     return "\n".join(lines)
 
 
@@ -106,13 +111,52 @@ def _ctl(*args):
     return ["systemctl", "--user", *args]
 
 
+def kind():
+    return _kind()
+
+
+def port():
+    """The port the installed service was set up with, or None."""
+    f = _file()
+    try:
+        if _kind() == "launchd":
+            args = plistlib.loads(f.read_bytes())["ProgramArguments"]
+            return int(args[args.index("--port") + 1])
+        m = re.search(r'"--port" "(\d+)"', f.read_text())
+        return int(m.group(1)) if m else None
+    except (OSError, ValueError, KeyError, IndexError, TypeError, plistlib.InvalidFileException):
+        return None
+
+
+# systemd exit statuses for namespace (226) and capability (218) setup failures
+_SANDBOX_FAILS = {"226", "218"}
+
+
+def _wait_active(timeout=10) -> bool:
+    end = time.monotonic() + timeout
+    while True:
+        r = _run(_ctl("is-active", UNIT))
+        if r.returncode == 0 and (r.stdout or "").strip() == "active":
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(0.5)
+
+
+def _sandbox_failure() -> bool:
+    r = _run(_ctl("show", UNIT, "-p", "ExecMainStatus", "-p", "Result"))
+    out = r.stdout or ""
+    m = re.search(r"ExecMainStatus=(\d+)", out)
+    return bool(m and m.group(1) in _SANDBOX_FAILS)
+
+
 def installed() -> bool:
     f = _file()
     return bool(f and f.is_file())
 
 
 def _linger_hint() -> str:
-    user = os.environ.get("USER", "")
+    user = getpass.getuser()
     r = _run(["loginctl", "show-user", user, "-p", "Linger"])
     if r.returncode == 0 and "Linger=no" in (r.stdout or ""):
         return f" To keep it running when you are logged out: loginctl enable-linger {user}"
@@ -136,7 +180,13 @@ def install(port: int = DEFAULT_PORT, server: bool = False) -> str:
     f.chmod(0o644)
     _check(_run(_ctl("daemon-reload")), "systemctl daemon-reload")
     _check(_run(_ctl("enable", "--now", UNIT)), "systemctl enable")
-    return f"Background service installed (systemd, port {port})." + _linger_hint()
+    note = ""
+    if not _wait_active() and _sandbox_failure():
+        f.write_text(systemd_unit(sys.executable, paths.CODE, port, paths.HOME, server, hardened=False))
+        _check(_run(_ctl("daemon-reload")), "systemctl daemon-reload")
+        _check(_run(_ctl("restart", UNIT)), "systemctl restart")
+        note = " Hardening was reduced because this system does not allow it."
+    return f"Background service installed (systemd, port {port})." + note + _linger_hint()
 
 
 def stop() -> None:

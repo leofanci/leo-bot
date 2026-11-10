@@ -32,7 +32,13 @@ class PureTests(unittest.TestCase):
         for want in ("Restart=always", "RestartSec=3", "NoNewPrivileges=true", "PrivateTmp=true",
                      "Environment=LEOBOT_HOME=", "WantedBy=default.target"):
             self.assertIn(want, u)
+        self.assertIn("ProtectSystem=full", u)
+        self.assertIn("PrivateTmp=true", u)
         self.assertNotIn("LEOBOT_DEPLOYMENT=server", u)
+        soft = service.systemd_unit("/p", Path("/a"), 1, Path("/h"), False, hardened=False)
+        self.assertNotIn("ProtectSystem", soft)
+        self.assertNotIn("PrivateTmp", soft)
+        self.assertIn("NoNewPrivileges=true", soft)
         s = service.systemd_unit("/usr/bin/python3", Path("/a/app"), 8765, Path("/h"), True)
         self.assertIn("LEOBOT_DEPLOYMENT=server", s)
 
@@ -93,6 +99,10 @@ class MacTests(FakeHome):
         with self.assertRaises(RuntimeError):
             service.install()
 
+    def test_port_from_plist(self):
+        service.install(port=9124)
+        self.assertEqual(service.port(), 9124)
+
     def test_stop_boots_out_and_start_bootstraps(self):
         service.install()
         self.run_.reset_mock()
@@ -136,6 +146,38 @@ class LinuxTests(FakeHome):
         self.assertTrue(any("daemon-reload" in argv for argv in self.argvs()))
         f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
         self.assertIn("LEOBOT_DEPLOYMENT=server", f.read_text())
+
+    def _fake(self, active, status):
+        def run(argv, **k):
+            if argv[:3] == ["systemctl", "--user", "is-active"]:
+                return done(0 if active else 3, "active\n" if active else "failed\n")
+            if "show" in argv:
+                return done(0, f"ExecMainStatus={status}\nResult=exit-code\n")
+            return done()
+        self.run_.side_effect = run
+
+    def test_sandbox_failure_falls_back_to_reduced_hardening(self):
+        self._fake(False, 226)
+        with mock.patch("core.service.time.sleep"), \
+                mock.patch("core.service.time.monotonic", side_effect=[0, 1, 5, 11, 12, 13]):
+            msg = service.install()
+        f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
+        self.assertNotIn("ProtectSystem", f.read_text())
+        self.assertIn("Hardening was reduced", msg)
+        self.assertTrue(any(a[:3] == ["systemctl", "--user", "restart"] for a in self.argvs()))
+
+    def test_other_failure_keeps_hardening(self):
+        self._fake(False, 1)
+        with mock.patch("core.service.time.sleep"), \
+                mock.patch("core.service.time.monotonic", side_effect=[0, 11, 12]):
+            msg = service.install()
+        f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
+        self.assertIn("ProtectSystem=full", f.read_text())
+        self.assertNotIn("Hardening", msg)
+
+    def test_port_from_installed_file(self):
+        service.install(port=9123)
+        self.assertEqual(service.port(), 9123)
 
     def test_linger_hint(self):
         self.run_.side_effect = lambda argv, **k: done(0, "Linger=no\n") if argv[0] == "loginctl" else done()
