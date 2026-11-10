@@ -17,7 +17,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from core import datadir, migrations, paths, version
+from core import datadir, migrations, paths, service, version
 
 DEFAULT_PORT = 8765
 START_WAIT = 20
@@ -120,6 +120,8 @@ def cmd_start(args) -> int:
         print(f"Leo Bot is already running at {_url(info['port'] or args.port)}")
         return 0
     paths.ensure_dirs()
+    if service.installed():  # the service manager owns the server: never spawn a second one
+        return _start_service(args)
     fd = os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         log = os.fdopen(fd, "ab")
@@ -145,8 +147,36 @@ def cmd_start(args) -> int:
     return 1
 
 
+def _start_service(args) -> int:
+    try:
+        service.start()
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not start the background service ({e}). See {paths.SERVER_LOG}", file=sys.stderr)
+        return 1
+    end = time.monotonic() + START_WAIT
+    while time.monotonic() < end:
+        info = status_info()
+        if info["running"] and _proof_ok(info["port"] or args.port):
+            print(f"Leo Bot is running at {_url(info['port'] or args.port)}")
+            return 0
+        time.sleep(0.25)
+    print(f"Leo Bot did not start. See {paths.SERVER_LOG}", file=sys.stderr)
+    return 1
+
+
 def cmd_stop(args=None) -> int:
     info = status_info()
+    if service.installed():  # a KeepAlive service would respawn a killed server at once
+        try:
+            service.stop()
+        except Exception as e:  # noqa: BLE001
+            print(f"Could not stop the background service ({e}).", file=sys.stderr)
+            return 1
+        if info["running"] and _wait_stopped(STOP_WAIT):
+            paths.PID_FILE.unlink(missing_ok=True)
+            print("Leo Bot stopped.")
+            return 0
+        info = status_info()
     if not info["running"]:
         print("Leo Bot is not running.")
         return 0
@@ -215,17 +245,12 @@ def cmd_open(args=None) -> int:
 
 def _service_state() -> str:
     try:
-        from core import service  # Task 7; absent until then
-    except ImportError:
-        return "not available"
-    for name in ("state", "status"):
-        fn = getattr(service, name, None)
-        if callable(fn):
-            try:
-                return str(fn())
-            except Exception:  # noqa: BLE001
-                return "unknown"
-    return "unknown"
+        st = service.status()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    if not st.get("installed"):
+        return "not installed"
+    return f"{'running' if st.get('running') else 'installed, stopped'} ({st.get('kind')})"
 
 
 def cmd_status(args) -> int:
@@ -468,7 +493,12 @@ def cmd_backup(args) -> int:
             src = kept
         else:
             kept = None
-        snap = _tar_data(paths.BACKUPS / f"pre-restore-{stamp}.tar.gz")
+        try:
+            snap = _tar_data(paths.BACKUPS / f"pre-restore-{stamp}.tar.gz")
+        except BaseException:
+            if kept:
+                kept.unlink(missing_ok=True)  # the copy was only for this restore
+            raise
         aside = paths.HOME / f"data.pre-restore-{stamp}"
         os.rename(paths.DATA, aside)
         try:
@@ -596,17 +626,14 @@ def cmd_uninstall(args) -> int:
     if not _confirm(f"Uninstall Leo Bot: remove {what}?", args.yes):
         print("Cancelled.", file=sys.stderr)
         return 1
-    try:  # first, so a service cannot bring the server back
-        from core import service  # Task 7; absent until then
-        service.uninstall()
-    except ImportError:
-        pass
-    except Exception as e:  # noqa: BLE001
-        print(f"Could not remove the background service ({e}). Continuing.", file=sys.stderr)
     user = Path.home().resolve()
     if home == user or home in user.parents:
         print(f"Refusing: {home} is or contains your own home folder.", file=sys.stderr)
         return 1
+    try:  # before stopping, so the service cannot bring the server back
+        service.uninstall()
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not remove the background service ({e}). Continuing.", file=sys.stderr)
     _stop_if_running()
     link = Path.home() / ".local" / "bin" / "leobot"
     if _is_ours(link):
@@ -621,6 +648,27 @@ def cmd_uninstall(args) -> int:
     if args.data:
         _rm(paths.HOME)
     print("Leo Bot uninstalled." + (f" Removed {home}." if args.data else f" Your data is still in {paths.DATA}."))
+    return 0
+
+
+def cmd_service(args) -> int:
+    try:
+        if args.action == "install":
+            if not service.installed():
+                _stop_if_running()  # a loose detached server would hold the pid lock
+            print(service.install(port=args.port, server=args.server))
+        elif args.action == "uninstall":
+            service.uninstall()
+            print("Background service removed.")
+        else:
+            st = service.status()
+            print(f"installed: {'yes' if st['installed'] else 'no'}")
+            print(f"running: {'yes' if st['running'] else 'no'}")
+            if st.get("kind"):
+                print(f"kind: {st['kind']}")
+    except (RuntimeError, SystemExit) as e:
+        print(str(e), file=sys.stderr)
+        return 1
     return 0
 
 
@@ -647,12 +695,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("uninstall", help="remove Leo Bot")
     p.add_argument("--data", action="store_true", help="also delete all your data")
     p.add_argument("--yes", action="store_true")
+    p = sub.add_parser("service", help="run Leo Bot as a background service")
+    p.add_argument("action", choices=("install", "uninstall", "status"))
+    p.add_argument("--port", type=int, default=DEFAULT_PORT)
+    p.add_argument("--server", action="store_true", help="server deployment mode (Linux)")
     return ap
 
 
 COMMANDS = {"open": cmd_open, "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
             "version": cmd_version, "doctor": cmd_doctor, "backup": cmd_backup,
-            "move-data": cmd_move_data, "uninstall": cmd_uninstall}
+            "move-data": cmd_move_data, "uninstall": cmd_uninstall,
+            "service": cmd_service}
 
 
 def main(argv=None) -> int:

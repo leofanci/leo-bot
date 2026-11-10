@@ -41,6 +41,11 @@ class CliBase(unittest.TestCase):
         p = mock.patch.object(leobot, "_reindex")
         self.reindex = p.start()
         self.addCleanup(p.stop)
+        p = mock.patch.object(leobot, "service")  # never touch the real launchd/systemd
+        self.service = p.start()
+        self.service.installed.return_value = False
+        self.service.status.return_value = {"installed": False, "running": False, "kind": None}
+        self.addCleanup(p.stop)
 
     def write(self, rel, text="x", base=None):
         f = Path(base or paths.DATA) / rel
@@ -472,6 +477,78 @@ class UninstallTests(CliBase):
             code, _, _ = run("uninstall")
         self.assertNotEqual(code, 0)
         self.assertTrue((paths.HOME / "app").exists())
+
+
+class ServiceWiringTests(CliBase):
+    def test_stop_goes_through_service(self):
+        self.service.installed.return_value = True
+        with mock.patch.object(leobot, "status_info", return_value={"running": True, "pid": 4242, "port": 9001}), \
+                mock.patch.object(leobot, "_wait_stopped", return_value=True), \
+                mock.patch.object(leobot.os, "kill") as kill:
+            code, out, _ = run("stop")
+        self.assertEqual(code, 0)
+        self.service.stop.assert_called_once()
+        kill.assert_not_called()
+        self.assertIn("stopped", out)
+
+    def test_start_goes_through_service(self):
+        self.service.installed.return_value = True
+        infos = iter([{"running": False, "pid": None, "port": None},
+                      {"running": True, "pid": 1, "port": 9001}, {"running": True, "pid": 1, "port": 9001}])
+        with mock.patch.object(leobot, "status_info", side_effect=lambda: next(infos)), \
+                mock.patch.object(leobot, "_proof_ok", return_value=True), \
+                mock.patch.object(leobot.subprocess, "Popen") as popen:
+            code, _, _ = run("start")
+        self.assertEqual(code, 0)
+        self.service.start.assert_called_once()
+        popen.assert_not_called()
+
+    def test_service_cli(self):
+        self.service.install.return_value = "installed it"
+        with mock.patch.object(leobot, "_stop_if_running", return_value=None):
+            code, out, _ = run("service", "install", "--port", "9100", "--server")
+        self.assertEqual(code, 0)
+        self.service.install.assert_called_once_with(port=9100, server=True)
+        self.assertIn("installed it", out)
+        self.assertEqual(run("service", "uninstall")[0], 0)
+        self.service.uninstall.assert_called_once()
+        self.service.status.return_value = {"installed": True, "running": True, "kind": "launchd"}
+        code, out, _ = run("service", "status")
+        self.assertIn("launchd", out)
+
+    def test_service_install_failure(self):
+        self.service.install.side_effect = RuntimeError("nope")
+        with mock.patch.object(leobot, "_stop_if_running", return_value=None):
+            code, _, err = run("service", "install")
+        self.assertEqual(code, 1)
+        self.assertIn("nope", err)
+
+    def test_uninstall_refusal_before_service_removal(self):
+        user = self.tmp / "fakehome"
+        user.mkdir()
+        with mock.patch.object(leobot.Path, "home", return_value=user), \
+                mock.patch.object(paths, "HOME", self.tmp), \
+                mock.patch.object(leobot, "_stop_if_running") as st:
+            code, _, _ = run("uninstall", "--yes")
+        self.assertEqual(code, 1)
+        self.service.uninstall.assert_not_called()
+        st.assert_not_called()
+
+    def test_uninstall_removes_service(self):
+        with mock.patch.object(leobot.Path, "home", return_value=self.tmp / "fakehome"), \
+                mock.patch.object(leobot, "_stop_if_running"):
+            run("uninstall", "--yes")
+        self.service.uninstall.assert_called_once()
+
+    def test_restore_snapshot_failure_removes_source_copy(self):
+        self.write("a.txt")
+        src = paths.DATA / "inside.tar.gz"
+        with tarfile.open(src, "w:gz"):
+            pass
+        with mock.patch.object(leobot, "_tar_data", side_effect=OSError("disk full")):
+            code, _, _ = run("backup", "--restore", str(src), "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual(list(paths.BACKUPS.glob("restore-source-*")), [])
 
 
 if __name__ == "__main__":
