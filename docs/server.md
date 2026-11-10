@@ -24,7 +24,8 @@ ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < sc
 ```
 
 This creates a `leobot` user, turns on `loginctl enable-linger` for it, and runs the Leo Bot
-installer (`install.sh --no-service --no-app --yes`) as that user, moves any legacy data, then
+installer (`install.sh --no-service --no-app --claude --yes`) as that user, which also installs
+Claude Code for that user with Anthropic's official installer. It moves any legacy data, then
 runs `leobot service install --port 8766 --server`. Leo Bot lands in `~leobot/.leobot`
 (code in `app/`, data in `data/`) and runs as a systemd user unit named `leobot`, which
 restarts on its own and starts at boot. It follows the latest release; set `LEOBOT_CHANNEL=main`

@@ -94,8 +94,9 @@ else
 fi
 
 # No service yet: the old folder's data must move first, while nothing is running.
+# --claude: install Claude Code for the leobot user without asking (--yes alone would skip it).
 as_user env LEOBOT_REPO_URL="$LEOBOT_REPO_URL" LEOBOT_PORT="$LEOBOT_PORT" LEOBOT_DEPLOYMENT=server \
-  bash "$WORK/src/install.sh" --channel "$LEOBOT_CHANNEL" --no-service --no-app --yes
+  bash "$WORK/src/install.sh" --channel "$LEOBOT_CHANNEL" --no-service --no-app --claude --yes
 
 OLD_DIR="$HOME_DIR/leo-bot"
 if [ -d "$OLD_DIR" ]; then

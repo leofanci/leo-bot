@@ -3,11 +3,12 @@
 #
 #   curl -fsSL <repo>/releases/latest/download/install.sh | bash
 #   bash install.sh [--channel stable|main] [--version vX.Y.Z] [--service|--no-service]
-#                   [--no-app] [--yes] [--dry-run]
+#                   [--no-app] [--claude] [--yes] [--dry-run]
 #
 # The same settings as environment variables: LEOBOT_CHANNEL, LEOBOT_VERSION,
-# LEOBOT_SERVICE (1 or 0), LEOBOT_NO_APP=1, LEOBOT_YES=1, LEOBOT_DRY_RUN=1, LEOBOT_HOME
-# (default ~/.leobot), LEOBOT_REPO_URL, LEOBOT_PORT (background service port).
+# LEOBOT_SERVICE (1 or 0), LEOBOT_NO_APP=1, LEOBOT_INSTALL_CLAUDE=1, LEOBOT_YES=1,
+# LEOBOT_DRY_RUN=1, LEOBOT_HOME (default ~/.leobot), LEOBOT_REPO_URL, LEOBOT_PORT
+# (background service port).
 #
 # Everything runs from main(), called on the last line, so a download cut short runs nothing.
 
@@ -75,17 +76,19 @@ usage() {
 Install Leo Bot into ~/.leobot (or LEOBOT_HOME).
 
   install.sh [--channel stable|main] [--version vX.Y.Z] [--service|--no-service]
-             [--no-app] [--yes] [--dry-run]
+             [--no-app] [--claude] [--yes] [--dry-run]
 
   --channel   stable follows releases (default), main follows the latest code
   --version   install this release instead of the newest one
   --service   run Leo Bot as a background service (--no-service: do not)
   --no-app    do not build the Mac app
+  --claude    install Claude Code without asking, when it is missing
   --yes       no questions, take the defaults
   --dry-run   only print what would change
 
 Environment: LEOBOT_CHANNEL, LEOBOT_VERSION, LEOBOT_SERVICE (1 or 0), LEOBOT_NO_APP=1,
-LEOBOT_YES=1, LEOBOT_DRY_RUN=1, LEOBOT_HOME, LEOBOT_REPO_URL, LEOBOT_PORT.
+LEOBOT_INSTALL_CLAUDE=1, LEOBOT_YES=1, LEOBOT_DRY_RUN=1, LEOBOT_HOME, LEOBOT_REPO_URL,
+LEOBOT_PORT.
 EOF_USAGE
 }
 
@@ -99,6 +102,7 @@ parse_args() {
       --service) SERVICE=1 ;;
       --no-service) SERVICE=0 ;;
       --no-app) NO_APP=1 ;;
+      --claude) INSTALL_CLAUDE=1 ;;
       --yes|-y) YES=1 ;;
       --dry-run) DRY_RUN=1 ;;
       -h|--help) usage; exit 0 ;;
@@ -112,6 +116,7 @@ parse_args() {
     [ "$CHANNEL" = stable ] || die "--version only works on the stable channel"
   fi
   case "$SERVICE" in ""|1|0) ;; *) die "LEOBOT_SERVICE must be 1 or 0" ;; esac
+  case "$INSTALL_CLAUDE" in 1|0) ;; *) die "LEOBOT_INSTALL_CLAUDE must be 1 or 0" ;; esac
   if [ -n "$PORT" ] && ! [[ $PORT =~ ^[0-9]+$ ]]; then die "LEOBOT_PORT must be a number"; fi
 }
 
@@ -196,7 +201,7 @@ check_python() {
 check_claude() {
   if command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ]; then return 0; fi
   say "Claude Code is not installed. Bots can also run on an API key (Settings, Engines)."
-  if ask "Install Claude Code now with Anthropic's official installer?" n; then
+  if [ "$INSTALL_CLAUDE" = 1 ] || ask "Install Claude Code now with Anthropic's official installer?" n; then
     if [ "$DRY_RUN" = 1 ]; then
       say "would: curl -fsSL https://claude.ai/install.sh | bash"
     elif ! command -v curl >/dev/null 2>&1; then
@@ -412,11 +417,13 @@ main() {
   PIN="${LEOBOT_VERSION:-}"
   SERVICE="${LEOBOT_SERVICE:-}"
   NO_APP="${LEOBOT_NO_APP:-0}"
+  INSTALL_CLAUDE="${LEOBOT_INSTALL_CLAUDE:-0}"
   YES="${LEOBOT_YES:-0}"
   DRY_RUN="${LEOBOT_DRY_RUN:-0}"
   PORT="${LEOBOT_PORT:-}"
   TAG=""
   WRAPPER_OK=0
+  WRAPPER_DONE=0
   parse_args "$@"
 
   case "$REPO_URL_DEFAULT" in https://*) REPO_URL="${LEOBOT_REPO_URL:-$REPO_URL_DEFAULT}" ;; *) REPO_URL="${LEOBOT_REPO_URL:-}" ;; esac
@@ -447,6 +454,18 @@ main() {
 
   local updated=0
   if [ -e "$HOME_DIR/app/.git" ]; then
+    # A first install cut short after the clone: finish its steps before the update takes over.
+    if [ ! -e "$HOME_DIR/data/.leobot-data" ]; then
+      say "Finishing the setup of $HOME_DIR first."
+      setup_home
+    fi
+    if ! [ -e "$HOME/.local/bin/leobot" ] && ! [ -L "$HOME/.local/bin/leobot" ]; then
+      install_wrapper
+      WRAPPER_DONE=1
+    fi
+    if [ "$OS" = mac ] && [ "$NO_APP" != 1 ] && ! [ -d "$HOME/Applications/LeoBot.app" ]; then
+      build_app
+    fi
     say "Leo Bot is already installed in $HOME_DIR/app: updating it."
     local cmd=(python3 "$HOME_DIR/app/leobot.py" update --yes)
     if [ "$CHANNEL_SET" = 1 ]; then cmd+=(--channel "$CHANNEL"); fi
@@ -460,7 +479,7 @@ main() {
     setup_home
   fi
 
-  install_wrapper
+  [ "$WRAPPER_DONE" = 1 ] || install_wrapper
   add_to_path
   if [ "$updated" = 0 ]; then
     build_app

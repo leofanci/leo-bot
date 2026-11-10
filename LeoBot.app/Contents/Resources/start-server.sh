@@ -14,22 +14,27 @@ TOKEN_FILE="$HOME_DIR/run/auth-token"
 PIDFILE="$HOME_DIR/run/server.pid"
 LOGFILE="$HOME_DIR/logs/server.log"
 
-# Find python3 — probe in order of preference
+# Find python3 3.10 or newer: probe in order of preference, skipping older ones (macOS's own
+# /usr/bin/python3 can be 3.9, which Leo Bot cannot run on).
+py_ok() { "$1" -c 'import sys; sys.exit(sys.version_info < (3, 10))' >/dev/null 2>&1; }
 PYTHON3=""
 for _p in \
     "$HOME/anaconda3/bin/python3" \
     "$HOME/miniconda3/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3" \
     "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3" \
+    "/Library/Frameworks/Python.framework/Versions/3.10/bin/python3" \
     "/opt/homebrew/bin/python3" \
     "/usr/local/bin/python3" \
-    "/usr/bin/python3"; do
-    [ -x "$_p" ] && PYTHON3="$_p" && break
+    "/usr/bin/python3" \
+    "$(command -v python3 2>/dev/null)"; do
+    [ -n "$_p" ] && [ -x "$_p" ] && py_ok "$_p" && PYTHON3="$_p" && break
 done
-[ -z "$PYTHON3" ] && PYTHON3="$(command -v python3 2>/dev/null)"
 
 if [ -z "$PYTHON3" ]; then
-    osascript -e 'display alert "Leo Bot" message "python3 not found. Install from python.org."' >/dev/null 2>&1
+    osascript -e 'display alert "Leo Bot" message "Leo Bot needs Python 3.10 or newer. Install it from python.org."' >/dev/null 2>&1
     echo "NOPYTHON"
     exit 1
 fi

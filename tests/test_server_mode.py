@@ -62,6 +62,15 @@ class Scripts(unittest.TestCase):
         self.assertIn('LEOBOT_REPO="${LEOBOT_REPO:-}"', text)  # old name still works
         self.assertNotIn("cat > /etc/systemd", text)  # no new system unit
 
+    def test_setup_installs_claude_code_and_hints_a_login_shell(self):
+        text = (ROOT / "scripts" / "server-setup.sh").read_text()
+        self.assertIn("--no-service --no-app --claude --yes", text)
+        self.assertIn("sudo -iu $LEOBOT_USER $HOME_DIR/.local/bin/leobot update", text)
+        self.assertNotIn("sudo -u $LEOBOT_USER $HOME_DIR/.local/bin/leobot", text)
+        guide = (ROOT / "docs" / "server.md").read_text()
+        self.assertIn("install.sh --no-service --no-app --claude --yes", guide)
+        self.assertIn("sudo -iu leobot ~leobot/.local/bin/leobot update", guide)
+
     def test_setup_removes_the_old_unit_before_starting_the_new_service(self):
         text = (ROOT / "scripts" / "server-setup.sh").read_text()
         self.assertLess(text.index("systemctl disable --now"), text.index("service install"))

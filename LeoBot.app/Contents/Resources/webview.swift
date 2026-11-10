@@ -13,9 +13,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var window: NSWindow!
     var webView: WKWebView!
     var serverPID: Int32 = 0
-    let port = 8765
+    // The port: the running server's (run/server.pid), else the background service's, else
+    // defaultPort. Read again before every ping, so a server that comes back on another port is found.
+    let defaultPort = 8765
+    private var currentPort = 8765
+    private let portLock = NSLock()
+    var port: Int {
+        get { portLock.lock(); defer { portLock.unlock() }; return currentPort }
+        set { portLock.lock(); currentPort = newValue; portLock.unlock() }
+    }
     // Retry timing: ping every retryInterval; after startGrace of silence (and no
-    // update running) start the server once; give up after totalWait.
+    // update running) start the server once; give up after totalWait of silence with no
+    // update running (the clock starts again while the updater holds its lock).
     let retryInterval: TimeInterval = 2.0
     let startGrace: TimeInterval = 30.0
     let totalWait: TimeInterval = 90.0
@@ -195,6 +204,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     private func runStartScript(_ repo: String) {
         serverPID = 0
+        port = resolvePort()
         guard let script = Bundle.main.path(forResource: "start-server", ofType: "sh") else { return }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/bash")
@@ -214,14 +224,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
     }
 
-    // True once a ping succeeds, polling every retryInterval for up to totalWait.
-    // If nothing answers for startGrace, start the server once, but never while the
-    // updater holds its lock (it stops, backs up and restarts the server itself).
+    // True once a ping succeeds, polling every retryInterval. If nothing answers for
+    // startGrace, start the server once, but never while the updater holds its lock (it
+    // stops, backs up and restarts the server itself). Gives up after totalWait of silence
+    // with no update running: while an update runs the clock starts again, however long it takes.
     private func waitUp(_ repo: String, startAfter: TimeInterval) -> Bool {
-        let begin = Date()
+        var begin = Date()
         var started = false
         while true {
             if ping(repo) { return true }
+            if isUpdating() {
+                begin = Date()
+                Thread.sleep(forTimeInterval: retryInterval)
+                continue
+            }
             let elapsed = Date().timeIntervalSince(begin)
             if elapsed >= totalWait { return false }
             if !started && elapsed >= startAfter && !isUpdating() {
@@ -230,6 +246,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             }
             Thread.sleep(forTimeInterval: retryInterval)
         }
+    }
+
+    // The port to ping: the running server's own record (run/server.pid, while its lock is
+    // held), else the port the background service was installed with, else defaultPort.
+    private func resolvePort() -> Int {
+        if let p = pidFilePort() { return p }
+        if let p = servicePort() { return p }
+        return defaultPort
+    }
+
+    private func validPort(_ v: Any?) -> Int? {
+        guard let n = v as? Int, n > 0, n < 65536 else { return nil }
+        return n
+    }
+
+    // run/server.pid holds {"pid": N, "port": P}; the server keeps an exclusive flock on it
+    // for its whole life, so a file nobody holds is a leftover and is ignored.
+    private func pidFilePort() -> Int? {
+        let path = (homePath() as NSString).appendingPathComponent("run/server.pid")
+        let fd = open(path, O_RDONLY)
+        if fd < 0 { return nil }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 {
+            flock(fd, LOCK_UN)
+            return nil
+        }
+        guard let data = FileManager.default.contents(atPath: path),
+              let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return validPort(rec["port"])
+    }
+
+    // ~/Library/LaunchAgents/leobot.server.plist: ProgramArguments ends with --port P.
+    private func servicePort() -> Int? {
+        let plist = (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/leobot.server.plist")
+        guard let dict = NSDictionary(contentsOfFile: plist),
+              let args = dict["ProgramArguments"] as? [String],
+              let i = args.firstIndex(of: "--port"), i + 1 < args.count else { return nil }
+        return validPort(Int(args[i + 1]))
     }
 
     // True while core/updater.py holds run/update.lock (it takes flock LOCK_EX on it).
@@ -284,6 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     // HMAC-SHA256(token, nonce) for a fresh nonce. Anything else on the port
     // never receives the tokenized login URL.
     private func ping(_ repo: String) -> Bool {
+        port = resolvePort()
         let token = readToken(repo)
         if token.isEmpty { return false }
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -309,14 +364,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return ok
     }
 
-    // The home folder: $LEOBOT_HOME, else ~/.leobot (token, pid lock and log live here).
+    // The home folder: $LEOBOT_HOME, else ~/.leobot (token, pid lock and log live here). Only an
+    // absolute path counts: a relative one would point somewhere else for every process.
     private func homePath() -> String {
-        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], !h.isEmpty { return h }
+        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], h.hasPrefix("/") { return h }
         // Finder/Dock launches carry no environment: build-app.sh --out records a custom home here.
-        if let f = Bundle.main.path(forResource: "leobot-home", ofType: nil),
-           let h = (try? String(contentsOfFile: f, encoding: .utf8))?
-               .trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty { return h }
+        if let h = recordedHome() { return h }
         return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot")
+    }
+
+    private func recordedHome() -> String? {
+        guard let f = Bundle.main.path(forResource: "leobot-home", ofType: nil),
+              let h = (try? String(contentsOfFile: f, encoding: .utf8))?
+                  .trimmingCharacters(in: .whitespacesAndNewlines), h.hasPrefix("/") else { return nil }
+        return h
     }
 
     // A development clone (the bundle sits next to dashboard/server.py) runs its own
@@ -325,10 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let parent = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
         let marker = (parent as NSString).appendingPathComponent("dashboard/server.py")
         if FileManager.default.fileExists(atPath: marker) { return parent }
-        if ProcessInfo.processInfo.environment["LEOBOT_HOME"] != nil || Bundle.main.path(forResource: "leobot-home", ofType: nil) != nil {
-            return (homePath() as NSString).appendingPathComponent("app")
-        }
-        return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot/app")
+        // homePath() is $LEOBOT_HOME, the recorded home, or ~/.leobot: its app/ is the code.
+        return (homePath() as NSString).appendingPathComponent("app")
     }
 
     private func showFailure() {

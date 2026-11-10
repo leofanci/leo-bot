@@ -154,6 +154,72 @@ class InstallScriptTest(unittest.TestCase):
         self.assertNotIn("checkout", r.stdout)
         self.assertNothingInstalled()
 
+    def path_without_claude(self):
+        """PATH with every folder holding a `claude` left out, so the installer sees none."""
+        dirs = [d for d in os.environ["PATH"].split(os.pathsep)
+                if d and not os.path.exists(os.path.join(d, "claude"))]
+        return os.pathsep.join(dirs)
+
+    def test_claude_flag_installs_without_asking(self):
+        url = make_bare_repo(self.tmp)
+        for args, env in ((["--claude"], {}), ([], {"LEOBOT_INSTALL_CLAUDE": "1"})):
+            with self.subTest(args=args, env=env):
+                r = self.run_install("--dry-run", "--yes", *args, LEOBOT_REPO_URL=url,
+                                     PATH=self.path_without_claude(), **env)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                self.assertIn("would: curl -fsSL https://claude.ai/install.sh | bash", r.stdout)
+                self.assertNotIn("Skipped Claude Code", r.stdout)
+                self.assertNothingInstalled()
+
+    def test_without_claude_flag_yes_keeps_the_no_default(self):
+        url = make_bare_repo(self.tmp)
+        r = self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url, PATH=self.path_without_claude())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("claude.ai/install.sh", r.stdout)
+        self.assertIn("Skipped Claude Code", r.stdout)
+
+    def test_bad_install_claude_value_refused(self):
+        r = self.run_install("--dry-run", "--yes", LEOBOT_INSTALL_CLAUDE="yes")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("LEOBOT_INSTALL_CLAUDE", r.stderr)
+
+    def test_half_finished_install_finishes_setup_before_update(self):
+        url = make_bare_repo(self.tmp)
+        (self.home / ".leobot" / "app" / ".git").mkdir(parents=True)
+        r = self.run_install("--dry-run", "--yes", "--no-app", LEOBOT_REPO_URL=url)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = r.stdout
+        update = out.index("update --yes")
+        self.assertLess(out.index("the data marker"), update)
+        self.assertLess(out.index("would: write"), update)
+        self.assertEqual(out.count("would: write"), 1)
+
+    def test_finished_install_goes_straight_to_update(self):
+        url = make_bare_repo(self.tmp)
+        (self.home / ".leobot" / "app" / ".git").mkdir(parents=True)
+        (self.home / ".leobot" / "data").mkdir(parents=True)
+        (self.home / ".leobot" / "data" / ".leobot-data").write_text("{}")
+        bin_dir = self.home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "leobot").write_text(f"#!/bin/sh\n{MARKER}\nexec python3 '/x/app/leobot.py' \"$@\"\n")
+        (self.home / "Applications" / "LeoBot.app").mkdir(parents=True)
+        r = self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        before = r.stdout[:r.stdout.index("update --yes")]
+        self.assertNotIn("the data marker", before)
+        self.assertNotIn("would: write", before)
+        self.assertNotIn("build-app", before)
+
+    @unittest.skipUnless(shutil.which("swiftc"), "no swiftc: the app step is skipped anyway")
+    def test_half_finished_install_on_mac_builds_the_missing_app(self):
+        if os.uname().sysname != "Darwin":
+            self.skipTest("macOS only")
+        url = make_bare_repo(self.tmp)
+        (self.home / ".leobot" / "app" / ".git").mkdir(parents=True)
+        r = self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(r.stdout.index("build-app.sh"), r.stdout.index("update --yes"))
+
     def test_existing_install_hands_to_update(self):
         url = make_bare_repo(self.tmp)
         (self.home / ".leobot" / "app" / ".git").mkdir(parents=True)
