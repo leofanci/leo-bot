@@ -2,10 +2,17 @@
 # Cut a release. Usage: release.sh X.Y.Z [--dry-run]
 set -euo pipefail
 
-ver="${1:-}"
+usage() { echo "usage: release.sh X.Y.Z [--dry-run]" >&2; exit 2; }
+ver=""
 dry=0
-[ "${2:-}" = "--dry-run" ] && dry=1
-[ -n "$ver" ] || { echo "usage: release.sh X.Y.Z [--dry-run]" >&2; exit 2; }
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) dry=1 ;;
+    -*) usage ;;
+    *) [ -z "$ver" ] || usage; ver="$arg" ;;
+  esac
+done
+[ -n "$ver" ] || usage
 [[ "$ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release: $ver is not X.Y.Z" >&2; exit 1; }
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -23,8 +30,22 @@ if [ "$ver" = "$cur" ] || [ "$newest" != "$ver" ]; then
   exit 1
 fi
 
-concl="$(gh run list --branch main --limit 1 --json conclusion --jq '.[0].conclusion')"
-[ "$concl" = "success" ] || { echo "release: latest CI run on main is '$concl', need success" >&2; exit 1; }
+git fetch origin main
+head="$(git rev-parse HEAD)"
+[ "$head" = "$(git rev-parse origin/main)" ] || { echo "release: HEAD is not origin/main" >&2; exit 1; }
+
+concls="$(gh run list --branch main --commit "$head" --json conclusion --jq '.[].conclusion')"
+[ -n "$concls" ] || { echo "release: no CI run found for $head" >&2; exit 1; }
+if [ "$(printf '%s\n' "$concls" | grep -vc '^success$')" != 0 ]; then
+  echo "release: CI runs for $head are not all success" >&2
+  exit 1
+fi
+
+git rev-parse -q --verify "refs/tags/v$ver" >/dev/null && { echo "release: tag v$ver exists locally" >&2; exit 1; }
+if git ls-remote --tags origin "refs/tags/v$ver" | grep -q .; then
+  echo "release: tag v$ver exists on origin" >&2
+  exit 1
+fi
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -42,6 +63,10 @@ if [ "$dry" = 0 ]; then
   git add VERSION
   git commit -m "Release v$ver"
   git tag "v$ver"
-  git push origin main "v$ver"
-  gh release create "v$ver" --generate-notes "$tmp/install.sh#install.sh"
+  git push --atomic origin main "v$ver"
+  if ! gh release create "v$ver" --generate-notes "$tmp/install.sh#install.sh"; then
+    echo "release: tag v$ver is pushed but the GitHub Release failed. Recover with:" >&2
+    echo "  scripts/render-installer.sh /tmp/install.sh && gh release create v$ver --generate-notes /tmp/install.sh#install.sh" >&2
+    exit 1
+  fi
 fi

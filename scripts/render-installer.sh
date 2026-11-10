@@ -18,11 +18,8 @@ case "$origin" in
 esac
 path="${path%/}"
 path="${path%.git}"
-case "$path" in
-  */*/*|""|/*|*/) echo "render-installer: cannot read account/repo from origin" >&2; exit 1 ;;
-  */*) ;;
-  *) echo "render-installer: cannot read account/repo from origin" >&2; exit 1 ;;
-esac
+[[ "$path" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+  || { echo "render-installer: cannot read account/repo from origin" >&2; exit 1; }
 url="https://github.com/${path}.git"
 
 grep -q '^REPO_URL_DEFAULT="__LEOBOT_REPO_URL__"$' "$src" \
