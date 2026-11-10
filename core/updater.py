@@ -26,7 +26,8 @@ from pathlib import Path
 from core import migrations, paths, service, version
 
 CHANNELS = ("stable", "main")
-DEFAULTS = {"channel": "stable", "checked_at": None, "latest": None, "previous_ref": None}
+DEFAULTS = {"channel": "stable", "checked_at": None, "latest": None, "latest_commit": None,
+            "previous_ref": None}
 HEALTH_TIMEOUT = 60  # seconds for the new server to answer with the target version
 POLL = 0.5
 GIT_TIMEOUT = 300
@@ -184,17 +185,62 @@ def release_notes_url(code: "Path | None" = None, tag: "str | None" = None) -> "
     return f"{base}/releases/tag/{tag}" if tag else f"{base}/commits/main"
 
 
-def _remote_latest_tag(code: Path) -> "str | None":
+def _tag_commit_in(ls_remote_output: str, tag: str) -> "str | None":
+    """The commit `tag` points at in `git ls-remote --tags` output: the peeled `^{}` line of an
+    annotated tag, else the tag's own line (a lightweight tag names its commit)."""
+    plain = None
+    for line in (ls_remote_output or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        sha, ref = sha.strip(), ref.strip()
+        if not _SHA.fullmatch(sha):
+            continue
+        if ref == f"refs/tags/{tag}^{{}}":
+            return sha
+        if ref == f"refs/tags/{tag}":
+            plain = sha
+    return plain
+
+
+def _remote_latest(code: Path) -> "tuple[str | None, str | None]":
+    """(highest vX.Y.Z tag on origin, the commit it points at), or (None, None) when offline."""
     r = _git(code, "ls-remote", "--tags", "origin", timeout=REMOTE_TIMEOUT)
-    return version.latest_tag(r.stdout) if r.returncode == 0 else None
+    if r.returncode != 0:
+        return None, None
+    tag = version.latest_tag(r.stdout)
+    return tag, (_tag_commit_in(r.stdout, tag) if tag else None)
+
+
+def _remote_latest_tag(code: Path) -> "str | None":
+    return _remote_latest(code)[0]
+
+
+def _remote_tag(code: Path, tag: str) -> "tuple[bool | None, str | None]":
+    """(found, commit) for one tag on origin; found is None when origin cannot be reached."""
+    r = _git(code, "ls-remote", "--tags", "origin", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}",
+             timeout=REMOTE_TIMEOUT)
+    if r.returncode != 0:
+        return None, None
+    commit = _tag_commit_in(r.stdout, tag)
+    return commit is not None, commit
 
 
 def _remote_has_tag(code: Path, tag: str) -> "bool | None":
     """True/False, or None when origin cannot be reached."""
-    r = _git(code, "ls-remote", "--tags", "origin", f"refs/tags/{tag}", timeout=REMOTE_TIMEOUT)
-    if r.returncode != 0:
-        return None
-    return any(line.split("\t")[-1].strip() == f"refs/tags/{tag}" for line in r.stdout.splitlines())
+    return _remote_tag(code, tag)[0]
+
+
+def stable_update_needed(current: str, head: "str | None", tag: "str | None",
+                         tag_commit: "str | None") -> bool:
+    """Stable runs release tags only. An update is needed when the latest release is newer, or
+    is this same version but HEAD is not its commit (say an untagged main checkout after a
+    switch from the main channel). Never when this checkout is newer than the latest release."""
+    if version.parse(current or "") is None or version.parse(tag or "") is None:
+        return False
+    if version.newer(current, tag):
+        return True
+    if version.newer(tag, current):
+        return False
+    return bool(tag_commit) and tag_commit != head
 
 
 def _remote_main(code: Path) -> "str | None":
@@ -224,6 +270,7 @@ def check(code: "Path | None" = None) -> dict:
     channel = settings()["channel"]
     current = _version_file(code)
     res = {"current": current, "latest": None, "available": False, "channel": channel, "notes_url": None}
+    latest_commit = None  # stable: the commit of the latest tag; main: `latest` is itself a commit
     try:
         if origin_problem(code) is None:
             if channel == "main":
@@ -232,13 +279,15 @@ def check(code: "Path | None" = None) -> dict:
                     res.update(latest=sha, available=bool(head) and sha != head,
                                notes_url=release_notes_url(code))
             else:
-                tag = _remote_latest_tag(code)
+                tag, tag_commit = _remote_latest(code)
                 if tag:
-                    res.update(latest=tag, available=version.newer(current, tag),
+                    res.update(latest=tag, available=stable_update_needed(current, _head(code), tag, tag_commit),
                                notes_url=release_notes_url(code, tag))
+                    latest_commit = tag_commit
         upd = {"checked_at": _now()}
         if res["latest"] is not None:
             upd["latest"] = res["latest"]
+            upd["latest_commit"] = latest_commit
         save_settings(upd)
     except OSError:
         pass
@@ -331,9 +380,20 @@ def _stop_server(cli):
     if _service_installed(cli):
         info = cli.status_info()
         if cli.cmd_stop() != 0:
-            raise SystemExit("Could not stop Leo Bot. Nothing was changed.")
+            _resume_after_failed_stop(cli, info)
+            raise SystemExit("The background service could not be stopped (see the message above), so the "
+                             "update did not start. Nothing was changed.")
         return (info.get("port") or cli.DEFAULT_PORT) if info.get("running") else None
     return cli._stop_if_running()
+
+
+def _resume_after_failed_stop(cli, before: dict) -> None:
+    """A stop that failed half way can leave the server down: start it again when it ran before."""
+    try:
+        if before.get("running") and not cli.status_info().get("running"):
+            cli._launch(before.get("port") or cli.DEFAULT_PORT)
+    except Exception as e:  # noqa: BLE001
+        _log(f"Could not start Leo Bot again ({e}). Run: leobot start", err=True)
 
 
 def _wait_healthy(cli, port, want, proc=None) -> bool:
@@ -485,22 +545,22 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
         if not tag:
             _log(f"{target!r} is not a release version like v1.2.3.", err=True)
             return 1
-        found = _remote_has_tag(code, tag)
+        found, tag_commit = _remote_tag(code, tag)
         if found is None:
             _log("Could not reach origin to look for that version. Nothing was changed.", err=True)
             return 1
         if not found:
             _log(f"There is no release {tag}. Nothing was changed.", err=True)
             return 1
-        if version.parse(tag) == version.parse(current):
+        if tag_commit == head:
             _log(f"Leo Bot is up to date ({current}).")
             return 0
     elif channel == "stable":
-        tag = _remote_latest_tag(code)
+        tag, tag_commit = _remote_latest(code)
         if not tag:
             _log("Could not reach origin to check for updates. Nothing was changed.", err=True)
             return 1
-        if not version.newer(current, tag):
+        if not stable_update_needed(current, head, tag, tag_commit):
             _log(f"Leo Bot is up to date ({current}).")
             return 0
     else:
@@ -536,6 +596,9 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
     if not commit:
         _log(f"The download did not contain {label}. Leo Bot stays on {current}.", err=True)
         return 1
+    if commit == head:  # the release names the commit already checked out
+        _log(f"Leo Bot is up to date ({current}).")
+        return 0
     want = _version_at(code, commit)
     if not want:
         _log(f"{label} has no VERSION file. Leo Bot stays on {current}.", err=True)
@@ -884,7 +947,7 @@ def spawn_detached() -> None:
                 f"--setenv=LEOBOT_HOME={home}",
                 f"--property=StandardOutput=append:{log}", f"--property=StandardError=append:{log}",
                 *cmd]
-        _must(argv, "systemd-run")
+        _must(argv, "systemd-run", env=service.user_env())
     elif kind == "launchd":
         _run(["launchctl", "remove", JOB])  # a finished job from last time; not there is fine
         # A submitted job is restarted when it exits, so the job removes itself when done.
@@ -902,14 +965,14 @@ def spawn_detached() -> None:
             os.close(fd)
 
 
-def _run(argv) -> subprocess.CompletedProcess:
+def _run(argv, env=None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(argv, 127, "", str(e))
 
 
-def _must(argv, what) -> None:
-    r = _run(argv)
+def _must(argv, what, env=None) -> None:
+    r = _run(argv, env)
     if r.returncode != 0:
         raise RuntimeError(f"{what} failed: {_why(r)}")

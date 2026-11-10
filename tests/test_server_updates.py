@@ -44,6 +44,18 @@ class UpdateRoutes(sp.Base):
             _, out, _ = request("GET", "/api/update", owner=True)
         self.assertFalse(out["available"])
 
+    def test_stable_same_version_on_another_commit_is_available(self):
+        cfg = {"channel": "stable", "latest": "v0.1.0", "latest_commit": "b" * 40}
+        server._HEAD_CACHE[:] = ["a" * 40]
+        self.addCleanup(server._HEAD_CACHE.clear)
+        with mock.patch.object(updater, "settings", return_value=cfg):
+            _, out, _ = request("GET", "/api/update", owner=True)
+        self.assertTrue(out["available"])
+        server._HEAD_CACHE[:] = ["b" * 40]
+        with mock.patch.object(updater, "settings", return_value=cfg):
+            _, out, _ = request("GET", "/api/update", owner=True)
+        self.assertFalse(out["available"])
+
     def test_updating_follows_the_updater_lock(self):
         with mock.patch.object(updater, "is_updating", return_value=True):
             _, out, _ = request("GET", "/api/update", owner=True)

@@ -13,6 +13,7 @@ from pathlib import Path
 from core import paths
 
 LABEL = "leobot.server"
+_RUNTIME_ROOT = "/run/user"  # where logind keeps each user's runtime folder (and session bus)
 UNIT = "leobot"
 DEFAULT_PORT = 8765
 
@@ -87,9 +88,25 @@ def systemd_unit(python: str, code: Path, port: int, home: Path, server: bool, h
     return "\n".join(lines)
 
 
+def user_env(env=None, uid=None) -> dict:
+    """The environment for `systemctl --user` and `systemd-run --user`. A `sudo -u` or `runuser`
+    shell has no XDG_RUNTIME_DIR, so systemctl cannot reach the user manager: default it to
+    /run/user/<uid>, and the session bus inside it, when that folder exists."""
+    env = dict(os.environ if env is None else env)
+    uid = os.getuid() if uid is None else uid
+    runtime = env.get("XDG_RUNTIME_DIR") or ""
+    if not runtime:
+        candidate = os.path.join(_RUNTIME_ROOT, str(uid))
+        if os.path.isdir(candidate):
+            env["XDG_RUNTIME_DIR"] = runtime = candidate
+    if runtime and not env.get("DBUS_SESSION_BUS_ADDRESS") and os.path.isdir(runtime):
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={runtime}/bus"
+    return env
+
+
 def _run(argv):
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=60)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=60, env=user_env())
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(argv, 127, "", str(e))
 
@@ -193,12 +210,16 @@ def install(port: int = DEFAULT_PORT, server: bool = False) -> str:
 
 
 def stop() -> None:
-    """Stop so the manager does not respawn it. launchd: unload (the file stays)."""
+    """Stop so the manager does not respawn it. launchd: unload (the file stays). Raises
+    RuntimeError when the service is still there afterwards (say systemctl could not reach the
+    user manager), so nobody goes on as if it were stopped while Restart=always brings it back."""
     kind = _kind()
     if kind == "launchd":
-        _run(["launchctl", "bootout", _target()])  # not loaded is fine
+        r = _run(["launchctl", "bootout", _target()])
+        if r.returncode != 0 and _run(["launchctl", "print", _target()]).returncode == 0:
+            _check(r, "launchctl bootout")  # still loaded; not loaded at all is fine
     elif kind == "systemd":
-        _run(_ctl("stop", UNIT))
+        _check(_run(_ctl("stop", UNIT)), "systemctl --user stop")
 
 
 def start() -> None:

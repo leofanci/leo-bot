@@ -765,6 +765,10 @@ def cmd_service(args) -> int:
 def cmd_update(args) -> int:
     from core import updater
     if args.channel:
+        reason = updater.refuse_reason(paths.CODE)  # a refused update must not switch the channel
+        if reason:
+            print(reason, file=sys.stderr)
+            return 1
         try:
             updater.save_settings({"channel": args.channel})
         except OSError as e:

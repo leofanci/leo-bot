@@ -342,6 +342,59 @@ class ApplyTests(UpdaterBase):
         self.assertEqual(self.head(), git(self.work, "rev-parse", "HEAD"))
         self.assertTrue(self.pre_backups()[0].startswith("pre-main-"))
 
+    def untagged_main_at(self, ver):
+        """The app on an untagged origin/main commit whose VERSION is `ver` (a main-channel
+        install that switched to stable)."""
+        (self.work / "VERSION").write_text(ver + "\n")
+        (self.work / "NOTES.md").write_text(f"after the release, still {ver}\n")
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-q", "-m", f"untagged {ver}")
+        git(self.work, "push", "-q", self.origin.as_uri(), "main")
+        git(self.app, "fetch", "-q", "origin", "+refs/heads/main:refs/remotes/origin/main")
+        git(self.app, "checkout", "-q", "--detach", "origin/main")
+        return self.head()
+
+    def test_stable_same_version_on_untagged_main_checks_out_the_tag(self):
+        main = self.untagged_main_at("0.2.0")
+        self.assertNotEqual(main, self.sha("v0.2.0"))
+        self.assertTrue(updater.check()["available"])
+        self.assertEqual(updater.settings()["latest_commit"], self.sha("v0.2.0"))
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+        self.assertFalse(updater.check()["available"])
+
+    def test_stable_never_moves_back_from_a_newer_main(self):
+        main = self.untagged_main_at("0.3.0")
+        self.assertFalse(updater.check()["available"])
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("up to date", out)
+        self.assertEqual(self.head(), main)
+        self.assertEqual(self.server.stops, 0)
+
+    def test_explicit_same_version_on_another_commit_checks_out_the_tag(self):
+        self.untagged_main_at("0.2.0")
+        rc, out = self.call(updater.apply, "v0.2.0")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+
+    def test_explicit_same_version_on_its_commit_is_up_to_date(self):
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        rc, out = self.call(updater.apply, "v0.2.0")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("up to date", out)
+        self.assertEqual(self.server.stops, 0)
+
+    def test_stable_update_needed_rules(self):
+        a, b = "a" * 40, "b" * 40
+        self.assertTrue(updater.stable_update_needed("0.1.0", a, "v0.2.0", b))
+        self.assertTrue(updater.stable_update_needed("0.2.0", a, "v0.2.0", b))
+        self.assertFalse(updater.stable_update_needed("0.2.0", a, "v0.2.0", a))
+        self.assertFalse(updater.stable_update_needed("0.3.0", a, "v0.2.0", b))
+        self.assertFalse(updater.stable_update_needed("0.2.0", a, a, None))  # a main sha cached as latest
+        self.assertFalse(updater.stable_update_needed("0.2.0", a, "v0.2.0", None))
+
     def test_explicit_version(self):
         git(self.app, "checkout", "-q", "--detach", "v0.2.0")
         rc, out = self.call(updater.apply, "v0.1.0")
@@ -528,6 +581,28 @@ class ApplyTests(UpdaterBase):
         leobot._stop_if_running.side_effect = SystemExit("Could not stop Leo Bot. Nothing was changed.")
         rc, out = self.call(updater.apply)
         self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+
+    def test_service_that_cannot_be_stopped_stops_the_update(self):
+        self.leobot_service.installed.return_value = True
+        self.leobot_service.stop.side_effect = RuntimeError("systemctl --user stop failed: Failed to connect to bus")
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertIn("could not be stopped", out)
+        self.assertIn("Failed to connect to bus", out)
+        self.assertEqual(self.pre_backups(), [])
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+        self.assertIsNone(updater.settings()["previous_ref"])
+
+    def test_server_down_after_a_failed_service_stop_is_started_again(self):
+        self.leobot_service.installed.return_value = True
+        self.server.running = False
+        with mock.patch.object(leobot, "status_info",
+                               side_effect=[{"running": True, "port": 8799}, {"running": False, "port": None}]), \
+                mock.patch.object(leobot, "cmd_stop", return_value=1):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.server.launches, [(8799, "0.1.0")])
         self.assertEqual(self.head(), self.sha("v0.1.0"))
 
     def test_failed_health_and_unstoppable_server_changes_nothing_more(self):
@@ -812,6 +887,15 @@ class SpawnTests(UpdaterBase):
         self.assertIn(f"--setenv=LEOBOT_HOME={paths.HOME}", argv)
         self.assertEqual(argv[-4:], self.argv_tail())
 
+    def test_spawn_detached_systemd_run_gets_the_user_bus(self):
+        self.service.installed.return_value = True
+        self.service.kind.return_value = "systemd"
+        self.service.user_env.return_value = {"XDG_RUNTIME_DIR": "/run/user/1001"}
+        with mock.patch.object(updater.subprocess, "run",
+                               return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+            updater.spawn_detached()
+        self.assertEqual(run.call_args[1]["env"], {"XDG_RUNTIME_DIR": "/run/user/1001"})
+
     def test_spawn_detached_macos_uses_launchctl_submit(self):
         self.service.installed.return_value = True
         self.service.kind.return_value = "launchd"
@@ -923,6 +1007,18 @@ class CliTests(UpdaterBase):
         self.assertEqual(rc, 0)
         self.assertEqual(updater.settings()["channel"], "main")
         self.assertEqual(apply.call_args[1]["channel"], "main")
+
+    def test_cli_channel_not_saved_when_the_update_is_refused(self):
+        with mock.patch.object(paths, "is_installed", return_value=False):
+            rc, out = self.run_cli("--channel", "main", "--yes")
+        self.assertEqual(rc, 1)
+        self.assertIn("development checkout", out)
+        self.assertEqual(updater.settings()["channel"], "stable")
+        (self.app / "README.md").write_text("local edit\n")
+        rc, out = self.run_cli("--channel", "main", "--check")
+        self.assertEqual(rc, 1)
+        self.assertIn("local changes", out)
+        self.assertEqual(updater.settings()["channel"], "stable")
 
     def test_cli_version_and_rollback_routes(self):
         with mock.patch.object(updater, "apply", return_value=0) as apply:

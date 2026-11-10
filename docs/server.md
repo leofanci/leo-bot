@@ -98,11 +98,13 @@ come back to the shared workspace. See [Runners](runners.md).
 From Settings in Leo Bot (the update button), or on the server:
 
 ```sh
-sudo -u leobot ~leobot/.local/bin/leobot update
+sudo -iu leobot ~leobot/.local/bin/leobot update
 ```
 
-It backs up your data, moves to the latest release and restarts the service. Running the setup
-script again does the same.
+`-i` gives the command the `leobot` user's own home folder. Leo Bot finds that user's service
+manager by itself (it uses `/run/user/<uid>`, which `enable-linger` keeps), and if the service
+cannot be stopped the update stops before changing anything and says why. It backs up your data,
+moves to the latest release and restarts the service. Running the setup script again does the same.
 
 ## Managing the service
 

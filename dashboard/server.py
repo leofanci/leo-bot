@@ -351,7 +351,10 @@ def _update_view() -> dict:
             available = bool(head) and latest != head
             notes = updater.release_notes_url()
         else:
-            available = version.newer(RUNNING_VERSION, latest)
+            # Same version but another commit (an untagged main checkout) still needs the tag.
+            latest_commit = cfg.get("latest_commit")
+            head = _code_head() if latest_commit and not version.newer(RUNNING_VERSION, latest) else None
+            available = updater.stable_update_needed(RUNNING_VERSION, head, latest, latest_commit)
             notes = updater.release_notes_url(tag=latest)
     return {"installed": installed, "current": RUNNING_VERSION, "latest": latest, "available": bool(available),
             "notes_url": notes, "updating": bool(_update_in_flight()),

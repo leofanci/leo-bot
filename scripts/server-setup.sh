@@ -102,7 +102,7 @@ if [ -d "$OLD_DIR" ]; then
   as_user python3 "$LEOBOT_CLI" stop >/dev/null 2>&1 || true
   if ! as_user python3 "$LEOBOT_CLI" move-data --from "$OLD_DIR"; then
     echo "Old data in $OLD_DIR was not moved. Fix that first, then run this script again:" >&2
-    echo "  sudo -u $LEOBOT_USER $HOME_DIR/.local/bin/leobot doctor" >&2
+    echo "  sudo -iu $LEOBOT_USER $HOME_DIR/.local/bin/leobot doctor" >&2
     exit 1
   fi
 fi
@@ -115,7 +115,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 if [ -z "$up" ]; then
-  echo "Leo Bot did not start. See why with: sudo -u $LEOBOT_USER $HOME_DIR/.local/bin/leobot doctor" >&2
+  echo "Leo Bot did not start. See why with: sudo -iu $LEOBOT_USER $HOME_DIR/.local/bin/leobot doctor" >&2
   exit 1
 fi
 
@@ -131,7 +131,7 @@ echo "  3. To move your data from your Mac:"
 echo "       scripts/sync-to-server.sh root@THIS_SERVER"
 echo "  4. To invite people, add a tunnel: docs/sharing.md"
 echo "  5. To update later, from the Leo Bot Settings screen, or on this server:"
-echo "       sudo -u $LEOBOT_USER $HOME_DIR/.local/bin/leobot update"
+echo "       sudo -iu $LEOBOT_USER $HOME_DIR/.local/bin/leobot update"
 if [ -d "$OLD_DIR" ]; then
   echo
   echo "The old folder $OLD_DIR is left in place. Once you have checked your data,"

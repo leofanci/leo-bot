@@ -218,6 +218,66 @@ class LinuxTests(FakeHome):
         self.assertTrue(any("disable" in a for a in self.argvs()))
 
 
+class UserEnvTests(unittest.TestCase):
+    """`sudo -u leobot leobot update` has no XDG_RUNTIME_DIR: systemctl --user must still find
+    the user manager."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="leobot-xdg-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        p = mock.patch.object(service, "_RUNTIME_ROOT", str(self.tmp))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_defaults_runtime_dir_and_bus_when_the_folder_exists(self):
+        (self.tmp / "1001").mkdir()
+        env = service.user_env({"PATH": "/bin"}, uid=1001)
+        self.assertEqual(env["XDG_RUNTIME_DIR"], str(self.tmp / "1001"))
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], f"unix:path={self.tmp / '1001'}/bus")
+        self.assertEqual(env["PATH"], "/bin")
+
+    def test_keeps_what_is_set(self):
+        (self.tmp / "1001").mkdir()
+        env = service.user_env({"XDG_RUNTIME_DIR": str(self.tmp), "DBUS_SESSION_BUS_ADDRESS": "x"}, uid=1001)
+        self.assertEqual(env["XDG_RUNTIME_DIR"], str(self.tmp))
+        self.assertEqual(env["DBUS_SESSION_BUS_ADDRESS"], "x")
+
+    def test_no_folder_no_default(self):
+        env = service.user_env({}, uid=1001)
+        self.assertNotIn("XDG_RUNTIME_DIR", env)
+        self.assertNotIn("DBUS_SESSION_BUS_ADDRESS", env)
+
+    def test_every_service_command_gets_it(self):
+        (self.tmp / str(os.getuid())).mkdir()
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("core.service.subprocess.run", return_value=done()) as run:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+            os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+            service._run(["systemctl", "--user", "stop", "leobot"])
+        self.assertEqual(run.call_args[1]["env"]["XDG_RUNTIME_DIR"], str(self.tmp / str(os.getuid())))
+
+
+class StopFailureTests(FakeHome):
+    def test_systemd_stop_failure_raises(self):
+        self.system("Linux")
+        self.run_.side_effect = lambda argv, **k: (done(1, "", "Failed to connect to bus") if "stop" in argv
+                                                   else done())
+        with self.assertRaises(RuntimeError) as cm:
+            service.stop()
+        self.assertIn("Failed to connect to bus", str(cm.exception))
+
+    def test_launchd_bootout_failure_raises_only_while_still_loaded(self):
+        self.system("Darwin")
+        loaded = {"yes": True}
+        self.run_.side_effect = lambda argv, **k: (
+            done(5, "", "Boot-out failed") if "bootout" in argv
+            else done(0 if loaded["yes"] else 113) if "print" in argv else done())
+        with self.assertRaises(RuntimeError):
+            service.stop()
+        loaded["yes"] = False  # not loaded: already stopped, which is fine
+        service.stop()
+
+
 class UnsupportedTests(FakeHome):
     def test_other_platform(self):
         self.system("Windows")
