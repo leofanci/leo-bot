@@ -585,7 +585,19 @@ class ApplyTests(UpdaterBase):
         self.assertEqual(self.server.launches[-1][1], "0.2.0")  # nothing started after the stop
         self.assertFalse(paths.DATA.exists())
         aside = next(paths.HOME.glob("data.pre-restore-*"))
-        self.assertIn(f"mv {aside} {paths.DATA}", out)
+        put_back = f"&& mv {aside} {paths.DATA}"
+        self.assertIn(put_back, out)
+        self.assertNotIn("rm -rf", out)
+        pre = paths.BACKUPS / self.pre_backups()[0]
+        restore = f"leobot backup --restore {pre} --yes"
+        self.assertLess(out.index(put_back), out.index(restore))  # restore only after the put-back
+
+    def test_manual_commands_quote_paths(self):
+        code = Path("/tmp/a folder/app")
+        self.assertEqual(updater._checkout_cmd(code, "abc"),
+                         "git -C '/tmp/a folder/app' checkout --force --detach abc")
+        self.assertEqual(updater._restore_cmd(Path("/tmp/my backups/pre-x.tar.gz")),
+                         "leobot backup --restore '/tmp/my backups/pre-x.tar.gz' --yes")
 
     def test_concurrent_update_refused(self):
         paths.RUN.mkdir(parents=True, exist_ok=True)
@@ -774,7 +786,8 @@ class RollbackTests(UpdaterBase):
         self.assertFalse(self.server.running)
         self.assertEqual(self.head(), self.sha("v0.2.0"))
         aside = next(paths.HOME.glob("data.pre-restore-*"))
-        self.assertIn(f"mv {aside} {paths.DATA}", out)
+        self.assertIn(f"&& mv {aside} {paths.DATA}", out)
+        self.assertNotIn("rm -rf", out)
 
     def test_rollback_nothing_to_go_back_to(self):
         rc, out = self.call(updater.rollback, True)

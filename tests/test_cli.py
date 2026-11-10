@@ -252,8 +252,31 @@ class BackupTests(CliBase):
         start.assert_not_called()  # it would create an empty data folder
         aside = next(paths.HOME.glob("data.pre-restore-*"))
         self.assertEqual((aside / "keep.md").read_text(), "keep")
-        self.assertIn(f"mv {aside} {paths.DATA}", err)
+        self.assertIn(f"&& mv {aside} {paths.DATA}", err)
+        self.assertNotIn("rm -rf", err)
         self.assertIn("not started", err)
+
+    def test_put_back_command_moves_partial_aside_and_restores(self):
+        import subprocess
+        base = self.tmp / "with space"
+        base.mkdir()
+        data, aside = base / "data", base / "data.pre-restore-1"
+        (aside / "keep.md").parent.mkdir()
+        (aside / "keep.md").write_text("keep")
+        data.mkdir()
+        (data / "half.md").write_text("half")
+        with mock.patch.object(paths, "DATA", data):
+            cmd = leobot._put_back_command(aside)
+            subprocess.run(["/bin/sh", "-c", cmd], check=True)
+            self.assertEqual((data / "keep.md").read_text(), "keep")
+            self.assertFalse(aside.exists())
+            partial = [p for p in base.iterdir() if p.name.startswith("data.partial-")]
+            self.assertEqual(len(partial), 1)
+            self.assertEqual((partial[0] / "half.md").read_text(), "half")  # moved, never deleted
+            shutil.rmtree(data)
+            aside.mkdir()
+            subprocess.run(["/bin/sh", "-c", leobot._put_back_command(aside)], check=True)  # no DATA
+            self.assertTrue(data.is_dir())
 
     def test_restore_midway_failure_rolls_back(self):
         self.write("keep.md", "keep")

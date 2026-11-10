@@ -562,8 +562,11 @@ class RestoreFailed(Exception):
 
 
 def _put_back_command(aside: Path) -> str:
+    """Shell command that moves the set-aside data folder back. Whatever is at DATA (a
+    half-extracted folder) is moved out of the way, never deleted."""
     d = shlex.quote(str(paths.DATA))
-    return f"rm -rf {d} && mv {shlex.quote(str(aside))} {d}"
+    partial = shlex.quote(f"{paths.DATA}.partial-{_stamp()}")
+    return f"{{ [ ! -e {d} ] || mv {d} {partial}; }} && mv {shlex.quote(str(aside))} {d}"
 
 
 def _replace_data(src: Path, snap_path: Path) -> Path:

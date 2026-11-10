@@ -602,6 +602,18 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
     return 0
 
 
+def _q(path) -> str:
+    return shlex.quote(str(path))
+
+
+def _checkout_cmd(code: Path, head: str) -> str:
+    return f"git -C {_q(code)} checkout --force --detach {_q(head)}"
+
+
+def _restore_cmd(archive: Path) -> str:
+    return f"leobot backup --restore {_q(archive)} --yes"
+
+
 def _restore_prev(old_prev) -> None:
     """Put back the previous_ref from before an update or rollback that did not happen."""
     try:
@@ -633,23 +645,22 @@ def _recover(cli, code, *, label, head, current, pre, marker_before, port, proc,
             failed = cli._replace_data(pre, paths.BACKUPS / f"failed-{label}-{_stamp()}.tar.gz")
         except cli.RestoreFailed as e:
             # The data stays in the newer format, so the older code must not open it.
+            # previous_ref is left at the old version on purpose: the target stays checked out,
+            # so `leobot update --rollback` must still find the version to go back to.
             _log(f"{e}", err=True)
-            if not e.data_back:
-                _log(f"Leo Bot is stopped and stays on {label}. First put your data back with: "
-                     f"{cli._put_back_command(e.aside)}", err=True)
+            steps = [cli._put_back_command(e.aside)] if not e.data_back else []
+            steps += [_restore_cmd(pre), _checkout_cmd(code, head), "leobot start"]
             _log(f"Leo Bot is stopped and stays on {label}, so the older version never opens the "
-                 f"newer data. To go back by hand, run: leobot backup --restore {pre} --yes ; then: "
-                 f"git -C {code} checkout --force --detach {head} ; then: leobot start", err=True)
+                 f"newer data. To go back by hand, run in order: {' ; then: '.join(steps)}", err=True)
             _log(f"Backup from before the update: {pre}", err=True)
             return 1
     if not _checkout_back(code, head):
         if failed:
             _log(f"Leo Bot is stopped: your data is back to how it was before the update, but the "
-                 f"newer code is still checked out. Run: git -C {code} checkout --force --detach "
-                 f"{head} ; then: leobot start", err=True)
-        else:
-            _log(f"Leo Bot is stopped. Run: git -C {code} checkout --force --detach {head} ; "
+                 f"newer code is still checked out. Run: {_checkout_cmd(code, head)} ; "
                  f"then: leobot start", err=True)
+        else:
+            _log(f"Leo Bot is stopped. Run: {_checkout_cmd(code, head)} ; then: leobot start", err=True)
         _log(f"Backup from before the update: {pre}", err=True)
         if failed:
             _log(f"Data at the time of the failed update: {failed}", err=True)
@@ -817,8 +828,8 @@ def _rollback(cli, code: Path, yes: bool) -> int:
     _log(f"Leo Bot {old} did not start (see {paths.SERVER_LOG}). Going back to {current}.", err=True)
     if not _stop(cli, proc):
         _log(f"Could not stop Leo Bot {old}, so nothing else was changed. Stop it, then run: "
-             f"git -C {code} checkout --force --detach {head}"
-             + (f" ; then: leobot backup --restore {snap} --yes" if snap else "")
+             f"{_checkout_cmd(code, head)}"
+             + (f" ; then: {_restore_cmd(snap)}" if snap else "")
              + " ; then: leobot start", err=True)
         return 1
     if snap:
@@ -830,7 +841,7 @@ def _rollback(cli, code: Path, yes: bool) -> int:
             if not e.data_back:
                 return _back_to_current(start=False, put_back=e.aside, **back)
             _log(f"Your data from {current} could not be put back; it is saved in {snap}. Restore "
-                 f"it with: leobot backup --restore {snap} --yes", err=True)
+                 f"it with: {_restore_cmd(snap)}", err=True)
     return _back_to_current(start=True, **back)
 
 
@@ -840,7 +851,7 @@ def _back_to_current(*, cli, code: Path, head: str, current: str, port, old_prev
     to, start it. `put_back`: DATA is missing and the old folder is there; never start then."""
     _restore_prev(old_prev)
     if not _checkout_back(code, head):
-        _log(f"Leo Bot is stopped. Run: git -C {code} checkout --force --detach {head}"
+        _log(f"Leo Bot is stopped. Run: {_checkout_cmd(code, head)}"
              + (f" ; then: {cli._put_back_command(put_back)}" if put_back else "")
              + " ; then: leobot start", err=True)
         return 1
