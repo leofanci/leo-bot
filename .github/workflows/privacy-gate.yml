@@ -32,3 +32,47 @@ jobs:
 
       - name: Reject private data and unsafe boundaries
         run: python -m unittest tests.test_no_usage_data tests.test_security_boundaries
+
+  install-script:
+    name: install-script
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+
+      - name: Shellcheck
+        run: |
+          command -v shellcheck >/dev/null || sudo apt-get install -y shellcheck
+          shellcheck --version
+          shellcheck install.sh scripts/*.sh
+
+      - name: Installer dry run in a temp HOME with a space
+        run: |
+          set -eu
+          tmp="$(mktemp -d)"
+          home="$tmp/home dir"
+          mkdir "$home"
+          git -c init.defaultBranch=main init -q "$tmp/work"
+          echo 0.1.0 > "$tmp/work/VERSION"
+          git -C "$tmp/work" add VERSION
+          git -C "$tmp/work" -c user.name=ci -c user.email=ci@example.com commit -q -m first
+          git -C "$tmp/work" tag v0.1.0
+          git clone -q --bare "$tmp/work" "$tmp/repo.git"
+          env -u LEOBOT_HOME HOME="$home" LEOBOT_REPO_URL="file://$tmp/repo.git" \
+            bash install.sh --dry-run --yes < /dev/null | tee "$tmp/out"
+          grep -q 'would: git clone' "$tmp/out"
+          grep -q 'refs/tags/v0.1.0' "$tmp/out"
+          test -z "$(ls -A "$home")"
+
+      - name: Installer tests
+        run: python -m unittest tests.test_install_script -v
