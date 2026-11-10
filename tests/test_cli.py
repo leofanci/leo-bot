@@ -13,6 +13,8 @@ from unittest import mock
 import leobot
 from core import datadir, migrations, paths, version
 
+REAL_REINDEX = leobot._reindex  # CliBase replaces it with a mock
+
 
 def run(*argv):
     out, err = io.StringIO(), io.StringIO()
@@ -105,6 +107,40 @@ class BasicTests(CliBase):
         self.assertTrue(popen.call_args[1]["start_new_session"])
         self.assertIn("9123", out)
         self.assertNotIn("token", out)
+
+    def test_spawn_and_reindex_pass_the_absolute_home(self):
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        with mock.patch.dict(os.environ, {"LEOBOT_HOME": "relative/home"}), \
+                mock.patch.object(leobot.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(leobot, "_proof_ok", return_value=True):
+            run("start", "--port", "9124")
+        self.assertEqual(popen.call_args[1]["env"]["LEOBOT_HOME"], str(paths.HOME))
+        with mock.patch.dict(os.environ, {"LEOBOT_HOME": "relative/home"}), \
+                mock.patch.object(leobot.subprocess, "run") as sub:
+            REAL_REINDEX()
+        self.assertEqual(sub.call_args[1]["env"]["LEOBOT_HOME"], str(paths.HOME))
+        self.assertTrue(paths.HOME.is_absolute())
+
+    def test_open_on_linux(self):
+        with mock.patch.object(leobot, "status_info", return_value={"running": True, "port": 8790}), \
+                mock.patch.object(leobot, "_token", return_value="tok"), \
+                mock.patch.object(leobot.sys, "platform", "linux"):
+            with mock.patch.dict(os.environ, {"DISPLAY": ":0"}), \
+                    mock.patch("webbrowser.open", return_value=True) as wb:
+                code, out, _ = run("open")
+            self.assertEqual(code, 0)
+            wb.assert_called_once_with("http://127.0.0.1:8790/?token=tok")
+            self.assertEqual(out, "")
+            with mock.patch.dict(os.environ, {"WAYLAND_DISPLAY": "wayland-0"}), \
+                    mock.patch("webbrowser.open", return_value=False):
+                _, out, _ = run("open")
+            self.assertIn("http://127.0.0.1:8790/?token=tok", out)  # no browser found: the link
+            env = {k: v for k, v in os.environ.items() if k not in ("DISPLAY", "WAYLAND_DISPLAY")}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch("webbrowser.open") as wb:
+                _, out, _ = run("open")
+            wb.assert_not_called()
+            self.assertIn("http://127.0.0.1:8790/?token=tok", out)
 
     def test_start_reports_server_exit(self):
         proc = mock.Mock()

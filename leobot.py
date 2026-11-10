@@ -165,7 +165,13 @@ def _spawn(port):
         return subprocess.Popen([sys.executable, str(paths.CODE / "dashboard" / "server.py"),
                                  "--port", str(port)],
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                cwd=str(paths.CODE), start_new_session=True)
+                                cwd=str(paths.CODE), start_new_session=True, env=_child_env())
+
+
+def _child_env() -> dict:
+    """The environment for a server or indexer this command starts: the same home folder as
+    this process, spelled out (absolute), whatever the shell's LEOBOT_HOME said."""
+    return {**os.environ, "LEOBOT_HOME": str(paths.HOME)}
 
 
 def _launch(port):
@@ -284,7 +290,16 @@ def cmd_open(args=None) -> int:
         if r.returncode != 0:
             print("Could not open Leo Bot. Try: leobot status", file=sys.stderr)
             return 1
-    else:
+    elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):  # a Linux desktop
+        import webbrowser
+        url = _login_url(port)
+        try:
+            opened = webbrowser.open(url)
+        except Exception:  # noqa: BLE001
+            opened = False
+        if not opened:
+            print(url)
+    else:  # no screen (a server): the link to open from a browser elsewhere
         print(_login_url(port))
     return 0
 
@@ -686,7 +701,7 @@ def _replace_data(src: Path, snap_path: Path) -> Path:
 
 def _reindex() -> None:
     subprocess.run([sys.executable, str(paths.CODE / "index.py"), str(paths.DATA)],
-                   capture_output=True, text=True)
+                   capture_output=True, text=True, env=_child_env())
 
 
 def cmd_move_data(args) -> int:

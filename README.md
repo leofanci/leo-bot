@@ -66,11 +66,12 @@ It creates `~/.leobot` (or `$LEOBOT_HOME`) with the code in `app/`, your data in
 `run/`, `logs/` and `backups/`, adds a `leobot` command to `~/.local/bin`, and on a Mac builds
 `LeoBot.app` into `~/Applications` when the Command Line Tools are there. Flags: `--channel main`
 for the latest code instead of releases, `--version vX.Y.Z`, `--service` / `--no-service`,
-`--no-app`, `--yes`, `--dry-run`.
+`--no-app`, `--claude` (install Claude Code without asking), `--yes`, `--dry-run`.
 
 `leobot` basics:
 
-- `leobot` opens Leo Bot (starts it if needed).
+- `leobot` opens Leo Bot (starts it if needed): the app on a Mac, the browser on a Linux desktop,
+  and on a server it prints the link to open.
 - `leobot start`, `leobot stop`, `leobot status`
 - `leobot update` updates to the latest release (a backup is taken first); Settings has the same button.
 - `leobot service install` keeps it running in the background (launchd on a Mac, a systemd user unit on Linux).
@@ -94,7 +95,11 @@ python3 dashboard/server.py   # open the login link it prints
 The clone shares `~/.leobot` with an installed copy, so only one server runs at a time: stop the
 other first (`leobot stop`). On first start, data that older versions kept inside the clone
 (`projects/`, `portfolio/`, `chats/`, `team/`) is moved to `~/.leobot/data`, after a backup in
-`~/.leobot/backups/`. Tests: `python3 -m unittest discover -t . -s tests`.
+`~/.leobot/backups/`. If `~/.leobot/data` already holds data, nothing is moved and `leobot doctor`
+shows the two ways out: `leobot move-data --from <clone> --archive` keeps the home folder and
+archives the clone's copy into `~/.leobot/backups/`, `--replace` uses the clone's copy instead
+(after a backup of the home folder). Tests: `python3 -m unittest discover -t . -s tests` (the
+`-t .` matters: it pins a temp home; without it the tests stop at once rather than touch yours).
 
 The dashboard chat loads skills from `skills/` by itself. For plain `claude`
 sessions in a terminal, Claude Code does not read `skills/`: copy them into

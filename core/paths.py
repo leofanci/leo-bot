@@ -1,9 +1,13 @@
 """One place for code, home and data folders.
 
 CODE is the app checkout. HOME holds all user data (default ~/.leobot,
-override with LEOBOT_HOME). Paths are resolved once at import.
+override with LEOBOT_HOME). Paths are resolved once at import, always absolute.
+
+Under unittest LEOBOT_HOME must be set (tests/__init__.py sets a temp folder), so a test run
+that skips tests/__init__.py fails at once instead of using the real home folder.
 """
 import os
+import sys
 from pathlib import Path
 from typing import Mapping
 
@@ -11,12 +15,24 @@ CODE = Path(__file__).resolve().parent.parent
 
 
 def home_for(env: Mapping[str, str]) -> Path:
+    """$LEOBOT_HOME made absolute (~ expanded, a relative one taken from the current folder,
+    so every child process agrees on it), else ~/.leobot."""
     raw = env.get("LEOBOT_HOME", "")
     if raw:
-        return Path(raw).expanduser()
+        return Path(os.path.abspath(os.path.expanduser(raw)))
     return Path.home() / ".leobot"
 
 
+def refuse_real_home_in_tests(env: Mapping[str, str], modules=None) -> None:
+    """Raise when tests run without LEOBOT_HOME: they would read and write the real home folder."""
+    if "unittest" in (sys.modules if modules is None else modules) and not env.get("LEOBOT_HOME"):
+        raise RuntimeError(
+            "Leo Bot tests must not use your real home folder, and LEOBOT_HOME is not set. Run them "
+            "with `python3 -m unittest discover -t . -s tests` (the -t . makes tests/__init__.py set a "
+            "temp home), or set LEOBOT_HOME to a temp folder.")
+
+
+refuse_real_home_in_tests(os.environ)
 HOME = home_for(os.environ)
 DATA = HOME / "data"
 RUN = HOME / "run"

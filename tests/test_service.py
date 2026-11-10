@@ -93,6 +93,12 @@ class MacTests(FakeHome):
         self.assertIn("9000", plistlib.loads(f.read_bytes())["ProgramArguments"])
         self.assertTrue(msg)
 
+    def test_install_passes_the_home_folder(self):
+        service.install()
+        f = self.tmp / "u" / "Library" / "LaunchAgents" / "leobot.server.plist"
+        self.assertEqual(plistlib.loads(f.read_bytes())["EnvironmentVariables"]["LEOBOT_HOME"], str(paths.HOME))
+        self.assertTrue(paths.HOME.is_absolute())
+
     def test_install_boots_out_before_bootstrap(self):
         service.install()
         verbs = [argv[1] for argv in self.argvs() if argv[0] == "launchctl"]
@@ -191,6 +197,11 @@ class LinuxTests(FakeHome):
         f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
         self.assertIn("ProtectSystem=full", f.read_text())
         self.assertNotIn("Hardening", msg)
+
+    def test_unit_passes_the_home_folder(self):
+        service.install()
+        f = self.tmp / "u" / ".config" / "systemd" / "user" / "leobot.service"
+        self.assertIn(service._sd_env("LEOBOT_HOME", str(paths.HOME)), f.read_text().splitlines())
 
     def test_port_from_installed_file(self):
         service.install(port=9123)
