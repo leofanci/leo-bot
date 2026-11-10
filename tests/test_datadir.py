@@ -1,4 +1,8 @@
+import errno
 import json
+import os
+import shutil
+import stat
 import tarfile
 import tempfile
 import unittest
@@ -148,12 +152,168 @@ class DataDirCase(unittest.TestCase):
         self.assertEqual(json.loads((self.data / "chats/c.json").read_text())["p"], f"{self.data}/projects/demo")
         self.assertIn(f"{self.data}/portfolio", (self.data / "projects/demo/project.md").read_text())
 
-    def test_failed_move_leaves_no_marker(self):
-        with mock.patch.object(datadir.shutil, "move", side_effect=OSError("boom")):
+    def _crash_on_nth(self, n):
+        real = datadir._move_entry
+        calls = []
+
+        def fake(src, dst):
+            calls.append(src)
+            if len(calls) == n:
+                raise OSError("boom")
+            real(src, dst)
+        return mock.patch.object(datadir, "_move_entry", fake)
+
+    def _prepare(self, source=None):
+        with mock.patch.object(paths, "DATA", self.data), mock.patch.object(paths, "CODE", source or self.source), \
+                mock.patch.object(paths, "ensure_dirs"):
+            datadir.prepare()
+
+    def assert_all_moved(self):
+        self.assertTrue((self.data / "projects/demo/project.md").exists())
+        self.assertTrue((self.data / "chats/x.json").exists())
+        self.assertTrue((self.data / "os.db").exists())
+        self.assertFalse((self.source / "chats").exists())
+        self.assertFalse((self.source / "os.db").exists())
+        self.assertFalse((self.source / "projects/demo").exists())
+        self.assertTrue((self.source / "projects/.gitkeep").exists())
+        self.assertEqual(self.marker()["schema"], 1)
+        self.assertFalse((self.data / datadir.JOURNAL).exists())
+
+    def test_crash_after_first_item_resumes(self):
+        with self._crash_on_nth(2):
             with self.assertRaises(OSError):
                 datadir.move_legacy(self.source, self.data)
         self.assertFalse((self.data / datadir.MARKER).exists())
-        self.assertTrue(datadir.legacy_items(self.source))
+        self.assertTrue((self.data / datadir.JOURNAL).exists())
+        self._prepare()
+        self.assert_all_moved()
+
+    def test_replace_refused_while_journal_exists(self):
+        with self._crash_on_nth(2):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        r = datadir.move_legacy(self.source, self.data, replace=True)
+        self.assertIn("did not finish", r.refused)
+        self._prepare()
+        self.assert_all_moved()
+
+    def test_journal_from_other_source_refuses(self):
+        with self._crash_on_nth(2):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        other = self.root / "other"
+        other.mkdir()
+        r = datadir.move_legacy(other, self.data)
+        self.assertIn("unfinished move", r.refused)
+
+    def test_crash_during_source_delete_resumes(self):
+        # cross-volume path: copy done, source delete interrupted
+        real_rename = os.rename
+
+        def exdev(a, b):
+            raise OSError(errno.EXDEV, "cross-device")
+        real_remove = datadir._remove
+        state = {"n": 0}
+
+        def flaky(p):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError("boom")
+            real_remove(p)
+        with mock.patch.object(datadir.os, "rename", exdev), mock.patch.object(datadir, "_remove", flaky):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        self.assertTrue(real_rename)
+        self.assertTrue(list(self.source.glob("*")))  # a leftover source beside a full copy
+        self._prepare()
+        self.assert_all_moved()
+
+    def test_partial_copy_is_discarded_on_resume(self):
+        journal = {"source": str(self.source), "items": ["chats"], "dropped": [], "stamp": "s",
+                   "backup": None, "stage": "moving"}
+        (self.data / datadir.JOURNAL).write_text(json.dumps(journal))
+        write(self.data / "chats.partial" / "junk.json", "{")
+        with mock.patch.object(datadir.os, "rename", side_effect=OSError(errno.EXDEV, "x")):
+            self._prepare()
+        self.assertTrue((self.data / "chats/x.json").exists())
+        self.assertFalse((self.data / "chats.partial").exists())
+
+    def test_crash_inside_rewrite_resumes(self):
+        write(self.source / "chats" / "c.json", json.dumps({"p": f"{self.source}/projects/demo"}))
+        with mock.patch.object(datadir, "_replace_text", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        self.assertEqual(datadir.read_journal(self.data)["stage"], "rewriting")
+        self._prepare()
+        self.assert_all_moved()
+        self.assertIn(f"{self.data}/projects/demo", (self.data / "chats/c.json").read_text())
+
+    def test_rewrite_is_atomic_and_keeps_mode(self):
+        write(self.source / "chats" / "c.json", json.dumps({"p": f"{self.source}/projects/demo"}))
+        os.chmod(self.source / "chats" / "c.json", 0o640)
+        datadir.move_legacy(self.source, self.data)
+        self.assertEqual(stat.S_IMODE((self.data / "chats/c.json").stat().st_mode), 0o640)
+        self.assertEqual([p.name for p in (self.data / "chats").iterdir() if p.name.startswith(".")], [])
+
+    def test_stale_token_or_log_alone_never_refuses(self):
+        src = self.root / "stale"
+        write(src / "dashboard/server.log", "log")
+        write(src / "dashboard/.auth-token", "t")
+        write(self.data / "projects/acme/project.md")
+        self._prepare(src)
+        self.assertFalse((src / "dashboard/server.log").exists())
+        self.assertFalse((src / "dashboard/.auth-token").exists())
+        self.assertTrue((self.data / "projects/acme/project.md").exists())
+        self.assertEqual(self.marker()["schema"], 1)
+        self.assertEqual(list(self.backups.glob("*")), [])
+
+    def test_failing_tar_leaves_nothing(self):
+        with mock.patch.object(datadir.tarfile.TarFile, "add", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        self.assertEqual(list(self.backups.glob("*")), [])
+        self.assertTrue((self.source / "projects/demo/project.md").exists())
+        self.assertEqual(list(self.data.iterdir()), [])
+
+    def test_junk_does_not_count_as_data(self):
+        write(self.data / ".DS_Store")
+        write(self.data / "._x")
+        write(self.data / ".marker-abc123")
+        self.assertTrue(datadir.data_is_empty(self.data))
+        r = datadir.move_legacy(self.source, self.data)
+        self.assertIsNone(r.refused)
+
+    def test_symlinked_top_level_item_refused(self):
+        outside = self.root / "outside"
+        write(outside / "a.json", "{}")
+        shutil.rmtree(self.source / "chats")
+        os.symlink(outside, self.source / "chats")
+        r = datadir.move_legacy(self.source, self.data)
+        self.assertIn("chats", r.refused)
+        self.assertIn("symbolic link", r.refused)
+        self.assertTrue((outside / "a.json").exists())
+        self.assertTrue((self.source / "projects/demo").exists())
+
+    def test_other_spellings_of_source_rewritten(self):
+        alias = self.root / "alias"
+        os.symlink(self.root, alias)
+        src = alias / "clone"
+        real = self.source.resolve()
+        write(self.source / "chats" / "c.json", json.dumps(
+            {"a": f"{src}/projects/demo", "b": f"{real}/projects/demo"}))
+        datadir.move_legacy(src, self.data)
+        c = json.loads((self.data / "chats/c.json").read_text())
+        self.assertEqual(c["a"], f"{self.data}/projects/demo")
+        self.assertEqual(c["b"], f"{self.data}/projects/demo")
+
+    def test_low_disk_space_refuses_before_moving(self):
+        usage = shutil._ntuple_diskusage(100, 100, 0)
+        with mock.patch.object(datadir.shutil, "disk_usage", return_value=usage):
+            r = datadir.move_legacy(self.source, self.data)
+        self.assertIn("Not enough free disk space", r.refused)
+        self.assertTrue((self.source / "projects/demo/project.md").exists())
+        self.assertEqual(list(self.data.iterdir()), [])
+        self.assertEqual(list(self.backups.glob("*")), [])
 
     def test_prepare_refuses_with_exit(self):
         write(self.data / "projects/acme/project.md")
@@ -194,7 +354,16 @@ class MigrationsCase(unittest.TestCase):
         (self.data / datadir.MARKER).write_text(json.dumps({"schema": migrations.LATEST + 1}))
         with self.assertRaises(SystemExit) as cm:
             migrations.run(self.data)
-        self.assertIn("newer Leo Bot", str(cm.exception))
+        self.assertIn("newer Leo Bot (schema", str(cm.exception))
+        self.assertIn("leobot update", str(cm.exception))
+
+    def test_marker_records_version_and_message_names_it(self):
+        with mock.patch.object(migrations.version, "current", return_value="9.9.9"):
+            migrations.write_marker(self.data, {"schema": migrations.LATEST + 1})
+        self.assertEqual(json.loads((self.data / datadir.MARKER).read_text())["version"], "9.9.9")
+        with self.assertRaises(SystemExit) as cm:
+            migrations.run(self.data)
+        self.assertIn("schema %d, version 9.9.9" % (migrations.LATEST + 1), str(cm.exception))
 
 
 if __name__ == "__main__":

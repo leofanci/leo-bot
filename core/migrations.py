@@ -10,6 +10,8 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from core import version
+
 MARKER = ".leobot-data"
 
 
@@ -31,9 +33,12 @@ def read_marker(data: Path) -> dict:
 
 def write_marker(data: Path, rec: dict) -> None:
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
+    rec = {**rec, "version": version.current()}  # which app wrote it, for the newer-data message
     fd, tmp = tempfile.mkstemp(dir=data, prefix=".marker-")
     with os.fdopen(fd, "w") as f:
         json.dump(rec, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, data / MARKER)
 
@@ -44,7 +49,9 @@ def run(data: Path) -> int:
     if not isinstance(schema, int):
         schema = 0
     if schema > LATEST:
-        sys.exit(f"Your data is from a newer Leo Bot (schema {schema}). Run: leobot update")
+        ver = rec.get("version")
+        which = f"schema {schema}, version {ver}" if isinstance(ver, str) and ver else f"schema {schema}"
+        sys.exit(f"Your data is from a newer Leo Bot ({which}). Run: leobot update")
     while schema < LATEST:
         MIGRATIONS[schema](data)
         schema += 1
