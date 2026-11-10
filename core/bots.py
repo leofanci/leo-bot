@@ -22,7 +22,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from core import paths
+
+ROOT = paths.DATA  # user data; bot definitions ship in paths.CODE
 ROOT_BOT = "cos"
 CEO = "ceo"  # the user; top of the org chart, not a bot
 HQ = "hq"    # the holding's own workspace (CEO office); every other workspace is a project
@@ -61,9 +63,9 @@ def _parse(text):
     return fm, body
 
 
-def load_defs(root=ROOT):
+def load_defs(root=paths.CODE):
     """{id: Bot} from bots/*.md. Definitions ship with the code, so callers
-    pass a data root only for state/memory; defs default to this checkout."""
+    pass a data root only for state/memory; defs default to the code folder."""
     out = {}
     for f in sorted((Path(root) / "bots").glob("*.md")):
         fm, body = _parse(f.read_text(encoding="utf-8"))

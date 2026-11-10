@@ -14,7 +14,9 @@ import time
 import unicodedata
 from pathlib import Path
 
-CHATS_DIR = Path(__file__).resolve().parent.parent / "chats"
+from core import paths
+
+CHATS_DIR = paths.DATA / "chats"
 _ID_RE = re.compile(r"^[0-9a-f-]{36}$")
 TITLE_MAX = 60
 _LOCK = threading.RLock()  # load-change-save of one chat must not interleave

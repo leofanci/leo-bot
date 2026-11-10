@@ -29,7 +29,7 @@ Usage:
     python3 generate.py brief <profile-slug> <post-id>
     python3 generate.py refine-guidelines <channel-slug>
 
-Optional --workspace ROOT (default: cwd). Writes to:
+Optional --workspace ROOT (default: the data folder). Writes to:
     plan  -> projects/*/profiles/<profile-slug>/content/plan-<period>.json
     brief -> projects/*/profiles/<profile-slug>/content/briefs/<post-id>.json
 """
@@ -56,6 +56,7 @@ from core.brief_spec_util import (  # noqa: E402
 )
 from core.ids import mint_post_ids  # noqa: E402
 from core.voice_util import list_voice_ids, read_voice_text  # noqa: E402
+from core import paths  # noqa: E402
 
 
 def _persist_brief(root: Path, post_id: str, brief: dict,
@@ -698,7 +699,7 @@ def do_refine_guidelines(root: Path, channel_slug: str, raw_text: str) -> str:
 # --------------------------------------------------------------------------- #
 def build_parser():
     ap = argparse.ArgumentParser(description="Synchronous claude -p content pipeline")
-    ap.add_argument("--workspace", default=".", help="workspace root (default: cwd)")
+    ap.add_argument("--workspace", default=str(paths.DATA), help="workspace root (default: the data folder)")
     sub = ap.add_subparsers(dest="job", required=True)
 
     pp = sub.add_parser("plan", help="generate a content calendar skeleton")

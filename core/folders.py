@@ -21,7 +21,7 @@ import re
 import subprocess
 from pathlib import Path, PurePath
 
-from core import bots
+from core import bots, paths
 
 READ, EDIT = "read", "edit"
 ACCESS = (READ, EDIT)
@@ -152,11 +152,12 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     workspace_root = Path(root).resolve()
     home = Path.home().resolve()
     filesystem_root = Path(resolved.anchor).resolve()
-    if any(_same(resolved, p) for p in (filesystem_root, home, workspace_root)):
+    code_root = Path(paths.CODE).resolve()  # the app checkout, apart from the data folder
+    if any(_same(resolved, p) for p in (filesystem_root, home, workspace_root, code_root)):
         raise FolderError("local folder must be a specific app directory")
     # A parent of Leo Bot (for example ~/Documents/GitHub) would expose this repo
     # and every sibling app when passed to Claude as an allowed directory.
-    if under(workspace_root, resolved):
+    if under(workspace_root, resolved) or under(code_root, resolved):
         raise FolderError("local folder cannot contain the Leo Bot workspace")
     # Claude's config holds every bot session's transcript, all workspaces.
     if under(resolved, home / ".claude"):
@@ -172,7 +173,7 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     if any(part.lower().endswith(".app") for part in resolved.parts):
         raise FolderError("local folder cannot be an app bundle")
     # Leo Bot's own data is written only through osctl; a link inside it would bypass that.
-    if under(resolved, workspace_root):
+    if under(resolved, workspace_root) or under(resolved, code_root):
         raise FolderError("local folder cannot be inside the Leo Bot folder")
     return str(resolved)
 

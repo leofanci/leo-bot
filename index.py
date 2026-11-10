@@ -36,6 +36,7 @@ HERE = Path(__file__).resolve().parent
 MIGRATIONS_DIR = HERE / "database" / "migrations"   # schema lives with the code
 DB_RELPATH = Path("database") / "data" / "os.db"    # generated under the workspace root
 
+from core import paths  # noqa: E402
 from core.project_schemas import MEMO_TYPES, normalize_workspace_artifacts  # noqa: E402
 EXPERIMENT_STATUSES = {"planned", "running", "done"}
 EXPERIMENT_DECISIONS = {"persist", "pivot", "kill"}
@@ -591,7 +592,7 @@ def build(root: Path):
 
 
 def main():
-    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+    root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else paths.DATA
     if not any(MIGRATIONS_DIR.glob("*.sql")):
         print(f"error: no migrations found in {MIGRATIONS_DIR}", file=sys.stderr)
         sys.exit(1)

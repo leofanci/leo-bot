@@ -47,7 +47,7 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
-from core import folders
+from core import folders, paths
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
@@ -97,7 +97,8 @@ from core.subsections import (
 def parse_subsections_arg(raw: str) -> list[str]:
     return _parse_subsections_arg(raw)
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = paths.DATA  # user data; scripts and prompts live in paths.CODE
+_GENERATE_SCRIPT = paths.CODE / "generate.py"
 
 
 def _db_module():
@@ -122,7 +123,7 @@ def _composed_id(lookup_key: str) -> str:
 
 # index.py is a fixed script (it lives at the repo root); ROOT is the WORKSPACE
 # it indexes. They coincide in production but tests point ROOT at a temp dir.
-_INDEX_SCRIPT = Path(__file__).resolve().parent.parent / "index.py"
+_INDEX_SCRIPT = paths.CODE / "index.py"
 
 ALLOWED_TRANSITIONS = {
     "planned":       {"approved_slot", "rejected"},
@@ -389,7 +390,7 @@ def generate_brief(post_id, instruction=None, profile_slug=None, brief_id=None, 
     if current not in ("planned", "approved_slot"):
         raise ActionError(f"can only brief a planned/approved_slot post (is '{current}')")
 
-    cmd = [sys.executable, str(ROOT / "generate.py"),
+    cmd = [sys.executable, str(_GENERATE_SCRIPT),
            "--workspace", str(ROOT), "brief", ctx["profile_slug"], post_id]
     if instruction and instruction.strip():
         cmd += [f"--instruction={instruction.strip()}"]  # "=": option-looking text stays text
@@ -430,7 +431,7 @@ def revise_post(post_id, instruction, profile_slug=None, brief_id=None, voice_id
     brief_file = ctx["plan"].parent / "briefs" / f"{post_id}.json"
     is_draft = brief_file.exists()
 
-    cmd = [sys.executable, str(ROOT / "generate.py"),
+    cmd = [sys.executable, str(_GENERATE_SCRIPT),
            "--workspace", str(ROOT), "revise", ctx["profile_slug"], post_id,
            f"--instruction={instruction}"]  # "=": option-looking text stays text
     if brief_id:
@@ -595,7 +596,7 @@ def refine_guidelines(slug, raw_text):
     """AI-polish rough guideline notes via generate.py; returns text, does NOT save."""
     _channel_dir(slug)
     res = subprocess.run(
-        [sys.executable, str(ROOT / "generate.py"),
+        [sys.executable, str(_GENERATE_SCRIPT),
          "--workspace", str(ROOT), "refine-guidelines", slug],
         input=raw_text or "", capture_output=True, text=True,
     )
@@ -2157,7 +2158,7 @@ def _plan_args(profile_slug, params):
     period = (params.get("period") or "").strip()
     if not period:
         raise ActionError("a period is required (e.g. '2026-07-01 to 2026-07-14')")
-    args = [sys.executable, str(ROOT / "generate.py"),
+    args = [sys.executable, str(_GENERATE_SCRIPT),
             "--workspace", str(ROOT), "plan", profile_slug, f"--period={period}"]
     # "--flag=value" throughout: option-looking text stays text, never a flag.
     platforms = (params.get("platforms") or "").strip()

@@ -6,10 +6,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import bots
+from core import bots, paths
 import dashboard.server as server
 
-SKILLS = {d.name for d in (Path(bots.ROOT) / "skills").iterdir() if (d / "SKILL.md").exists()}
+SKILLS = {d.name for d in (Path(paths.CODE) / "skills").iterdir() if (d / "SKILL.md").exists()}
 # A venture with profiles and a linked app: its smart default switches every bot on.
 VENTURE = {"slug": "acme", "kind": "venture", "profiles": [{"slug": "profile-a"}],
            "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}]}
