@@ -13,6 +13,7 @@ Run:  python3 dashboard/server.py [--port 8765]
 import argparse
 import base64
 import binascii
+import fcntl
 import hmac
 import html
 import json
@@ -189,61 +190,52 @@ def health_proof(nonce):
 def write_token_file(path=None):
     """Write AUTH_TOKEN to an owner-only file (0600) for the macOS app."""
     path = Path(path or TOKEN_FILE)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.fchmod(fd, 0o600)  # before the token goes in, also for a file that already existed
     with os.fdopen(fd, "w") as f:
         f.write(AUTH_TOKEN)
-    os.chmod(path, 0o600)
 
 
-def _pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-    except ProcessLookupError:
-        return False
-    except (PermissionError, TypeError, ValueError, OverflowError):
-        return isinstance(pid, int) and pid > 0  # exists, just not ours
-    return True
-
-
-def _server_answers(port):
-    """True when the server on `port` proves, with the healthz nonce proof against the
-    token in TOKEN_FILE, that it is the Leo Bot that wrote that file."""
-    import urllib.request
-    try:
-        token = Path(TOKEN_FILE).read_text().strip()
-        nonce = secrets.token_hex(8)
-        with urllib.request.urlopen(f"http://127.0.0.1:{int(port)}/healthz?nonce={nonce}", timeout=2) as r:
-            got = json.loads(r.read().decode())
-        want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
-        return bool(token) and hmac.compare_digest(str(got.get("proof", "")), want)
-    except (OSError, ValueError, AttributeError):
-        return False
+_PID_FD = None  # the pid file, open and flock-ed for the life of the process
 
 
 def acquire_pid_lock(port):
-    """One server per home folder. A pid file naming a live pid whose healthz proof
-    verifies refuses the start; anything else (dead pid, reused pid, junk) is replaced."""
+    """One server per home folder: an exclusive flock on the pid file, held until exit.
+    The kernel drops it with the process, so a stale file or a recycled pid needs no check."""
+    global _PID_FD
     path = paths.PID_FILE
-    try:
-        held = json.loads(path.read_text())
-        pid, held_port = held["pid"], held["port"]
-        if _pid_alive(pid) and _server_answers(held_port):
-            sys.exit(f"Leo Bot is already running (pid {pid}, port {held_port}).")
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump({"pid": os.getpid(), "port": int(port)}, f)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            held = json.loads(os.pread(fd, 4096, 0).decode() or "{}")
+            who = f" (pid {int(held['pid'])}, port {int(held['port'])})"
+        except (OSError, ValueError, KeyError, TypeError):
+            who = ""
+        os.close(fd)
+        sys.exit(f"Leo Bot is already running{who}.")
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, json.dumps({"pid": os.getpid(), "port": int(port)}).encode(), 0)
+    _PID_FD = fd
 
 
 def release_pid_lock():
+    """Remove the file while still holding the lock, then let go."""
+    global _PID_FD
+    if _PID_FD is None:
+        return
     try:
-        if json.loads(paths.PID_FILE.read_text()).get("pid") == os.getpid():  # never a newer run's lock
-            paths.PID_FILE.unlink()
-    except (OSError, ValueError, AttributeError):
+        paths.PID_FILE.unlink()
+    except OSError:
         pass
+    try:
+        os.close(_PID_FD)
+    except OSError:
+        pass
+    _PID_FD = None
 
 
 def remove_token_file(path=None):
@@ -1071,14 +1063,16 @@ def _workspace_deny_dirs(ws, projects, kept=()):
         return folders.turn_denies(kept, [], own_removed)
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
+    dirs += [paths.CODE / "projects" / p["slug"] for p in others]  # a clone not yet migrated
     # Folders on disk too: a project the index has not seen yet is just as private.
-    on_disk = ROOT / "projects"
-    for d in (on_disk.iterdir() if on_disk.is_dir() else ()):
-        if d.is_dir() and d.name.lower() != ws.lower() and not d.name.startswith("."):
-            dirs.append(d)
+    for on_disk in dict.fromkeys((ROOT / "projects", paths.CODE / "projects")):
+        for d in (on_disk.iterdir() if on_disk.is_dir() else ()):
+            if d.is_dir() and d.name.lower() != ws.lower() and not d.name.startswith("."):
+                dirs.append(d)
     dirs += [Path(p) for p in folders.turn_denies(
         kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
-    dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
+    dirs += [base / n for base in dict.fromkeys((ROOT, paths.CODE))
+             for n in ("chats", "team", "portfolio", "database")]
     dirs += [paths.CODE / ".remember", paths.CODE / ".superpowers", paths.CODE / ".tokensave",
              paths.CODE / "private"]  # the owner's machine state
     # The home folder's non-data parts: token and pid, logs, update backups.
@@ -3465,6 +3459,8 @@ def main():
         log = open(os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a",
                    buffering=1, encoding="utf-8")
         os.chmod(paths.SERVER_LOG, 0o600)
+        os.dup2(log.fileno(), 1)  # child processes and early messages land in the log too
+        os.dup2(log.fileno(), 2)
         sys.stdout = sys.stderr = log
     restrict_new_files()
     ap = argparse.ArgumentParser()

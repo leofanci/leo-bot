@@ -2,7 +2,8 @@
 import io
 import json
 import os
-import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ from dashboard.engines import claude_code
 class HomeFilesTest(unittest.TestCase):
     def setUp(self):
         paths.ensure_dirs()
+        self.addCleanup(server.release_pid_lock)
         self.addCleanup(lambda: paths.PID_FILE.unlink(missing_ok=True))
 
     def test_token_file_in_run(self):
@@ -27,17 +29,19 @@ class HomeFilesTest(unittest.TestCase):
         self.assertEqual(paths.TOKEN_FILE.stat().st_mode & 0o777, 0o600)
 
     def test_second_start_refused(self):
-        paths.PID_FILE.write_text(json.dumps({"pid": os.getpid(), "port": 8765}))
-        with mock.patch.object(server, "_server_answers", return_value=True):
-            with self.assertRaises(SystemExit) as cm:
-                server.acquire_pid_lock(8765)
-        self.assertIn("already running", str(cm.exception))
-
-    def test_live_pid_without_proof_is_replaced(self):
-        paths.PID_FILE.write_text(json.dumps({"pid": os.getpid(), "port": 8765}))
-        with mock.patch.object(server, "_server_answers", return_value=False):
+        code = ("import sys,time,json;from dashboard import server;"
+                "server.acquire_pid_lock(8765);print('held',flush=True);time.sleep(30)")
+        child = subprocess.Popen([sys.executable, "-c", code], cwd=paths.CODE, stdout=subprocess.PIPE,
+                                 text=True, env={**os.environ})
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        with self.assertRaises(SystemExit) as cm:
             server.acquire_pid_lock(8766)
-        self.assertEqual(json.loads(paths.PID_FILE.read_text())["port"], 8766)
+        self.assertIn("already running", str(cm.exception))
+        self.assertIn(f"pid {child.pid}", str(cm.exception))
+        self.assertIn("port 8765", str(cm.exception))
+        self.assertEqual(json.loads(paths.PID_FILE.read_text())["pid"], child.pid)
 
     def test_stale_pid_replaced(self):
         paths.PID_FILE.write_text(json.dumps({"pid": 999999, "port": 8765}))
@@ -46,18 +50,31 @@ class HomeFilesTest(unittest.TestCase):
         self.assertEqual(got, {"pid": os.getpid(), "port": 8765})
         self.assertEqual(paths.PID_FILE.stat().st_mode & 0o777, 0o600)
 
+    def test_stale_file_naming_a_live_pid_is_taken_over(self):
+        paths.PID_FILE.write_text(json.dumps({"pid": os.getppid(), "port": 8765}))  # live, holds no lock
+        server.acquire_pid_lock(8767)
+        self.assertEqual(json.loads(paths.PID_FILE.read_text())["port"], 8767)
+
     def test_garbage_pid_file_replaced(self):
         paths.PID_FILE.write_text("not json")
         server.acquire_pid_lock(8765)
         self.assertEqual(json.loads(paths.PID_FILE.read_text())["pid"], os.getpid())
 
-    def test_release_removes_only_own_lock(self):
+    def test_release_removes_file_and_frees_lock(self):
         server.acquire_pid_lock(8765)
         server.release_pid_lock()
         self.assertFalse(paths.PID_FILE.exists())
-        paths.PID_FILE.write_text(json.dumps({"pid": 999999, "port": 1}))
-        server.release_pid_lock()
-        self.assertTrue(paths.PID_FILE.exists())
+        server.acquire_pid_lock(8766)  # free again
+        self.assertEqual(json.loads(paths.PID_FILE.read_text())["port"], 8766)
+
+    def test_token_file_mode_set_before_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "t"
+            path.write_text("old")
+            os.chmod(path, 0o644)
+            server.write_token_file(path)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_text(), server.AUTH_TOKEN)
 
 
 class DenyListsTest(unittest.TestCase):
@@ -66,6 +83,13 @@ class DenyListsTest(unittest.TestCase):
         for want in (paths.RUN, paths.LOGS, paths.BACKUPS, paths.DATA / "chats", paths.DATA / "team",
                      paths.CODE / "private", paths.CODE / ".tokensave"):
             self.assertIn(str(want), dirs)
+
+    def test_deny_dirs_cover_unmigrated_clone_data(self):
+        dirs = server._workspace_deny_dirs("acme", [{"slug": "acme"}, {"slug": "demo"}])
+        for n in ("chats", "team", "portfolio", "database"):
+            self.assertIn(str(paths.CODE / n), dirs)
+        self.assertIn(str(paths.CODE / "projects" / "demo"), dirs)
+        self.assertNotIn(str(paths.CODE / "projects" / "acme"), dirs)
 
     def test_deny_files_cover_db_and_settings(self):
         files = server._workspace_deny_files("acme")
