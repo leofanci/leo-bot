@@ -24,7 +24,8 @@ ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < sc
 ```
 
 This creates a `leobot` user, turns on `loginctl enable-linger` for it, and runs the Leo Bot
-installer (`install.sh --service --yes`) as that user. Leo Bot lands in `~leobot/.leobot`
+installer (`install.sh --no-service --no-app --yes`) as that user, moves any legacy data, then
+runs `leobot service install --port 8766 --server`. Leo Bot lands in `~leobot/.leobot`
 (code in `app/`, data in `data/`) and runs as a systemd user unit named `leobot`, which
 restarts on its own and starts at boot. It follows the latest release; set `LEOBOT_CHANNEL=main`
 for the latest code. Leo Bot listens on `127.0.0.1:8766` only, so nothing is open to the

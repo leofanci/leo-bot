@@ -11,7 +11,7 @@
 # (docs/sharing.md).
 #
 # Settings: LEOBOT_REPO_URL (LEOBOT_REPO still works), LEOBOT_USER, LEOBOT_PORT,
-# LEOBOT_CHANNEL (stable, the default, or main), LEOBOT_BRANCH (main channel only).
+# LEOBOT_CHANNEL (stable, the default, or main).
 set -euo pipefail
 
 LEOBOT_USER="${LEOBOT_USER:-leobot}"
@@ -19,12 +19,10 @@ LEOBOT_PORT="${LEOBOT_PORT:-8766}"  # not 8765, so it never collides with Leo Bo
 LEOBOT_REPO="${LEOBOT_REPO:-}"      # old name of LEOBOT_REPO_URL
 LEOBOT_REPO_URL="${LEOBOT_REPO_URL:-$LEOBOT_REPO}"
 LEOBOT_CHANNEL="${LEOBOT_CHANNEL:-stable}"
-LEOBOT_BRANCH="${LEOBOT_BRANCH:-main}"
 
 case "$LEOBOT_USER" in ""|-*|*[!a-z0-9_-]*) echo "LEOBOT_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
 case "$LEOBOT_PORT" in ""|*[!0-9]*) echo "LEOBOT_PORT must be a number." >&2; exit 1 ;; esac
 case "$LEOBOT_CHANNEL" in stable|main) ;; *) echo "LEOBOT_CHANNEL must be stable or main." >&2; exit 1 ;; esac
-case "$LEOBOT_BRANCH" in ""|-*|*[!A-Za-z0-9._/-]*) echo "LEOBOT_BRANCH has characters a branch name should not." >&2; exit 1 ;; esac
 case "$LEOBOT_REPO_URL" in -*) echo "LEOBOT_REPO_URL must be a git address, not an option." >&2; exit 1 ;; esac
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -51,6 +49,7 @@ if ! id "$LEOBOT_USER" >/dev/null 2>&1; then
 fi
 HOME_DIR="$(getent passwd "$LEOBOT_USER" | cut -d: -f6)"
 chmod 700 "$HOME_DIR"  # your data, keys and Claude login live here
+cd "$HOME_DIR"  # not root's folder, which the leobot user cannot read
 USER_ID="$(id -u "$LEOBOT_USER")"
 RUNTIME_DIR="/run/user/$USER_ID"
 LEOBOT_CLI="$HOME_DIR/.leobot/app/leobot.py"
@@ -65,7 +64,7 @@ fi
 
 as_user() {
   runuser -u "$LEOBOT_USER" -- env HOME="$HOME_DIR" XDG_RUNTIME_DIR="$RUNTIME_DIR" \
-    DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "$@"
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "$@" </dev/null
 }
 
 # An older setup ran Leo Bot as a system unit on the same port. Remove it before the user
@@ -84,7 +83,7 @@ chown "$LEOBOT_USER": "$WORK"
 chmod 700 "$WORK"
 as_user git clone --quiet -- "$LEOBOT_REPO_URL" "$WORK/src"
 if [ "$LEOBOT_CHANNEL" = main ]; then
-  as_user git -C "$WORK/src" checkout --quiet "$LEOBOT_BRANCH"
+  as_user git -C "$WORK/src" checkout --quiet main
 else
   TAG="$(as_user git -C "$WORK/src" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
   if [ -z "$TAG" ]; then
