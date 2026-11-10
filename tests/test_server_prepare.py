@@ -56,6 +56,15 @@ class MainWiringCase(unittest.TestCase):
             self.run_main(events, refuse)
         self.assertEqual(events, ["lock", "prepare", "release"])
 
+    def test_any_failure_releases_lock(self):
+        events = []
+
+        def boom():
+            raise RuntimeError("disk")
+        with self.assertRaises(RuntimeError):
+            self.run_main(events, boom)
+        self.assertEqual(events, ["lock", "release"])
+
 
 if __name__ == "__main__":
     unittest.main()

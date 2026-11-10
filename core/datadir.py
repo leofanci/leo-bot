@@ -31,6 +31,8 @@ PLACEHOLDER = ".gitkeep"  # tracked in the checkout; never moved, never deleted
 _TEXT_SUFFIXES = (".json", ".jsonl", ".md")
 _TMP_PREFIX = ".marker-"  # temp files this module leaves at the top of the data folder
 _REWRITE_PREFIX = ".rewrite-"
+_REWRITE_SUFFIX = ".tmp"
+_REWRITE_TEMP = re.compile(r"^\.rewrite-[A-Za-z0-9_]{8}\.tmp$")  # exactly what mkstemp makes below
 
 
 @dataclass
@@ -79,6 +81,36 @@ def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
         raise
 
 
+def _fsync_path(p: Path) -> None:
+    try:
+        fd = os.open(p, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(p: Path) -> None:
+    """Flush a copied file or folder (every file, then every folder) to disk."""
+    if p.is_symlink():
+        return
+    if p.is_dir():
+        for root, dirs, files in os.walk(p):
+            for name in files:
+                f = Path(root, name)
+                if not f.is_symlink():
+                    _fsync_path(f)
+            for name in dirs:
+                _fsync_path(Path(root, name))
+            _fsync_path(Path(root))
+    else:
+        _fsync_path(p)
+
+
 def _tar(items: list, base: Path, dest: Path) -> Path:
     dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     skip = lambda ti: None if Path(ti.name).name == PLACEHOLDER else ti  # noqa: E731
@@ -87,6 +119,8 @@ def _tar(items: list, base: Path, dest: Path) -> Path:
             for rel in items:
                 t.add(base / rel, arcname=rel, filter=skip)
         dest.chmod(0o600)
+        _fsync_path(dest)
+        _fsync_path(dest.parent)
     except BaseException:
         dest.unlink(missing_ok=True)  # never leave a partial backup that looks real
         raise
@@ -173,7 +207,9 @@ def _move_entry(src: Path, dst: Path) -> None:
         shutil.copytree(src, part, symlinks=True)
     else:
         shutil.copy2(src, part, follow_symlinks=False)
+    _fsync_tree(part)  # the copy must be on disk before the only other copy goes
     os.replace(part, dst)
+    _fsync_path(dst.parent)
     _remove(src)
 
 
@@ -192,7 +228,7 @@ def _spellings(p: Path) -> list:
     return list(dict.fromkeys(out))
 
 
-def rewrite_paths(data: Path, source: Path, items: list) -> int:
+def rewrite_paths(data: Path, source: Path, items: list, *, clean_temps: bool = False) -> int:
     """Point absolute paths stored inside moved text files at the new place.
 
     Only `<source>/<moved item>` prefixes change (under every spelling of the source: as
@@ -218,7 +254,7 @@ def rewrite_paths(data: Path, source: Path, items: list) -> int:
             continue
         files = [f for f in root.rglob("*") if f.is_file() or f.is_symlink()] if root.is_dir() else [root]
         for f in files:
-            if f.name.startswith(_REWRITE_PREFIX):  # temp left by an interrupted pass
+            if clean_temps and _REWRITE_TEMP.match(f.name):  # temp left by the interrupted pass
                 f.unlink(missing_ok=True)
                 continue
             if f.suffix not in _TEXT_SUFFIXES or f.is_symlink():
@@ -238,7 +274,7 @@ def rewrite_paths(data: Path, source: Path, items: list) -> int:
 
 def _replace_text(f: Path, text: str) -> None:
     mode = stat.S_IMODE(f.stat().st_mode)
-    fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=_REWRITE_PREFIX)
+    fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=_REWRITE_PREFIX, suffix=_REWRITE_SUFFIX)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as h:
             h.write(text)
@@ -256,14 +292,25 @@ def _new_marker(data: Path) -> None:
                                    .isoformat(timespec="seconds")})
 
 
+def _valid_journal(rec) -> bool:
+    return (isinstance(rec, dict) and isinstance(rec.get("source"), str)
+            and isinstance(rec.get("items"), list) and all(isinstance(i, str) for i in rec["items"])
+            and isinstance(rec.get("dropped", []), list) and all(isinstance(i, str) for i in rec.get("dropped", []))
+            and rec.get("stage") in ("moving", "rewriting"))
+
+
 def read_journal(data: Path) -> "dict | None":
+    """None: no journal. A damaged one comes back as {"_bad": True, "backup": <path or None>}."""
     try:
         rec = json.loads((Path(data) / JOURNAL).read_text())
-        return rec if isinstance(rec, dict) else {"_bad": True}
     except FileNotFoundError:
         return None
     except (OSError, ValueError):
-        return {"_bad": True}
+        return {"_bad": True, "backup": None}
+    if _valid_journal(rec):
+        return rec
+    backup = rec.get("backup") if isinstance(rec, dict) else None
+    return {"_bad": True, "backup": backup if isinstance(backup, str) else None}
 
 
 def _write_journal(data: Path, rec: dict) -> None:
@@ -277,18 +324,39 @@ def _same_folder(a: str, b: Path) -> bool:
         return False
 
 
+def _linked_part(source: Path, rel: str, include_self: bool = True) -> "str | None":
+    """The first part of `rel` (from the top of the source) that is a symbolic link."""
+    parts = Path(rel).parts
+    cur = source
+    for i, part in enumerate(parts):
+        cur = cur / part
+        if i == len(parts) - 1 and not include_self:
+            break
+        if cur.is_symlink():
+            return str(Path(*parts[:i + 1]))
+    return None
+
+
+def _drop(source: Path, rel: str) -> None:
+    """Delete a stale token or log: a file, a folder, or a link itself; never through a linked parent."""
+    if _linked_part(source, rel, include_self=False):
+        return
+    _remove(source / rel)
+
+
 def _finish(source: Path, data: Path, journal: dict) -> MoveResult:
     """Do (or finish) the moving, rewriting and marker. Safe to run again after any crash."""
     res = MoveResult(backup=Path(journal["backup"]) if journal.get("backup") else None)
     items = list(journal["items"])
+    resuming_rewrite = journal.get("stage") == "rewriting"
     if journal.get("stage") == "moving":
         for rel in items:
             _move_item(source / rel, data / rel)
         for rel in journal.get("dropped", []):
-            (source / rel).unlink(missing_ok=True)
+            _drop(source, rel)
         journal["stage"] = "rewriting"
         _write_journal(data, journal)
-    rewrite_paths(data, source, items)
+    rewrite_paths(data, source, items, clean_temps=resuming_rewrite)
     _new_marker(data)
     (data / JOURNAL).unlink(missing_ok=True)
     res.moved = items
@@ -303,13 +371,20 @@ def move_legacy(source: Path, data: Path = None, *, replace: bool = False) -> Mo
 
     journal = read_journal(data)
     if journal is not None:
-        if replace:
+        jf = data / JOURNAL
+        if journal.get("_bad"):
+            known = f" Its backup should be {journal['backup']}." if journal.get("backup") else \
+                f" Look for legacy-*.tar.gz in {paths.BACKUPS}."
+            res.refused = (f"The note about an unfinished move into {data} ({jf}) is unreadable or damaged. "
+                           f"Nothing was changed.{known} Run `leobot doctor` to see the choices.")
+        elif not _same_folder(journal["source"], source):
+            res.refused = (f"{data} holds an unfinished move from {journal['source']}. Nothing was changed. "
+                           f"Run `leobot move-data --from {journal['source']}` (without --replace) to "
+                           f"finish it first.")
+        elif replace:
             res.refused = (f"An earlier move into {data} did not finish. Start Leo Bot, or run "
-                           f"`leobot doctor`, to finish it first; --replace is refused until then.")
-        elif journal.get("_bad") or not _same_folder(journal.get("source", ""), source):
-            res.refused = (f"{data} holds an unfinished move from another folder "
-                           f"({journal.get('source', 'unknown')}). Nothing was changed. "
-                           f"Run `leobot doctor` to see the choices.")
+                           f"`leobot move-data --from {source}` (without --replace), to finish it first; "
+                           f"--replace is refused until then.")
         else:
             return _finish(source, data, journal)
         return res
@@ -317,13 +392,14 @@ def move_legacy(source: Path, data: Path = None, *, replace: bool = False) -> Mo
     found = legacy_items(source)
     real = [i for i in found if i not in DROPPED]
     for rel in real:
-        if (source / rel).is_symlink():
-            res.refused = (f"{rel} in {source} is a symbolic link, and Leo Bot will not follow it. "
+        link = _linked_part(source, rel)
+        if link:
+            res.refused = (f"{link} in {source} is a symbolic link, and Leo Bot will not follow it. "
                            f"Replace it with the real folder (or move it into {data} by hand), then start again.")
             return res
     if not real:  # nothing, or only a stale token or log: drop those, never refuse over them
         for rel in found:
-            (source / rel).unlink(missing_ok=True)
+            _drop(source, rel)
         if not (data / MARKER).exists():
             _new_marker(data)
         return res

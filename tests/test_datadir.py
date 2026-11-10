@@ -207,8 +207,8 @@ class DataDirCase(unittest.TestCase):
         self.assertIn("unfinished move", r.refused)
 
     def test_crash_during_source_delete_resumes(self):
-        # cross-volume path: copy done, source delete interrupted
-        real_rename = os.rename
+        # cross-volume path: copy done, source delete half done (one file already gone)
+        write(self.source / "projects" / "demo" / "notes.md", "n")
 
         def exdev(a, b):
             raise OSError(errno.EXDEV, "cross-device")
@@ -218,15 +218,17 @@ class DataDirCase(unittest.TestCase):
         def flaky(p):
             state["n"] += 1
             if state["n"] == 1:
+                (p / "project.md").unlink()  # half-finished delete
                 raise OSError("boom")
             real_remove(p)
         with mock.patch.object(datadir.os, "rename", exdev), mock.patch.object(datadir, "_remove", flaky):
             with self.assertRaises(OSError):
                 datadir.move_legacy(self.source, self.data)
-        self.assertTrue(real_rename)
-        self.assertTrue(list(self.source.glob("*")))  # a leftover source beside a full copy
+        self.assertEqual([p.name for p in (self.source / "projects/demo").iterdir()], ["notes.md"])
         self._prepare()
         self.assert_all_moved()
+        self.assertEqual(sorted(p.name for p in (self.data / "projects/demo").iterdir()),
+                         ["notes.md", "project.md"])
 
     def test_partial_copy_is_discarded_on_resume(self):
         journal = {"source": str(self.source), "items": ["chats"], "dropped": [], "stamp": "s",
@@ -237,6 +239,70 @@ class DataDirCase(unittest.TestCase):
             self._prepare()
         self.assertTrue((self.data / "chats/x.json").exists())
         self.assertFalse((self.data / "chats.partial").exists())
+
+    def test_rewrite_temp_cleanup_only_on_resume_and_exact_pattern(self):
+        write(self.source / "chats" / ".rewrite-notes.json", "mine")
+        write(self.source / "chats" / ".rewrite-abcd1234.tmp", "user file")
+        write(self.source / "chats" / "c.json", json.dumps({"p": f"{self.source}/projects/demo"}))
+        datadir.move_legacy(self.source, self.data)  # first pass: nothing is cleaned
+        self.assertTrue((self.data / "chats/.rewrite-notes.json").exists())
+        self.assertTrue((self.data / "chats/.rewrite-abcd1234.tmp").exists())
+
+    def test_rewrite_resume_cleans_its_own_temps(self):
+        write(self.source / "chats" / "c.json", json.dumps({"p": f"{self.source}/projects/demo"}))
+        write(self.source / "chats" / ".rewrite-notes.json", "mine")
+        with mock.patch.object(datadir, "_replace_text", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        write(self.data / "chats" / ".rewrite-abcd1234.tmp", "stray")
+        self._prepare()
+        self.assertFalse((self.data / "chats/.rewrite-abcd1234.tmp").exists())
+        self.assertTrue((self.data / "chats/.rewrite-notes.json").exists())
+
+    def test_other_source_journal_names_the_fix(self):
+        with self._crash_on_nth(2):
+            with self.assertRaises(OSError):
+                datadir.move_legacy(self.source, self.data)
+        other = self.root / "other"
+        other.mkdir()
+        for replace in (False, True):
+            r = datadir.move_legacy(other, self.data, replace=replace)
+            self.assertIn(f"leobot move-data --from {self.source}", r.refused)
+            self.assertIn("without --replace", r.refused)
+
+    def test_unreadable_or_malformed_journal_refuses_clearly(self):
+        for text in ("{not json", json.dumps({"source": str(self.source)}),
+                     json.dumps({"source": str(self.source), "items": "chats", "stage": "moving",
+                                 "backup": "/b/legacy-1.tar.gz"})):
+            (self.data / datadir.JOURNAL).write_text(text)
+            r = datadir.move_legacy(self.source, self.data)
+            self.assertIn("unreadable or damaged", r.refused)
+            self.assertIn(str(self.data / datadir.JOURNAL), r.refused)
+            self.assertTrue((self.source / "chats/x.json").exists())
+        self.assertIn("/b/legacy-1.tar.gz", r.refused)
+        self.assertIn("legacy-*.tar.gz", self._bad_no_backup())
+
+    def _bad_no_backup(self):
+        (self.data / datadir.JOURNAL).write_text("{x")
+        return datadir.move_legacy(self.source, self.data).refused
+
+    def test_dropped_directory_is_removed(self):
+        src = self.root / "dirs"
+        write(src / "dashboard/server.log/inner.txt", "x")
+        write(self.data / "projects/acme/project.md")
+        self._prepare(src)
+        self.assertFalse((src / "dashboard/server.log").exists())
+
+    def test_linked_parent_of_item_refused(self):
+        outside = self.root / "outside2"
+        write(outside / "data" / "a.db", "x")
+        write(self.source / "database" / "keep.sql", "tracked")
+        shutil.rmtree(self.source / "database")
+        os.symlink(outside, self.source / "database")
+        r = datadir.move_legacy(self.source, self.data)
+        self.assertIn("database", r.refused)
+        self.assertIn("symbolic link", r.refused)
+        self.assertTrue((outside / "data" / "a.db").exists())
 
     def test_crash_inside_rewrite_resumes(self):
         write(self.source / "chats" / "c.json", json.dumps({"p": f"{self.source}/projects/demo"}))

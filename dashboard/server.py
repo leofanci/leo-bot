@@ -3470,8 +3470,8 @@ def main():
     acquire_pid_lock(args.port)  # before the move and re-index: a second start must not touch the data
     try:
         datadir.prepare()  # one-time move out of a clone, marker, data migrations
-    except SystemExit:
-        release_pid_lock()  # refused (two data folders, newer data): leave no stale pid file
+    except BaseException:
+        release_pid_lock()  # refused or failed (two data folders, newer data, disk error): no stale pid file
         raise
 
     if not args.no_reindex:
