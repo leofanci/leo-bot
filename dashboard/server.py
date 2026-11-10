@@ -43,7 +43,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots, paths, version  # noqa: E402
+from core import bots, datadir, paths, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -3467,7 +3467,12 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-reindex", action="store_true", help="skip the startup re-index")
     args = ap.parse_args()
-    acquire_pid_lock(args.port)  # before the re-index: a second start must not touch the index
+    acquire_pid_lock(args.port)  # before the move and re-index: a second start must not touch the data
+    try:
+        datadir.prepare()  # one-time move out of a clone, marker, data migrations
+    except SystemExit:
+        release_pid_lock()  # refused (two data folders, newer data): leave no stale pid file
+        raise
 
     if not args.no_reindex:
         print("Re-indexing os.db from source files...")
