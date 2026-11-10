@@ -395,7 +395,7 @@ async function loadMe(){
     history.replaceState(null, "", location.pathname + location.hash);
   }
 }
-async function boot(){ await loadMe(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+async function boot(){ await loadMe(); loadUpdate(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -481,10 +481,11 @@ function renderWsBar(){
     return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
   }).join("")
     + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`)
-    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}</button>`);
+    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}<span class="ws-update-dot" aria-hidden="true"></span></button>`);
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
   if ($("#new-project-btn")) $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
   if ($("#ws-settings")) $("#ws-settings").onclick = () => STATE.view === "settings" ? closeSettings() : openSettings();
+  if ($("#ws-settings") && _UPDATE?.available) $("#ws-settings").classList.add("has-update");
 }
 
 // Settings covers the whole machine, so it takes over the window (.settings-open)
@@ -1505,13 +1506,66 @@ function engineLogo(id, size){
   const [bg, glyph] = ENGINE_MARKS[key] || ENGINE_MARKS.custom;
   return `<span class="eng-logo" style="--s:${size || 40}px;background:${bg}"><svg viewBox="0 0 24 24" aria-hidden="true">${glyph}</svg></span>`;
 }
+// ── Update notice (owner only): badge on the Settings gear, card + data folder on top of Settings ──
+let _UPDATE = null;
+async function loadUpdate(){
+  if (isPerson()) { _UPDATE = null; return; }
+  try { _UPDATE = await api("/api/update"); } catch { _UPDATE = null; }
+  document.getElementById("ws-settings")?.classList.toggle("has-update", !!(_UPDATE && _UPDATE.available));
+}
+function updateCardHtml(d){
+  const folder = d.data_dir ? `<div class="upd-folder">Data folder: <code>${esc(d.data_dir)}</code>${_ME.deployment === "server" ? "" : ` <button class="btn sm ghost" data-upd-open>Open</button>`}</div>` : "";
+  if (d.updating) return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Updating. Leo Bot restarts in a moment.</b><small data-upd-note></small></div></div>${folder}`;
+  if (!d.available) return folder;
+  const notes = d.notes_url ? `<a href="${esc(d.notes_url)}" target="_blank" rel="noopener noreferrer">What's new</a>` : "";
+  const ver = d.latest && /^[0-9a-f]{40,}$/.test(d.latest) ? d.latest.slice(0, 7) : d.latest;
+  return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Leo Bot ${esc(ver)} is available (you have ${esc(d.current)})</b>${notes}<small data-upd-note></small></div>
+    <button class="btn primary" data-upd-go>Update</button></div>${folder}`;
+}
+function watchUpdate(d){
+  const card = document.querySelector("[data-upd-card]"); if (!card) return;
+  const started = Date.now();
+  const timer = setInterval(async () => {
+    try {
+      const h = await (await fetch("/healthz", { cache: "no-store" })).json();
+      if (h.version && h.version !== d.current) { clearInterval(timer); location.reload(); return; }
+    } catch {}
+    if (Date.now() - started > 120000) {
+      clearInterval(timer);
+      const note = card.querySelector("[data-upd-note]");
+      if (note) note.textContent = `Still waiting. See the update log: ${d.log || ""}`;
+    }
+  }, 2000);
+}
+async function mountUpdateCard(){
+  const scroll = document.querySelector("#main .scroll"); if (isPerson() || !scroll) return;
+  await loadUpdate();
+  if (!_UPDATE || !document.body.contains(scroll)) return;
+  scroll.querySelector(".upd-wrap")?.remove();
+  const wrap = document.createElement("div"); wrap.className = "upd-wrap";
+  wrap.innerHTML = updateCardHtml(_UPDATE);
+  scroll.prepend(wrap);
+  wrap.querySelector("[data-upd-open]")?.addEventListener("click", () => jpost("/api/update/open-data", {}).catch(e => toast("✗ " + e.message)));
+  wrap.querySelector("[data-upd-go]")?.addEventListener("click", async e => {
+    e.currentTarget.disabled = true;
+    try { await jpost("/api/update", {}); } catch (err) { e.currentTarget.disabled = false; toast("✗ " + err.message); return; }
+    _UPDATE = { ..._UPDATE, updating: true };
+    wrap.innerHTML = updateCardHtml(_UPDATE);
+    watchUpdate(_UPDATE);
+  });
+  if (_UPDATE.updating) watchUpdate(_UPDATE);
+}
+// ── end update notice
+
 // Settings: only what applies to the whole machine, across every workspace.
 // What belongs to one project (Linked folders, Team) stays in that project.
 const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]];
 const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
     <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
 function renderSettings(tab){
-  return tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
+  const out = tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
+  mountUpdateCard();
+  return out;
 }
 
 // Settings, Access: how people reach this Leo Bot, and where it runs.

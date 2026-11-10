@@ -43,7 +43,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots, datadir, paths, version  # noqa: E402
+from core import bots, datadir, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -312,6 +312,57 @@ def pick_local_folder() -> dict:
 
 # `open` runs these instead of showing them.
 _LAUNCHABLE_SUFFIXES = frozenset({".app", ".command", ".workflow", ".action", ".saver", ".prefpane", ".terminal"})
+
+
+# ── Update notice (owner only): cached check result, one detached update at a time ──
+UPDATE_FIRST_CHECK = 60        # seconds after start
+UPDATE_CHECK_EVERY = 24 * 3600
+UPDATE_SPAWN_WINDOW = 30       # a double click inside this window gets 409 even before the updater's lock is held
+_UPDATE_STARTED = 0.0          # monotonic time of the last accepted POST
+_UPDATE_GUARD = threading.Lock()
+
+
+def _update_in_flight() -> bool:
+    return updater.is_updating() or (_UPDATE_STARTED and time.monotonic() - _UPDATE_STARTED < UPDATE_SPAWN_WINDOW)
+
+
+def _update_view() -> dict:
+    """What GET /api/update says. Cached settings only: never touches the network."""
+    cfg = updater.settings()
+    latest = cfg.get("latest")
+    installed = paths.is_installed()
+    available = False
+    notes = None
+    if latest:
+        if cfg.get("channel") == "main":
+            available = latest != updater._head(paths.CODE)
+            notes = updater.release_notes_url()
+        else:
+            available = version.newer(RUNNING_VERSION, latest)
+            notes = updater.release_notes_url(tag=latest)
+    return {"installed": installed, "current": RUNNING_VERSION, "latest": latest, "available": bool(available),
+            "notes_url": notes, "updating": bool(_update_in_flight()),
+            "data_dir": str(paths.DATA), "log": str(paths.UPDATE_LOG)}
+
+
+def _update_check_loop(sleep=time.sleep, rounds=None) -> None:
+    """First check after UPDATE_FIRST_CHECK seconds, then daily. Never raises."""
+    wait, n = UPDATE_FIRST_CHECK, 0
+    while rounds is None or n < rounds:
+        sleep(wait)
+        wait, n = UPDATE_CHECK_EVERY, n + 1
+        try:
+            updater.check()
+        except Exception as e:  # noqa: BLE001
+            print(f"update check failed: {e}", file=sys.stderr)
+
+
+def _start_update_checker():
+    if not paths.is_installed():
+        return None
+    t = threading.Thread(target=_update_check_loop, name="update-check", daemon=True)
+    t.start()
+    return t
 
 
 def open_local_folder(path: str) -> None:
@@ -1961,6 +2012,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "unknown endpoint"})
         return self._send(200, _folders_view(ws, projects))
 
+    def _update_post(self, path):
+        """Settings, Updates: owner only (the caller checked). Starts one detached `leobot update`."""
+        global _UPDATE_STARTED
+        if path == "/api/update/open-data":
+            open_local_folder(str(paths.DATA))
+            return self._send(200, {"ok": True})
+        if path != "/api/update":
+            return self._send(404, {"error": "unknown endpoint"})
+        with _UPDATE_GUARD:
+            if not paths.is_installed():
+                return self._send(409, {"error": "This is a development checkout. Update it with git."})
+            if _update_in_flight():
+                return self._send(409, {"error": "An update is already running."})
+            try:
+                updater.spawn_detached()
+            except RuntimeError as e:
+                return self._send(500, {"error": str(e)})
+            _UPDATE_STARTED = time.monotonic()
+        return self._send(202, {"updating": True})
+
     def _engines_post(self, path, body):
         """Settings, Engines: owner only (the caller checked)."""
         if path == "/api/engines/provider":
@@ -2888,6 +2959,8 @@ class Handler(BaseHTTPRequestHandler):
                     (parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 files = deliverables.list_files(ROOT, ws, db.tree(), db.posts()) if record else []
                 return self._send(200, {"ws": ws, "files": files})
+            if path == "/api/update":
+                return self._send(200, _update_view())
             if path == "/api/engines":
                 return self._send(200, _engines_view())
             if path == "/api/folders":
@@ -3286,6 +3359,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0, shared=team_scope)
                 return self._send(200, {"lines": text.splitlines() if text else []})
+            if path in ("/api/update", "/api/update/open-data"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._update_post(path)
             if path.startswith("/api/engines/"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
@@ -3524,6 +3601,7 @@ def main():
         release_pid_lock()
         raise
     write_token_file()
+    _start_update_checker()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

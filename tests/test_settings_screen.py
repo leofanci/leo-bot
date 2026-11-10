@@ -89,3 +89,19 @@ class SettingsScreen(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UpdateCard(unittest.TestCase):
+    def test_settings_has_the_update_card_hook(self):
+        self.assertIn("/api/update", APP_JS)
+        for text in ("is available (you have", "What's new", "Updating. Leo Bot restarts in a moment.", "Data folder: "):
+            self.assertIn(text, APP_JS)
+        self.assertIn("/healthz", APP_JS)
+        self.assertIn("ws-update-dot", APP_JS)
+        self.assertIn(".ws-update-dot", APP_CSS)
+
+    def test_card_is_owner_only_and_has_no_em_dash(self):
+        block = APP_JS.split("// ── Update notice", 1)[1].split("// ── end update notice", 1)[0]
+        self.assertNotIn("—", block)
+        self.assertIn("isPerson()", block)
+        self.assertNotIn("—", APP_CSS.split("/* update notice */", 1)[1].split("/* end update notice */", 1)[0])

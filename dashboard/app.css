@@ -864,3 +864,14 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .integ-setup p{margin:4px 0 8px;color:var(--ui-color-text-muted)}
 .integ-setup ol{margin:0;padding-left:18px;display:grid;gap:6px}
 .integ-setup code{display:block;margin-top:4px;padding:6px 8px;border-radius:var(--ui-radius-small);background:var(--ui-color-surface-muted);font-size:12px;word-break:break-all;user-select:all}
+
+/* update notice */
+.ws-update-dot{display:none;position:absolute;top:6px;right:6px;width:9px;height:9px;border-radius:50%;background:var(--ui-color-signal);box-shadow:0 0 0 2px var(--ui-color-rail)}
+.ws-btn.has-update .ws-update-dot{display:block}
+.upd-card{display:flex;align-items:center;justify-content:space-between;gap:var(--ui-space-3);padding:14px 16px;margin-bottom:var(--ui-space-3);border-color:var(--ui-color-accent-line);background:var(--ui-color-accent-soft)}
+.upd-text{display:flex;flex-direction:column;gap:4px;min-width:0}
+.upd-text a{color:var(--ui-color-accent);font-size:var(--ui-type-label)}
+.upd-text small{color:var(--ui-color-text-muted);overflow-wrap:anywhere}
+.upd-folder{margin-bottom:var(--ui-space-3);color:var(--ui-color-text-muted);font-size:var(--ui-type-label);overflow-wrap:anywhere}
+@media (max-width:640px){.upd-card{flex-wrap:wrap}}
+/* end update notice */
