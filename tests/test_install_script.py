@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 INSTALL = ROOT / "install.sh"
 RENDER = ROOT / "scripts" / "render-installer.sh"
 PLACEHOLDER = "__LEOBOT_" + "REPO_URL__"
+MARKER = "# leobot wrapper (installed by install.sh)"
+# macOS ships bash 3.2 as /bin/bash; CI and Homebrew have bash 5. Run under each one found.
+BASHES = sorted({b for b in ("/bin/bash", shutil.which("bash")) if b and os.path.exists(b)})
 
 
 def _git(cwd, *args):
@@ -52,9 +55,29 @@ class InstallScriptTest(unittest.TestCase):
         env.update(extra)
         return env
 
-    def run_install(self, *args, **env):
-        return subprocess.run(["bash", str(INSTALL), *args], env=self.env(**env),
+    def run_install(self, *args, _bash="bash", **env):
+        return subprocess.run([_bash, str(INSTALL), *args], env=self.env(**env),
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120)
+
+    @staticmethod
+    def wrapper_body(out: str) -> str:
+        """The wrapper text a dry run prints, indented four spaces under `would: write`."""
+        lines = out.splitlines()
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("would: write ")) + 1
+        body = []
+        for ln in lines[start:]:
+            if not ln.startswith("    "):
+                break
+            body.append(ln[4:])
+        return "\n".join(body) + "\n"
+
+    def fake_bin(self, name: str, script: str) -> Path:
+        d = self.tmp / "fakebin"
+        d.mkdir(exist_ok=True)
+        f = d / name
+        f.write_text("#!/bin/sh\n" + script)
+        f.chmod(0o755)
+        return d
 
     def assertNothingInstalled(self):
         self.assertFalse((self.home / ".leobot").exists(), "dry run created the home folder")
@@ -161,6 +184,66 @@ class InstallScriptTest(unittest.TestCase):
         self.assertIn("export LEOBOT_HOME=", r.stdout)
         self.assertIn("elsewhere/app", r.stdout)
         self.assertFalse(custom.exists())
+
+    def test_quotes_in_home_survive_every_bash(self):
+        url = make_bare_repo(self.tmp)
+        custom = self.home / "it's $HOME `x` dir"
+        fake = self.fake_bin("python3", 'printf "%s\\n" "$LEOBOT_HOME" "$@"\n')
+        for bash in BASHES:
+            with self.subTest(bash=bash):
+                r = self.run_install("--dry-run", "--yes", _bash=bash, LEOBOT_REPO_URL=url,
+                                     LEOBOT_HOME=str(custom))
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                body = self.wrapper_body(r.stdout)
+                wrapper = self.tmp / "wrapper"
+                wrapper.write_text(body)
+                chk = subprocess.run(["sh", "-n", str(wrapper)], capture_output=True, text=True)
+                self.assertEqual(chk.returncode, 0, body + chk.stderr)
+                ran = subprocess.run(["sh", str(wrapper), "status", "a b"], capture_output=True, text=True,
+                                     env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}"})
+                self.assertEqual(ran.stdout.splitlines(),
+                                 [str(custom), str(custom / "app" / "leobot.py"), "status", "a b"],
+                                 body + ran.stderr)
+                self.assertIn(MARKER, body.splitlines())
+                line = next(ln for ln in r.stdout.splitlines() if ln.startswith("would: git -C "))
+                words = subprocess.run(["sh", "-c", "printf '%s\\n' " + line[len("would: "):]],
+                                       capture_output=True, text=True).stdout.splitlines()
+                self.assertEqual(words[:3], ["git", "-C", str(custom / "app")], line)
+
+    def test_foreign_leobot_command_left_alone(self):
+        url = make_bare_repo(self.tmp)
+        bin_dir = self.home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "leobot").write_text("#!/bin/sh\nexec python3 /opt/other/leobot.py \"$@\"\n")
+        r = self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("would: write", r.stdout)
+        self.assertIn("left alone", r.stderr)
+
+    def test_own_wrapper_is_replaced(self):
+        url = make_bare_repo(self.tmp)
+        bin_dir = self.home / ".local" / "bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "leobot").write_text(f"#!/bin/sh\n{MARKER}\nexec python3 '/old/app/leobot.py' \"$@\"\n")
+        r = self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("would: write", r.stdout)
+
+    def linux_run(self, **env):
+        url = make_bare_repo(self.tmp)
+        fake = self.fake_bin("uname", 'if [ "$1" = -s ]; then echo Linux; else exec /usr/bin/uname "$@"; fi\n')
+        return self.run_install("--dry-run", "--yes", LEOBOT_REPO_URL=url,
+                                PATH=f"{fake}:{os.environ['PATH']}", **env)
+
+    def test_linux_desktop_defaults_to_no_service(self):
+        r = self.linux_run(DISPLAY=":0")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotRegex(r.stdout, r"would: .*service install")
+
+    def test_linux_headless_defaults_to_server_service(self):
+        r = self.linux_run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertRegex(r.stdout, r"would: .*leobot\.py'? service install --server")
 
     def test_render_fills_placeholder(self):
         clone = self.tmp / "clone"

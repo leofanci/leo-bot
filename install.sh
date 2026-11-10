@@ -19,12 +19,12 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 
 # One shell word per argument, quoted only when needed, for the `would:` lines.
 quote() {
-  local out="" a
+  local out="" a sq="'\\''"
   for a in "$@"; do
     if [[ $a =~ ^[A-Za-z0-9_./:=@%+,-]+$ ]]; then
       out+="$a "
     else
-      out+="'${a//\'/\'\\\'\'}' "
+      out+="'${a//\'/$sq}' "
     fi
   done
   printf '%s' "${out% }"
@@ -139,8 +139,13 @@ detect_os() {
 is_root() { [ "$(id -u)" = 0 ]; }
 
 apt_install() {
-  run apt-get update
-  run apt-get install -y "$@"
+  if [ "$YES" = 1 ] || ! [ -t 0 ]; then
+    run env DEBIAN_FRONTEND=noninteractive apt-get update
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y "$@"
+  else
+    run apt-get update
+    run apt-get install -y "$@"
+  fi
 }
 
 check_git() {
@@ -196,7 +201,7 @@ check_claude() {
       say "would: curl -fsSL https://claude.ai/install.sh | bash"
     elif ! command -v curl >/dev/null 2>&1; then
       warn "curl is missing, so Claude Code was not installed. See the Claude Code docs to install it later."
-    elif ! bash -c 'curl -fsSL https://claude.ai/install.sh | bash'; then
+    elif ! bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash'; then
       warn "Claude Code did not install. Leo Bot works without it; see the Claude Code docs to install it later."
     fi
   else
@@ -291,14 +296,17 @@ updater.save_settings({"channel": sys.argv[2]})
 PY
 }
 
+# First line after the shebang of every wrapper this script writes; how it knows its own.
+WRAPPER_MARK="# leobot wrapper (installed by install.sh)"
+
 # ~/.local/bin/leobot: a small wrapper, never written through a symlink.
 install_wrapper() {
   local bin="$HOME/.local/bin" wrapper="$HOME/.local/bin/leobot" body tmp
-  body="#!/bin/sh"$'\n'"# Leo Bot command, written by install.sh. \`leobot uninstall\` removes it."$'\n'
+  body="#!/bin/sh"$'\n'"$WRAPPER_MARK"$'\n'"# \`leobot uninstall\` removes it."$'\n'
   if [ "$CUSTOM_HOME" = 1 ]; then
     body+="export LEOBOT_HOME=$(quote "$HOME_DIR")"$'\n'
   fi
-  body+="exec python3 '${HOME_DIR//\'/\'\\\'\'}/app/leobot.py' \"\$@\""$'\n'
+  body+="exec python3 $(quote "$HOME_DIR/app/leobot.py") \"\$@\""$'\n'
   if { [ -e "$wrapper" ] || [ -L "$wrapper" ]; } && ! wrapper_is_ours "$wrapper"; then
     warn "$wrapper already exists and is not Leo Bot's, so it was left alone. Run Leo Bot with: python3 $(quote "$HOME_DIR/app/leobot.py")"
     WRAPPER_OK=0
@@ -323,7 +331,7 @@ wrapper_is_ours() {
   if [ -L "$f" ]; then
     case "$(readlink "$f")" in *leobot.py) return 0 ;; *) return 1 ;; esac
   fi
-  [ -f "$f" ] && grep -q 'leobot\.py' "$f"
+  [ -f "$f" ] && grep -qxF "$WRAPPER_MARK" "$f" && grep -q '^exec python3 .*leobot\.py' "$f"
 }
 
 on_path() {
@@ -376,7 +384,7 @@ install_service() {
      { [ "$OS" != mac ] && [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; }; then
     server=1
   fi
-  if [ "$server" = 1 ] || [ "$OS" != mac ]; then def=y; fi
+  if [ "$server" = 1 ]; then def=y; fi
   if [ -z "$want" ]; then
     if ask "Run Leo Bot as a background service that starts on its own?" "$def"; then want=1; else want=0; fi
   fi
@@ -424,6 +432,7 @@ main() {
     [ "$HOME_DIR" = "$HOME/.leobot" ] || CUSTOM_HOME=1
   fi
   export LEOBOT_HOME="$HOME_DIR"
+  export GIT_TERMINAL_PROMPT=0  # a wrong or private URL fails instead of asking for a password
   [ "$DRY_RUN" = 1 ] && say "Dry run: nothing on this machine changes."
 
   trap cleanup EXIT

@@ -7,6 +7,8 @@
 cd "$(dirname "$0")/.." || exit 0
 BIN=LeoBot.app/Contents/MacOS/LeoBot
 SRC=LeoBot.app/Contents/Resources
+# -nt is POSIX since 2024 and in every sh this runs under (macOS /bin/sh is bash or zsh)
+# shellcheck disable=SC3013
 if [ ! -x "$BIN" ] || [ "$SRC/webview.swift" -nt "$BIN" ] || [ "$SRC/start-server.sh" -nt "$BIN" ] \
         || [ "$SRC/AppIcon.icns" -nt "$BIN" ]; then
     echo "LeoBot.app source changed: rebuilding..."
