@@ -87,10 +87,6 @@ class SettingsScreen(unittest.TestCase):
         self.assertIn('g.ws === "hq" ? "Same as your messages" : "Same as its workspace"', APP_JS)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class UpdateCard(unittest.TestCase):
     def test_settings_has_the_update_card_hook(self):
         self.assertIn("/api/update", APP_JS)
@@ -105,3 +101,17 @@ class UpdateCard(unittest.TestCase):
         self.assertNotIn("—", block)
         self.assertIn("isPerson()", block)
         self.assertNotIn("—", APP_CSS.split("/* update notice */", 1)[1].split("/* end update notice */", 1)[0])
+
+    def test_card_slot_is_not_inside_a_re_rendered_container(self):
+        self.assertIn('<div class="scroll eng-page"><div id="access"></div></div>', APP_JS)
+        self.assertNotIn('class="scroll eng-page" id="access"', APP_JS)
+
+    def test_watch_uses_boot_id_one_timer_and_installed_flag(self):
+        block = APP_JS.split("// ── Update notice", 1)[1].split("// ── end update notice", 1)[0]
+        self.assertIn("h.boot", block)
+        self.assertIn("clearInterval(_UPD_TIMER)", block)
+        self.assertIn("d.installed", block)
+
+
+if __name__ == "__main__":
+    unittest.main()

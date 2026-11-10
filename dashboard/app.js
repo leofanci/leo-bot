@@ -1508,9 +1508,12 @@ function engineLogo(id, size){
 }
 // ── Update notice (owner only): badge on the Settings gear, card + data folder on top of Settings ──
 let _UPDATE = null;
+let _UPD_TIMER = null;
+let _BOOT0 = null;  // boot id of the server this page loaded from
 async function loadUpdate(){
   if (isPerson()) { _UPDATE = null; return; }
   try { _UPDATE = await api("/api/update"); } catch { _UPDATE = null; }
+  if (_BOOT0 === null) { try { _BOOT0 = (await (await fetch("/healthz", { cache: "no-store" })).json()).boot || ""; } catch {} }
   document.getElementById("ws-settings")?.classList.toggle("has-update", !!(_UPDATE && _UPDATE.available));
 }
 function updateCardHtml(d){
@@ -1518,20 +1521,21 @@ function updateCardHtml(d){
   if (d.updating) return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Updating. Leo Bot restarts in a moment.</b><small data-upd-note></small></div></div>${folder}`;
   if (!d.available) return folder;
   const notes = d.notes_url ? `<a href="${esc(d.notes_url)}" target="_blank" rel="noopener noreferrer">What's new</a>` : "";
-  const ver = d.latest && /^[0-9a-f]{40,}$/.test(d.latest) ? d.latest.slice(0, 7) : d.latest;
+  const ver = d.latest && /^[0-9a-f]{40,}$/.test(d.latest) ? d.latest.slice(0, 7) : String(d.latest || "").replace(/^v/, "");
   return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Leo Bot ${esc(ver)} is available (you have ${esc(d.current)})</b>${notes}<small data-upd-note></small></div>
-    <button class="btn primary" data-upd-go>Update</button></div>${folder}`;
+    ${d.installed ? `<button class="btn primary" data-upd-go>Update</button>` : ""}</div>${folder}`;
 }
 function watchUpdate(d){
   const card = document.querySelector("[data-upd-card]"); if (!card) return;
   const started = Date.now();
-  const timer = setInterval(async () => {
+  clearInterval(_UPD_TIMER);
+  _UPD_TIMER = setInterval(async () => {
     try {
       const h = await (await fetch("/healthz", { cache: "no-store" })).json();
-      if (h.version && h.version !== d.current) { clearInterval(timer); location.reload(); return; }
+      if ((h.version && h.version !== d.current) || (h.boot && _BOOT0 && h.boot !== _BOOT0)) { clearInterval(_UPD_TIMER); location.reload(); return; }
     } catch {}
     if (Date.now() - started > 120000) {
-      clearInterval(timer);
+      clearInterval(_UPD_TIMER);
       const note = card.querySelector("[data-upd-note]");
       if (note) note.textContent = `Still waiting. See the update log: ${d.log || ""}`;
     }
@@ -1571,7 +1575,7 @@ function renderSettings(tab){
 // Settings, Access: how people reach this Leo Bot, and where it runs.
 async function renderAccess(){
   const stillOn = routeGuard();
-  $("#main").innerHTML = `${settingsTop("access")}<div class="scroll eng-page" id="access"></div>`;
+  $("#main").innerHTML = `${settingsTop("access")}<div class="scroll eng-page"><div id="access"></div></div>`;
   const [share, eng] = await Promise.all([api("/api/sharing").catch(() => ({})), api("/api/engines").catch(() => ({}))]);
   if (!stillOn()) return;
   const box = $("#access");

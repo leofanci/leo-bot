@@ -119,6 +119,40 @@ class UpdateRoutes(sp.Base):
         self.assertEqual(code, 202)
         spawn.assert_called_once()
 
+    def test_spawn_race_is_409_not_500(self):
+        with mock.patch.object(updater, "spawn_detached", side_effect=RuntimeError("An update is already running.")):
+            code, _, _ = request("POST", "/api/update", {}, owner=True)
+        self.assertEqual(code, 409)
+
+    def test_get_works_without_an_index(self):
+        with mock.patch.object(server.db, "db_exists", return_value=False):
+            code, _, _ = request("GET", "/api/update", owner=True)
+            member_code = request("GET", "/api/update", member="nope")[0]
+        self.assertEqual(code, 200)
+        self.assertEqual(member_code, 403)
+
+    def test_main_channel_unknown_head_is_not_available(self):
+        cfg = {"channel": "main", "latest": "a" * 40}
+        server._HEAD_CACHE.clear()
+        self.addCleanup(server._HEAD_CACHE.clear)
+        with mock.patch.object(updater, "settings", return_value=cfg), \
+                mock.patch.object(updater, "_head", return_value=None) as head:
+            _, out, _ = request("GET", "/api/update", owner=True)
+        self.assertFalse(out["available"])
+        server._HEAD_CACHE.clear()
+        with mock.patch.object(updater, "settings", return_value=cfg), \
+                mock.patch.object(updater, "_head", return_value="b" * 40) as head:
+            request("GET", "/api/update", owner=True)
+            _, out, _ = request("GET", "/api/update", owner=True)
+        self.assertTrue(out["available"])
+        head.assert_called_once()
+
+    def test_healthz_has_a_boot_id(self):
+        for path in ("/healthz", "/healthz?nonce=abc"):
+            _, out, _ = request("GET", path)
+            self.assertEqual(out["boot"], server.BOOT_ID)
+        self.assertGreaterEqual(len(server.BOOT_ID), 16)
+
     def test_open_data_uses_the_data_folder_only(self):
         with mock.patch.object(server, "open_local_folder") as opener:
             code, _, _ = request("POST", "/api/update/open-data", {"path": "/etc"}, owner=True)

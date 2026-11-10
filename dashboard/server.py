@@ -184,6 +184,8 @@ def restrict_new_files():
 # The version this process loaded at startup. /healthz reports it, so after `leobot update`
 # checks out new code an old process still running can never pass for the new version.
 RUNNING_VERSION = version.current()
+# Random per process: a main-channel update may leave VERSION unchanged, so /healthz also reports this.
+BOOT_ID = secrets.token_hex(8)
 
 
 def health_proof(nonce):
@@ -326,6 +328,16 @@ def _update_in_flight() -> bool:
     return updater.is_updating() or (_UPDATE_STARTED and time.monotonic() - _UPDATE_STARTED < UPDATE_SPAWN_WINDOW)
 
 
+_HEAD_CACHE: list = []
+
+
+def _code_head():
+    """The checkout's commit as of this process (it restarts after an update), read once."""
+    if not _HEAD_CACHE:
+        _HEAD_CACHE.append(updater._head(paths.CODE))
+    return _HEAD_CACHE[0]
+
+
 def _update_view() -> dict:
     """What GET /api/update says. Cached settings only: never touches the network."""
     cfg = updater.settings()
@@ -335,7 +347,8 @@ def _update_view() -> dict:
     notes = None
     if latest:
         if cfg.get("channel") == "main":
-            available = latest != updater._head(paths.CODE)
+            head = _code_head()
+            available = bool(head) and latest != head
             notes = updater.release_notes_url()
         else:
             available = version.newer(RUNNING_VERSION, latest)
@@ -2028,7 +2041,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 updater.spawn_detached()
             except RuntimeError as e:
-                return self._send(500, {"error": str(e)})
+                code = 409 if updater.is_updating() or "already running" in str(e) else 500
+                return self._send(code, {"error": str(e)})
             _UPDATE_STARTED = time.monotonic()
         return self._send(202, {"updating": True})
 
@@ -2837,9 +2851,9 @@ class Handler(BaseHTTPRequestHandler):
             # checkout's token file (HMAC of the nonce), without sending the token.
             nonce = (parse_qs(urlparse(self.path).query).get("nonce") or [""])[0]
             if nonce:
-                return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION,
+                return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION, "boot": BOOT_ID,
                                         "proof": health_proof(nonce)})
-            return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION})
+            return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION, "boot": BOOT_ID})
         if path in ("/", "/index.html"):
             token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
             # Compare bytes: str compare_digest raises on non-ASCII input.
@@ -2909,6 +2923,8 @@ class Handler(BaseHTTPRequestHandler):
             if person and db.db_exists():
                 return self._person_get(path, person)
             return self._send(403, {"error": "forbidden"})
+        if path == "/api/update":  # owner only (checked above); needs no index
+            return self._send(200, _update_view())
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
@@ -2959,8 +2975,6 @@ class Handler(BaseHTTPRequestHandler):
                     (parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 files = deliverables.list_files(ROOT, ws, db.tree(), db.posts()) if record else []
                 return self._send(200, {"ws": ws, "files": files})
-            if path == "/api/update":
-                return self._send(200, _update_view())
             if path == "/api/engines":
                 return self._send(200, _engines_view())
             if path == "/api/folders":
@@ -3079,6 +3093,13 @@ class Handler(BaseHTTPRequestHandler):
             if person and db.db_exists():
                 return self._person_post(path, person)
             return self._send(403, {"error": "forbidden"})
+        if path in ("/api/update", "/api/update/open-data"):  # owner only, no body, no index needed
+            if not self._authorized(require_origin=True):
+                return self._send(403, {"error": "forbidden"})
+            try:
+                return self._update_post(path)
+            except fileops.ActionError as e:
+                return self._send(400, {"error": str(e)})
         try:
             body = self._read_json()
             if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
@@ -3359,10 +3380,6 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0, shared=team_scope)
                 return self._send(200, {"lines": text.splitlines() if text else []})
-            if path in ("/api/update", "/api/update/open-data"):
-                if not self._authorized(require_origin=True):
-                    return self._send(403, {"error": "forbidden"})
-                return self._update_post(path)
             if path.startswith("/api/engines/"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
