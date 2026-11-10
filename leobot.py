@@ -70,20 +70,28 @@ def _token() -> str:
         return ""
 
 
-def _proof_ok(port) -> bool:
-    """True when the server on `port` proves it holds our token (HMAC over a fresh nonce)."""
+def _healthz(port):
+    """The server's /healthz answer when the server on `port` proves it holds our token
+    (HMAC over a fresh nonce), else None."""
     token = _token()
     if not token or not port:
-        return False
+        return None
     nonce = secrets.token_hex(8)
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via HTTP(S)_PROXY
         with opener.open(f"http://127.0.0.1:{port}/healthz?nonce={nonce}", timeout=1) as r:
             body = json.loads(r.read().decode())
     except (OSError, ValueError):
-        return False
+        return None
     want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
-    return isinstance(body, dict) and hmac.compare_digest(str(body.get("proof", "")), want)
+    if isinstance(body, dict) and hmac.compare_digest(str(body.get("proof", "")), want):
+        return body
+    return None
+
+
+def _proof_ok(port) -> bool:
+    """True when the server on `port` proves it holds our token."""
+    return _healthz(port) is not None
 
 
 def _cmdline(pid) -> str:
@@ -124,17 +132,7 @@ def cmd_start(args) -> int:
     paths.ensure_dirs()
     if service.installed():  # the service manager owns the server: never spawn a second one
         return _start_service(args, explicit)
-    fd = os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        log = os.fdopen(fd, "ab")
-    except BaseException:
-        os.close(fd)
-        raise
-    with log:
-        proc = subprocess.Popen([sys.executable, str(paths.CODE / "dashboard" / "server.py"),
-                                 "--port", str(args.port)],
-                                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                cwd=str(paths.CODE), start_new_session=True)
+    proc = _spawn(args.port)
     end = time.monotonic() + START_WAIT
     while time.monotonic() < end:
         if _proof_ok(args.port):
@@ -147,6 +145,31 @@ def cmd_start(args) -> int:
         proc.terminate()
     print(f"Leo Bot did not start. See {paths.SERVER_LOG}", file=sys.stderr)
     return 1
+
+
+def _spawn(port):
+    """Start a detached server on `port` (its own session, output to the server log)."""
+    fd = os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        log = os.fdopen(fd, "ab")
+    except BaseException:
+        os.close(fd)
+        raise
+    with log:
+        return subprocess.Popen([sys.executable, str(paths.CODE / "dashboard" / "server.py"),
+                                 "--port", str(port)],
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                cwd=str(paths.CODE), start_new_session=True)
+
+
+def _launch(port):
+    """Start the server without waiting for it: through the service when one is installed
+    (returns None), else as a detached child (returns the process)."""
+    paths.ensure_dirs()
+    if service.installed():
+        service.start()
+        return None
+    return _spawn(port)
 
 
 def _wait_ready(fallback_port):
@@ -498,50 +521,13 @@ def cmd_backup(args) -> int:
         print("Cancelled.", file=sys.stderr)
         return 1
     port = _stop_if_running()
-    snap = None
-    kept = None
-    done = False
     try:
-        stamp = _stamp()
-        real_data = paths.DATA.resolve()
-        if real_data == src.resolve() or real_data in src.resolve().parents:
-            kept = paths.BACKUPS / f"restore-source-{stamp}.tar.gz"  # the restore would delete it
-            shutil.copy2(src, kept)
-            src = kept
-        else:
-            kept = None
         try:
-            snap = _tar_data(paths.BACKUPS / f"pre-restore-{stamp}.tar.gz")
-        except BaseException:
-            if kept:
-                kept.unlink(missing_ok=True)  # the copy was only for this restore
-            raise
-        aside = paths.HOME / f"data.pre-restore-{stamp}"
-        os.rename(paths.DATA, aside)
-        try:
-            paths.DATA.mkdir(mode=0o700)
-            _safe_extract(src, paths.DATA)
-            os.chmod(paths.DATA, 0o700)
-        except BaseException as e:
-            shutil.rmtree(paths.DATA, ignore_errors=True)
-            try:
-                os.rename(aside, paths.DATA)
-                back = "Your previous data is back."
-            except OSError:
-                back = f"Could not put it back. Your data is in {aside} and in {snap}."
-            print(f"Restore failed ({e}). {back} Snapshot: {snap}"
-                  + (f" Restore source kept: {kept}" if kept else ""), file=sys.stderr)
-            if not isinstance(e, Exception):
-                raise
+            snap = _replace_data(src, paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
+        except RestoreFailed as e:
+            print(str(e), file=sys.stderr)
             return 1
-        done = True
         notes = []
-        try:
-            shutil.rmtree(aside)
-        except OSError as e:
-            notes.append(f"Could not delete {aside} ({e}); remove it by hand.")
-        if kept:
-            kept.unlink(missing_ok=True)
         try:
             _reindex()
         except Exception as e:  # noqa: BLE001
@@ -550,14 +536,67 @@ def cmd_backup(args) -> int:
         for n in notes:
             print(n, file=sys.stderr)
         return 0
-    except Exception as e:
-        if done:
-            raise
-        print(f"Restore failed ({e}). Nothing was replaced."
-              + (f" Snapshot: {snap}" if snap else ""), file=sys.stderr)
-        return 1
     finally:
         _restart(port)
+
+
+class RestoreFailed(Exception):
+    """A restore did not happen; the message says where the data is. DATA is as it was."""
+
+
+def _replace_data(src: Path, snap_path: Path) -> Path:
+    """Replace DATA with the archive `src`. The server must be stopped. First saves DATA to
+    `snap_path`, then moves DATA aside, extracts with _safe_extract and deletes the old folder;
+    if the extraction fails the old folder is put back. Returns the snapshot path.
+    Raises RestoreFailed (data unchanged) with a message naming the snapshot."""
+    if paths.DATA.is_symlink():
+        raise RestoreFailed(f"{paths.DATA} is a symbolic link to {os.readlink(paths.DATA)}. Restore will "
+                            f"not replace a linked data folder. Restore {src} by hand into the target. "
+                            f"Nothing was replaced.")
+    stamp = _stamp()
+    snap = None
+    kept = None
+    try:
+        real_data = paths.DATA.resolve()
+        if real_data == src.resolve() or real_data in src.resolve().parents:
+            kept = paths.BACKUPS / f"restore-source-{stamp}.tar.gz"  # the restore would delete it
+            shutil.copy2(src, kept)
+            src = kept
+        try:
+            snap = _tar_data(snap_path)
+        except BaseException:
+            if kept:
+                kept.unlink(missing_ok=True)  # the copy was only for this restore
+            raise
+        aside = paths.HOME / f"data.pre-restore-{stamp}"
+        os.rename(paths.DATA, aside)
+    except Exception as e:
+        raise RestoreFailed(f"Restore failed ({e}). Nothing was replaced."
+                            + (f" Snapshot: {snap}" if snap else "")) from e
+    try:
+        paths.DATA.mkdir(mode=0o700)
+        _safe_extract(src, paths.DATA)
+        os.chmod(paths.DATA, 0o700)
+    except BaseException as e:
+        shutil.rmtree(paths.DATA, ignore_errors=True)
+        try:
+            os.rename(aside, paths.DATA)
+            back = "Your previous data is back."
+        except OSError:
+            back = f"Could not put it back. Your data is in {aside} and in {snap}."
+        msg = (f"Restore failed ({e}). {back} Snapshot: {snap}"
+               + (f" Restore source kept: {kept}" if kept else ""))
+        if not isinstance(e, Exception):
+            print(msg, file=sys.stderr)
+            raise
+        raise RestoreFailed(msg) from e
+    try:
+        shutil.rmtree(aside)
+    except OSError as e:
+        print(f"Could not delete {aside} ({e}); remove it by hand.", file=sys.stderr)
+    if kept:
+        kept.unlink(missing_ok=True)
+    return snap
 
 
 def _reindex() -> None:
@@ -693,6 +732,34 @@ def cmd_service(args) -> int:
     return 0
 
 
+def cmd_update(args) -> int:
+    from core import updater
+    if args.channel:
+        try:
+            updater.save_settings({"channel": args.channel})
+        except OSError as e:
+            print(f"Could not save the channel ({e}).", file=sys.stderr)
+            return 1
+    if args.rollback:
+        return updater.rollback(args.yes)
+    if args.check:
+        if not paths.is_installed():
+            print("This is a development checkout. Update it with git.", file=sys.stderr)
+            return 1
+        res = updater.check()
+        if res["latest"] is None:
+            print("Could not check for updates. Is the network up?", file=sys.stderr)
+            return 1
+        if res["available"]:
+            notes = f" What's new: {res['notes_url']}" if res.get("notes_url") else ""
+            print(f"Leo Bot {res['latest']} is available (you have {res['current']}). "
+                  f"Run: leobot update.{notes}")
+        else:
+            print(f"Leo Bot is up to date ({res['current']}, {res['channel']}).")
+        return 0
+    return updater.apply(args.version, channel=args.channel, yes=args.yes)
+
+
 # ----------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -720,13 +787,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=("install", "uninstall", "status"))
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--server", action="store_true", help="server deployment mode (Linux)")
+    p = sub.add_parser("update", help="update Leo Bot (backs up your data first)")
+    p.add_argument("--check", action="store_true", help="only check whether an update is out")
+    p.add_argument("--channel", choices=("stable", "main"), help="follow releases or main (remembered)")
+    p.add_argument("--version", metavar="vX.Y.Z", help="move to this release")
+    p.add_argument("--rollback", action="store_true", help="go back to the previous version")
+    p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     return ap
 
 
 COMMANDS = {"open": cmd_open, "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
             "version": cmd_version, "doctor": cmd_doctor, "backup": cmd_backup,
             "move-data": cmd_move_data, "uninstall": cmd_uninstall,
-            "service": cmd_service}
+            "service": cmd_service, "update": cmd_update}
 
 
 def main(argv=None) -> int:
