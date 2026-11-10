@@ -81,17 +81,31 @@ def _atomic_write(path: Path, text: str, mode: int = 0o600) -> None:
         raise
 
 
-def _fsync_path(p: Path) -> None:
+def _fsync_path(p: Path, strict: bool = False) -> None:
+    """Flush a file or folder. Lenient by default (some filesystems refuse folder fsync);
+    strict raises, for files whose loss would be unrecoverable."""
     try:
         fd = os.open(p, os.O_RDONLY)
     except OSError:
+        if strict:
+            raise
         return
     try:
         os.fsync(fd)
     except OSError:
-        pass
+        if strict:
+            raise
     finally:
         os.close(fd)
+
+
+class NoLinkTar(tarfile.TarFile):
+    """Archive writer that never emits hard-link members: a file linked twice is stored twice,
+    so every backup restores with plain files, directories and symbolic links only."""
+
+    def gettarinfo(self, *a, **k):
+        self.inodes.clear()
+        return super().gettarinfo(*a, **k)
 
 
 def _fsync_tree(p: Path) -> None:
@@ -115,11 +129,11 @@ def _tar(items: list, base: Path, dest: Path) -> Path:
     dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     skip = lambda ti: None if Path(ti.name).name == PLACEHOLDER else ti  # noqa: E731
     try:
-        with tarfile.open(dest, "w:gz") as t:
+        with NoLinkTar.open(dest, "w:gz") as t:
             for rel in items:
                 t.add(base / rel, arcname=rel, filter=skip)
         dest.chmod(0o600)
-        _fsync_path(dest)
+        _fsync_path(dest, strict=True)
         _fsync_path(dest.parent)
     except BaseException:
         dest.unlink(missing_ok=True)  # never leave a partial backup that looks real

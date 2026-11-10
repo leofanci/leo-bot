@@ -351,11 +351,11 @@ def _confirm(question, yes) -> bool:
 def _tar_data(dest: Path) -> Path:
     dest.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with tarfile.open(dest, "w:gz") as t:
+        with datadir.NoLinkTar.open(dest, "w:gz") as t:
             for child in sorted(paths.DATA.iterdir()):
                 t.add(child, arcname=child.name)
         dest.chmod(0o600)
-        datadir._fsync_path(dest)
+        datadir._fsync_path(dest, strict=True)
         datadir._fsync_path(dest.parent)
     except BaseException:
         dest.unlink(missing_ok=True)
@@ -448,11 +448,17 @@ def cmd_backup(args) -> int:
     except (OSError, tarfile.TarError, ValueError) as e:
         print(f"Cannot restore {src}: {e}. Nothing was changed.", file=sys.stderr)
         return 1
+    if paths.DATA.is_symlink():
+        print(f"{paths.DATA} is a symbolic link to {os.readlink(paths.DATA)}. Restore will not replace "
+              f"a linked data folder. Restore by hand into the target. Nothing was changed.", file=sys.stderr)
+        return 1
     if not _confirm(f"Replace your data with {src.name}? Current data is saved first.", args.yes):
         print("Cancelled.", file=sys.stderr)
         return 1
     port = _stop_if_running()
     snap = None
+    kept = None
+    done = False
     try:
         stamp = _stamp()
         real_data = paths.DATA.resolve()
@@ -460,6 +466,8 @@ def cmd_backup(args) -> int:
             kept = paths.BACKUPS / f"restore-source-{stamp}.tar.gz"  # the restore would delete it
             shutil.copy2(src, kept)
             src = kept
+        else:
+            kept = None
         snap = _tar_data(paths.BACKUPS / f"pre-restore-{stamp}.tar.gz")
         aside = paths.HOME / f"data.pre-restore-{stamp}"
         os.rename(paths.DATA, aside)
@@ -474,16 +482,31 @@ def cmd_backup(args) -> int:
                 back = "Your previous data is back."
             except OSError:
                 back = f"Could not put it back. Your data is in {aside} and in {snap}."
-            print(f"Restore failed ({e}). {back} Snapshot: {snap}", file=sys.stderr)
+            print(f"Restore failed ({e}). {back} Snapshot: {snap}"
+                  + (f" Restore source kept: {kept}" if kept else ""), file=sys.stderr)
             if not isinstance(e, Exception):
                 raise
             return 1
-        shutil.rmtree(aside, ignore_errors=True)
-        _reindex()
+        done = True
+        notes = []
+        try:
+            shutil.rmtree(aside)
+        except OSError as e:
+            notes.append(f"Could not delete {aside} ({e}); remove it by hand.")
+        if kept:
+            kept.unlink(missing_ok=True)
+        try:
+            _reindex()
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"Re-index failed ({e}). Start Leo Bot to rebuild it.")
         print(f"Restored. Previous data saved: {snap}")
+        for n in notes:
+            print(n, file=sys.stderr)
         return 0
-    except Exception as e:  # snapshot or rename failed: nothing was replaced
-        print(f"Restore failed ({e}). Nothing was changed."
+    except Exception as e:
+        if done:
+            raise
+        print(f"Restore failed ({e}). Nothing was replaced."
               + (f" Snapshot: {snap}" if snap else ""), file=sys.stderr)
         return 1
     finally:
@@ -542,6 +565,15 @@ def _home_problem():
     return None
 
 
+def _is_checkout(p: Path) -> bool:
+    try:
+        if p.resolve() == paths.CODE.resolve():
+            return True
+        return (p / "dashboard" / "server.py").is_file() and (p / "leobot.py").is_file() and (p / ".git").exists()
+    except OSError:
+        return False
+
+
 def _is_ours(link: Path) -> bool:
     """Our launcher: a symlink to leobot.py in the app/code folder, or a script naming leobot.py."""
     try:
@@ -571,12 +603,21 @@ def cmd_uninstall(args) -> int:
         pass
     except Exception as e:  # noqa: BLE001
         print(f"Could not remove the background service ({e}). Continuing.", file=sys.stderr)
+    user = Path.home().resolve()
+    if home == user or home in user.parents:
+        print(f"Refusing: {home} is or contains your own home folder.", file=sys.stderr)
+        return 1
     _stop_if_running()
     link = Path.home() / ".local" / "bin" / "leobot"
     if _is_ours(link):
         _rm(link)
-    for p in (paths.HOME / "app", Path.home() / "Applications" / "LeoBot.app"):
-        _rm(p)
+    app = paths.HOME / "app"
+    if app.exists() or app.is_symlink():
+        if _is_checkout(app):
+            _rm(app)
+        else:
+            print(f"Left {app} alone: it does not look like a Leo Bot checkout.", file=sys.stderr)
+    _rm(Path.home() / "Applications" / "LeoBot.app")
     if args.data:
         _rm(paths.HOME)
     print("Leo Bot uninstalled." + (f" Removed {home}." if args.data else f" Your data is still in {paths.DATA}."))
