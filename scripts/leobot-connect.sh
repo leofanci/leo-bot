@@ -29,7 +29,7 @@ TOKEN=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   # $LEOBOT_USER (checked above) expands here on purpose; ~user then expands on the server
   # shellcheck disable=SC2029
-  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null || cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null" || true)"
+  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$LEOBOT_USER/.leobot/run/auth-token 2>/dev/null || cat ~$LEOBOT_USER/.leobot/run/auth-token 2>/dev/null" || true)"
   [ -n "$TOKEN" ] && break
   sleep 3
 done

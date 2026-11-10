@@ -54,6 +54,41 @@ class Scripts(unittest.TestCase):
         self.assertIn("LEOBOT_DEPLOYMENT=server", text)
         self.assertNotIn("0.0.0.0", text)
 
+    def test_setup_installs_a_user_service_through_install_sh(self):
+        text = (ROOT / "scripts" / "server-setup.sh").read_text()
+        for needle in ("enable-linger", "install.sh", "/etc/systemd/system/leobot.service",
+                       "systemctl disable --now", "move-data --from", "XDG_RUNTIME_DIR", "LEOBOT_REPO_URL"):
+            self.assertIn(needle, text)
+        self.assertIn('LEOBOT_REPO="${LEOBOT_REPO:-}"', text)  # old name still works
+        self.assertNotIn("cat > /etc/systemd", text)  # no new system unit
+
+    def test_setup_removes_the_old_unit_before_starting_the_new_service(self):
+        text = (ROOT / "scripts" / "server-setup.sh").read_text()
+        self.assertLess(text.index("systemctl disable --now"), text.index("service install"))
+
+    def test_sync_copies_data_to_data(self):
+        text = (ROOT / "scripts" / "sync-to-server.sh").read_text()
+        self.assertIn(".leobot/data", text)
+        self.assertIn("systemctl --user", text)
+        self.assertNotIn("/leo-bot", text)
+
+    def test_connect_reads_the_token_from_the_run_folder(self):
+        text = (ROOT / "scripts" / "leobot-connect.sh").read_text()
+        self.assertIn(".leobot/run/auth-token", text)
+        self.assertNotIn("dashboard/.auth-token", text)
+
+    def test_readme_documents_install_and_updates(self):
+        text = (ROOT / "README.md").read_text()
+        for needle in ("releases/latest/download/install.sh", "../../releases/latest", "leobot update",
+                       "~/.leobot/data", "## Develop", "leobot backup"):
+            self.assertIn(needle, text)
+
+    def test_server_guide_covers_the_user_service(self):
+        text = (ROOT / "docs" / "server.md").read_text()
+        for needle in ("leobot update", "leobot service", "enable-linger", ".leobot/data"):
+            self.assertIn(needle, text)
+        self.assertNotIn("journalctl -u leobot", text)
+
     def test_server_still_listens_on_loopback_only(self):
         self.assertIn('ThreadingHTTPServer(("127.0.0.1", args.port)', (ROOT / "dashboard" / "server.py").read_text())
 
@@ -71,7 +106,7 @@ class DeploymentSettings(unittest.TestCase):
     def test_the_screen_shows_the_guides_commands(self):
         app = (ROOT / "dashboard" / "app.js").read_text()
         guide = (ROOT / "docs" / "server.md").read_text()
-        for line in ('ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
+        for line in ('ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < scripts/server-setup.sh',
                      "scripts/leobot-connect.sh root@your-server", "scripts/sync-to-server.sh root@your-server"):
             self.assertIn(line, app)
             self.assertIn(line, guide)

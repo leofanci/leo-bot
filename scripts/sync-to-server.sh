@@ -3,9 +3,10 @@
 #
 #   scripts/sync-to-server.sh user@server
 #
-# Copies your projects, chats, team and portfolio (all gitignored), then re-indexes
-# and restarts Leo Bot there. Nothing on the server is deleted. Stop using the copy on
-# this machine afterwards, or the two will drift apart.
+# Copies this machine's data folder (${LEOBOT_HOME:-~/.leobot}/data: projects, chats, team,
+# portfolio) to the server's ~/.leobot/data, then restarts Leo Bot there. Nothing on the
+# server is deleted. Stop using the copy on this machine afterwards, or the two will drift
+# apart.
 set -euo pipefail
 
 TARGET="${1:-}"
@@ -16,7 +17,11 @@ if [ -z "$TARGET" ]; then
 fi
 case "$TARGET" in -*|*[[:space:]]*) echo "Target must be user@server, not an option." >&2; exit 1 ;; esac
 case "$LEOBOT_USER" in ""|-*|*[!a-z0-9_-]*) echo "LEOBOT_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOCAL_DATA="${LEOBOT_HOME:-$HOME/.leobot}/data"
+if [ ! -d "$LOCAL_DATA" ]; then
+  echo "No data folder at $LOCAL_DATA. Open Leo Bot here once (leobot) so it moves your data there, then run this again." >&2
+  exit 1
+fi
 # the user name is checked above and meant to expand here
 # shellcheck disable=SC2029
 REMOTE_HOME="$(ssh "$TARGET" "getent passwd $LEOBOT_USER | cut -d: -f6")"
@@ -24,20 +29,24 @@ if [ -z "$REMOTE_HOME" ]; then
   echo "No $LEOBOT_USER user on $TARGET. Run scripts/server-setup.sh there first." >&2
   exit 1
 fi
-APP="$REMOTE_HOME/leo-bot"
+REMOTE_DATA="$REMOTE_HOME/.leobot/data"
 
-ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S systemctl stop leobot"
-# A failed copy must not leave Leo Bot stopped or the copied files open.
-PRIVATE="$APP/projects $APP/chats $APP/team $APP/portfolio"
-finish() {
-  # the user name is checked above and meant to expand here
+# Runs a command as the leobot user on the server; $(id -u ...) expands there, not here.
+# The user name is checked above and meant to expand here.
+remote_service() {
   # shellcheck disable=SC2029
-  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $LEOBOT_USER: $APP; \$S chmod -R go-rwx $PRIVATE 2>/dev/null; \$S systemctl start leobot"
+  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S -u $LEOBOT_USER env XDG_RUNTIME_DIR=/run/user/\$(id -u $LEOBOT_USER) systemctl --user $1 leobot" 2>/dev/null \
+    || ssh "$TARGET" "XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user $1 leobot"
+}
+
+remote_service stop
+# A failed copy must not leave Leo Bot stopped or the copied files open.
+finish() {
+  # shellcheck disable=SC2029
+  ssh "$TARGET" "S=; [ \$(id -u) -eq 0 ] || S='sudo -n'; \$S chown -R $LEOBOT_USER: $REMOTE_DATA; \$S chmod -R go-rwx $REMOTE_DATA" || true
+  remote_service start
 }
 trap finish EXIT
-for dir in projects chats team portfolio; do
-  [ -d "$ROOT/$dir" ] || continue
-  rsync -a --rsync-path="sudo -n rsync" "$ROOT/$dir/" "$TARGET:$APP/$dir/" 2>/dev/null \
-    || rsync -a "$ROOT/$dir/" "$TARGET:$APP/$dir/"
-done
+rsync -a --rsync-path="sudo -n rsync" "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/" 2>/dev/null \
+  || rsync -a "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/"
 echo "Done. Saved chats continue with a recap of their messages. Linked app folders need linking again on the server."

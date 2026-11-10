@@ -1478,14 +1478,14 @@ async function drawRunners(box, stillOn = () => true){
 function deploymentSection(where){
   const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
   if (where === "server") return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
-    <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. To watch its log, run this on the server. Guide: docs/server.md.</div>
-    ${cmd("journalctl -u leobot -f")}</section>`;
+    <div class="help">On your own server, so bots keep working when your laptop is closed. Update it from Settings or with leobot update. To watch its log, run this on the server as the leobot user. Guide: docs/server.md.</div>
+    ${cmd("tail -f ~/.leobot/logs/server.log")}</section>`;
   return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
-    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a leo-bot checkout here. They install Leo Bot, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
+    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a leo-bot checkout here. They install Leo Bot as a background service there, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
     ${cmd(SERVER_STEPS.join("\n"))}</section>`;
 }
 const SERVER_STEPS = [
-  `ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
+  `ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
   "scripts/leobot-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
