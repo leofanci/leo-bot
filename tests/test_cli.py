@@ -38,6 +38,9 @@ class CliBase(unittest.TestCase):
             self.patches.append(p)
         self.addCleanup(lambda: [p.stop() for p in self.patches])
         paths.ensure_dirs()
+        p = mock.patch.object(leobot, "_reindex")
+        self.reindex = p.start()
+        self.addCleanup(p.stop)
 
     def write(self, rel, text="x", base=None):
         f = Path(base or paths.DATA) / rel
@@ -172,15 +175,87 @@ class BackupTests(CliBase):
         self.assertFalse((self.home / "evil").exists())
         self.assertFalse(list(paths.BACKUPS.glob("pre-restore-*")))
 
-    def test_restore_rejects_link_escape(self):
+    def test_restore_rejects_hardlink(self):
         dest = self.tmp / "ln.tar.gz"
         with tarfile.open(dest, "w:gz") as t:
             ti = tarfile.TarInfo("link")
-            ti.type = tarfile.SYMTYPE
-            ti.linkname = "../../outside"
+            ti.type = tarfile.LNKTYPE
+            ti.linkname = "/etc/passwd"
             t.addfile(ti)
         code, _, _ = run("backup", "--restore", str(dest), "--yes")
         self.assertNotEqual(code, 0)
+
+    def archive_with_links(self, entries):
+        dest = self.tmp / "ln2.tar.gz"
+        with tarfile.open(dest, "w:gz") as t:
+            for name, link in entries:
+                ti = tarfile.TarInfo(name)
+                if link is None:
+                    ti.size = 1
+                    t.addfile(ti, io.BytesIO(b"p"))
+                else:
+                    ti.type = tarfile.SYMTYPE
+                    ti.linkname = link
+                    t.addfile(ti)
+        return dest
+
+    def test_restore_chained_symlink_slip_contained(self):
+        self.write("keep.md", "keep")
+        arc = self.archive_with_links([("x", "."), ("x/y", ".."), ("y/pwned", None)])
+        code, _, _ = run("backup", "--restore", str(arc), "--yes")
+        self.assertNotEqual(code, 0)
+        self.assertFalse((paths.HOME / "pwned").exists())
+        self.assertFalse((paths.HOME.parent / "pwned").exists())
+        self.assertEqual((paths.DATA / "keep.md").read_text(), "keep")
+
+    def test_restore_keeps_outside_symlink(self):
+        outside = self.tmp / "outside-folder"
+        outside.mkdir()
+        arc = self.archive_with_links([("linked", str(outside)), ("a.md", None)])
+        code, _, _ = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 0)
+        self.assertTrue((paths.DATA / "linked").is_symlink())
+        self.assertEqual(os.readlink(paths.DATA / "linked"), str(outside))
+        self.assertEqual(oct(paths.DATA.stat().st_mode & 0o777), "0o700")
+        self.reindex.assert_called()
+
+    def test_restore_failure_rolls_back(self):
+        self.write("keep.md", "keep")
+        arc = self.archive({"ok.md": b"1"})
+        with mock.patch.object(leobot, "_safe_extract", side_effect=OSError("disk full")):
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual((paths.DATA / "keep.md").read_text(), "keep")
+        self.assertIn("pre-restore-", err)
+        self.assertFalse(list(paths.HOME.glob("data.pre-restore-*")))
+
+    def test_restore_midway_failure_rolls_back(self):
+        self.write("keep.md", "keep")
+        arc = self.archive_with_links([("good.md", None), ("x", "."), ("x/y", None)])
+        code, _, _ = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual((paths.DATA / "keep.md").read_text(), "keep")
+        self.assertFalse((paths.DATA / "good.md").exists())
+
+    def test_restore_archive_inside_data(self):
+        self.write("old.md", "old")
+        arc = paths.DATA / "inside.tar.gz"
+        with tarfile.open(arc, "w:gz") as t:
+            ti = tarfile.TarInfo("new.md")
+            ti.size = 3
+            t.addfile(ti, io.BytesIO(b"new"))
+        code, _, _ = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 0)
+        self.assertEqual((paths.DATA / "new.md").read_text(), "new")
+
+    def test_snapshot_failure_restarts_server(self):
+        arc = self.archive({"ok.md": b"1"})
+        with mock.patch.object(leobot, "_stop_if_running", return_value=9123), \
+                mock.patch.object(leobot, "_tar_data", side_effect=OSError("no space")), \
+                mock.patch.object(leobot, "cmd_start") as start:
+            code, _, _ = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertEqual(start.call_args[0][0].port, 9123)
 
     def test_declined_prompt_changes_nothing(self):
         self.write("a.md")
@@ -206,7 +281,8 @@ class MoveAndDoctorTests(CliBase):
 
     def test_move_data_moves_and_reindexes(self):
         src = self.legacy()
-        with mock.patch.object(leobot, "_reindex") as re_:
+        re_ = self.reindex
+        if True:
             code, _, _ = run("move-data", "--from", str(src))
         self.assertEqual(code, 0)
         self.assertTrue((paths.DATA / "projects/demo/p.md").exists())
@@ -224,6 +300,11 @@ class MoveAndDoctorTests(CliBase):
             {"source": "/somewhere/else", "items": ["projects"], "stage": "moving"}))
         _, out, _ = run("doctor")
         self.assertIn("leobot move-data --from /somewhere/else", out)
+
+    def test_doctor_reports_newer_version(self):
+        paths.SETTINGS.write_text(json.dumps({"latest": "v99.0.0"}))
+        _, out, _ = run("doctor")
+        self.assertIn("version v99.0.0 is available", out)
 
     def test_doctor_marker_and_modes(self):
         migrations.write_marker(paths.DATA, {"schema": migrations.LATEST})
@@ -255,9 +336,46 @@ class UninstallTests(CliBase):
         self.assertEqual(code, 0)
         self.assertFalse(paths.HOME.exists())
 
+    def test_uninstall_refuses_unsafe_home(self):
+        user = self.tmp / "fakehome"
+        user.mkdir()
+        with mock.patch.object(leobot.Path, "home", return_value=user), \
+                mock.patch.object(leobot, "_stop_if_running"):
+            for bad in (user, self.tmp):  # the user's home, and a folder containing it
+                with mock.patch.object(paths, "HOME", bad):
+                    code, _, err = run("uninstall", "--data", "--yes")
+                    self.assertEqual(code, 1, bad)
+                    self.assertIn("Refusing", err)
+            stuffed = self.tmp / "stuffed"
+            (stuffed / "data").mkdir(parents=True)
+            (stuffed / "photos").mkdir()
+            with mock.patch.object(paths, "HOME", stuffed):
+                code, _, err = run("uninstall", "--data", "--yes")
+            self.assertEqual(code, 1)
+            self.assertIn("photos", err)
+            empty = self.tmp / "emptyhome"
+            empty.mkdir()
+            with mock.patch.object(paths, "HOME", empty):
+                self.assertEqual(run("uninstall", "--data", "--yes")[0], 1)
+        self.assertTrue(self.tmp.exists() and user.exists() and stuffed.exists())
+
+    def test_uninstall_leaves_foreign_launcher(self):
+        user = self.tmp / "fakehome"
+        link = user / ".local" / "bin" / "leobot"
+        link.parent.mkdir(parents=True)
+        link.write_text("#!/bin/sh\necho other tool\n")
+        with mock.patch.object(leobot.Path, "home", return_value=user), \
+                mock.patch.object(leobot, "_stop_if_running"):
+            run("uninstall", "--yes")
+            self.assertTrue(link.exists())
+            link.write_text("#!/bin/sh\nexec python3 /x/leobot.py \"$@\"\n")
+            run("uninstall", "--yes")
+        self.assertFalse(link.exists())
+
     def test_uninstall_declined(self):
         (paths.HOME / "app").mkdir()
-        with mock.patch("builtins.input", return_value=""):
+        with mock.patch.object(leobot.Path, "home", return_value=self.tmp / "fakehome"), \
+                mock.patch("builtins.input", return_value=""):
             code, _, _ = run("uninstall")
         self.assertNotEqual(code, 0)
         self.assertTrue((paths.HOME / "app").exists())

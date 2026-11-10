@@ -77,7 +77,8 @@ def _proof_ok(port) -> bool:
         return False
     nonce = secrets.token_hex(8)
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz?nonce={nonce}", timeout=1) as r:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via HTTP(S)_PROXY
+        with opener.open(f"http://127.0.0.1:{port}/healthz?nonce={nonce}", timeout=1) as r:
             body = json.loads(r.read().decode())
     except (OSError, ValueError):
         return False
@@ -138,6 +139,8 @@ def cmd_start(args) -> int:
         if proc.poll() is not None:
             break
         time.sleep(0.25)
+    if proc.poll() is None:
+        proc.terminate()
     print(f"Leo Bot did not start. See {paths.SERVER_LOG}", file=sys.stderr)
     return 1
 
@@ -158,11 +161,17 @@ def cmd_stop(args=None) -> int:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        print(f"Not allowed to stop pid {pid}. Stop it as the user that started it.", file=sys.stderr)
+        return 1
     if not _wait_stopped(STOP_WAIT):
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except PermissionError:
+            print(f"Not allowed to force-stop pid {pid}.", file=sys.stderr)
+            return 1
         _wait_stopped(STOP_WAIT)
     if not _lock_held():
         paths.PID_FILE.unlink(missing_ok=True)
@@ -172,12 +181,19 @@ def cmd_stop(args=None) -> int:
     return 1
 
 
-def _stop_if_running() -> bool:
-    """Stop the server if it runs. Returns whether it was running."""
-    was = status_info()["running"]
-    if was and cmd_stop() != 0:
+def _stop_if_running():
+    """Stop the server if it runs. Returns the port it ran on, or None when it was not running."""
+    info = status_info()
+    if not info["running"]:
+        return None
+    if cmd_stop() != 0:
         raise SystemExit("Could not stop Leo Bot. Nothing was changed.")
-    return was
+    return info["port"] or DEFAULT_PORT
+
+
+def _restart(port) -> None:
+    if port:
+        cmd_start(argparse.Namespace(port=port))
 
 
 def cmd_open(args=None) -> int:
@@ -188,7 +204,10 @@ def cmd_open(args=None) -> int:
     port = status_info()["port"] or DEFAULT_PORT
     if sys.platform == "darwin":
         app = Path.home() / "Applications" / "LeoBot.app"
-        subprocess.run(["open", str(app)] if app.exists() else ["open", _login_url(port)])
+        r = subprocess.run(["open", str(app)] if app.exists() else ["open", _login_url(port)])
+        if r.returncode != 0:
+            print("Could not open Leo Bot. Try: leobot status", file=sys.stderr)
+            return 1
     else:
         print(_login_url(port))
     return 0
@@ -216,7 +235,7 @@ def cmd_status(args) -> int:
         print(json.dumps(info))
         return 0
     print(f"running: {'yes' if info['running'] else 'no'}")
-    for k in ("pid", "port", "version", "home", "data", "service"):
+    for k in ("pid", "port", "version", "installed", "home", "data", "service"):
         if info.get(k) is not None:
             print(f"{k}: {info[k]}")
     return 0
@@ -305,7 +324,7 @@ def cmd_doctor(args) -> int:
     else:
         fix(f"port {DEFAULT_PORT} is used by something else", f"leobot start --port {DEFAULT_PORT + 1}")
     try:
-        latest = json.loads(paths.SETTINGS.read_text()).get("latest_version")
+        latest = json.loads(paths.SETTINGS.read_text()).get("latest")
     except (OSError, ValueError, AttributeError):
         latest = None
     if isinstance(latest, str) and version.newer(version.current(), latest):
@@ -336,6 +355,8 @@ def _tar_data(dest: Path) -> Path:
             for child in sorted(paths.DATA.iterdir()):
                 t.add(child, arcname=child.name)
         dest.chmod(0o600)
+        datadir._fsync_path(dest)
+        datadir._fsync_path(dest.parent)
     except BaseException:
         dest.unlink(missing_ok=True)
         raise
@@ -343,17 +364,67 @@ def _tar_data(dest: Path) -> Path:
 
 
 def _unsafe_member(m: tarfile.TarInfo):
-    parts = Path(m.name).parts
-    if m.name.startswith("/") or Path(m.name).is_absolute() or ".." in parts:
+    p = Path(m.name)
+    if m.name.startswith("/") or p.is_absolute() or ".." in p.parts:
         return f"unsafe path {m.name!r}"
-    if not (m.isfile() or m.isdir() or m.issym() or m.islnk()):
+    if not (m.isfile() or m.isdir() or m.issym()):
         return f"unsupported entry {m.name!r}"
-    if m.issym() or m.islnk():
-        link = m.linkname
-        target = Path(link) if m.islnk() else Path(m.name).parent / link
-        if Path(link).is_absolute() or ".." in Path(os.path.normpath(target)).parts:
-            return f"link {m.name!r} points outside the archive"
     return None
+
+
+def _check_members(members) -> None:
+    for m in members:
+        bad = _unsafe_member(m)
+        if bad:
+            raise ValueError(bad)
+
+
+def _ensure_dirs(dest: Path, parts) -> Path:
+    """Create `parts` under dest one step at a time, refusing to go through any symbolic link."""
+    cur = dest
+    for part in parts:
+        cur = cur / part
+        if cur.is_symlink():
+            raise ValueError(f"{cur.relative_to(dest)} is a symbolic link; refusing to write through it")
+        if not cur.exists():
+            cur.mkdir(mode=0o700)
+    real_dest = os.path.realpath(dest)
+    if os.path.commonpath([real_dest, os.path.realpath(cur)]) != real_dest:
+        raise ValueError("path leaves the data folder")
+    return cur
+
+
+def _safe_extract(archive: Path, dest: Path) -> None:
+    """Extract directories, regular files and symbolic links only, never writing through a link.
+    Links are created as they are and never followed, so a backup that links to a folder outside
+    the data restores faithfully."""
+    with tarfile.open(archive) as t:
+        members = t.getmembers()
+        _check_members(members)
+        for m in members:
+            parts = Path(m.name).parts
+            if not parts:
+                continue
+            parent = _ensure_dirs(dest, parts[:-1])
+            target = parent / parts[-1]
+            if m.isdir():
+                if target.is_symlink():
+                    raise ValueError(f"{m.name} is a symbolic link; refusing to write through it")
+                if not target.exists():
+                    target.mkdir()
+                os.chmod(target, (m.mode & 0o755) | 0o700)
+            elif m.issym():
+                if os.path.lexists(target):
+                    raise ValueError(f"{m.name} appears twice")
+                os.symlink(m.linkname, target)
+            else:
+                if os.path.lexists(target):
+                    target.unlink()
+                src = t.extractfile(m)
+                fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                             (m.mode & 0o755) | 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    shutil.copyfileobj(src, f)
 
 
 def _empty_data() -> None:
@@ -362,14 +433,6 @@ def _empty_data() -> None:
             shutil.rmtree(p)
         else:
             p.unlink()
-
-
-def _extract(archive: Path) -> None:
-    with tarfile.open(archive) as t:
-        if hasattr(tarfile, "data_filter"):
-            t.extractall(paths.DATA, filter="data")
-        else:
-            t.extractall(paths.DATA)
 
 
 def cmd_backup(args) -> int:
@@ -381,32 +444,50 @@ def cmd_backup(args) -> int:
     src = Path(args.restore)
     try:
         with tarfile.open(src) as t:
-            for m in t.getmembers():
-                bad = _unsafe_member(m)
-                if bad:
-                    print(f"Refusing to restore: {bad}. Nothing was changed.", file=sys.stderr)
-                    return 1
-    except (OSError, tarfile.TarError) as e:
-        print(f"Cannot read {src}: {e}. Nothing was changed.", file=sys.stderr)
+            _check_members(t.getmembers())
+    except (OSError, tarfile.TarError, ValueError) as e:
+        print(f"Cannot restore {src}: {e}. Nothing was changed.", file=sys.stderr)
         return 1
     if not _confirm(f"Replace your data with {src.name}? Current data is saved first.", args.yes):
         print("Cancelled.", file=sys.stderr)
         return 1
-    was_running = _stop_if_running()
-    snap = _tar_data(paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
-    _empty_data()
+    port = _stop_if_running()
+    snap = None
     try:
-        _extract(src)
-    except BaseException as e:
-        _empty_data()
-        _extract(snap)
-        print(f"Restore failed ({e}). Your previous data is back.", file=sys.stderr)
+        stamp = _stamp()
+        real_data = paths.DATA.resolve()
+        if real_data == src.resolve() or real_data in src.resolve().parents:
+            kept = paths.BACKUPS / f"restore-source-{stamp}.tar.gz"  # the restore would delete it
+            shutil.copy2(src, kept)
+            src = kept
+        snap = _tar_data(paths.BACKUPS / f"pre-restore-{stamp}.tar.gz")
+        aside = paths.HOME / f"data.pre-restore-{stamp}"
+        os.rename(paths.DATA, aside)
+        try:
+            paths.DATA.mkdir(mode=0o700)
+            _safe_extract(src, paths.DATA)
+            os.chmod(paths.DATA, 0o700)
+        except BaseException as e:
+            shutil.rmtree(paths.DATA, ignore_errors=True)
+            try:
+                os.rename(aside, paths.DATA)
+                back = "Your previous data is back."
+            except OSError:
+                back = f"Could not put it back. Your data is in {aside} and in {snap}."
+            print(f"Restore failed ({e}). {back} Snapshot: {snap}", file=sys.stderr)
+            if not isinstance(e, Exception):
+                raise
+            return 1
+        shutil.rmtree(aside, ignore_errors=True)
+        _reindex()
+        print(f"Restored. Previous data saved: {snap}")
+        return 0
+    except Exception as e:  # snapshot or rename failed: nothing was replaced
+        print(f"Restore failed ({e}). Nothing was changed."
+              + (f" Snapshot: {snap}" if snap else ""), file=sys.stderr)
         return 1
     finally:
-        if was_running:
-            cmd_start(argparse.Namespace(port=DEFAULT_PORT))
-    print(f"Restored. Previous data saved: {snap}")
-    return 0
+        _restart(port)
 
 
 def _reindex() -> None:
@@ -415,23 +496,22 @@ def _reindex() -> None:
 
 
 def cmd_move_data(args) -> int:
-    was_running = _stop_if_running()
-    res = datadir.move_legacy(Path(args.source), replace=args.replace)
-    if res.refused:
-        print(res.refused, file=sys.stderr)
-        if was_running:
-            cmd_start(argparse.Namespace(port=DEFAULT_PORT))
-        return 1
-    if res.moved:
-        print(f"Moved: {', '.join(res.moved)}")
-        if res.backup:
-            print(f"Backup: {res.backup}")
-    else:
-        print("Nothing to move.")
-    _reindex()
-    if was_running:
-        cmd_start(argparse.Namespace(port=DEFAULT_PORT))
-    return 0
+    port = _stop_if_running()
+    try:
+        res = datadir.move_legacy(Path(args.source), replace=args.replace)
+        if res.refused:
+            print(res.refused, file=sys.stderr)
+            return 1
+        if res.moved:
+            print(f"Moved: {', '.join(res.moved)}")
+            if res.backup:
+                print(f"Backup: {res.backup}")
+        else:
+            print("Nothing to move.")
+        _reindex()
+        return 0
+    finally:
+        _restart(port)
 
 
 def _rm(p: Path) -> None:
@@ -441,26 +521,65 @@ def _rm(p: Path) -> None:
         shutil.rmtree(p)
 
 
+_HOME_ENTRIES = {"app", "data", "run", "logs", "backups", "leobot.json", ".DS_Store"}
+
+
+def _home_problem():
+    """Why paths.HOME must not be deleted, or None."""
+    h = paths.HOME.resolve()
+    user = Path.home().resolve()
+    code = paths.CODE.resolve()
+    if h == Path(h.anchor) or h == user or h in user.parents:
+        return f"{h} is or contains your own home folder"
+    if (h == code or h in code.parents) and code != (h / "app").resolve():
+        return f"{h} is or contains the Leo Bot code folder"
+    if not any((h / n).exists() for n in ("data", "run", "leobot.json")):
+        return f"{h} does not look like a Leo Bot home"
+    extra = sorted(p.name for p in h.iterdir()
+                   if p.name not in _HOME_ENTRIES and not p.name.startswith("data.pre-restore-"))
+    if extra:
+        return f"{h} holds other things ({', '.join(extra[:5])})"
+    return None
+
+
+def _is_ours(link: Path) -> bool:
+    """Our launcher: a symlink to leobot.py in the app/code folder, or a script naming leobot.py."""
+    try:
+        if link.is_symlink():
+            tgt = link.resolve()
+            return tgt.name == "leobot.py" and tgt.parent in (paths.CODE.resolve(), (paths.HOME / "app").resolve())
+        return link.is_file() and "leobot.py" in link.read_text(errors="replace")
+    except OSError:
+        return False
+
+
 def cmd_uninstall(args) -> int:
-    what = "the app, the command and the launcher" + (" AND all your data" if args.data else " (data is kept)")
+    home = paths.HOME.resolve()
+    what = "the app, the command and the launcher" + (f" AND all your data in {home}" if args.data else " (data is kept)")
+    if args.data:
+        problem = _home_problem()
+        if problem:
+            print(f"Refusing to delete everything: {problem}.", file=sys.stderr)
+            return 1
     if not _confirm(f"Uninstall Leo Bot: remove {what}?", args.yes):
         print("Cancelled.", file=sys.stderr)
         return 1
-    if args.data and paths.HOME.resolve() in (Path("/"), Path.home().resolve()):
-        print(f"Refusing to remove {paths.HOME}.", file=sys.stderr)
-        return 1
-    _stop_if_running()
-    try:
+    try:  # first, so a service cannot bring the server back
         from core import service  # Task 7; absent until then
         service.uninstall()
     except ImportError:
         pass
-    for p in (paths.HOME / "app", Path.home() / ".local" / "bin" / "leobot",
-              Path.home() / "Applications" / "LeoBot.app"):
+    except Exception as e:  # noqa: BLE001
+        print(f"Could not remove the background service ({e}). Continuing.", file=sys.stderr)
+    _stop_if_running()
+    link = Path.home() / ".local" / "bin" / "leobot"
+    if _is_ours(link):
+        _rm(link)
+    for p in (paths.HOME / "app", Path.home() / "Applications" / "LeoBot.app"):
         _rm(p)
     if args.data:
         _rm(paths.HOME)
-    print("Leo Bot uninstalled." + ("" if args.data else f" Your data is still in {paths.DATA}."))
+    print("Leo Bot uninstalled." + (f" Removed {home}." if args.data else f" Your data is still in {paths.DATA}."))
     return 0
 
 

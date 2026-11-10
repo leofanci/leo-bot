@@ -207,9 +207,16 @@ def acquire_pid_lock(port):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     os.fchmod(fd, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    locked = False
+    for attempt in range(5):  # `leobot status` may hold a shared lock for a moment
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+            break
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.1)
+    if not locked:
         try:
             held = json.loads(os.pread(fd, 4096, 0).decode() or "{}")
             who = f" (pid {int(held['pid'])}, port {int(held['port'])})"
