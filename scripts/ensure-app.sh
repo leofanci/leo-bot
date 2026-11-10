@@ -14,4 +14,15 @@ if [ ! -x "$BIN" ] || [ "$SRC/webview.swift" -nt "$BIN" ] || [ "$SRC/start-serve
     echo "LeoBot.app source changed: rebuilding..."
     sh scripts/build-app.sh || echo "LeoBot.app rebuild failed; run scripts/build-app.sh to see why." >&2
 fi
+
+# Installed copy: when this checkout is the installed code ($LEOBOT_HOME/app, default
+# ~/.leobot/app) and ~/Applications/LeoBot.app exists, rebuild it too.
+HOME_DIR="${LEOBOT_HOME:-$HOME/.leobot}"
+HERE="$(pwd -P)"
+INSTALLED="$(cd "$HOME_DIR/app" 2>/dev/null && pwd -P)"
+if [ -d "$HOME/Applications/LeoBot.app" ] && [ -n "$INSTALLED" ] && [ "$HERE" = "$INSTALLED" ]; then
+    echo "Rebuilding $HOME/Applications/LeoBot.app..."
+    sh scripts/build-app.sh --out "$HOME/Applications" \
+        || echo "Installed LeoBot.app rebuild failed; run scripts/build-app.sh --out \"\$HOME/Applications\" to see why." >&2
+fi
 exit 0

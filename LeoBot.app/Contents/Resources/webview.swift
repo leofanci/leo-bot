@@ -170,38 +170,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         NSApp.mainMenu = mainMenu
     }
 
+    // Starts (or finds) the server, waits for it, loads the dashboard, then keeps
+    // watching: a restart (an update, a crash) is ridden out instead of shown as a failure.
     private func startServerAndLoad() {
         let repo = repoPath()
+        runStartScript(repo)
 
-        if let script = Bundle.main.path(forResource: "start-server", ofType: "sh") {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-            proc.arguments = [script, repo, String(port)]
-            let out = Pipe()
-            proc.standardOutput = out
-            proc.standardError = Pipe()
-            try? proc.run()
-            proc.waitUntilExit()
-            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if let r = text.range(of: "PID ") {
-                let rest = text[r.upperBound...].prefix { $0.isNumber }
-                serverPID = Int32(rest) ?? 0
-            }
+        // Retry every 2 s for up to 90 s (the indexer runs before the server serves).
+        if !waitUp(repo, seconds: 90) {
+            DispatchQueue.main.async { [weak self] in self?.showFailure() }
+            return
         }
-
-        // Poll the server for up to 12s (the indexer runs before it serves).
-        var up = false
-        for _ in 0..<60 {
-            if ping(repo) { up = true; break }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if up {
+            self.webView.load(URLRequest(url: self.loginURL(repo)))
+        }
+        watch(repo)
+    }
+
+    private func runStartScript(_ repo: String) {
+        guard let script = Bundle.main.path(forResource: "start-server", ofType: "sh") else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = [script, repo, String(port)]
+        var env = ProcessInfo.processInfo.environment
+        env["LEOBOT_HOME"] = homePath()
+        proc.environment = env
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        try? proc.run()
+        proc.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if let r = text.range(of: "PID ") {
+            let rest = text[r.upperBound...].prefix { $0.isNumber }
+            serverPID = Int32(rest) ?? 0
+        }
+    }
+
+    // True once a ping succeeds; checks every 2.0 s for up to `seconds`.
+    private func waitUp(_ repo: String, seconds: Int) -> Bool {
+        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+        while true {
+            if ping(repo) { return true }
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: 2.0)
+        }
+    }
+
+    // While the app is open: when the server stops answering (an update restarts it),
+    // start it again if nobody has and retry for 90 s before giving up; once it is
+    // back, reload the dashboard.
+    private func watch(_ repo: String) {
+        while true {
+            Thread.sleep(forTimeInterval: 2.0)
+            if ping(repo) { continue }
+            runStartScript(repo)
+            if !waitUp(repo, seconds: 90) {
+                DispatchQueue.main.async { [weak self] in self?.showFailure() }
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.webView.load(URLRequest(url: self.loginURL(repo)))
-            } else {
-                self.showFailure(repo)
             }
         }
     }
@@ -214,12 +245,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     private func readToken(_ repo: String) -> String {
-        let file = (repo as NSString).appendingPathComponent("dashboard/.auth-token")
+        let file = (homePath() as NSString).appendingPathComponent("run/auth-token")
         return (try? String(contentsOfFile: file, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    // Up = the listener proves it holds this checkout's token: it must return
+    // Up = the listener proves it holds this home's token: it must return
     // HMAC-SHA256(token, nonce) for a fresh nonce. Anything else on the port
     // never receives the tokenized login URL.
     private func ping(_ repo: String) -> Bool {
@@ -248,15 +279,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return ok
     }
 
-    // The bundle lives at <repo>/LeoBot.app, so the repo is its parent directory.
-    private func repoPath() -> String {
-        (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+    // The home folder: $LEOBOT_HOME, else ~/.leobot (token, pid lock and log live here).
+    private func homePath() -> String {
+        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], !h.isEmpty { return h }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot")
     }
 
-    private func showFailure(_ repo: String) {
+    // A development clone (the bundle sits next to dashboard/server.py) runs its own
+    // code; an installed app runs the code in $LEOBOT_HOME/app, else ~/.leobot/app.
+    private func repoPath() -> String {
+        let parent = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+        let marker = (parent as NSString).appendingPathComponent("dashboard/server.py")
+        if FileManager.default.fileExists(atPath: marker) { return parent }
+        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], !h.isEmpty {
+            return (h as NSString).appendingPathComponent("app")
+        }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot/app")
+    }
+
+    private func showFailure() {
+        let log = (homePath() as NSString).appendingPathComponent("logs/server.log")
         let alert = NSAlert()
         alert.messageText = "Leo Bot failed to start"
-        alert.informativeText = "The dashboard server did not respond. Check \(repo)/dashboard/server.log for details."
+        alert.informativeText = "The dashboard server did not respond. Check \(log) for details."
         alert.runModal()
         NSApp.terminate(nil)
     }
