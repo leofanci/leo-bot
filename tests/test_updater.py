@@ -350,11 +350,14 @@ class ApplyTests(UpdaterBase):
         self.assertEqual(self.head(), self.sha("v0.1.0"))
         self.assertTrue(self.server.running)
 
-    def fail_git(self, verb):
+    def fail_git(self, verb, times=None):
         real = updater._git
+        left = [times]
 
         def fake(code, *args, **kw):
-            if args and args[0] == verb:
+            if args and args[0] == verb and (left[0] is None or left[0] > 0):
+                if left[0] is not None:
+                    left[0] -= 1
                 return subprocess.CompletedProcess(args, 1, "", f"fatal: {verb} broke")
             return real(code, *args, **kw)
         return mock.patch.object(updater, "_git", side_effect=fake)
@@ -369,13 +372,96 @@ class ApplyTests(UpdaterBase):
         self.assertTrue(self.server.running)
 
     def test_checkout_failure_restarts_old_code(self):
-        with self.fail_git("checkout"):
+        with self.fail_git("checkout", times=1):
             rc, out = self.call(updater.apply)
         self.assertEqual(rc, 1)
         self.assertEqual(self.head(), self.sha("v0.1.0"))
         self.assertTrue(self.server.running)
         self.assertEqual(self.server.launches[-1][1], "0.1.0")
         self.assertEqual(len(self.pre_backups()), 1)
+
+    def test_checkout_back_failure_stays_stopped_with_commands(self):
+        head = self.head()
+        with self.fail_git("checkout"):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.server.running)  # never the new code on old data, nor a broken tree
+        self.assertIn(f"checkout --force --detach {head}", out)
+        self.assertIn("leobot start", out)
+
+    def test_settings_failure_before_stop_changes_nothing(self):
+        with mock.patch.object(updater, "save_settings", side_effect=OSError(28, "No space left on device")):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.server.stops, 0)
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+
+    def test_error_after_stop_restarts_server(self):
+        with mock.patch.object(updater, "_prune", side_effect=OSError(5, "I/O error")):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.1.0")
+
+    def test_error_after_checkout_goes_back(self):
+        with mock.patch.object(updater, "_ensure_app", side_effect=[OSError(5, "I/O error"), None]) as ens:
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.1.0")
+        self.assertEqual(ens.call_count, 2)  # also after going back
+
+    def test_service_is_stopped_even_when_not_running(self):
+        self.server.running = False
+        self.leobot_service.installed.return_value = True
+        self.leobot_service.port.return_value = 9100
+        with mock.patch.object(leobot, "cmd_stop", return_value=0) as stop:
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 0, out)
+        stop.assert_called()
+        self.assertEqual(self.server.launches[-1], (9100, "0.2.0"))
+
+    def test_restore_failure_in_recovery_keeps_target_and_stops(self):
+        self.server.bad_versions = {"0.2.0"}
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        head = self.head()
+        with mock.patch.object(leobot, "_safe_extract", side_effect=ValueError("bad archive")):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))  # older code never opens newer data
+        self.assertFalse(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.2.0")
+        pre = paths.BACKUPS / self.pre_backups()[0]
+        self.assertIn(f"leobot backup --restore {pre} --yes", out)
+        self.assertIn(f"checkout --force --detach {head}", out)
+        self.assertNotIn("did not change", out)
+        self.assertEqual(migrations.read_marker(paths.DATA)["schema"], 2)
+
+    def test_migration_cut_short_counts_as_changed(self):
+        before = data_tree(paths.DATA)
+        self.server.bad_versions = {"0.2.0"}
+
+        def half(ver):
+            if ver == "0.2.0":  # killed mid-step: schema still 1, but the data is half migrated
+                migrations.write_marker(paths.DATA, {"schema": 1, "migrating": 2})
+                self.write_data("projects/demo/a.md", "half migrated")
+        self.server.on_launch = half
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(list(paths.BACKUPS.glob("failed-v0.2.0-*.tar.gz"))), 1)
+        self.assertEqual(data_tree(paths.DATA), before)
+
+    def test_any_marker_change_counts_as_changed(self):
+        self.server.bad_versions = {"0.2.0"}
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(
+            paths.DATA, {"schema": 1, "note": "touched"})
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(list(paths.BACKUPS.glob("failed-v0.2.0-*.tar.gz"))), 1)
+        self.assertNotIn("note", migrations.read_marker(paths.DATA))
 
     def test_failed_health_rolls_back_and_restores(self):
         before = data_tree(paths.DATA)
@@ -495,6 +581,89 @@ class RollbackTests(UpdaterBase):
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.head(), prev)
 
+    def add_tag_commit(self, ver, base):
+        git(self.app, "checkout", "-q", "--detach", base)
+        (self.app / "VERSION").write_text(ver + "\n")
+        git(self.app, "commit", "-q", "-am", f"version {ver}")
+        git(self.app, "tag", f"v{ver}")
+        return self.head()
+
+    def test_rollback_prefers_previous_ref_release(self):
+        prev = self.sha("v0.1.0")
+        self.add_tag_commit("0.1.9", "v0.1.0")
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        updater.save_settings({"previous_ref": prev})
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), prev)
+
+    def test_rollback_untagged_previous_ref_on_stable_uses_highest_lower_tag(self):
+        git(self.app, "checkout", "-q", "--detach", "v0.1.0")
+        (self.app / "README.md").write_text("untagged\n")
+        git(self.app, "commit", "-q", "-am", "untagged")
+        untagged = self.head()
+        middle = self.add_tag_commit("0.1.9", "v0.1.0")
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        updater.save_settings({"previous_ref": untagged})
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), middle)
+
+    def test_rollback_main_channel_uses_previous_ref(self):
+        git(self.app, "checkout", "-q", "--detach", "v0.1.0")
+        (self.app / "README.md").write_text("untagged\n")
+        git(self.app, "commit", "-q", "-am", "untagged")
+        untagged = self.head()
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        updater.save_settings({"previous_ref": untagged, "channel": "main"})
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), untagged)
+
+    def test_rollback_start_failure_without_restore_goes_back(self):
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        self.server.bad_versions = {"0.1.0"}  # the older code refuses the data
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.2.0")
+
+    def test_rollback_restore_failure_goes_back_and_restarts(self):
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        with mock.patch.object(leobot, "_safe_extract", side_effect=ValueError("bad archive")):
+            rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.2.0")
+
+    def test_rollback_restore_failure_and_checkout_back_failure_names_command(self):
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        head = self.head()
+        real = updater._git
+
+        def fake(code, *args, **kw):
+            if args[:2] == ("checkout", "--quiet") and "--force" in args:
+                return subprocess.CompletedProcess(args, 1, "", "fatal: checkout broke")
+            return real(code, *args, **kw)
+        with mock.patch.object(leobot, "_safe_extract", side_effect=ValueError("bad archive")), \
+                mock.patch.object(updater, "_git", side_effect=fake):
+            rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertIn(f"checkout --force --detach {head}", out)
+
+    def test_rollback_settings_failure_changes_nothing(self):
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        stops = self.server.stops
+        with mock.patch.object(updater, "save_settings", side_effect=OSError(28, "No space left on device")):
+            rc, _ = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.server.stops, stops)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+
     def test_rollback_nothing_to_go_back_to(self):
         rc, out = self.call(updater.rollback, True)
         self.assertEqual(rc, 1)
@@ -610,6 +779,8 @@ class HealthzTests(unittest.TestCase):
             seen["use"] = "forged"
             self.assertIsNone(leobot._healthz(8765))
             self.assertFalse(leobot._proof_ok(8765))
+            seen["use"] = "\u00e9t\u00e9"  # non-ASCII proof: not healthy, no TypeError
+            self.assertIsNone(leobot._healthz(8765))
 
 
 class CliTests(UpdaterBase):

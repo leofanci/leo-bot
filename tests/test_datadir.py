@@ -416,6 +416,27 @@ class MigrationsCase(unittest.TestCase):
                 migrations.run(self.data)
         self.assertEqual(json.loads((self.data / datadir.MARKER).read_text())["schema"], 2)
 
+    def test_marker_names_the_step_under_way(self):
+        seen = []
+
+        def step(d):
+            seen.append(json.loads((d / datadir.MARKER).read_text()))
+        fake = [migrations.MIGRATIONS[0], step, step]
+        with mock.patch.object(migrations, "MIGRATIONS", fake), mock.patch.object(migrations, "LATEST", 3):
+            migrations.run(self.data)
+        self.assertEqual([(m["schema"], m["migrating"]) for m in seen], [(1, 2), (2, 3)])
+        self.assertNotIn("migrating", json.loads((self.data / datadir.MARKER).read_text()))
+
+    def test_failed_step_leaves_migrating_mark(self):
+        def boom(d):
+            raise RuntimeError("no")
+        fake = [migrations.MIGRATIONS[0], boom]
+        with mock.patch.object(migrations, "MIGRATIONS", fake), mock.patch.object(migrations, "LATEST", 2):
+            with self.assertRaises(RuntimeError):
+                migrations.run(self.data)
+        rec = json.loads((self.data / datadir.MARKER).read_text())
+        self.assertEqual((rec["schema"], rec["migrating"]), (1, 2))
+
     def test_newer_schema_refuses(self):
         (self.data / datadir.MARKER).write_text(json.dumps({"schema": migrations.LATEST + 1}))
         with self.assertRaises(SystemExit) as cm:

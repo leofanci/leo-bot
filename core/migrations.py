@@ -53,8 +53,14 @@ def run(data: Path) -> int:
         which = f"schema {schema}, version {ver}" if isinstance(ver, str) and ver else f"schema {schema}"
         sys.exit(f"Your data is from a newer Leo Bot ({which}). Run: leobot update")
     while schema < LATEST:
+        # Say which step is under way first, so a step cut short (a killed server, an update
+        # health check that gave up) is never mistaken for untouched data at the old schema.
+        rec["schema"] = schema
+        rec["migrating"] = schema + 1
+        write_marker(data, rec)
         MIGRATIONS[schema](data)
         schema += 1
         rec["schema"] = schema
+        rec.pop("migrating", None)
         write_marker(data, rec)
     return schema

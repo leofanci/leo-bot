@@ -181,6 +181,11 @@ def restrict_new_files():
     terminal_session.USER_UMASK = os.umask(0o077)
 
 
+# The version this process loaded at startup. /healthz reports it, so after `leobot update`
+# checks out new code an old process still running can never pass for the new version.
+RUNNING_VERSION = version.current()
+
+
 def health_proof(nonce):
     """HMAC-SHA256(AUTH_TOKEN, nonce): lets the launcher verify server identity."""
     # The context prefix keeps this proof from ever matching an HMAC made for another purpose.
@@ -2761,9 +2766,9 @@ class Handler(BaseHTTPRequestHandler):
             # checkout's token file (HMAC of the nonce), without sending the token.
             nonce = (parse_qs(urlparse(self.path).query).get("nonce") or [""])[0]
             if nonce:
-                return self._send(200, {"app": "Leo Bot", "version": version.current(),
+                return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION,
                                         "proof": health_proof(nonce)})
-            return self._send(200, {"app": "Leo Bot", "version": version.current()})
+            return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION})
         if path in ("/", "/index.html"):
             token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
             # Compare bytes: str compare_digest raises on non-ASCII input.

@@ -84,9 +84,13 @@ def _healthz(port):
     except (OSError, ValueError):
         return None
     want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
-    if isinstance(body, dict) and hmac.compare_digest(str(body.get("proof", "")), want):
-        return body
-    return None
+    if not isinstance(body, dict):
+        return None
+    try:  # bytes: a str compare raises on non-ASCII input
+        ok = hmac.compare_digest(str(body.get("proof", "")).encode(), want.encode())
+    except (TypeError, ValueError):
+        return None
+    return body if ok else None
 
 
 def _proof_ok(port) -> bool:

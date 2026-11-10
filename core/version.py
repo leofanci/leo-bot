@@ -3,7 +3,7 @@ import re
 
 from core import paths
 
-_SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+_SEMVER = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)")
 
 
 def current() -> str:
