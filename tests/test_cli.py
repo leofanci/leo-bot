@@ -234,6 +234,27 @@ class BackupTests(CliBase):
         self.assertIn("pre-restore-", err)
         self.assertFalse(list(paths.HOME.glob("data.pre-restore-*")))
 
+    def test_restore_that_cannot_put_data_back_does_not_start(self):
+        self.write("keep.md", "keep")
+        arc = self.archive({"ok.md": b"1"})
+        real = os.rename
+
+        def rename(src, dst):
+            if Path(src).name.startswith("data.pre-restore-") and Path(dst) == paths.DATA:
+                raise OSError(16, "Resource busy")
+            return real(src, dst)
+        with mock.patch.object(leobot, "_safe_extract", side_effect=OSError("disk full")), \
+                mock.patch.object(leobot.os, "rename", side_effect=rename), \
+                mock.patch.object(leobot, "_stop_if_running", return_value=9123), \
+                mock.patch.object(leobot, "cmd_start") as start:
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        start.assert_not_called()  # it would create an empty data folder
+        aside = next(paths.HOME.glob("data.pre-restore-*"))
+        self.assertEqual((aside / "keep.md").read_text(), "keep")
+        self.assertIn(f"mv {aside} {paths.DATA}", err)
+        self.assertIn("not started", err)
+
     def test_restore_midway_failure_rolls_back(self):
         self.write("keep.md", "keep")
         arc = self.archive_with_links([("good.md", None), ("x", "."), ("x/y", None)])

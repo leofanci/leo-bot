@@ -96,6 +96,17 @@ def data_tree(root: Path) -> dict:
     return out
 
 
+def no_put_back():
+    """os.rename that refuses to move the set-aside data folder back into place."""
+    real = os.rename
+
+    def rename(src, dst):
+        if Path(src).name.startswith("data.pre-restore-") and Path(dst) == paths.DATA:
+            raise OSError(16, "Resource busy")
+        return real(src, dst)
+    return mock.patch.object(leobot.os, "rename", side_effect=rename)
+
+
 class Template:
     """A work repo with v0.1.0 (lightweight) and v0.2.0 (annotated), and its bare origin."""
     root = None
@@ -534,6 +545,48 @@ class ApplyTests(UpdaterBase):
         self.assertIn("--rollback", out)
         self.assertIn(str(paths.BACKUPS / self.pre_backups()[0]), out)
 
+    def test_previous_ref_kept_when_stop_fails(self):
+        updater.save_settings({"previous_ref": "a" * 40})
+        leobot._stop_if_running.side_effect = SystemExit("Could not stop Leo Bot. Nothing was changed.")
+        rc, _ = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(updater.settings()["previous_ref"], "a" * 40)
+
+    def test_previous_ref_kept_when_backup_fails(self):
+        updater.save_settings({"previous_ref": "b" * 40})
+        with mock.patch.object(leobot, "_tar_data", side_effect=OSError(28, "No space left on device")):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertIn("Backing up your data failed", out)
+        self.assertEqual(updater.settings()["previous_ref"], "b" * 40)
+        self.assertTrue(self.server.running)
+
+    def test_previous_ref_kept_when_update_goes_back(self):
+        updater.save_settings({"previous_ref": "c" * 40})
+        self.server.bad_versions = {"0.2.0"}
+        rc, _ = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(updater.settings()["previous_ref"], "c" * 40)
+
+    def test_failure_names_the_step(self):
+        with mock.patch.object(updater, "_prune", side_effect=OSError(5, "I/O error")):
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertIn("Removing old update backups failed", out)
+        self.assertNotIn("Backing up your data failed", out)
+
+    def test_recovery_restore_that_cannot_put_data_back_starts_nothing(self):
+        self.server.bad_versions = {"0.2.0"}
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        with mock.patch.object(leobot, "_safe_extract", side_effect=ValueError("bad archive")), no_put_back():
+            rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertFalse(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.2.0")  # nothing started after the stop
+        self.assertFalse(paths.DATA.exists())
+        aside = next(paths.HOME.glob("data.pre-restore-*"))
+        self.assertIn(f"mv {aside} {paths.DATA}", out)
+
     def test_concurrent_update_refused(self):
         paths.RUN.mkdir(parents=True, exist_ok=True)
         fd = os.open(paths.RUN / "update.lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -663,6 +716,65 @@ class RollbackTests(UpdaterBase):
         self.assertEqual(rc, 1)
         self.assertEqual(self.server.stops, stops)
         self.assertEqual(self.head(), self.sha("v0.2.0"))
+
+    def test_double_rollback_on_stable_never_moves_forward(self):
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        self.assertEqual(self.call(updater.rollback, True)[0], 0)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertIn("no earlier version", out)
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+
+    def test_rollback_stop_failure_after_bad_start_starts_nothing(self):
+        git(self.app, "checkout", "-q", "--detach", "v0.2.0")
+        head = self.head()
+        self.server.bad_versions = {"0.1.0"}
+        real = updater._stop_server
+        n = [0]
+
+        def stop(cli):
+            n[0] += 1
+            if n[0] == 2:
+                raise SystemExit("cannot stop")
+            return real(cli)
+        with mock.patch.object(updater, "_stop_server", side_effect=stop):
+            rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.server.launches), 1)  # only the attempt at 0.1.0
+        self.assertEqual(self.head(), self.sha("v0.1.0"))
+        self.assertIn(f"checkout --force --detach {head}", out)
+
+    def test_rollback_bad_start_after_restore_brings_current_data_back(self):
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        self.write_data("projects/demo/later.md", "later")
+        current_data = data_tree(paths.DATA)
+        self.server.bad_versions = {"0.1.0"}
+        updater.save_settings({"previous_ref": "d" * 40})
+        prev = updater.settings()["previous_ref"]
+        rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+        self.assertEqual(data_tree(paths.DATA), current_data)
+        self.assertTrue(self.server.running)
+        self.assertEqual(self.server.launches[-1][1], "0.2.0")
+        snap = next(paths.BACKUPS.glob("rollback-v0.2.0-*.tar.gz"))
+        self.assertIn(str(snap), out)
+        self.assertEqual(updater.settings()["previous_ref"], prev)
+
+    def test_rollback_restore_that_cannot_put_data_back_starts_nothing(self):
+        self.server.on_launch = lambda v: v == "0.2.0" and migrations.write_marker(paths.DATA, {"schema": 2})
+        self.assertEqual(self.call(updater.apply)[0], 0)
+        launches = len(self.server.launches)
+        with mock.patch.object(leobot, "_safe_extract", side_effect=ValueError("bad archive")), no_put_back():
+            rc, out = self.call(updater.rollback, True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(self.server.launches), launches)
+        self.assertFalse(self.server.running)
+        self.assertEqual(self.head(), self.sha("v0.2.0"))
+        aside = next(paths.HOME.glob("data.pre-restore-*"))
+        self.assertIn(f"mv {aside} {paths.DATA}", out)
 
     def test_rollback_nothing_to_go_back_to(self):
         rc, out = self.call(updater.rollback, True)

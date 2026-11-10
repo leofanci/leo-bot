@@ -544,6 +544,7 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
         _log("Update cancelled.", err=True)
         return 1
     _log(f"Updating Leo Bot {current} to {want} ({label})")
+    old_prev = settings()["previous_ref"]
     try:  # remembered before anything is stopped or changed
         save_settings({"previous_ref": head})
     except OSError as e:
@@ -556,24 +557,31 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
         port = _stop_server(cli)
     except SystemExit as e:
         _log(f"{e}", err=True)
+        _restore_prev(old_prev)
         return 1
     resume = port is not None or _service_installed(cli)
     port = port or _service_port(cli) or cli.DEFAULT_PORT
+    step = "Preparing the home folder"
     try:
         paths.ensure_dirs()
+        step = "Reading the data marker"
         marker_before = migrations.read_marker(paths.DATA)
-        _log("Backing up your data")
+        step = "Backing up your data"
+        _log(step)
         pre = cli._tar_data(paths.BACKUPS / f"pre-{label}-{_stamp()}.tar.gz")
         _log(f"Backup saved: {pre}")
+        step = "Removing old update backups"
         _prune()
     except Exception as e:  # noqa: BLE001
-        _log(f"Backup failed ({e}). Nothing was changed.", err=True)
+        _log(f"{step} failed ({e}). Nothing was changed.", err=True)
+        _restore_prev(old_prev)
         if resume:
             _start(cli, port, current)
         return 1
 
     # 6b. check out; from here on any failure goes back to the previous version
-    ctx = dict(label=label, head=head, current=current, pre=pre, marker_before=marker_before, port=port)
+    ctx = dict(label=label, head=head, current=current, pre=pre, marker_before=marker_before, port=port,
+               old_prev=old_prev)
     proc = None
     try:
         _log(f"Checking out {label}")
@@ -594,6 +602,14 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
     return 0
 
 
+def _restore_prev(old_prev) -> None:
+    """Put back the previous_ref from before an update or rollback that did not happen."""
+    try:
+        save_settings({"previous_ref": old_prev})
+    except OSError as e:
+        _log(f"Could not restore previous_ref in {paths.SETTINGS} ({e}).", err=True)
+
+
 def _checkout_back(code: Path, head: str) -> bool:
     r = _git(code, "checkout", "--quiet", "--force", "--detach", head)
     if r.returncode != 0:
@@ -602,7 +618,7 @@ def _checkout_back(code: Path, head: str) -> bool:
     return True
 
 
-def _recover(cli, code, *, label, head, current, pre, marker_before, port, proc, why) -> int:
+def _recover(cli, code, *, label, head, current, pre, marker_before, port, proc, why, old_prev) -> int:
     """Step 10: stop the new server, put the data and the previous code back, start it."""
     _log(f"{why}. Going back to {current}.", err=True)
     if not _stop(cli, proc):
@@ -618,6 +634,9 @@ def _recover(cli, code, *, label, head, current, pre, marker_before, port, proc,
         except cli.RestoreFailed as e:
             # The data stays in the newer format, so the older code must not open it.
             _log(f"{e}", err=True)
+            if not e.data_back:
+                _log(f"Leo Bot is stopped and stays on {label}. First put your data back with: "
+                     f"{cli._put_back_command(e.aside)}", err=True)
             _log(f"Leo Bot is stopped and stays on {label}, so the older version never opens the "
                  f"newer data. To go back by hand, run: leobot backup --restore {pre} --yes ; then: "
                  f"git -C {code} checkout --force --detach {head} ; then: leobot start", err=True)
@@ -635,6 +654,7 @@ def _recover(cli, code, *, label, head, current, pre, marker_before, port, proc,
         if failed:
             _log(f"Data at the time of the failed update: {failed}", err=True)
         return 1
+    _restore_prev(old_prev)  # the update did not happen
     if failed:
         try:
             cli._reindex()
@@ -692,7 +712,11 @@ def _rollback_target(code: Path, current: str, head: str):
     if commit and commit != head:
         return commit, f"refs/tags/{tag}^{{commit}}"
     if prev_commit and prev_commit != head:
-        return prev_commit, prev_commit
+        if s["channel"] == "main":
+            return prev_commit, prev_commit
+        pv, cv = version.parse(_version_at(code, prev_commit) or ""), version.parse(current)
+        if pv is not None and cv is not None and pv < cv:  # stable never "rolls back" forward
+            return prev_commit, prev_commit
     return None, None
 
 
@@ -744,6 +768,7 @@ def _rollback(cli, code: Path, yes: bool) -> int:
     elif pre is None:
         _log(f"No backup from before {current} was found, so the data is kept as it is.", err=True)
     _log(f"Rolling back Leo Bot {current} to {old}")
+    old_prev = settings()["previous_ref"]
     try:
         save_settings({"previous_ref": head})
     except OSError as e:
@@ -753,22 +778,27 @@ def _rollback(cli, code: Path, yes: bool) -> int:
         port = _stop_server(cli)
     except SystemExit as e:
         _log(f"{e}", err=True)
+        _restore_prev(old_prev)
         return 1
     resume = port is not None or _service_installed(cli)
     port = port or _service_port(cli) or cli.DEFAULT_PORT
+    back = dict(cli=cli, code=code, head=head, current=current, port=port, old_prev=old_prev)
     snap = None
+    proc = None
     try:
         paths.ensure_dirs()
         r = _git(code, "checkout", "--quiet", "--detach", ref)
         if r.returncode != 0:
             _log(f"Could not check out {old} ({_why(r)}). Leo Bot stays on {current}.", err=True)
-            return _back_to_current(cli, code, head, current, port, resume)
+            return _back_to_current(start=resume, **back)
         if restore:
             try:
                 snap = cli._replace_data(pre, paths.BACKUPS / f"rollback-v{current}-{_stamp()}.tar.gz")
             except cli.RestoreFailed as e:
                 _log(f"{e} Going back to {current}.", err=True)
-                return _back_to_current(cli, code, head, current, port, True)
+                if not e.data_back:
+                    return _back_to_current(start=False, put_back=e.aside, **back)
+                return _back_to_current(start=True, **back)
             try:
                 cli._reindex()
             except Exception as e:  # noqa: BLE001
@@ -777,32 +807,48 @@ def _rollback(cli, code: Path, yes: bool) -> int:
         ok, proc = _start(cli, port, old_version)
     except Exception as e:  # noqa: BLE001
         _log(f"The rollback failed ({e}).", err=True)
-        if snap:
-            _log(f"Leo Bot is stopped on {old} with the data from before {current}. Your data from "
-                 f"{current} was saved: {snap}. Start it with: leobot start", err=True)
-            return 1
-        return _back_to_current(cli, code, head, current, port, True)
-    if snap:
-        _log(f"Your data from {current} was saved: {snap}")
+        ok = False
     if ok:
+        if snap:
+            _log(f"Your data from {current} was saved: {snap}")
         _log(f"Leo Bot is back on {old}.")
         return 0
-    if snap:
-        _log(f"Leo Bot {old} did not start. See {paths.SERVER_LOG}. Your data from {current} "
-             f"was saved: {snap}", err=True)
-        return 1
-    # Nothing was restored: the older code may refuse data it does not know. Go back.
+    # The older version did not come up: go back to the current code (and its data).
     _log(f"Leo Bot {old} did not start (see {paths.SERVER_LOG}). Going back to {current}.", err=True)
-    _stop(cli, proc)
-    return _back_to_current(cli, code, head, current, port, True)
+    if not _stop(cli, proc):
+        _log(f"Could not stop Leo Bot {old}, so nothing else was changed. Stop it, then run: "
+             f"git -C {code} checkout --force --detach {head}"
+             + (f" ; then: leobot backup --restore {snap} --yes" if snap else "")
+             + " ; then: leobot start", err=True)
+        return 1
+    if snap:
+        try:
+            cli._replace_data(snap, paths.BACKUPS / f"rollback-failed-{old}-{_stamp()}.tar.gz")
+            _log(f"Your data from {current} is back (from {snap}).", err=True)
+        except cli.RestoreFailed as e:
+            _log(f"{e}", err=True)
+            if not e.data_back:
+                return _back_to_current(start=False, put_back=e.aside, **back)
+            _log(f"Your data from {current} could not be put back; it is saved in {snap}. Restore "
+                 f"it with: leobot backup --restore {snap} --yes", err=True)
+    return _back_to_current(start=True, **back)
 
 
-def _back_to_current(cli, code: Path, head: str, current: str, port, start: bool) -> int:
+def _back_to_current(*, cli, code: Path, head: str, current: str, port, old_prev, start: bool,
+                     put_back=None) -> int:
+    """A rollback that did not happen: check the current code out again and, unless told not
+    to, start it. `put_back`: DATA is missing and the old folder is there; never start then."""
+    _restore_prev(old_prev)
     if not _checkout_back(code, head):
-        _log(f"Leo Bot is stopped. Run: git -C {code} checkout --force --detach {head} ; "
-             f"then: leobot start", err=True)
+        _log(f"Leo Bot is stopped. Run: git -C {code} checkout --force --detach {head}"
+             + (f" ; then: {cli._put_back_command(put_back)}" if put_back else "")
+             + " ; then: leobot start", err=True)
         return 1
     _ensure_app(code)
+    if put_back:
+        _log(f"Leo Bot is stopped, since your data folder is missing. Put it back with: "
+             f"{cli._put_back_command(put_back)} ; then: leobot start", err=True)
+        return 1
     if start:
         ok, _ = _start(cli, port, current)
         _log(f"Leo Bot {current} is running again." if ok

@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -530,6 +531,9 @@ def cmd_backup(args) -> int:
             snap = _replace_data(src, paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
         except RestoreFailed as e:
             print(str(e), file=sys.stderr)
+            if not e.data_back:
+                port = None  # starting now would create an empty data folder
+                print("Leo Bot was not started.", file=sys.stderr)
             return 1
         notes = []
         try:
@@ -545,14 +549,30 @@ def cmd_backup(args) -> int:
 
 
 class RestoreFailed(Exception):
-    """A restore did not happen; the message says where the data is. DATA is as it was."""
+    """A restore did not happen; the message says where the data is.
+
+    `data_back` True: DATA is as it was. False: the old folder could not be put back, so DATA
+    is gone and the old data sits in `aside`. Then nothing may start the server (it would
+    create a fresh, empty data folder); the message carries the command that puts it back."""
+
+    def __init__(self, msg, data_back=True, aside=None):
+        super().__init__(msg)
+        self.data_back = data_back
+        self.aside = aside
+
+
+def _put_back_command(aside: Path) -> str:
+    d = shlex.quote(str(paths.DATA))
+    return f"rm -rf {d} && mv {shlex.quote(str(aside))} {d}"
 
 
 def _replace_data(src: Path, snap_path: Path) -> Path:
     """Replace DATA with the archive `src`. The server must be stopped. First saves DATA to
     `snap_path`, then moves DATA aside, extracts with _safe_extract and deletes the old folder;
     if the extraction fails the old folder is put back. Returns the snapshot path.
-    Raises RestoreFailed (data unchanged) with a message naming the snapshot."""
+    Raises RestoreFailed with a message naming the snapshot. Its `data_back` is True when DATA
+    is unchanged, False when the old folder could not be put back (it is then in `aside`, DATA
+    is missing, and the server must not be started)."""
     if paths.DATA.is_symlink():
         raise RestoreFailed(f"{paths.DATA} is a symbolic link to {os.readlink(paths.DATA)}. Restore will "
                             f"not replace a linked data folder. Restore {src} by hand into the target. "
@@ -583,17 +603,20 @@ def _replace_data(src: Path, snap_path: Path) -> Path:
         os.chmod(paths.DATA, 0o700)
     except BaseException as e:
         shutil.rmtree(paths.DATA, ignore_errors=True)
+        data_back = True
         try:
             os.rename(aside, paths.DATA)
             back = "Your previous data is back."
         except OSError:
-            back = f"Could not put it back. Your data is in {aside} and in {snap}."
+            data_back = False
+            back = (f"Could not put it back: your data is in {aside} (and in {snap}). Do not start "
+                    f"Leo Bot until it is back. Put it back with: {_put_back_command(aside)}")
         msg = (f"Restore failed ({e}). {back} Snapshot: {snap}"
                + (f" Restore source kept: {kept}" if kept else ""))
         if not isinstance(e, Exception):
             print(msg, file=sys.stderr)
             raise
-        raise RestoreFailed(msg) from e
+        raise RestoreFailed(msg, data_back=data_back, aside=None if data_back else aside) from e
     try:
         shutil.rmtree(aside)
     except OSError as e:
