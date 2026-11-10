@@ -188,7 +188,8 @@ class LoginAndLocalFilesTest(unittest.TestCase):
         self.assertEqual(h_out["code"], 200)
         body = json.loads(h_out["body"])
         want = hmac.new(server.AUTH_TOKEN.encode(), b"leobot-healthz:abc123", "sha256").hexdigest()
-        self.assertEqual(body, {"app": "Leo Bot", "version": server.RUNNING_VERSION, "proof": want})
+        self.assertEqual(body, {"app": "Leo Bot", "version": server.RUNNING_VERSION, "boot": server.BOOT_ID,
+                                "proof": want})
         self.assertNotIn(server.AUTH_TOKEN.encode(), h_out["body"])
 
     def test_healthz_reports_the_version_loaded_at_startup(self):
