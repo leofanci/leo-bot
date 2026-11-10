@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """leobot: start, stop and look after Leo Bot. Python standard library only."""
 import argparse
+import contextlib
 import datetime
 import fcntl
 import hmac
@@ -361,7 +362,8 @@ def cmd_doctor(args) -> int:
         if schema == migrations.LATEST:
             ok(f"data schema {schema}")
         elif isinstance(schema, int) and schema > migrations.LATEST:
-            fix(f"data schema {schema} is newer than this app ({migrations.LATEST})", "leobot update")
+            fix(f"data schema {schema} is newer than this app ({migrations.LATEST})",
+                "leobot update" if paths.is_installed() else "git pull (this is a development checkout)")
         else:
             fix(f"data schema {schema} is older than {migrations.LATEST}", "leobot start")
     journal = datadir.read_journal(paths.DATA)
@@ -382,10 +384,16 @@ def cmd_doctor(args) -> int:
         sources.append(legacy_home)
     for src in sources:
         found = datadir.legacy_items(src)
-        if found:
-            fix(f"old data found in {src} ({', '.join(found)})", f"leobot move-data --from {src}")
-        else:
+        q = shlex.quote(str(src))
+        if not found:
             ok(f"no old data in {src}")
+        elif all(i in datadir.DROPPED for i in found) or datadir.data_is_empty(paths.DATA):
+            fix(f"old data found in {src} ({', '.join(found)})", f"leobot move-data --from {q}")
+        else:  # both places hold data: the two ways out, each a command that ends the refusal
+            lines.append(f"FIX  old data found in {src} ({', '.join(found)}), and {paths.DATA} has data "
+                         f"too. Choose one. Keep the home folder and archive the old copy. Run: "
+                         f"leobot move-data --from {q} --archive. Or use the old copy instead (the home "
+                         f"folder is backed up first). Run: leobot move-data --from {q} --replace")
     info = status_info()
     if info["running"]:
         ok(f"port {info['port']} is Leo Bot")
@@ -505,6 +513,52 @@ def _empty_data() -> None:
             p.unlink()
 
 
+class Busy(Exception):
+    """A data operation did not start because an update or a server holds its lock."""
+
+
+@contextlib.contextmanager
+def _pid_lock():
+    """Hold the exclusive flock every server holds on the pid file for its whole life, so no
+    server can start meanwhile. Yields False when a server (or another command) has it."""
+    paths.RUN.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(paths.PID_FILE, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        os.ftruncate(fd, 0)  # no server runs: a pid left by a killed one must not be signalled
+        yield True
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _data_operation(what: str):
+    """Restore and move-data change the data folder under two locks: the update lock (so the
+    app's watcher and the Settings button stand back), then, with the server stopped, the pid
+    file lock (so nothing can start a server) for the whole operation. On the way out the pid
+    lock goes first, the server starts again if it was running (unless the body set
+    op["port"] to None), then the update lock goes. Raises Busy, with nothing changed, when an
+    update runs or a server came back."""
+    from core import updater
+    with updater._update_lock() as mine:
+        if not mine:
+            raise Busy(f"An update is running, so {what} did not start. Nothing was changed. "
+                       f"Try again when it has finished (see {paths.UPDATE_LOG}).")
+        op = {"port": _stop_if_running()}
+        try:
+            with _pid_lock() as held:
+                if not held:
+                    raise Busy(f"Leo Bot started again, so {what} did not start. Nothing was changed. "
+                               f"Stop it with `leobot stop`, then try again.")
+                yield op
+        finally:
+            _restart(op["port"])
+
+
 def cmd_backup(args) -> int:
     paths.ensure_dirs()
     if not args.restore:
@@ -525,27 +579,28 @@ def cmd_backup(args) -> int:
     if not _confirm(f"Replace your data with {src.name}? Current data is saved first.", args.yes):
         print("Cancelled.", file=sys.stderr)
         return 1
-    port = _stop_if_running()
     try:
-        try:
-            snap = _replace_data(src, paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
-        except RestoreFailed as e:
-            print(str(e), file=sys.stderr)
-            if not e.data_back:
-                port = None  # starting now would create an empty data folder
-                print("Leo Bot was not started.", file=sys.stderr)
-            return 1
-        notes = []
-        try:
-            _reindex()
-        except Exception as e:  # noqa: BLE001
-            notes.append(f"Re-index failed ({e}). Start Leo Bot to rebuild it.")
-        print(f"Restored. Previous data saved: {snap}")
-        for n in notes:
-            print(n, file=sys.stderr)
-        return 0
-    finally:
-        _restart(port)
+        with _data_operation("the restore") as op:
+            try:
+                snap = _replace_data(src, paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
+            except RestoreFailed as e:
+                print(str(e), file=sys.stderr)
+                if not e.data_back:
+                    op["port"] = None  # starting now would create an empty data folder
+                    print("Leo Bot was not started.", file=sys.stderr)
+                return 1
+            notes = []
+            try:
+                _reindex()
+            except Exception as e:  # noqa: BLE001
+                notes.append(f"Re-index failed ({e}). Start Leo Bot to rebuild it.")
+            print(f"Restored. Previous data saved: {snap}")
+            for n in notes:
+                print(n, file=sys.stderr)
+            return 0
+    except Busy as e:
+        print(str(e), file=sys.stderr)
+        return 1
 
 
 class RestoreFailed(Exception):
@@ -635,22 +690,34 @@ def _reindex() -> None:
 
 
 def cmd_move_data(args) -> int:
-    port = _stop_if_running()
+    archive = getattr(args, "archive", False)
     try:
-        res = datadir.move_legacy(Path(args.source), replace=args.replace)
-        if res.refused:
-            print(res.refused, file=sys.stderr)
-            return 1
-        if res.moved:
-            print(f"Moved: {', '.join(res.moved)}")
-            if res.backup:
-                print(f"Backup: {res.backup}")
-        else:
-            print("Nothing to move.")
-        _reindex()
-        return 0
-    finally:
-        _restart(port)
+        with _data_operation("moving the data"):
+            if archive:
+                res = datadir.archive_legacy(Path(args.source))
+            else:
+                res = datadir.move_legacy(Path(args.source), replace=args.replace)
+            if res.refused:
+                print(res.refused, file=sys.stderr)
+                return 1
+            if archive:
+                if res.moved:
+                    print(f"Archived and removed from {args.source}: {', '.join(res.moved)}")
+                    print(f"Archive: {res.backup}")
+                else:
+                    print("Nothing to archive.")
+                return 0
+            if res.moved:
+                print(f"Moved: {', '.join(res.moved)}")
+                if res.backup:
+                    print(f"Backup: {res.backup}")
+            else:
+                print("Nothing to move.")
+            _reindex()
+            return 0
+    except Busy as e:
+        print(str(e), file=sys.stderr)
+        return 1
 
 
 def _rm(p: Path) -> None:
@@ -813,7 +880,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true")
     p = sub.add_parser("move-data", help="move old data into the home folder")
     p.add_argument("--from", dest="source", required=True)
-    p.add_argument("--replace", action="store_true")
+    how = p.add_mutually_exclusive_group()
+    how.add_argument("--replace", action="store_true",
+                     help="use the old data instead of the home folder's (backed up first)")
+    how.add_argument("--archive", action="store_true",
+                     help="keep the home folder's data; archive the old copy into backups, then remove it")
     p = sub.add_parser("uninstall", help="remove Leo Bot")
     p.add_argument("--data", action="store_true", help="also delete all your data")
     p.add_argument("--yes", action="store_true")

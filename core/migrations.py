@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from core import version
+from core import paths, version
 
 MARKER = ".leobot-data"
 
@@ -51,7 +51,9 @@ def run(data: Path) -> int:
     if schema > LATEST:
         ver = rec.get("version")
         which = f"schema {schema}, version {ver}" if isinstance(ver, str) and ver else f"schema {schema}"
-        sys.exit(f"Your data is from a newer Leo Bot ({which}). Run: leobot update")
+        advice = ("Run: leobot update" if paths.is_installed()
+                  else "This is a development checkout: update it with git (git pull), then start it again.")
+        sys.exit(f"Your data is from a newer Leo Bot ({which}). {advice}")
     while schema < LATEST:
         # Say which step is under way first, so a step cut short (a killed server, an update
         # health check that gave up) is never mistaken for untouched data at the old schema.

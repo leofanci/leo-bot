@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 import index
-from core import bots, folders, rooms
+from core import bots, folders, paths, rooms
 import dashboard.db as db
 import dashboard.fileops as fileops
 import dashboard.osctl as osctl
@@ -153,7 +153,9 @@ class WorkspaceTurns(unittest.TestCase):
     def test_hq_sees_every_company(self):
         seen = self.ask("hq/general")
         self.assertIsNone(seen["scope"])
-        self.assertEqual(seen["sess"].deny_dirs, ())
+        denied = seen["sess"].deny_dirs
+        self.assertFalse([d for d in denied if "projects" in d or d.startswith(str(self.root))], denied)
+        self.assertIn(str(paths.RUN), denied)  # never the home folder's private parts
         self.assertIn("SNAPSHOT only=None", seen["text"])
 
     def test_brand_workspace_has_brand_team(self):

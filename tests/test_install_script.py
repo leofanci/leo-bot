@@ -97,6 +97,14 @@ class InstallScriptTest(unittest.TestCase):
         lines = [ln for ln in INSTALL.read_text().splitlines() if ln.strip()]
         self.assertEqual(lines[-1], 'main "$@"')
 
+    def test_setup_home_only_makes_folders_and_marker(self):
+        text = INSTALL.read_text()
+        body = text[text.index("setup_home() {"):]
+        body = body[:body.index("\n}\n")]
+        self.assertIn("datadir.init_home()", body)
+        self.assertNotIn("prepare()", body)
+        self.assertNotIn("move_legacy", body)
+
     def test_placeholder_line_present_for_render(self):
         self.assertIn(f'\nREPO_URL_DEFAULT="{PLACEHOLDER}"\n', INSTALL.read_text())
 

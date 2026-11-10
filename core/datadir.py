@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -25,8 +26,11 @@ JOURNAL = ".leobot-moving"
 LEGACY_ITEMS: tuple = ("projects", "portfolio", "chats", "team", "database/data", "database/os.db",
                        "os.db", "dashboard/os.db", "dashboard/data.db", "dashboard/.auth-token",
                        "dashboard/server.log")
-# Leftovers that are dropped, not moved: the token and log now live in RUN and LOGS.
+# Leftovers that are not moved into the data folder: the stale token is deleted, the old log is
+# appended to LOGS/server.legacy.log (both now live in RUN and LOGS).
 DROPPED = ("dashboard/.auth-token", "dashboard/server.log")
+LEGACY_LOG = "dashboard/server.log"
+LEGACY_LOG_NAME = "server.legacy.log"
 PLACEHOLDER = ".gitkeep"  # tracked in the checkout; never moved, never deleted
 _TEXT_SUFFIXES = (".json", ".jsonl", ".md")
 _TMP_PREFIX = ".marker-"  # temp files this module leaves at the top of the data folder
@@ -58,9 +62,35 @@ def _junk(name: str) -> bool:
     return name == ".DS_Store" or name.startswith("._") or name.startswith(_TMP_PREFIX)
 
 
+_DERIVED_DB = re.compile(r"os\.db(-wal|-shm|-journal)?")
+
+
+def _only_derived(db: Path) -> bool:
+    """database/ holding nothing but the index a server start rebuilds (database/data/os.db and
+    its -wal, -shm and -journal files)."""
+    if db.is_symlink() or not db.is_dir():
+        return False
+    for p in db.iterdir():
+        if _junk(p.name):
+            continue
+        if p.name != "data" or p.is_symlink() or not p.is_dir():
+            return False
+        for f in p.iterdir():
+            if _junk(f.name):
+                continue
+            if f.is_symlink() or not f.is_file() or not _DERIVED_DB.fullmatch(f.name):
+                return False
+    return True
+
+
 def data_is_empty(data: Path) -> bool:
+    """True when the data folder holds nothing of the user's: only the marker, junk, or the
+    rebuilt index (a server that started once on an empty home leaves that behind)."""
     data = Path(data)
-    return not data.exists() or all(p.name == MARKER or _junk(p.name) for p in data.iterdir())
+    if not data.exists():
+        return True
+    return all(p.name == MARKER or _junk(p.name) or (p.name == "database" and _only_derived(p))
+               for p in data.iterdir())
 
 
 def _stamp() -> str:
@@ -164,7 +194,8 @@ def _anchor(p: Path) -> Path:
     return p
 
 
-def _space_problem(source: Path, data: Path, items: list, replace: bool) -> "str | None":
+def _space_problem(source: Path, data: "Path | None", items: list, replace: bool) -> "str | None":
+    """Not enough room for the backup (and, across volumes, the copy)? `data` None: archive only."""
     size = sum(_size(source / i) for i in items)
     need = {}  # device -> [bytes, a path on it]
 
@@ -176,7 +207,7 @@ def _space_problem(source: Path, data: Path, items: list, replace: bool) -> "str
     add(paths.BACKUPS, size)  # the tar.gz is at most about the data's size
     if replace:
         add(paths.BACKUPS, _size(data) if data.exists() else 0)
-    if os.stat(_anchor(source)).st_dev != os.stat(_anchor(data)).st_dev:
+    if data is not None and os.stat(_anchor(source)).st_dev != os.stat(_anchor(data)).st_dev:
         add(data, size)  # across volumes the move copies first
     for n, a in need.values():
         free = shutil.disk_usage(a).free
@@ -351,10 +382,28 @@ def _linked_part(source: Path, rel: str, include_self: bool = True) -> "str | No
     return None
 
 
+def _keep_log(p: Path) -> None:
+    """Append the old in-checkout server log to LOGS/server.legacy.log (owner-only), flushed to
+    disk before the original goes. Only a plain file holds log lines."""
+    if not p.is_file() or p.is_symlink():
+        return
+    paths.LOGS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(paths.LOGS / LEGACY_LOG_NAME,
+                 os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "ab") as out, open(p, "rb") as src:
+        os.fchmod(out.fileno(), 0o600)
+        shutil.copyfileobj(src, out)
+        out.flush()
+        os.fsync(out.fileno())
+
+
 def _drop(source: Path, rel: str) -> None:
-    """Delete a stale token or log: a file, a folder, or a link itself; never through a linked parent."""
+    """Clear a leftover token or log: a file, a folder, or a link itself; never through a linked
+    parent. The log's lines are kept in LOGS first; the token is simply deleted."""
     if _linked_part(source, rel, include_self=False):
         return
+    if rel == LEGACY_LOG:
+        _keep_log(source / rel)
     _remove(source / rel)
 
 
@@ -418,10 +467,7 @@ def move_legacy(source: Path, data: Path = None, *, replace: bool = False) -> Mo
             _new_marker(data)
         return res
     if not data_is_empty(data) and not replace:
-        res.refused = (f"Leo Bot found data in two places: {source} (old, inside the app folder) and "
-                       f"{data} (the home folder). Nothing was moved. Run `leobot doctor` to see the "
-                       f"choices: keep the home folder and archive the old copy, or "
-                       f"`leobot move-data --from {source} --replace`, which backs up {data} first.")
+        res.refused = two_places_message(source, data)
         return res
     problem = _space_problem(source, data, real, replace)
     if problem:
@@ -448,8 +494,68 @@ def move_legacy(source: Path, data: Path = None, *, replace: bool = False) -> Mo
     return _finish(source, data, journal)
 
 
+def two_places_message(source: Path, data: Path) -> str:
+    src = shlex.quote(str(source))
+    return (f"Leo Bot found data in two places: {source} (old, inside the app folder) and {data} (the "
+            f"home folder). Nothing was moved. Choose one. Keep the home folder and archive the old "
+            f"copy: `leobot move-data --from {src} --archive`. Or use the old copy instead, after a "
+            f"backup of {data}: `leobot move-data --from {src} --replace`. `leobot doctor` shows the "
+            f"same choices.")
+
+
+def _clear_item(src: Path) -> None:
+    """Remove an archived item from the clone; a tracked .gitkeep stays where there is one."""
+    if src.is_dir() and not src.is_symlink() and (src / PLACEHOLDER).exists():
+        for child in sorted(src.iterdir()):
+            if child.name != PLACEHOLDER:
+                _remove(child)
+    else:
+        _remove(src)
+
+
+def archive_legacy(source: Path) -> MoveResult:
+    """`leobot move-data --from X --archive`: keep the home folder's data and set the old copy
+    aside. Its items go into BACKUPS/legacy-archived-<stamp>.tar.gz (flushed to disk), and only
+    then leave `source`. The data folder is never touched. Run again after a crash: it archives
+    whatever is left."""
+    source = Path(source)
+    res = MoveResult()
+    found = legacy_items(source)
+    real = [i for i in found if i not in DROPPED]
+    for rel in real:
+        link = _linked_part(source, rel)
+        if link:
+            res.refused = (f"{link} in {source} is a symbolic link, and Leo Bot will not follow it. "
+                           f"Archive it by hand, then run this again. Nothing was changed.")
+            return res
+    if real:
+        problem = _space_problem(source, None, real, False)
+        if problem:
+            res.refused = problem
+            return res
+        res.backup = _tar(real, source, paths.BACKUPS / f"legacy-archived-{_stamp()}.tar.gz")
+        for rel in real:
+            _clear_item(source / rel)
+        _fsync_path(source)
+    for rel in found:
+        if rel in DROPPED:
+            _drop(source, rel)
+    res.moved = real
+    return res
+
+
+def init_home() -> None:
+    """What install.sh sets up: the folders (mode 700) and, on a fresh data folder, the marker.
+    No move out of a clone and no migrations: the first server start does those, under its lock."""
+    paths.ensure_dirs()
+    if read_journal(paths.DATA) is None and not (paths.DATA / MARKER).exists():
+        _new_marker(paths.DATA)
+
+
 def prepare() -> None:
-    """Run at server start, under the single-server lock."""
+    """Run at server start, under the single-server lock (the pid file's flock). Every other
+    caller of move_legacy and its journal resume (`leobot move-data`) holds that lock too, so two
+    runs never finish one journal at the same time."""
     paths.ensure_dirs()
     if read_journal(paths.DATA) is not None or legacy_items(paths.CODE):
         r = move_legacy(paths.CODE)

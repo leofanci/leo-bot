@@ -1138,8 +1138,9 @@ def _workspace_deny_dirs(ws, projects, kept=()):
     ws = ws or bots.HQ
     kept = [str(k) for k in kept]
     own_removed = [p for p in folders.all_paths(ws, ROOT) if p not in kept]
-    if ws == bots.HQ:
-        return folders.turn_denies(kept, [], own_removed)
+    if ws == bots.HQ:  # HQ reads every workspace, but never the home folder's private parts
+        return tuple(dict.fromkeys(folders.turn_denies(kept, [], own_removed)
+                                   + _both_spellings(paths.home_private()[0])))
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
     dirs += [paths.CODE / "projects" / p["slug"] for p in others]  # a clone not yet migrated
@@ -1150,13 +1151,30 @@ def _workspace_deny_dirs(ws, projects, kept=()):
                 dirs.append(d)
     dirs += [Path(p) for p in folders.turn_denies(
         kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
-    dirs += [base / n for base in dict.fromkeys((ROOT, paths.CODE))
-             for n in ("chats", "team", "portfolio", "database")]
+    dirs += [paths.CODE / n for n in ("chats", "team", "portfolio", "database")]  # a clone not yet migrated
+    dirs += _data_private()[0]
     dirs += [paths.CODE / ".remember", paths.CODE / ".superpowers", paths.CODE / ".tokensave",
              paths.CODE / "private"]  # the owner's machine state
-    # The home folder's non-data parts: token and pid, logs, update backups.
-    dirs += [paths.RUN, paths.LOGS, paths.BACKUPS]
+    # Every home folder entry but app and data: token and pid, logs, backups, set-aside data.
+    dirs += paths.home_private()[0]
     return _both_spellings(dirs)
+
+
+def _data_private():
+    """Every top-level entry of the data folder but `projects`, as (folders, files): the stores
+    with every workspace in them (chats, team, portfolio, database) even before they exist, plus
+    whatever else is there (the marker, a move journal, databases left by an old layout). A
+    company turn reaches only its own workspace, under projects/."""
+    dirs = [ROOT / n for n in ("chats", "team", "portfolio", "database")]
+    files = []
+    try:
+        entries = sorted(Path(ROOT).iterdir())
+    except OSError:
+        entries = []
+    for p in entries:
+        if p.name != "projects" and p not in dirs:
+            paths._sort_entry(p, dirs, files)
+    return dirs, files
 
 
 def _both_spellings(items):
@@ -1168,11 +1186,13 @@ def _both_spellings(items):
 
 
 def _workspace_deny_files(ws):
-    """Single files with every workspace in them (the index databases)."""
-    if ws == bots.HQ:
-        return ()
+    """Single files with every workspace in them (the index databases), and the home folder's
+    private files (settings, anything set aside). HQ: only the home folder's."""
+    home = paths.home_private()[1]
+    if (ws or bots.HQ) == bots.HQ:
+        return _both_spellings(home)
     legacy = (paths.CODE / "os.db", paths.CODE / "dashboard" / "os.db", paths.CODE / "dashboard" / "data.db")
-    return _both_spellings((db.DB_PATH, *legacy, paths.SETTINGS))
+    return _both_spellings((db.DB_PATH, *legacy, *_data_private()[1], *home))
 
 
 CLI_NOTE = (

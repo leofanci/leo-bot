@@ -30,6 +30,34 @@ SERVER_LOG = LOGS / "server.log"
 UPDATE_LOG = LOGS / "update.log"
 
 
+HOME_SHARED = ("app", "data")  # the only home folder entries a bot turn may read
+
+
+def _sort_entry(p: Path, dirs: list, files: list) -> None:
+    if p.is_symlink():  # a link: deny the name itself and anything under it
+        files.append(p)
+        dirs.append(p)
+    elif p.is_dir():
+        dirs.append(p)
+    else:
+        files.append(p)
+
+
+def home_private() -> "tuple[list, list]":
+    """Every entry of HOME but app and data, as (folders, files): run, logs, backups and the
+    settings even before they exist, plus whatever else is there now (data.pre-restore-*,
+    data.partial-*, .app-installing). No bot turn may read any of it."""
+    dirs, files = [RUN, LOGS, BACKUPS], [SETTINGS]
+    try:
+        entries = sorted(HOME.iterdir())
+    except OSError:
+        entries = []
+    for p in entries:
+        if p.name not in HOME_SHARED and p not in dirs and p not in files:
+            _sort_entry(p, dirs, files)
+    return dirs, files
+
+
 def is_installed() -> bool:
     return CODE.resolve() == (HOME / "app").resolve()
 

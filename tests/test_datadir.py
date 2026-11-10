@@ -26,9 +26,11 @@ class DataDirCase(unittest.TestCase):
         self.data = self.root / "home" / "data"
         self.backups = self.root / "home" / "backups"
         self.data.mkdir(parents=True)
-        p = mock.patch.object(paths, "BACKUPS", self.backups)
-        p.start()
-        self.addCleanup(p.stop)
+        self.logs = self.root / "home" / "logs"
+        for name, val in (("BACKUPS", self.backups), ("LOGS", self.logs)):
+            p = mock.patch.object(paths, name, val)
+            p.start()
+            self.addCleanup(p.stop)
         write(self.source / "projects" / "demo" / "project.md", "demo")
         write(self.source / "projects" / ".gitkeep", "")
         write(self.source / "chats" / "x.json", "{}")
@@ -102,6 +104,101 @@ class DataDirCase(unittest.TestCase):
         self.assertFalse((self.source / "dashboard/.auth-token").exists())
         self.assertFalse((self.source / "dashboard/server.log").exists())
         self.assertFalse((self.data / "dashboard").exists())
+
+    def test_old_log_is_kept_in_logs_appended(self):
+        write(self.logs / datadir.LEGACY_LOG_NAME, "earlier\n")
+        write(self.source / "dashboard/server.log", "old lines\n")
+        datadir.move_legacy(self.source, self.data)
+        kept = self.logs / datadir.LEGACY_LOG_NAME
+        self.assertEqual(kept.read_text(), "earlier\nold lines\n")
+        self.assertEqual(stat.S_IMODE(kept.stat().st_mode), 0o600)
+        self.assertFalse((self.source / "dashboard/server.log").exists())
+        self.assertFalse(any("secret" in p.name for p in self.logs.iterdir()))
+
+    def test_derived_index_does_not_count_as_data(self):
+        for name in ("os.db", "os.db-wal", "os.db-shm", "os.db-journal"):
+            write(self.data / "database" / "data" / name, "idx")
+        (self.data / datadir.MARKER).write_text('{"schema": 1}')
+        self.assertTrue(datadir.data_is_empty(self.data))
+        r = datadir.move_legacy(self.source, self.data)
+        self.assertIsNone(r.refused)
+        self.assertTrue((self.data / "projects/demo/project.md").exists())
+
+    def test_other_files_in_database_count_as_data(self):
+        write(self.data / "database" / "data" / "os.db", "idx")
+        write(self.data / "database" / "data" / "notes.db", "mine")
+        self.assertFalse(datadir.data_is_empty(self.data))
+        write(self.data / "database" / "schema.sql", "mine")
+        (self.data / "database" / "data" / "notes.db").unlink()
+        self.assertFalse(datadir.data_is_empty(self.data))
+
+    def test_two_places_message_names_both_commands(self):
+        write(self.data / "projects/acme/project.md")
+        r = datadir.move_legacy(self.source, self.data)
+        self.assertIn(f"leobot move-data --from {self.source} --archive", r.refused)
+        self.assertIn(f"leobot move-data --from {self.source} --replace", r.refused)
+
+    def test_archive_keeps_home_data_and_clears_the_old_copy(self):
+        write(self.data / "projects/acme/project.md", "home")
+        write(self.source / "dashboard/server.log", "old log\n")
+        write(self.source / "dashboard/.auth-token", "secret")
+        before = sorted(str(p.relative_to(self.data)) for p in self.data.rglob("*"))
+        r = datadir.archive_legacy(self.source)
+        self.assertIsNone(r.refused)
+        self.assertEqual(sorted(r.moved), ["chats", "os.db", "projects"])
+        self.assertTrue(r.backup.name.startswith("legacy-archived-"))
+        self.assertEqual(r.backup.parent, self.backups)
+        self.assertEqual(stat.S_IMODE(r.backup.stat().st_mode), 0o600)
+        with tarfile.open(r.backup) as t:
+            names = t.getnames()
+        for want in ("projects/demo/project.md", "chats/x.json", "os.db"):
+            self.assertIn(want, names)
+        self.assertNotIn("projects/.gitkeep", names)
+        self.assertFalse((self.source / "projects/demo").exists())
+        self.assertTrue((self.source / "projects/.gitkeep").exists())
+        self.assertFalse((self.source / "chats").exists())
+        self.assertFalse((self.source / "os.db").exists())
+        self.assertFalse((self.source / "dashboard/.auth-token").exists())
+        self.assertEqual((self.logs / datadir.LEGACY_LOG_NAME).read_text(), "old log\n")
+        self.assertEqual(sorted(str(p.relative_to(self.data)) for p in self.data.rglob("*")), before)
+        self.assertEqual(datadir.legacy_items(self.source), [])
+        self.assertIsNone(datadir.move_legacy(self.source, self.data).refused)  # the loop is over
+
+    def test_archive_refuses_a_linked_item(self):
+        outside = self.root / "outside-a"
+        write(outside / "x.json", "{}")
+        shutil.rmtree(self.source / "chats")
+        os.symlink(outside, self.source / "chats")
+        r = datadir.archive_legacy(self.source)
+        self.assertIn("symbolic link", r.refused)
+        self.assertTrue((outside / "x.json").exists())
+        self.assertTrue((self.source / "projects/demo/project.md").exists())
+        self.assertEqual(list(self.backups.glob("*")) if self.backups.exists() else [], [])
+
+    def test_archive_low_space_changes_nothing(self):
+        usage = shutil._ntuple_diskusage(100, 100, 0)
+        with mock.patch.object(datadir.shutil, "disk_usage", return_value=usage):
+            r = datadir.archive_legacy(self.source)
+        self.assertIn("Not enough free disk space", r.refused)
+        self.assertTrue((self.source / "projects/demo/project.md").exists())
+
+    def test_init_home_makes_folders_and_marker_only(self):
+        home = self.root / "fresh"
+        with mock.patch.object(paths, "HOME", home), mock.patch.object(paths, "DATA", home / "data"), \
+                mock.patch.object(paths, "RUN", home / "run"), mock.patch.object(paths, "LOGS", home / "logs"), \
+                mock.patch.object(paths, "BACKUPS", home / "backups"), \
+                mock.patch.object(paths, "CODE", self.source), \
+                mock.patch.object(datadir, "move_legacy", side_effect=AssertionError("no move")), \
+                mock.patch.object(migrations, "run", side_effect=AssertionError("no migrations")):
+            datadir.init_home()
+            for d in ("data", "run", "logs", "backups"):
+                self.assertEqual(stat.S_IMODE((home / d).stat().st_mode), 0o700)
+            self.assertEqual(json.loads((home / "data" / datadir.MARKER).read_text())["schema"], 1)
+            (home / "data" / datadir.MARKER).unlink()
+            (home / "data" / datadir.JOURNAL).write_text("{}")
+            datadir.init_home()  # an unfinished move: the server finishes it, no marker yet
+            self.assertFalse((home / "data" / datadir.MARKER).exists())
+        self.assertTrue((self.source / "projects/demo/project.md").exists())
 
     def test_tracked_files_never_moved(self):
         # a tracked placeholder next to real data stays in the source
@@ -439,10 +536,19 @@ class MigrationsCase(unittest.TestCase):
 
     def test_newer_schema_refuses(self):
         (self.data / datadir.MARKER).write_text(json.dumps({"schema": migrations.LATEST + 1}))
-        with self.assertRaises(SystemExit) as cm:
+        with mock.patch.object(paths, "is_installed", return_value=True), \
+                self.assertRaises(SystemExit) as cm:
             migrations.run(self.data)
         self.assertIn("newer Leo Bot (schema", str(cm.exception))
         self.assertIn("leobot update", str(cm.exception))
+
+    def test_newer_schema_on_a_dev_checkout_says_git(self):
+        (self.data / datadir.MARKER).write_text(json.dumps({"schema": migrations.LATEST + 1}))
+        with mock.patch.object(paths, "is_installed", return_value=False), \
+                self.assertRaises(SystemExit) as cm:
+            migrations.run(self.data)
+        self.assertIn("update it with git", str(cm.exception))
+        self.assertNotIn("leobot update", str(cm.exception))
 
     def test_marker_records_version_and_message_names_it(self):
         with mock.patch.object(migrations.version, "current", return_value="9.9.9"):

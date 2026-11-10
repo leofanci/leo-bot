@@ -280,19 +280,22 @@ clone_app() {
 }
 
 # HOME/data with the marker, run/, logs/, backups/ (mode 700), and the channel in leobot.json.
-# Done by the app's own code so the marker and settings formats live in one place.
+# Done by the app's own code so the marker and settings formats live in one place. Folders and
+# marker only: moving old data and migrations happen at the first server start, under its lock.
+# A channel already saved is kept unless --channel was given.
 setup_home() {
   if [ "$DRY_RUN" = 1 ]; then
     plan "create $(quote "$HOME_DIR")/{data,run,logs,backups} (mode 700) and the data marker"
     plan "save channel $CHANNEL in $(quote "$HOME_DIR/leobot.json")"
     return 0
   fi
-  python3 -I - "$HOME_DIR/app" "$CHANNEL" <<'PY' || die "could not set up $HOME_DIR."
+  python3 -I - "$HOME_DIR/app" "$CHANNEL" "$CHANNEL_SET" <<'PY' || die "could not set up $HOME_DIR."
 import sys
 sys.path.insert(0, sys.argv[1])
-from core import datadir, updater
-datadir.prepare()
-updater.save_settings({"channel": sys.argv[2]})
+from core import datadir, paths, updater
+datadir.init_home()
+if sys.argv[3] == "1" or not paths.SETTINGS.exists():
+    updater.save_settings({"channel": sys.argv[2]})
 PY
 }
 

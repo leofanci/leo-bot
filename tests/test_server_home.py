@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,59 @@ class DenyListsTest(unittest.TestCase):
         self.assertIn(f"Read(/{paths.SETTINGS})", rules)
         # legacy clone: the old log name stays denied
         self.assertIn(f"Read(/{paths.CODE.resolve() / 'dashboard' / 'server.log'})", rules)
+
+    def leftovers(self):
+        """What a restore, a broken one and an interrupted install leave in the home folder, and
+        what an old layout leaves at the top of the data folder."""
+        paths.ensure_dirs()
+        made = [paths.HOME / "data.pre-restore-20260101-000000-000000", paths.HOME / "data.partial-x",
+                paths.HOME / ".app-installing", paths.DATA / "dashboard"]
+        for d in made:
+            d.mkdir(parents=True, exist_ok=True)
+            self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        files = [paths.DATA / "os.db", paths.DATA / "dashboard" / "data.db", paths.HOME / "notes.txt"]
+        for f in files:
+            f.write_text("x")
+            self.addCleanup(f.unlink, missing_ok=True)
+        (paths.DATA / "projects" / "acme").mkdir(parents=True, exist_ok=True)
+        (paths.DATA / "projects" / "demo").mkdir(parents=True, exist_ok=True)
+        return made, files
+
+    def test_company_turn_denies_every_home_and_data_entry_but_its_own(self):
+        made, files = self.leftovers()
+        projects = [{"slug": "acme"}, {"slug": "demo"}]
+        dirs = server._workspace_deny_dirs("acme", projects)
+        deny_files = server._workspace_deny_files("acme")
+        for d in made:
+            self.assertIn(str(d), dirs)
+        for f in (paths.DATA / "os.db", paths.HOME / "notes.txt"):
+            self.assertIn(str(f), deny_files)
+        self.assertIn(str(paths.DATA / "projects" / "demo"), dirs)
+        for allowed in (paths.DATA / "projects", paths.DATA / "projects" / "acme", paths.HOME / "app",
+                        paths.DATA, paths.HOME):
+            self.assertNotIn(str(allowed), dirs)
+            self.assertNotIn(str(allowed), deny_files)
+
+    def test_hq_turn_denies_home_entries_not_data(self):
+        made, _ = self.leftovers()
+        dirs = server._workspace_deny_dirs("hq", [{"slug": "acme"}])
+        deny_files = server._workspace_deny_files("hq")
+        for d in made[:3]:
+            self.assertIn(str(d), dirs)
+        self.assertIn(str(paths.RUN), dirs)
+        self.assertIn(str(paths.SETTINGS), deny_files)
+        self.assertIn(str(paths.HOME / "notes.txt"), deny_files)
+        self.assertFalse([d for d in dirs if d == str(paths.DATA) or d.startswith(str(paths.DATA) + "/")], dirs)
+        self.assertNotIn(str(paths.DATA / "os.db"), deny_files)
+
+    def test_private_read_rules_cover_every_home_entry_but_app_and_data(self):
+        made, _ = self.leftovers()
+        rules = claude_code.private_read_rules(paths.CODE)
+        for d in made[:3]:
+            self.assertIn(f"Read(/{d}/**)", rules)
+        self.assertIn(f"Read(/{paths.HOME / 'notes.txt'})", rules)
+        self.assertNotIn(f"Read(/{paths.DATA}/**)", rules)
+        self.assertNotIn(f"Read(/{paths.HOME / 'app'}/**)", rules)
 
     def test_hq_turn_denies_them_too(self):
         cmd = server.chat_session.ChatSession(repo_dir=str(paths.CODE), rail="r")._base_cmd()

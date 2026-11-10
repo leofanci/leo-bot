@@ -397,6 +397,36 @@ class MoveAndDoctorTests(CliBase):
         self.assertIn("leobot move-data --from", out)
         self.assertIn(str(src), out)
 
+    def test_doctor_gives_both_choices_when_both_have_data(self):
+        src = self.legacy()
+        self.write("projects/acme/q.md", "q")
+        code, out, _ = run("doctor", "--from", str(src))
+        self.assertEqual(code, 1)
+        self.assertIn(f"leobot move-data --from {src} --archive", out)
+        self.assertIn(f"leobot move-data --from {src} --replace", out)
+
+    def test_move_data_archive_ends_the_two_places_loop(self):
+        src = self.legacy()
+        self.write("projects/acme/q.md", "q")
+        code, out, err = run("move-data", "--from", str(src), "--archive")
+        self.assertEqual(code, 0, err)
+        self.assertIn("legacy-archived-", out)
+        self.assertTrue((paths.DATA / "projects/acme/q.md").exists())
+        self.assertFalse((paths.DATA / "projects/demo").exists())
+        self.assertEqual(len(list(paths.BACKUPS.glob("legacy-archived-*.tar.gz"))), 1)
+        _, out, _ = run("doctor", "--from", str(src))
+        self.assertIn(f"no old data in {src}", out)
+
+    def test_move_data_archive_and_replace_exclusive(self):
+        src = self.legacy()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            leobot.main(["move-data", "--from", str(src), "--archive", "--replace"])
+
+    def test_doctor_reports_newer_schema_on_dev_checkout(self):
+        migrations.write_marker(paths.DATA, {"schema": migrations.LATEST + 1})
+        _, out, _ = run("doctor")
+        self.assertIn("git pull", out)
+
     def test_doctor_reports_interrupted_move(self):
         paths.DATA.mkdir(parents=True, exist_ok=True)
         (paths.DATA / datadir.JOURNAL).write_text(json.dumps(
@@ -417,6 +447,95 @@ class MoveAndDoctorTests(CliBase):
         _, out, _ = run("doctor")
         self.assertIn("FIX", out)
         self.assertIn("chmod 700", out)
+
+
+class DataLockTests(CliBase):
+    """Restore and move-data hold the update lock and the pid lock for the whole operation."""
+
+    def not_running(self):
+        return mock.patch.object(leobot, "status_info", return_value={"running": False, "pid": None, "port": None})
+
+    def hold(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def test_restore_holds_both_locks(self):
+        from core import updater
+        arc = self.archive({"projects/demo/new.md": b"new"})
+        seen = {}
+        real = leobot._replace_data
+
+        def replace(src, snap):
+            seen["pid"] = leobot._lock_held()
+            seen["update"] = updater.is_updating()
+            return real(src, snap)
+        with self.not_running(), mock.patch.object(leobot, "_replace_data", side_effect=replace):
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen, {"pid": True, "update": True})
+        self.assertFalse(leobot._lock_held())
+        self.assertFalse(updater.is_updating())
+
+    def test_restore_refused_while_updating(self):
+        self.write("projects/demo/old.md", "old")
+        arc = self.archive({"projects/demo/new.md": b"new"})
+        self.hold(paths.RUN / "update.lock")
+        with self.not_running():
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("An update is running", err)
+        self.assertTrue((paths.DATA / "projects/demo/old.md").exists())
+        self.assertEqual(list(paths.BACKUPS.glob("pre-restore-*")), [])
+
+    def test_restore_refused_when_a_server_holds_the_pid_lock(self):
+        self.write("projects/demo/old.md", "old")
+        arc = self.archive({"projects/demo/new.md": b"new"})
+        self.hold(paths.PID_FILE)
+        with self.not_running():
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("started again", err)
+        self.assertTrue((paths.DATA / "projects/demo/old.md").exists())
+
+    def test_move_data_holds_both_locks_and_restarts_after(self):
+        from core import updater
+        src = self.tmp / "clone"
+        self.write("projects/demo/p.md", "p", base=src)
+        seen = {}
+        real = datadir.move_legacy
+        order = []
+
+        def move(*a, **k):
+            seen["pid"] = leobot._lock_held()
+            seen["update"] = updater.is_updating()
+            return real(*a, **k)
+
+        def restart(port):
+            order.append((port, leobot._lock_held(), updater.is_updating()))
+        with mock.patch.object(leobot, "_stop_if_running", return_value=8765), \
+                mock.patch.object(datadir, "move_legacy", side_effect=move), \
+                mock.patch.object(leobot, "_restart", side_effect=restart):
+            code, _, err = run("move-data", "--from", str(src))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen, {"pid": True, "update": True})
+        self.assertEqual(order, [(8765, False, True)])  # pid lock gone, update lock still held
+
+    def test_move_data_refused_while_updating(self):
+        src = self.tmp / "clone"
+        self.write("projects/demo/p.md", "p", base=src)
+        self.hold(paths.RUN / "update.lock")
+        code, _, err = run("move-data", "--from", str(src))
+        self.assertEqual(code, 1)
+        self.assertIn("An update is running", err)
+        self.assertTrue((src / "projects/demo/p.md").exists())
+
+    def test_stale_pid_is_cleared_while_held(self):
+        paths.PID_FILE.write_text(json.dumps({"pid": 999999, "port": 8765}))
+        with leobot._pid_lock() as held:
+            self.assertTrue(held)
+            self.assertEqual(paths.PID_FILE.read_text(), "")
 
 
 class UninstallTests(CliBase):
