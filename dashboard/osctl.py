@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 from dashboard import chat_session, db, fileops  # noqa: E402
-from core import bots, paths  # noqa: E402
+from core import bots, memory, paths  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -334,7 +334,10 @@ def _build_parser():
     p.add_argument("--bot", required=True)
     p.add_argument("--project", help="project slug; omit for HQ memory")
     p.add_argument("--text", required=True)
-    p.set_defaults(_run=lambda a: {"path": bots.remember(a.bot, a.text, a.project)})
+    p.add_argument("--type", choices=memory.TYPES, default="fact",
+                   help="decision and preference are pinned: always on the bot's card, never dropped")
+    p.set_defaults(_run=lambda a: {"path": memory.remember(a.bot, a.text, a.project, root=bots.ROOT,
+                                                           type=a.type)})
 
     p = sub.add_parser("get-memory", help="Read a bot's memory (per project, or HQ)")
     p.add_argument("--bot", required=True)

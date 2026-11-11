@@ -118,6 +118,7 @@ class Memory(unittest.TestCase):
             bots.remember("cmo", "x" * 400, "acme", self.root)
 
     def test_memory_is_capped(self):
+        self.assertEqual(bots.MEMORY_MAX_LINES, 400)
         for i in range(bots.MEMORY_MAX_LINES + 5):
             bots.remember("cos", f"fact {i}", None, self.root)
         lines = bots.read_memory("cos", None, self.root, tail=0).splitlines()

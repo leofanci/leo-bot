@@ -3446,7 +3446,8 @@ class Handler(BaseHTTPRequestHandler):
                 bot_id, project = str(body.get("bot") or ""), (ws if record else None)
                 team_scope = bool(record) and body.get("scope") == "team"
                 if path == "/api/memory":
-                    bots.remember(bot_id, body.get("text"), project, ROOT, shared=team_scope)
+                    bots.remember(bot_id, body.get("text"), project, ROOT, shared=team_scope,
+                                  type=str(body.get("type") or "fact"))
                 elif not bots.forget(bot_id, body.get("line"), project, ROOT, shared=team_scope):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0, shared=team_scope)

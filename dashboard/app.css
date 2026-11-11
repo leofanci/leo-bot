@@ -618,10 +618,12 @@ summary.pf-head::-webkit-details-marker{display:none}
 .mem-head{margin-bottom:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}
 .mem-line{display:flex;align-items:flex-start;gap:var(--ui-space-2);padding:3px 0;font-size:var(--ui-type-label)}
 .mem-line span{flex:1}
+.mem-line .mem-type{flex:none;margin:0}
 .mem-line .cl-del{display:grid;place-items:center;border:0;background:none;color:var(--ui-color-text-muted)}
 .mem-empty{font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}
 .mem-add{display:flex;gap:var(--ui-space-1-5);margin-top:var(--ui-space-1-5)}
-.mem-add input{flex:1;height:var(--ui-control-default);padding:0 var(--ui-space-2);border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);font-size:var(--ui-type-label)}
+.mem-add input,.mem-add select{height:var(--ui-control-default);padding:0 var(--ui-space-2);border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);font-size:var(--ui-type-label)}
+.mem-add input{flex:1}
 
 /* ---------- forms, dialogs, popups ---------- */
 .fpage,.form-shell{max-width:var(--ui-form-width)}
