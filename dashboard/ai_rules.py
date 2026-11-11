@@ -20,7 +20,7 @@ Each turn: COMPACT state index only — not full content. Fetch on demand:
 - `get-posts [--profile <slug>]` — post ids, dates, statuses
 - `get-project --slug <slug>` — memos, experiments, features, activities, `sections` + `subsections`
 - `resolve-id --id pr1.sec02` — section artifacts + paths
-- `read-file --path <repo-relative>` — profile.md, brief JSON, intake.md, brief-specs/br{N}.md, voices/vc{N}.md, etc.
+- `read-file --path <data-relative>` — profile.md, brief JSON, intake.md, brief-specs/br{N}.md, voices/vc{N}.md, etc.
 - WebSearch / WebFetch — only on research turns; use for live external data.
   WebFetch works only for sites the user named in the message; otherwise use
   WebSearch. Never copy private workspace content (notes, numbers, file

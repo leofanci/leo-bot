@@ -2,8 +2,9 @@
 """PostToolUse hook — rebuild os.db when an authored SOURCE file changes.
 
 Files are the source of truth; os.db is the derived index. After any Edit/Write
-to a file under ventures/ brands/ apps/ portfolio/, re-run index.py so the index
-never drifts from the files. No-op for every other edit. Never blocks (exit 0).
+to a .md or .json file under the data folder's projects/ or portfolio/, re-run
+index.py so the index never drifts from the files. No-op for every other edit.
+Never blocks (exit 0).
 
 Wired in .claude/settings.json as a PostToolUse hook on Edit|Write|MultiEdit.
 """
@@ -13,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-DATA_DIRS = {"ventures", "brands", "apps", "portfolio"}
+DATA_DIRS = {"projects", "portfolio"}  # what index.py reads
 SOURCE_EXTS = {".md", ".json"}
 CODE_DIR = Path(__file__).resolve().parent.parent  # the checkout (one above hooks/)
 sys.path.insert(0, str(CODE_DIR))
@@ -34,7 +35,7 @@ def main():
         return
 
     try:
-        relp = Path(fp).resolve().relative_to(ROOT)
+        relp = Path(fp).resolve().relative_to(ROOT.resolve())
     except ValueError:
         return  # edit outside this workspace
 

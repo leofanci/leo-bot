@@ -123,6 +123,33 @@ class StartServer(unittest.TestCase):
         self.assertIn("dashboard/server.py", self.src)
         self.assertIn("server.pid", self.src)
 
+    def test_installed_service_is_started_not_a_second_server(self):
+        # launchd owns the server when the background service is installed: the script asks it
+        # to start and never spawns a second server that would fight it for the pid lock.
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            home, stub = Path(tmp) / "home", Path(tmp) / "bin"
+            (home / "Library" / "LaunchAgents").mkdir(parents=True)
+            (home / "Library" / "LaunchAgents" / "leobot.server.plist").write_text("<plist/>")
+            stub.mkdir()
+            calls = Path(tmp) / "calls"
+            (stub / "launchctl").write_text(f'#!/bin/sh\necho "$@" >> "{calls}"\n')
+            (stub / "launchctl").chmod(0o755)
+            env = {"HOME": str(home), "PATH": f"{stub}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin",
+                   "LEOBOT_HOME": str(Path(tmp) / "lb")}
+            r = subprocess.run(["bash", str(RES / "start-server.sh"), str(Path(tmp) / "nocode"), "8799"],
+                               env=env, capture_output=True, text=True, timeout=60)
+            if "NOPYTHON" in r.stdout:
+                self.skipTest("no python3 3.10+ found by the script")
+            self.assertEqual(r.stdout.strip(), "SERVICE", r.stdout + r.stderr)
+            self.assertIn("kickstart gui/", calls.read_text())
+            self.assertIn("/leobot.server", calls.read_text())
+            self.assertFalse((Path(tmp) / "lb" / "logs" / "server.log").exists())
+
+    def test_probe_bypasses_proxies(self):
+        self.assertIn("ProxyHandler({})", self.src)
+
     def test_python_version_checked_per_candidate(self):
         self.assertIn("sys.version_info < (3, 10)", self.src)
         loop = self.src[self.src.index("PYTHON3=\"\"\nfor _p in"):]

@@ -559,5 +559,29 @@ class MigrationsCase(unittest.TestCase):
         self.assertIn("schema %d, version 9.9.9" % (migrations.LATEST + 1), str(cm.exception))
 
 
+
+class MarkerRobustness(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.data = Path(tmp.name)
+
+    def test_boolean_or_negative_schema_counts_as_none(self):
+        for bad in (True, False, -1, "1", None):
+            (self.data / migrations.MARKER).write_text(json.dumps({"schema": bad}))
+            calls = []
+            with mock.patch.object(migrations, "MIGRATIONS", [lambda d: calls.append(d)]), \
+                    mock.patch.object(migrations, "LATEST", 1):
+                self.assertEqual(migrations.run(self.data), 1)
+            self.assertEqual(calls, [self.data], bad)
+            self.assertEqual(migrations.read_marker(self.data)["schema"], 1)
+
+    def test_failed_marker_write_leaves_no_temp_file(self):
+        with mock.patch.object(migrations.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                migrations.write_marker(self.data, {"schema": 1})
+        self.assertEqual([p.name for p in self.data.iterdir()], [])
+
+
 if __name__ == "__main__":
     unittest.main()
