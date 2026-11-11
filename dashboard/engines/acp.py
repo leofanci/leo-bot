@@ -194,7 +194,7 @@ class AcpEngine(Engine):
             if not done or done.get("error"):
                 yield ("error", f"{self.label}: {((done or {}).get('error') or {}).get('message', 'no reply')}")
                 return
-            yield ("done", {"result": None, "subtype": "success", "tokens": 0, "cost": None})
+            yield ("done", {"result": None, "subtype": "success", "tokens": 0, "cost": None, "usage": None})
         except (BrokenPipeError, ValueError):
             yield ("error", f"{self.label} stopped unexpectedly")
         finally:

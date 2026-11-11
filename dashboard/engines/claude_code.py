@@ -24,6 +24,7 @@ import threading
 from pathlib import Path
 
 from core import folders, paths
+from dashboard.engines import prices
 from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 
 
@@ -45,8 +46,10 @@ def parse_event(obj):
         usage = obj.get("usage") or {}
         tokens = sum(int(usage.get(k) or 0) for k in (
             "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens"))
+        parts = prices.usage(usage.get("input_tokens"), usage.get("cache_creation_input_tokens"),
+                             usage.get("cache_read_input_tokens"), usage.get("output_tokens"))
         return ("done", {"result": obj.get("result"), "subtype": obj.get("subtype"),
-                         "tokens": tokens, "cost": obj.get("total_cost_usd")})
+                         "tokens": tokens, "cost": obj.get("total_cost_usd"), "usage": parts})
     return (None, None)
 
 
