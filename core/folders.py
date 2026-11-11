@@ -21,7 +21,7 @@ import re
 import subprocess
 from pathlib import Path, PurePath
 
-from core import bots
+from core import bots, paths
 
 READ, EDIT = "read", "edit"
 ACCESS = (READ, EDIT)
@@ -46,7 +46,8 @@ NEVER_WRITE_FILES = (".mcp.json", ".envrc", ".pre-commit-config.yaml",
 SECRET_FILE_GLOBS = [
     ".env", ".env.*", "*.pem", "*.key", ".npmrc", ".netrc", ".pgpass", ".pypirc", ".git-credentials",
     "credentials*.json", "secrets.*", "id_rsa*", "id_ed25519*",
-    ".auth-token", "owner-token",  # dashboard login token (server.TOKEN_FILE, OWNER_TOKEN_FILE)
+    ".auth-token",  # the old in-checkout login token, for clones that still have one
+    "auth-token", "owner-token",  # login tokens (server.TOKEN_FILE in the home folder, OWNER_TOKEN_FILE)
     "engines.json", "runners.json",  # API keys (dashboard.engines.config), runner token hashes
     ".leobot-runner-token", ".leobot-runner-sessions.json",  # a runner's own files on a person's Mac
     "integrations.json",  # Composio key + sessions (core.integrations)
@@ -152,12 +153,17 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     workspace_root = Path(root).resolve()
     home = Path.home().resolve()
     filesystem_root = Path(resolved.anchor).resolve()
+    code_root = Path(paths.CODE).resolve()  # the app checkout, apart from the data folder
+    leobot_home = Path(paths.HOME).resolve()  # data, run, logs, backups, settings
+    own_msg = "Leo Bot's own folders can't be linked."
+    if any(_same(resolved, p) for p in (leobot_home, code_root)):
+        raise FolderError(own_msg)
     if any(_same(resolved, p) for p in (filesystem_root, home, workspace_root)):
         raise FolderError("local folder must be a specific app directory")
     # A parent of Leo Bot (for example ~/Documents/GitHub) would expose this repo
     # and every sibling app when passed to Claude as an allowed directory.
-    if under(workspace_root, resolved):
-        raise FolderError("local folder cannot contain the Leo Bot workspace")
+    if any(under(p, resolved) for p in (workspace_root, code_root, leobot_home)):
+        raise FolderError(own_msg)
     # Claude's config holds every bot session's transcript, all workspaces.
     if under(resolved, home / ".claude"):
         raise FolderError("local folder cannot be inside the Claude config folder")
@@ -172,8 +178,8 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     if any(part.lower().endswith(".app") for part in resolved.parts):
         raise FolderError("local folder cannot be an app bundle")
     # Leo Bot's own data is written only through osctl; a link inside it would bypass that.
-    if under(resolved, workspace_root):
-        raise FolderError("local folder cannot be inside the Leo Bot folder")
+    if any(under(resolved, p) for p in (workspace_root, code_root, leobot_home)):
+        raise FolderError(own_msg)
     return str(resolved)
 
 

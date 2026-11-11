@@ -13,6 +13,7 @@ Run:  python3 dashboard/server.py [--port 8765]
 import argparse
 import base64
 import binascii
+import fcntl
 import hmac
 import html
 import json
@@ -32,9 +33,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(ROOT))
+HERE = Path(__file__).resolve().parent  # dashboard/ in the checkout: app.html, assets, vendor
+CODE = HERE.parent  # sys.path setup only; the checkout is paths.CODE
+sys.path.insert(0, str(CODE))
 sys.path.insert(0, str(HERE))
 import db                # noqa: E402
 import fileops           # noqa: E402
@@ -42,7 +43,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots    # noqa: E402
+from core import bots, datadir, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -78,7 +79,8 @@ DEPLOYMENT = deployment_settings.mode()
 # Browsers keep cookies per host, not per port: over the SSH connection a server and the
 # Mac's own Leo Bot are both 127.0.0.1, and one cookie name would log each out of the other.
 AUTH_COOKIE = "leobot_server_auth" if DEPLOYMENT == "server" else "leobot_auth"
-OWNER_TOKEN_FILE = ROOT / "team" / "owner-token"
+ROOT = paths.DATA  # user data (projects, chats, team...); code is paths.CODE
+OWNER_TOKEN_FILE = paths.DATA / "team" / "owner-token"
 
 
 def _owner_token(deployment=None, path=None):
@@ -117,7 +119,7 @@ RAIL = CHAT_RAIL
 # the macOS app reads it from this owner-only file, a terminal user gets it in
 # the printed URL. A plain GET / (another local account, a port scanner) gets
 # nothing. See do_GET "/" and write_token_file().
-TOKEN_FILE = HERE / ".auth-token"
+TOKEN_FILE = paths.TOKEN_FILE
 _TOKEN_IN_LOG = re.compile(r"([?&]token=|/join/)[^&\s\"?]*")
 # An invited person's device cookie (core.people); the owner keeps AUTH_COOKIE.
 MEMBER_COOKIE = "leobot_member"
@@ -179,6 +181,13 @@ def restrict_new_files():
     terminal_session.USER_UMASK = os.umask(0o077)
 
 
+# The version this process loaded at startup. /healthz reports it, so after `leobot update`
+# checks out new code an old process still running can never pass for the new version.
+RUNNING_VERSION = version.current()
+# Random per process: a main-channel update may leave VERSION unchanged, so /healthz also reports this.
+BOOT_ID = secrets.token_hex(8)
+
+
 def health_proof(nonce):
     """HMAC-SHA256(AUTH_TOKEN, nonce): lets the launcher verify server identity."""
     # The context prefix keeps this proof from ever matching an HMAC made for another purpose.
@@ -188,10 +197,59 @@ def health_proof(nonce):
 def write_token_file(path=None):
     """Write AUTH_TOKEN to an owner-only file (0600) for the macOS app."""
     path = Path(path or TOKEN_FILE)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.fchmod(fd, 0o600)  # before the token goes in, also for a file that already existed
     with os.fdopen(fd, "w") as f:
         f.write(AUTH_TOKEN)
-    os.chmod(path, 0o600)
+
+
+_PID_FD = None  # the pid file, open and flock-ed for the life of the process
+
+
+def acquire_pid_lock(port):
+    """One server per home folder: an exclusive flock on the pid file, held until exit.
+    The kernel drops it with the process, so a stale file or a recycled pid needs no check."""
+    global _PID_FD
+    path = paths.PID_FILE
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.fchmod(fd, 0o600)
+    locked = False
+    for attempt in range(5):  # `leobot status` may hold a shared lock for a moment
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+            break
+        except OSError:
+            if attempt < 4:
+                time.sleep(0.1)
+    if not locked:
+        try:
+            held = json.loads(os.pread(fd, 4096, 0).decode() or "{}")
+            who = f" (pid {int(held['pid'])}, port {int(held['port'])})"
+        except (OSError, ValueError, KeyError, TypeError):
+            who = ""
+        os.close(fd)
+        sys.exit(f"Leo Bot is already running{who}.")
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, json.dumps({"pid": os.getpid(), "port": int(port)}).encode(), 0)
+    _PID_FD = fd
+
+
+def release_pid_lock():
+    """Remove the file while still holding the lock, then let go."""
+    global _PID_FD
+    if _PID_FD is None:
+        return
+    try:
+        paths.PID_FILE.unlink()
+    except OSError:
+        pass
+    try:
+        os.close(_PID_FD)
+    except OSError:
+        pass
+    _PID_FD = None
 
 
 def remove_token_file(path=None):
@@ -256,6 +314,64 @@ def pick_local_folder() -> dict:
 
 # `open` runs these instead of showing them.
 _LAUNCHABLE_SUFFIXES = frozenset({".app", ".command", ".workflow", ".action", ".saver", ".prefpane", ".terminal"})
+
+
+# ── Update notice (owner only): cached check result, one detached update at a time ──
+UPDATE_FIRST_CHECK = 60        # seconds after start
+UPDATE_CHECK_EVERY = 24 * 3600
+UPDATE_SPAWN_WINDOW = 30       # a double click inside this window gets 409 even before the updater's lock is held
+_UPDATE_STARTED = 0.0          # monotonic time of the last accepted POST
+_UPDATE_GUARD = threading.Lock()
+
+
+def _update_in_flight() -> bool:
+    return updater.is_updating() or (_UPDATE_STARTED and time.monotonic() - _UPDATE_STARTED < UPDATE_SPAWN_WINDOW)
+
+
+_HEAD_CACHE: list = []
+
+
+def _code_head():
+    """The checkout's commit as of this process (it restarts after an update), read once."""
+    if not _HEAD_CACHE:
+        _HEAD_CACHE.append(updater._head(paths.CODE))
+    return _HEAD_CACHE[0]
+
+
+def _update_view() -> dict:
+    """What GET /api/update says. Cached settings only: never touches the network."""
+    cfg = updater.settings()
+    latest = cfg.get("latest")
+    installed = paths.is_installed()
+    # Same version on another commit still needs the tag; a commit that failed is not offered.
+    available = updater.cached_available(cfg, RUNNING_VERSION, _code_head)
+    notes = None
+    if latest:
+        notes = (updater.release_notes_url() if cfg.get("channel") == "main"
+                 else updater.release_notes_url(tag=latest))
+    return {"installed": installed, "current": RUNNING_VERSION, "latest": latest, "available": bool(available),
+            "notes_url": notes, "updating": bool(_update_in_flight()),
+            "data_dir": str(paths.DATA), "log": str(paths.UPDATE_LOG)}
+
+
+def _update_check_loop(sleep=time.sleep, rounds=None) -> None:
+    """First check after UPDATE_FIRST_CHECK seconds, then daily. Never raises."""
+    wait, n = UPDATE_FIRST_CHECK, 0
+    while rounds is None or n < rounds:
+        sleep(wait)
+        wait, n = UPDATE_CHECK_EVERY, n + 1
+        try:
+            updater.check()
+        except Exception as e:  # noqa: BLE001
+            print(f"update check failed: {e}", file=sys.stderr)
+
+
+def _start_update_checker():
+    if not paths.is_installed():
+        return None
+    t = threading.Thread(target=_update_check_loop, name="update-check", daemon=True)
+    t.start()
+    return t
 
 
 def open_local_folder(path: str) -> None:
@@ -394,7 +510,7 @@ def state_snapshot(projects, only=None):
 # relevant skill here and injects only its SKILL.md body into the prompt. No
 # discovery overhead, no leaked built-in commands. Pure string match — no extra
 # model call.
-SKILLS_DIR = ROOT / "skills"
+SKILLS_DIR = paths.CODE / "skills"
 
 # Ordered: first match wins, so put the more specific / earlier-in-loop skills
 # first (e.g. problem-validation before gtm-assessment).
@@ -1015,27 +1131,61 @@ def _workspace_deny_dirs(ws, projects, kept=()):
     ws = ws or bots.HQ
     kept = [str(k) for k in kept]
     own_removed = [p for p in folders.all_paths(ws, ROOT) if p not in kept]
-    if ws == bots.HQ:
-        return folders.turn_denies(kept, [], own_removed)
+    if ws == bots.HQ:  # HQ reads every workspace, but never the home folder's private parts
+        return tuple(dict.fromkeys(folders.turn_denies(kept, [], own_removed)
+                                   + _both_spellings(paths.home_private()[0])))
     others = [p for p in projects if p.get("slug") != ws]
     dirs = [ROOT / "projects" / p["slug"] for p in others]
+    dirs += [paths.CODE / "projects" / p["slug"] for p in others]  # a clone not yet migrated
     # Folders on disk too: a project the index has not seen yet is just as private.
-    on_disk = ROOT / "projects"
-    for d in (on_disk.iterdir() if on_disk.is_dir() else ()):
-        if d.is_dir() and d.name.lower() != ws.lower() and not d.name.startswith("."):
-            dirs.append(d)
+    for on_disk in dict.fromkeys((ROOT / "projects", paths.CODE / "projects")):
+        for d in (on_disk.iterdir() if on_disk.is_dir() else ()):
+            if d.is_dir() and d.name.lower() != ws.lower() and not d.name.startswith("."):
+                dirs.append(d)
     dirs += [Path(p) for p in folders.turn_denies(
         kept, folders.other_workspace_paths(ws, [p["slug"] for p in projects], ROOT), own_removed)]
-    dirs += [ROOT / "chats", ROOT / "team", ROOT / "portfolio", ROOT / "database"]
-    dirs += [ROOT / ".remember", ROOT / ".superpowers", ROOT / ".tokensave", ROOT / "private"]  # the owner's machine state
-    return tuple(dict.fromkeys(str(d) for d in dirs))
+    dirs += [paths.CODE / n for n in ("chats", "team", "portfolio", "database")]  # a clone not yet migrated
+    dirs += _data_private()[0]
+    dirs += [paths.CODE / ".remember", paths.CODE / ".superpowers", paths.CODE / ".tokensave",
+             paths.CODE / "private"]  # the owner's machine state
+    # Every home folder entry but app and data: token and pid, logs, backups, set-aside data.
+    dirs += paths.home_private()[0]
+    return _both_spellings(dirs)
+
+
+def _data_private():
+    """Every top-level entry of the data folder but `projects`, as (folders, files): the stores
+    with every workspace in them (chats, team, portfolio, database) even before they exist, plus
+    whatever else is there (the marker, a move journal, databases left by an old layout). A
+    company turn reaches only its own workspace, under projects/."""
+    dirs = [ROOT / n for n in ("chats", "team", "portfolio", "database")]
+    files = []
+    try:
+        entries = sorted(Path(ROOT).iterdir())
+    except OSError:
+        entries = []
+    for p in entries:
+        if p.name != "projects" and p not in dirs:
+            paths._sort_entry(p, dirs, files)
+    return dirs, files
+
+
+def _both_spellings(items):
+    """Deny rules match text: add the resolved spelling (macOS /var is /private/var)."""
+    out = []
+    for d in items:
+        out += [str(d), str(Path(d).resolve())]
+    return tuple(dict.fromkeys(out))
 
 
 def _workspace_deny_files(ws):
-    """Single files with every workspace in them (the index databases)."""
-    if ws == bots.HQ:
-        return ()
-    return tuple(str(f) for f in (ROOT / "os.db", HERE / "os.db", HERE / "data.db"))
+    """Single files with every workspace in them (the index databases), and the home folder's
+    private files (settings, anything set aside). HQ: only the home folder's."""
+    home = paths.home_private()[1]
+    if (ws or bots.HQ) == bots.HQ:
+        return _both_spellings(home)
+    legacy = (paths.CODE / "os.db", paths.CODE / "dashboard" / "os.db", paths.CODE / "dashboard" / "data.db")
+    return _both_spellings((db.DB_PATH, *legacy, *_data_private()[1], *home))
 
 
 CLI_NOTE = (
@@ -1222,7 +1372,7 @@ def _folder_gone(sess_or_rec, linked):
 
 
 def _fresh_with_recap(rec):
-    sess = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+    sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     sess.pending_recap = chat_store.recap(rec) or None
     return sess
 
@@ -1234,10 +1384,10 @@ def _reopen(rec, scope, linked):
     rec_slug = _scope_slug(rec.get("scope")) if rec else None
     same = rec and (rec_slug == _scope_slug(scope) or (rec_slug is None and not _used_paths(rec)))
     if not same:
-        return chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(ROOT), RAIL, rec)
+    return chat_session.ChatSession.restore(str(paths.CODE), RAIL, rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
@@ -1261,7 +1411,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if new:
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
         _CHAT_SCOPE = scope
         return _CHAT
     if chat_id and (_CHAT is None or getattr(_CHAT, "session_id", None) != chat_id):
@@ -1282,7 +1432,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if _CHAT is None or _scope_slug(_CHAT_SCOPE) != _scope_slug(scope):
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
     _CHAT_SCOPE = scope
     return _CHAT
 
@@ -1327,7 +1477,7 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
         if cur is not None:
             cur.close()
         rec = chat_store.load(chat_id) if (chat_id and not new) else None
-        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
         _PERSON_CHATS[pid] = [sess, scope]
         return sess
 
@@ -1890,6 +2040,28 @@ class Handler(BaseHTTPRequestHandler):
         else:
             return self._send(404, {"error": "unknown endpoint"})
         return self._send(200, _folders_view(ws, projects))
+
+    def _update_post(self, path):
+        """Settings, Updates: owner only (the caller checked). Starts one detached `leobot update`."""
+        global _UPDATE_STARTED
+        if path == "/api/update/open-data":
+            open_local_folder(str(paths.DATA))
+            return self._send(200, {"ok": True})
+        if path != "/api/update":
+            return self._send(404, {"error": "unknown endpoint"})
+        with _UPDATE_GUARD:
+            if not paths.is_installed():
+                return self._send(409, {"error": "This is a development checkout. Update it with git."})
+            if _update_in_flight():
+                busy = updater.busy_text() if updater.is_updating() else "An update is running"
+                return self._send(409, {"error": f"{busy}. Try again when it has finished."})
+            try:
+                updater.spawn_detached()
+            except RuntimeError as e:
+                code = 409 if updater.is_updating() or "already running" in str(e) else 500
+                return self._send(code, {"error": str(e)})
+            _UPDATE_STARTED = time.monotonic()
+        return self._send(202, {"updating": True})
 
     def _engines_post(self, path, body):
         """Settings, Engines: owner only (the caller checked)."""
@@ -2456,7 +2628,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
-            c = chat_session.ChatSession(repo_dir=str(ROOT), rail=RAIL)
+            c = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
             c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
@@ -2640,7 +2812,7 @@ class Handler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-        term = terminal_session.TerminalSession(cmd=engine_registry.terminal_cmd(ROOT), cwd=str(ROOT))
+        term = terminal_session.TerminalSession(cmd=engine_registry.terminal_cmd(ROOT), cwd=str(paths.CODE))
         term.start(on_output)
 
         buf = b""
@@ -2696,8 +2868,9 @@ class Handler(BaseHTTPRequestHandler):
             # checkout's token file (HMAC of the nonce), without sending the token.
             nonce = (parse_qs(urlparse(self.path).query).get("nonce") or [""])[0]
             if nonce:
-                return self._send(200, {"app": "Leo Bot", "proof": health_proof(nonce)})
-            return self._send(200, {"app": "Leo Bot"})
+                return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION, "boot": BOOT_ID,
+                                        "proof": health_proof(nonce)})
+            return self._send(200, {"app": "Leo Bot", "version": RUNNING_VERSION, "boot": BOOT_ID})
         if path in ("/", "/index.html"):
             token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
             # Compare bytes: str compare_digest raises on non-ASCII input.
@@ -2767,6 +2940,8 @@ class Handler(BaseHTTPRequestHandler):
             if person and db.db_exists():
                 return self._person_get(path, person)
             return self._send(403, {"error": "forbidden"})
+        if path == "/api/update":  # owner only (checked above); needs no index
+            return self._send(200, _update_view())
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
@@ -2935,6 +3110,13 @@ class Handler(BaseHTTPRequestHandler):
             if person and db.db_exists():
                 return self._person_post(path, person)
             return self._send(403, {"error": "forbidden"})
+        if path in ("/api/update", "/api/update/open-data"):  # owner only, no body, no index needed
+            if not self._authorized(require_origin=True):
+                return self._send(403, {"error": "forbidden"})
+            try:
+                return self._update_post(path)
+            except fileops.ActionError as e:
+                return self._send(400, {"error": str(e)})
         try:
             body = self._read_json()
             if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
@@ -3395,15 +3577,29 @@ def main():
         except (AttributeError, ValueError):
             pass
 
+    paths.ensure_dirs()
+    if not sys.stdout.isatty():  # the app and the service redirect here; keep it owner-only
+        log = open(os.open(paths.SERVER_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "a",
+                   buffering=1, encoding="utf-8")
+        os.chmod(paths.SERVER_LOG, 0o600)
+        os.dup2(log.fileno(), 1)  # child processes and early messages land in the log too
+        os.dup2(log.fileno(), 2)
+        sys.stdout = sys.stderr = log
     restrict_new_files()
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--no-reindex", action="store_true", help="skip the startup re-index")
     args = ap.parse_args()
+    acquire_pid_lock(args.port)  # before the move and re-index: a second start must not touch the data
+    try:
+        datadir.prepare()  # one-time move out of a clone, marker, data migrations
+    except BaseException:
+        release_pid_lock()  # refused or failed (two data folders, newer data, disk error): no stale pid file
+        raise
 
     if not args.no_reindex:
         print("Re-indexing os.db from source files...")
-        r = subprocess.run([sys.executable, str(ROOT / "index.py"), str(ROOT)],
+        r = subprocess.run([sys.executable, str(paths.CODE / "index.py"), str(paths.DATA)],
                            capture_output=True, text=True)
         sys.stdout.write(r.stdout)
         if r.returncode != 0:
@@ -3411,6 +3607,7 @@ def main():
             # One bad file must not keep an always-on Leo Bot down: with an earlier index it
             # starts on that, says so in the log, and writes stay refused until it is fixed.
             if not db.db_exists():
+                release_pid_lock()
                 sys.exit("startup re-index failed — fix source files and retry")
             print("WARNING: re-index failed; running on the last good index. Fix the file above.", file=sys.stderr)
 
@@ -3427,12 +3624,18 @@ def main():
         remove_uploads()
         chat_session.remove_bot_tmpdir()
         remove_token_file()
+        release_pid_lock()
 
     # Quitting LeoBot.app (Cmd+Q) sends SIGTERM to this PID; clean up children before exiting.
     signal.signal(signal.SIGTERM, lambda *a: (_shutdown_children(), sys.exit(0)))
 
-    srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except OSError:
+        release_pid_lock()
+        raise
     write_token_file()
+    _start_update_checker()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

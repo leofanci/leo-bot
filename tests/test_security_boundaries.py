@@ -188,8 +188,17 @@ class LoginAndLocalFilesTest(unittest.TestCase):
         self.assertEqual(h_out["code"], 200)
         body = json.loads(h_out["body"])
         want = hmac.new(server.AUTH_TOKEN.encode(), b"leobot-healthz:abc123", "sha256").hexdigest()
-        self.assertEqual(body, {"app": "Leo Bot", "proof": want})
+        self.assertEqual(body, {"app": "Leo Bot", "version": server.RUNNING_VERSION, "boot": server.BOOT_ID,
+                                "proof": want})
         self.assertNotIn(server.AUTH_TOKEN.encode(), h_out["body"])
+
+    def test_healthz_reports_the_version_loaded_at_startup(self):
+        # After `leobot update` checks out new code, an old process must not claim the new version.
+        with mock.patch.object(server.version, "current", return_value="99.0.0"):
+            for path in ("/healthz", "/healthz?nonce=abc"):
+                body = json.loads(self.get(path)["body"])
+                self.assertEqual(body["version"], server.RUNNING_VERSION)
+                self.assertNotEqual(body["version"], "99.0.0")
 
     def test_request_log_redacts_login_token(self):
         h = server.Handler.__new__(server.Handler)
@@ -211,6 +220,16 @@ class LoginAndLocalFilesTest(unittest.TestCase):
                 osctl.main(["read-file", "--path", "dashboard/.auth-token"])
         self.assertIn("secret files are not readable", out.getvalue())
         self.assertNotIn('"content"', out.getvalue())
+
+    def test_osctl_read_file_refuses_home_token_name(self):
+        from dashboard import osctl
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(fileops, "ROOT", Path(d)):
+            (Path(d) / "run").mkdir()
+            (Path(d) / "run" / "auth-token").write_text("secret", encoding="utf-8")
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                osctl.main(["read-file", "--path", "run/auth-token"])
+        self.assertIn("secret files are not readable", out.getvalue())
 
     def test_token_file_is_owner_only_and_removed(self):
         with tempfile.TemporaryDirectory() as d:

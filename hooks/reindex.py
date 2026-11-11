@@ -15,7 +15,12 @@ from pathlib import Path
 
 DATA_DIRS = {"ventures", "brands", "apps", "portfolio"}
 SOURCE_EXTS = {".md", ".json"}
-ROOT = Path(__file__).resolve().parent.parent  # project root (one above hooks/)
+CODE_DIR = Path(__file__).resolve().parent.parent  # the checkout (one above hooks/)
+sys.path.insert(0, str(CODE_DIR))
+
+from core import paths  # noqa: E402
+
+ROOT = paths.DATA  # the workspace holding the user data
 
 
 def main():
@@ -37,7 +42,7 @@ def main():
         return  # not an indexed source file
 
     res = subprocess.run(
-        [sys.executable, str(ROOT / "index.py"), str(ROOT)],
+        [sys.executable, str(paths.CODE / "index.py"), str(ROOT)],
         capture_output=True, text=True,
     )
     if res.returncode == 0:

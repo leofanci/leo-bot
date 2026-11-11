@@ -10,7 +10,7 @@ options → pros/cons → one recommendation → what would change it.
 ## Workspace structure
 
 ```
-leo-bot/                          ← your clone; data folders below are gitignored
+~/.leobot/data/                   ← your data (a clone's own folders are legacy, moved here)
 ├── database/data/os.db         ← derived SQLite index (disposable; rebuilt from files)
 ├── portfolio/
 │   ├── milestones.json         ← manually entered dates/events (copy from template)
@@ -52,17 +52,54 @@ the UI tree — `pr1.sec04.mm1` (pricing tab → positioning memo),
 
 ## Install
 
-Prerequisites: Python 3.10+ (stdlib only, nothing to `pip install`), the Claude Code CLI logged in
-(`claude --version`), and for the macOS app, Xcode Command Line Tools.
+Prerequisites: Python 3.10+ (stdlib only, nothing to `pip install`), git, and the Claude Code CLI
+logged in (`claude --version`; the installer offers to set it up, and bots can also run on an API key).
+
+One command, on macOS or Debian/Ubuntu, no sudo on a Mac. Replace `<repo>` with this repository's
+address; its [latest release](../../releases/latest) page has the same line:
+
+```bash
+curl -fsSL <repo>/releases/latest/download/install.sh | bash
+```
+
+It creates `~/.leobot` (or `$LEOBOT_HOME`) with the code in `app/`, your data in `data/`, and
+`run/`, `logs/` and `backups/`, adds a `leobot` command to `~/.local/bin`, and on a Mac builds
+`LeoBot.app` into `~/Applications` when the Command Line Tools are there. Flags: `--channel main`
+for the latest code instead of releases, `--version vX.Y.Z`, `--service` / `--no-service`,
+`--no-app`, `--claude` (install Claude Code without asking), `--yes`, `--dry-run`.
+
+`leobot` basics:
+
+- `leobot` opens Leo Bot (starts it if needed): the app on a Mac, the browser on a Linux desktop,
+  and on a server it prints the link to open.
+- `leobot start`, `leobot stop`, `leobot status`
+- `leobot update` updates to the latest release (a backup is taken first); Settings has the same button.
+- `leobot service install` keeps it running in the background (launchd on a Mac, a systemd user unit on Linux).
+- `leobot doctor` checks the setup; `leobot version` prints the version.
+- `leobot backup` snapshots your data into `~/.leobot/backups/`.
+- `leobot uninstall` removes the app and keeps your data unless you add `--data`.
+
+Your data lives in `~/.leobot/data` (`projects/`, `portfolio/`, `chats/`, `team/`). It never
+leaves your machine, which also means nobody else backs it up: `leobot backup` makes a local
+snapshot, and an update takes one first, but copy `~/.leobot/backups/` somewhere safe yourself.
+
+### Develop
+
+To work on Leo Bot itself, run it from a clone:
 
 ```bash
 git clone <this repository> leo-bot && cd leo-bot
 python3 dashboard/server.py   # open the login link it prints
 ```
 
-Your data lives inside the clone, in `projects/`, `portfolio/` and `chats/`.
-All three are gitignored: they never leave your machine, which also means git
-does not back them up. Include the folder in your own backups.
+The clone shares `~/.leobot` with an installed copy, so only one server runs at a time: stop the
+other first (`leobot stop`). On first start, data that older versions kept inside the clone
+(`projects/`, `portfolio/`, `chats/`, `team/`) is moved to `~/.leobot/data`, after a backup in
+`~/.leobot/backups/`. If `~/.leobot/data` already holds data, nothing is moved and `leobot doctor`
+shows the two ways out: `leobot move-data --from <clone> --archive` keeps the home folder and
+archives the clone's copy into `~/.leobot/backups/`, `--replace` uses the clone's copy instead
+(after a backup of the home folder). Tests: `python3 -m unittest discover -t . -s tests` (the
+`-t .` matters: it pins a temp home; without it the tests stop at once rather than touch yours).
 
 The dashboard chat loads skills from `skills/` by itself. For plain `claude`
 sessions in a terminal, Claude Code does not read `skills/`: copy them into
@@ -105,7 +142,7 @@ scripts/build-app.sh   # needs Xcode Command Line Tools
 open LeoBot.app
 ```
 
-Without the app, run `python3 dashboard/server.py` and open the login link it prints (it contains a per-run token; a plain `http://127.0.0.1:8765` shows a login-required page).
+Without the app, run `leobot` (or `python3 dashboard/server.py` from a clone) and open the login link it prints (it contains a per-run token; a plain `http://127.0.0.1:8765` shows a login-required page).
 
 ---
 

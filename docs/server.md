@@ -20,12 +20,22 @@ Any Debian or Ubuntu server with 1 GB of memory is enough (Hetzner, DigitalOcean
 spare machine). From a checkout of this repo on your laptop:
 
 ```sh
-ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh
+ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < scripts/server-setup.sh
 ```
 
-This creates a `leobot` user, puts the code in its home folder, installs Claude Code
-and starts a service that restarts on its own. Leo Bot listens on `127.0.0.1:8766` only,
-so nothing is open to the internet yet. Read the script first if you like: it is short.
+This creates a `leobot` user, turns on `loginctl enable-linger` for it, and runs the Leo Bot
+installer (`install.sh --no-service --no-app --claude --yes`) as that user, which also installs
+Claude Code for that user with Anthropic's official installer. It moves any legacy data, then
+runs `leobot service install --port 8766 --server`. Leo Bot lands in `~leobot/.leobot`
+(code in `app/`, data in `data/`) and runs as a systemd user unit named `leobot`, which
+restarts on its own and starts at boot. It follows the latest release; set `LEOBOT_CHANNEL=main`
+for the latest code. Leo Bot listens on `127.0.0.1:8766` only, so nothing is open to the
+internet yet. Read the script first if you like.
+
+Upgrading an older server: the script removes the old system unit
+(`/etc/systemd/system/leobot.service`), moves your data from `~leobot/leo-bot` into
+`~leobot/.leobot/data` (with a backup first), and leaves the old folder in place. Delete it
+yourself once you have checked your data.
 
 ## 2. Log in to Claude (optional)
 
@@ -57,7 +67,8 @@ Once, from your Mac:
 scripts/sync-to-server.sh root@your-server
 ```
 
-This copies your projects, chats, team and portfolio. Saved chats carry on with a
+This copies this Mac's data folder (`~/.leobot/data`: projects, chats, team and portfolio) to
+`~leobot/.leobot/data` on the server. Saved chats carry on with a
 recap of their messages. Linked folders are not copied: clone your repos on the
 server and link them there, on the workspace's Folders screen (type the path; there
 is no folder chooser on a server). Paths synced from your Mac show as "Missing on
@@ -85,18 +96,39 @@ come back to the shared workspace. See [Runners](runners.md).
 
 ## Updating
 
-Run the setup script again. It pulls the latest code and restarts the service.
+From Settings in Leo Bot (the update button), or on the server:
+
+```sh
+sudo -iu leobot ~leobot/.local/bin/leobot update
+```
+
+`-i` gives the command the `leobot` user's own home folder. Leo Bot finds that user's service
+manager by itself (it uses `/run/user/<uid>`, which `enable-linger` keeps), and if the service
+cannot be stopped the update stops before changing anything and says why. It backs up your data,
+moves to the latest release and restarts the service. Running the setup script again does the same.
+
+## Managing the service
+
+The `leobot` user can stop, start and update its own service without sudo. As that user
+(`sudo -u leobot -i`):
+
+```sh
+leobot status
+leobot service status
+leobot service install --port 8766 --server   # reinstall the unit
+leobot doctor                                 # checks folders, port, version
+```
 
 ## Backups
 
-Everything of yours is in `projects/`, `chats/`, `team/` and `portfolio/` under
-the `leobot` user's home folder. Back those folders up. `team/` holds your API keys, so keep the
-backup private.
+Everything of yours is in `~leobot/.leobot/data` (`projects/`, `chats/`, `team/`, `portfolio/`).
+`leobot backup` snapshots it into `~leobot/.leobot/backups/`, and an update takes one first.
+Copy that folder off the server yourself. `team/` holds your API keys, so keep the backup private.
 
 ## Good to know
 
 - The service runs as its own `leobot` user, which holds only Leo Bot, so a bot's reach
   on the server ends at that user's files.
 - The login token stays the same across restarts on a server. To change it, delete
-  `team/owner-token` and restart: `systemctl restart leobot`.
-- Logs: `journalctl -u leobot -f`.
+  `~leobot/.leobot/data/team/owner-token` and restart: `leobot stop && leobot start` as the `leobot` user.
+- Logs: `~leobot/.leobot/logs/server.log`, or `journalctl --user -u leobot -f` as the `leobot` user.

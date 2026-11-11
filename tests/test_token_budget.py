@@ -65,15 +65,21 @@ class TestTokenBudget(unittest.TestCase):
         import dashboard.db as db
         import index
 
-        root = ROOT
-        prev_db = db.DB_PATH
-        try:
-            db.DB_PATH = root / "database" / "data" / "os.db"
-            if not db.db_exists():
-                index.build(root)
-            snap = state_snapshot(db.tree())
-        finally:
-            db.DB_PATH = prev_db
+        import tempfile
+        import dashboard.server as server
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            index.build(root)
+            dbs = {db, server.db}  # the dashboard.db and bare-imported db copies
+            prev = {m: m.DB_PATH for m in dbs}
+            try:
+                for m in dbs:
+                    m.DB_PATH = root / "database" / "data" / "os.db"
+                snap = state_snapshot(db.tree())
+            finally:
+                for m, p in prev.items():
+                    m.DB_PATH = p
         self.assertIn("index only", snap.lower())
         self.assertLess(len(snap), 4000, f"state_snapshot too large: {len(snap)} chars")
 

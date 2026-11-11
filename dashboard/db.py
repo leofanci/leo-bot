@@ -10,9 +10,9 @@ folders are first read.
 import sqlite3
 from pathlib import Path
 
-from core import folders
+from core import folders, paths
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = paths.DATA
 DB_PATH = ROOT / "database" / "data" / "os.db"
 
 

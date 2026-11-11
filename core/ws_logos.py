@@ -9,7 +9,9 @@ import re
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from core import paths
+
+ROOT = paths.DATA
 MAX_BYTES = 512 * 1024
 _WS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 TYPES = {"png": "image/png", "jpg": "image/jpeg", "webp": "image/webp"}

@@ -15,6 +15,7 @@ if [ -z "$TARGET" ]; then
   echo "Usage: scripts/leobot-connect.sh user@server [port]" >&2
   exit 1
 fi
+case "$LEOBOT_USER" in ""|-*|*[!a-z0-9_-]*) echo "LEOBOT_USER must be a plain lowercase user name." >&2; exit 1 ;; esac
 
 # The login link carries your token: if something else on this laptop answers on this
 # port, it must never receive it. (bash's /dev/tcp: a connection that opens means taken.)
@@ -26,7 +27,9 @@ fi
 # The service writes this as it starts, so give a fresh start a moment.
 TOKEN=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null || cat ~$LEOBOT_USER/leo-bot/dashboard/.auth-token 2>/dev/null" || true)"
+  # $LEOBOT_USER (checked above) expands here on purpose; ~user then expands on the server
+  # shellcheck disable=SC2029
+  TOKEN="$(ssh "$TARGET" "sudo -n cat ~$LEOBOT_USER/.leobot/run/auth-token 2>/dev/null || cat ~$LEOBOT_USER/.leobot/run/auth-token 2>/dev/null" || true)"
   [ -n "$TOKEN" ] && break
   sleep 3
 done

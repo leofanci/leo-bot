@@ -13,7 +13,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     var window: NSWindow!
     var webView: WKWebView!
     var serverPID: Int32 = 0
-    let port = 8765
+    // The port: the running server's (run/server.pid), else the background service's, else
+    // defaultPort. Read again before every ping, so a server that comes back on another port is found.
+    let defaultPort = 8765
+    private var currentPort = 8765
+    private let portLock = NSLock()
+    var port: Int {
+        get { portLock.lock(); defer { portLock.unlock() }; return currentPort }
+        set { portLock.lock(); currentPort = newValue; portLock.unlock() }
+    }
+    // Retry timing: ping every retryInterval; after startGrace of silence (and no
+    // update running) start the server once; give up after totalWait of silence with no
+    // update running (the clock starts again while the updater holds its lock).
+    let retryInterval: TimeInterval = 2.0
+    let startGrace: TimeInterval = 30.0
+    let totalWait: TimeInterval = 90.0
+    let maxStarts = 2  // start tries per quiet window: startGrace, then another startGrace
     var url: URL { URL(string: "http://127.0.0.1:\(port)")! }
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -170,38 +185,141 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         NSApp.mainMenu = mainMenu
     }
 
+    // Starts (or finds) the server, waits for it, loads the dashboard, then keeps
+    // watching: a restart (an update, a crash) is ridden out instead of shown as a failure.
     private func startServerAndLoad() {
         let repo = repoPath()
+        if !isUpdating() { runStartScript(repo) }
 
-        if let script = Bundle.main.path(forResource: "start-server", ofType: "sh") {
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-            proc.arguments = [script, repo, String(port)]
-            let out = Pipe()
-            proc.standardOutput = out
-            proc.standardError = Pipe()
-            try? proc.run()
-            proc.waitUntilExit()
-            let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            if let r = text.range(of: "PID ") {
-                let rest = text[r.upperBound...].prefix { $0.isNumber }
-                serverPID = Int32(rest) ?? 0
-            }
+        // Retry every retryInterval for up to totalWait (the indexer runs before the server serves).
+        if !waitUp(repo, startAfter: startGrace) {
+            DispatchQueue.main.async { [weak self] in self?.showFailure() }
+            return
         }
-
-        // Poll the server for up to 12s (the indexer runs before it serves).
-        var up = false
-        for _ in 0..<60 {
-            if ping(repo) { up = true; break }
-            Thread.sleep(forTimeInterval: 0.2)
-        }
-
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            if up {
+            self.webView.load(URLRequest(url: self.loginURL(repo)))
+        }
+        watch(repo)
+    }
+
+    private func runStartScript(_ repo: String) {
+        serverPID = 0
+        port = resolvePort()
+        guard let script = Bundle.main.path(forResource: "start-server", ofType: "sh") else { return }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+        proc.arguments = [script, repo, String(port)]
+        var env = ProcessInfo.processInfo.environment
+        env["LEOBOT_HOME"] = homePath()
+        proc.environment = env
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        try? proc.run()
+        proc.waitUntilExit()
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if let r = text.range(of: "PID ") {
+            let rest = text[r.upperBound...].prefix { $0.isNumber }
+            serverPID = Int32(rest) ?? 0
+        }
+    }
+
+    // True once a ping succeeds, polling every retryInterval. If nothing answers for
+    // startGrace, start the server, never while the update lock is held (an update, rollback,
+    // restore or data move: it stops and restarts the server itself). A start that failed or
+    // was refused (say a restore took the lock just after it) gets one more try after another
+    // startGrace. Gives up after totalWait of silence with the lock free all along: while it is
+    // held the clock, and the tries, start again, however long that takes.
+    private func waitUp(_ repo: String, startAfter: TimeInterval) -> Bool {
+        var begin = Date()
+        var starts = 0
+        var lastStart: Date? = nil
+        while true {
+            if ping(repo) { return true }
+            if isUpdating() {
+                begin = Date()
+                starts = 0
+                lastStart = nil
+                Thread.sleep(forTimeInterval: retryInterval)
+                continue
+            }
+            let now = Date()
+            let elapsed = now.timeIntervalSince(begin)
+            if elapsed >= totalWait { return false }
+            let sinceStart = lastStart.map { now.timeIntervalSince($0) } ?? .infinity
+            if starts < maxStarts && elapsed >= startAfter && sinceStart >= startGrace && !isUpdating() {
+                starts += 1
+                lastStart = now
+                runStartScript(repo)
+            }
+            Thread.sleep(forTimeInterval: retryInterval)
+        }
+    }
+
+    // The port to ping: the running server's own record (run/server.pid, while its lock is
+    // held), else the port the background service was installed with, else defaultPort.
+    private func resolvePort() -> Int {
+        if let p = pidFilePort() { return p }
+        if let p = servicePort() { return p }
+        return defaultPort
+    }
+
+    private func validPort(_ v: Any?) -> Int? {
+        guard let n = v as? Int, n > 0, n < 65536 else { return nil }
+        return n
+    }
+
+    // run/server.pid holds {"pid": N, "port": P}; the server keeps an exclusive flock on it
+    // for its whole life, so a file nobody holds is a leftover and is ignored.
+    private func pidFilePort() -> Int? {
+        let path = (homePath() as NSString).appendingPathComponent("run/server.pid")
+        let fd = open(path, O_RDONLY)
+        if fd < 0 { return nil }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) == 0 {
+            flock(fd, LOCK_UN)
+            return nil
+        }
+        guard let data = FileManager.default.contents(atPath: path),
+              let rec = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return validPort(rec["port"])
+    }
+
+    // ~/Library/LaunchAgents/leobot.server.plist: ProgramArguments ends with --port P.
+    private func servicePort() -> Int? {
+        let plist = (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents/leobot.server.plist")
+        guard let dict = NSDictionary(contentsOfFile: plist),
+              let args = dict["ProgramArguments"] as? [String],
+              let i = args.firstIndex(of: "--port"), i + 1 < args.count else { return nil }
+        return validPort(Int(args[i + 1]))
+    }
+
+    // True while core/updater.py holds run/update.lock (it takes flock LOCK_EX on it).
+    private func isUpdating() -> Bool {
+        let path = (homePath() as NSString).appendingPathComponent("run/update.lock")
+        let fd = open(path, O_RDONLY)
+        if fd < 0 { return false }
+        defer { close(fd) }
+        if flock(fd, LOCK_SH | LOCK_NB) != 0 { return true }
+        flock(fd, LOCK_UN)
+        return false
+    }
+
+    // While the app is open: when the server stops answering (an update restarts it),
+    // only poll; start it ourselves after startGrace of silence with no update running.
+    // Once it is back, reload the dashboard.
+    private func watch(_ repo: String) {
+        while true {
+            Thread.sleep(forTimeInterval: retryInterval)
+            if ping(repo) { continue }
+            if !waitUp(repo, startAfter: startGrace) {
+                DispatchQueue.main.async { [weak self] in self?.showFailure() }
+                return
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
                 self.webView.load(URLRequest(url: self.loginURL(repo)))
-            } else {
-                self.showFailure(repo)
             }
         }
     }
@@ -213,16 +331,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return URL(string: "http://127.0.0.1:\(port)/?token=\(token)") ?? url
     }
 
+    // Refuses a token file that is a symlink, not ours, or readable by group/other.
     private func readToken(_ repo: String) -> String {
-        let file = (repo as NSString).appendingPathComponent("dashboard/.auth-token")
+        let file = (homePath() as NSString).appendingPathComponent("run/auth-token")
+        var st = stat()
+        if lstat(file, &st) != 0 { return "" }
+        if (st.st_mode & S_IFMT) != S_IFREG { return "" }
+        if st.st_uid != getuid() { return "" }
+        if (st.st_mode & 0o077) != 0 { return "" }
         return (try? String(contentsOfFile: file, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    // Up = the listener proves it holds this checkout's token: it must return
+    // Up = the listener proves it holds this home's token: it must return
     // HMAC-SHA256(token, nonce) for a fresh nonce. Anything else on the port
     // never receives the tokenized login URL.
     private func ping(_ repo: String) -> Bool {
+        port = resolvePort()
         let token = readToken(repo)
         if token.isEmpty { return false }
         let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -248,21 +373,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         return ok
     }
 
-    // The bundle lives at <repo>/LeoBot.app, so the repo is its parent directory.
-    private func repoPath() -> String {
-        (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+    // The home folder: $LEOBOT_HOME, else ~/.leobot (token, pid lock and log live here). Only an
+    // absolute path counts: a relative one would point somewhere else for every process.
+    private func homePath() -> String {
+        if let h = ProcessInfo.processInfo.environment["LEOBOT_HOME"], h.hasPrefix("/") { return h }
+        // Finder/Dock launches carry no environment: build-app.sh --out records a custom home here.
+        if let h = recordedHome() { return h }
+        return (NSHomeDirectory() as NSString).appendingPathComponent(".leobot")
     }
 
-    private func showFailure(_ repo: String) {
+    private func recordedHome() -> String? {
+        guard let f = Bundle.main.path(forResource: "leobot-home", ofType: nil),
+              let h = (try? String(contentsOfFile: f, encoding: .utf8))?
+                  .trimmingCharacters(in: .whitespacesAndNewlines), h.hasPrefix("/") else { return nil }
+        return h
+    }
+
+    // A development clone (the bundle sits next to dashboard/server.py) runs its own
+    // code; an installed app runs the code in $LEOBOT_HOME/app, else ~/.leobot/app.
+    private func repoPath() -> String {
+        let parent = (Bundle.main.bundlePath as NSString).deletingLastPathComponent
+        let marker = (parent as NSString).appendingPathComponent("dashboard/server.py")
+        if FileManager.default.fileExists(atPath: marker) { return parent }
+        // homePath() is $LEOBOT_HOME, the recorded home, or ~/.leobot: its app/ is the code.
+        return (homePath() as NSString).appendingPathComponent("app")
+    }
+
+    private func showFailure() {
+        let log = (homePath() as NSString).appendingPathComponent("logs/server.log")
         let alert = NSAlert()
         alert.messageText = "Leo Bot failed to start"
-        alert.informativeText = "The dashboard server did not respond. Check \(repo)/dashboard/server.log for details."
+        alert.informativeText = "The dashboard server did not respond. Check \(log) for details."
         alert.runModal()
         NSApp.terminate(nil)
     }
 
     func applicationWillTerminate(_: Notification) {
-        if serverPID > 0 { kill(serverPID, SIGTERM) }
+        // Only a pid from this run that is still a dashboard/server.py process.
+        if serverPID > 0 && isLeoBotServer(serverPID) { kill(serverPID, SIGTERM) }
+    }
+
+    private func isLeoBotServer(_ pid: Int32) -> Bool {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-p", String(pid), "-o", "command="]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        guard (try? proc.run()) != nil else { return false }
+        let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        proc.waitUntilExit()
+        return text.contains("dashboard/server.py")
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_: NSApplication) -> Bool { true }

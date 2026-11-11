@@ -18,7 +18,9 @@ import re
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent
+from core import paths
+
+ROOT = paths.DATA
 FORMATS = ("anthropic", "openai")
 TERMINALS = ("shell", "claude", "codex")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")

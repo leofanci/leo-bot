@@ -395,7 +395,7 @@ async function loadMe(){
     history.replaceState(null, "", location.pathname + location.hash);
   }
 }
-async function boot(){ await loadMe(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+async function boot(){ await loadMe(); loadUpdate(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -481,10 +481,11 @@ function renderWsBar(){
     return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
   }).join("")
     + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`)
-    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}</button>`);
+    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}<span class="ws-update-dot" aria-hidden="true"></span></button>`);
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
   if ($("#new-project-btn")) $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
   if ($("#ws-settings")) $("#ws-settings").onclick = () => STATE.view === "settings" ? closeSettings() : openSettings();
+  if ($("#ws-settings") && _UPDATE?.available) $("#ws-settings").classList.add("has-update");
 }
 
 // Settings covers the whole machine, so it takes over the window (.settings-open)
@@ -1477,14 +1478,14 @@ async function drawRunners(box, stillOn = () => true){
 function deploymentSection(where){
   const cmd = text => `<pre class="runner-cmd">${esc(text)}</pre>`;
   if (where === "server") return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
-    <div class="help">On your own server, so bots keep working when your laptop is closed. To update, run the setup script again from your laptop. To watch its log, run this on the server. Guide: docs/server.md.</div>
-    ${cmd("journalctl -u leobot -f")}</section>`;
+    <div class="help">On your own server, so bots keep working when your laptop is closed. Update it from Settings or with leobot update. To watch its log, run this on the server as the leobot user. Guide: docs/server.md.</div>
+    ${cmd("tail -f ~/.leobot/logs/server.log")}</section>`;
   return `<section class="integ-group"><h3>Where Leo Bot runs</h3>
-    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a leo-bot checkout here. They install Leo Bot, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
+    <div class="help">On this computer, so bots stop when it sleeps or quits. To keep them always on, run Leo Bot on a server of your own. Replace your-server, then run these from a leo-bot checkout here. They install Leo Bot as a background service there, open it and copy your data across. The second keeps running until Ctrl-C: stop it before the third, then run it again to reopen Leo Bot. Bots on the server need a Claude login there or an API key. Guide: docs/server.md.</div>
     ${cmd(SERVER_STEPS.join("\n"))}</section>`;
 }
 const SERVER_STEPS = [
-  `ssh root@your-server "LEOBOT_REPO=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
+  `ssh root@your-server "LEOBOT_REPO_URL=$(git remote get-url origin) bash -s" < scripts/server-setup.sh`,
   "scripts/leobot-connect.sh root@your-server",
   "scripts/sync-to-server.sh root@your-server",
 ];
@@ -1505,19 +1506,76 @@ function engineLogo(id, size){
   const [bg, glyph] = ENGINE_MARKS[key] || ENGINE_MARKS.custom;
   return `<span class="eng-logo" style="--s:${size || 40}px;background:${bg}"><svg viewBox="0 0 24 24" aria-hidden="true">${glyph}</svg></span>`;
 }
+// ── Update notice (owner only): badge on the Settings gear, card + data folder on top of Settings ──
+let _UPDATE = null;
+let _UPD_TIMER = null;
+let _BOOT0 = null;  // boot id of the server this page loaded from
+async function loadUpdate(){
+  if (isPerson()) { _UPDATE = null; return; }
+  try { _UPDATE = await api("/api/update"); } catch { _UPDATE = null; }
+  if (_BOOT0 === null) { try { _BOOT0 = (await (await fetch("/healthz", { cache: "no-store" })).json()).boot || ""; } catch {} }
+  document.getElementById("ws-settings")?.classList.toggle("has-update", !!(_UPDATE && _UPDATE.available));
+}
+function updateCardHtml(d){
+  const folder = d.data_dir ? `<div class="upd-folder">Data folder: <code>${esc(d.data_dir)}</code>${_ME.deployment === "server" ? "" : ` <button class="btn sm ghost" data-upd-open>Open</button>`}</div>` : "";
+  if (d.updating) return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Updating. Leo Bot restarts in a moment.</b><small data-upd-note></small></div></div>${folder}`;
+  if (!d.available) return folder;
+  const notes = d.notes_url ? `<a href="${esc(d.notes_url)}" target="_blank" rel="noopener noreferrer">What's new</a>` : "";
+  const ver = d.latest && /^[0-9a-f]{40,}$/.test(d.latest) ? d.latest.slice(0, 7) : String(d.latest || "").replace(/^v/, "");
+  return `<div class="card upd-card" data-upd-card><div class="upd-text"><b>Leo Bot ${esc(ver)} is available (you have ${esc(d.current)})</b>${notes}<small data-upd-note></small></div>
+    ${d.installed ? `<button class="btn primary" data-upd-go>Update</button>` : ""}</div>${folder}`;
+}
+function watchUpdate(d){
+  const card = document.querySelector("[data-upd-card]"); if (!card) return;
+  const started = Date.now();
+  clearInterval(_UPD_TIMER);
+  _UPD_TIMER = setInterval(async () => {
+    try {
+      const h = await (await fetch("/healthz", { cache: "no-store" })).json();
+      if ((h.version && h.version !== d.current) || (h.boot && _BOOT0 && h.boot !== _BOOT0)) { clearInterval(_UPD_TIMER); location.reload(); return; }
+    } catch {}
+    if (Date.now() - started > 120000) {
+      clearInterval(_UPD_TIMER);
+      const note = card.querySelector("[data-upd-note]");
+      if (note) note.textContent = `Still waiting. See the update log: ${d.log || ""}`;
+    }
+  }, 2000);
+}
+async function mountUpdateCard(){
+  const scroll = document.querySelector("#main .scroll"); if (isPerson() || !scroll) return;
+  await loadUpdate();
+  if (!_UPDATE || !document.body.contains(scroll)) return;
+  scroll.querySelector(".upd-wrap")?.remove();
+  const wrap = document.createElement("div"); wrap.className = "upd-wrap";
+  wrap.innerHTML = updateCardHtml(_UPDATE);
+  scroll.prepend(wrap);
+  wrap.querySelector("[data-upd-open]")?.addEventListener("click", () => jpost("/api/update/open-data", {}).catch(e => toast("✗ " + e.message)));
+  wrap.querySelector("[data-upd-go]")?.addEventListener("click", async e => {
+    e.currentTarget.disabled = true;
+    try { await jpost("/api/update", {}); } catch (err) { e.currentTarget.disabled = false; toast("✗ " + err.message); return; }
+    _UPDATE = { ..._UPDATE, updating: true };
+    wrap.innerHTML = updateCardHtml(_UPDATE);
+    watchUpdate(_UPDATE);
+  });
+  if (_UPDATE.updating) watchUpdate(_UPDATE);
+}
+// ── end update notice
+
 // Settings: only what applies to the whole machine, across every workspace.
 // What belongs to one project (Linked folders, Team) stays in that project.
 const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]];
 const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
     <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
 function renderSettings(tab){
-  return tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
+  const out = tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
+  mountUpdateCard();
+  return out;
 }
 
 // Settings, Access: how people reach this Leo Bot, and where it runs.
 async function renderAccess(){
   const stillOn = routeGuard();
-  $("#main").innerHTML = `${settingsTop("access")}<div class="scroll eng-page" id="access"></div>`;
+  $("#main").innerHTML = `${settingsTop("access")}<div class="scroll eng-page"><div id="access"></div></div>`;
   const [share, eng] = await Promise.all([api("/api/sharing").catch(() => ({})), api("/api/engines").catch(() => ({}))]);
   if (!stillOn()) return;
   const box = $("#access");

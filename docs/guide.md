@@ -127,7 +127,7 @@ echo "rough notes..." | python3 generate.py refine-guidelines <channel-slug>
 ## How it works (the one invariant)
 
 ```
-authored files ──index──▶ database/data/os.db (read-only) ──▶ dashboard views
+authored files ──index──▶ ~/.leobot/data/database/data/os.db (read-only) ──▶ dashboard views
       ▲                                                          │
       └──────── mutate FILE ◀── dashboard action ──▶ re-index ───┘
 ```
@@ -150,16 +150,22 @@ python3 index.py
 ## Where things live
 
 ```
-Leo Bot/
+Leo Bot/                     ← the code (~/.leobot/app, or a clone)
 ├── docs/                    ← this guide
 ├── database/                ← all DB stuff (the only db-related folder)
-│   ├── migrations/          ← schema (0001_init.sql); index.py applies *.sql in order
-│   └── data/os.db           ← derived index, regenerated (gitignored)
+│   └── migrations/          ← schema (0001_init.sql); index.py applies *.sql in order
 ├── index.py                 ← builds os.db from the files
 ├── generate.py              ← claude -p jobs: plan, brief, refine-guidelines
 ├── prompts/                 ← prompt templates + platform constraints
 ├── hooks/reindex.py         ← auto re-index on source edits (PostToolUse)
 ├── dashboard/               ← db.py (read), fileops.py (write), server.py, app.html
+```
+
+Your data lives outside the code, in `~/.leobot/data` (or `$LEOBOT_HOME/data`):
+
+```
+~/.leobot/data/
+├── database/data/os.db      ← derived index, regenerated
 ├── portfolio/               ← activities.md, milestones.json
 └── projects/                ← all projects (nested: strategy/, products/, profiles/, channels/)
     └── <project-slug>/

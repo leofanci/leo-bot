@@ -119,7 +119,8 @@ class WebAndSecretPolicy(unittest.TestCase):
         denied = cmd[cmd.index("--disallowedTools") + 1:cmd.index("--strict-mcp-config")]
         self.assertIn("Read(**/.env)", denied)
         self.assertIn("Read(//tmp/app/**/.env)", denied)
-        self.assertIn("Read(**/.auth-token)", denied)  # dashboard login token
+        self.assertIn("Read(**/.auth-token)", denied)  # legacy in-checkout login token
+        self.assertIn("Read(**/auth-token)", denied)  # login token in the home folder (paths.TOKEN_FILE)
 
     def test_integrations_file_unreadable_every_turn(self):
         # HQ has no deny dirs; the Composio key file must still be unreadable.
