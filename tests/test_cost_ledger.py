@@ -255,5 +255,62 @@ class CapWiring(AskHarness):
         self.assertIn("m.notices", JS)
 
 
+
+def thread(ws, msgs):
+    return {"id": f"t-{ws}", "room": f"{ws}/general", "messages": msgs}
+
+
+def reply(bot, *, engine, model, skill, cost, tokens, usage, metered=True, ts=None):
+    return {"role": "assistant", "bot": bot, "ts": ts or time.time(), "engine": engine, "model": model,
+            "skill": skill, "cost": cost, "tokens": tokens, "usage": usage, "metered": metered}
+
+
+class Report(unittest.TestCase):
+    def test_groupings_and_cache_share(self):
+        from dashboard import costs
+        recs = [thread("acme", [reply("cmo", engine="claude-code", model="haiku", skill="strategy",
+                                      cost=0.02, tokens=1300, usage=USAGE),
+                                reply("cfo", engine="codex", model="gpt", skill=None, cost=None,
+                                      tokens=50, usage=None, metered=False)]),
+                thread("demo", [reply("cmo", engine="claude-code", model="haiku", skill="strategy",
+                                      cost=5.0, tokens=9, usage=None)])]
+        out = costs.summarize("acme", recs, {"acme", "demo"})
+        self.assertAlmostEqual(out["by_model"]["haiku"]["cost"], 0.02)  # demo's reply is not counted
+        self.assertEqual(out["by_skill"]["-"]["turns"], 1)
+        self.assertEqual(out["by_engine"]["codex"]["tokens"], 50)
+        self.assertAlmostEqual(out["cache_read_share"], 1000 / 1300)
+        self.assertEqual(out["unmetered"], 1)
+        self.assertEqual(list(out["by_day"]), [time.strftime("%Y-%m-%d")])
+        self.assertEqual(out["total"]["turns"], 2)
+        self.assertEqual(out["bots"]["cmo"]["turns"], 1)
+        hq = costs.summarize("hq", recs, {"acme", "demo"})
+        self.assertEqual(hq["total"]["turns"], 3)
+
+    def test_old_reply_without_new_fields(self):
+        from dashboard import costs
+        recs = [thread("acme", [{"role": "assistant", "bot": "cmo", "ts": time.time(), "tokens": 1500, "cost": 0.02}])]
+        out = costs.summarize("acme", recs, {"acme"})
+        self.assertEqual(out["total"]["tokens"], 1500)
+        self.assertEqual(out["by_engine"]["-"]["turns"], 1)
+        self.assertIsNone(out["cache_read_share"])
+        self.assertEqual(out["unmetered"], 0)
+
+    def test_old_and_bad_rows_never_crash(self):
+        from dashboard import costs
+        recs = [thread("acme", [{"role": "assistant", "ts": time.time() - 40 * 86_400, "cost": 9},
+                                {"role": "assistant", "ts": time.time(), "tokens": "x", "cost": "y",
+                                 "usage": {"in": "z"}, "skill": ["odd"]}])]
+        out = costs.summarize("acme", recs, {"acme"})
+        self.assertEqual(out["total"]["turns"], 1)  # the 40-day-old one is outside the window
+
+    def test_server_costs_wraps_summarize(self):
+        with mock.patch.object(server.chat_store, "records", return_value=[]):
+            self.assertIn("by_model", server._costs("hq", []))
+
+    def test_ui_shows_breakdown(self):
+        for s in ("by_model", "by_skill", "cache_read_share", "unmetered", "team-spend"):
+            self.assertIn(s, JS)
+
+
 if __name__ == "__main__":
     unittest.main()

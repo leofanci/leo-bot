@@ -56,7 +56,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import spend  # noqa: E402
+from dashboard import costs, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1308,23 +1308,8 @@ SHARED_NOTE = (
 
 
 def _costs(ws, projects, days=30):
-    """Estimated spend + tokens per bot (and total) in a workspace over `days`;
-    HQ covers every workspace. Read from the saved threads' reply metadata."""
-    since = time.time() - days * 86400
-    spaces = {w["id"] for w in _workspaces(projects)}
-    per_bot, total = {}, {"cost": 0.0, "tokens": 0, "turns": 0}
-    for rec in chat_store.records():
-        if ws != bots.HQ and rooms.split_id(rooms.room_of_chat(rec, set(), spaces))[0] != ws:
-            continue
-        for m in rec.get("messages") or []:
-            if m.get("role") != "assistant" or (m.get("ts") or 0) < since:
-                continue
-            row = per_bot.setdefault(m.get("bot") or bots.ROOT_BOT, {"cost": 0.0, "tokens": 0, "turns": 0})
-            for agg in (row, total):
-                agg["cost"] += float(m.get("cost") or 0)
-                agg["tokens"] += int(m.get("tokens") or 0)
-                agg["turns"] += 1
-    return {"days": days, "bots": per_bot, "total": total}
+    """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
+    return costs.summarize(ws, chat_store.records(), {w["id"] for w in _workspaces(projects)}, days)
 
 
 def _known_ws(value, projects):
