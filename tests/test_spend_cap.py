@@ -120,6 +120,17 @@ class Caps(unittest.TestCase):
             self.assertNotIn("—", text)
             self.assertIsNone(spend.refusal("acme", "p1"))
 
+    def test_refusal_copy_small_cap_and_tomorrow(self):
+        from dashboard import spend
+        now = time.time()
+        self.save_rows([{"ts": now - 60, "by": "owner", "cost": 1.0, "ws": "acme"}])
+        with self.env(LEOBOT_OWNER_DAILY_CAP="0.0001"):
+            text = spend.refusal("acme", "owner", now=now)
+        self.assertIn("$0.0001", text)
+        frees = now - 60 + spend.WINDOW
+        same_day = time.localtime(frees)[:3] == time.localtime(now)[:3]
+        self.assertIn("from " if same_day else "tomorrow at ", text)
+
     def test_old_rows_leave_the_window(self):
         from dashboard import spend
         self.save_rows([{"ts": time.time() - 90_000, "by": "owner", "cost": 99.0, "ws": "acme"}])

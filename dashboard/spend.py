@@ -58,6 +58,10 @@ def spent(kind, key=None, now=None, records=None):
     return total, oldest
 
 
+def _money(value):
+    return f"${value:.2f}" if value >= 0.01 else f"${value:.4f}".rstrip("0")
+
+
 def _caps(ws, by):
     """(kind, key, cap) for each cap set for this turn, workspace first."""
     out = []
@@ -76,9 +80,10 @@ def refusal(ws, by, now=None, pending=0.0, records=None):
         total, oldest = spent(kind, key, now, records)
         if total + (pending or 0) < cap:
             continue
-        frees = time.strftime("%H:%M", time.localtime((oldest if oldest is not None else now) + WINDOW))
+        at = time.localtime((oldest if oldest is not None else now) + WINDOW)
+        frees = ("from " if at[:3] == time.localtime(now)[:3] else "tomorrow at ") + time.strftime("%H:%M", at)
         who = "this workspace reached its" if kind == "workspace" else "you reached your"
-        return (f"Paused: {who} daily cap (${cap:.2f} per 24 hours). Room frees up from {frees}. "
+        return (f"Paused: {who} daily cap ({_money(cap)} per 24 hours). Room frees up {frees}. "
                 f"Raise {ENV[kind]} to go on now.")
     return None
 
