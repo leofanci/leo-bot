@@ -85,7 +85,9 @@ as_user git clone --quiet -- "$LEOBOT_REPO_URL" "$WORK/src"
 if [ "$LEOBOT_CHANNEL" = main ]; then
   as_user git -C "$WORK/src" checkout --quiet main
 else
-  TAG="$(as_user git -C "$WORK/src" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)"
+  # Releases only: vX.Y.Z exactly, so a pre-release tag (v1.0.0-rc1) never wins.
+  TAG="$(as_user git -C "$WORK/src" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)"
   if [ -z "$TAG" ]; then
     echo "There is no release yet. To install the latest code instead, run again with LEOBOT_CHANNEL=main." >&2
     exit 1

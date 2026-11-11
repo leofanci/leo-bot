@@ -117,7 +117,8 @@ class BasicTests(CliBase):
             run("start", "--port", "9124")
         self.assertEqual(popen.call_args[1]["env"]["LEOBOT_HOME"], str(paths.HOME))
         with mock.patch.dict(os.environ, {"LEOBOT_HOME": "relative/home"}), \
-                mock.patch.object(leobot.subprocess, "run") as sub:
+                mock.patch.object(leobot.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0, stdout="", stderr="")) as sub:
             REAL_REINDEX()
         self.assertEqual(sub.call_args[1]["env"]["LEOBOT_HOME"], str(paths.HOME))
         self.assertTrue(paths.HOME.is_absolute())
@@ -818,6 +819,79 @@ class ServiceWiringTests(CliBase):
             code, _, _ = run("backup", "--restore", str(src), "--yes")
         self.assertEqual(code, 1)
         self.assertEqual(list(paths.BACKUPS.glob("restore-source-*")), [])
+
+
+
+class DoubleCheckTests(CliBase):
+    """Fixes from the post-merge review of the install and updates work."""
+
+    def hold_update_lock(self):
+        from core import updater
+        cm = updater._update_lock("update")
+        self.assertTrue(cm.__enter__())
+        self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_start_refused_while_an_update_runs(self):
+        self.hold_update_lock()
+        with mock.patch.object(leobot, "_spawn") as spawn:
+            code, _, err = run("start")
+        self.assertEqual(code, 1)
+        self.assertIn("An update is running", err)
+        spawn.assert_not_called()
+
+    def test_restart_after_a_data_operation_still_starts(self):
+        # restore and move-data hold the update lock themselves while they start the server again
+        self.hold_update_lock()
+        with mock.patch.object(leobot, "_spawn") as spawn, \
+                mock.patch.object(leobot, "_proof_ok", return_value=True):
+            leobot._restart(8799)
+        spawn.assert_called_once_with(8799)
+
+    def test_status_prints_yes_or_no(self):
+        code, out, _ = run("status")
+        self.assertEqual(code, 0)
+        self.assertIn("installed: no", out)
+        self.assertNotIn("False", out)
+
+    def test_reindex_failure_raises(self):
+        fail = mock.Mock(returncode=1, stdout="", stderr="trace\nerror: bad file projects/demo/x.md\n")
+        with mock.patch.object(leobot.subprocess, "run", return_value=fail):
+            with self.assertRaisesRegex(RuntimeError, "bad file"):
+                REAL_REINDEX()
+        ok = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(leobot.subprocess, "run", return_value=ok):
+            REAL_REINDEX()
+
+    def test_move_data_reports_a_failed_reindex(self):
+        src = self.tmp / "clone"
+        self.write("projects/demo/project.md", "x", base=src)
+        self.reindex.side_effect = RuntimeError("bad file")
+        with mock.patch.object(leobot, "status_info",
+                               return_value={"running": False, "pid": None, "port": None}):
+            code, _, err = run("move-data", "--from", str(src))
+        self.assertEqual(code, 0, err)
+        self.assertIn("Re-index failed (bad file)", err)
+
+    def test_doctor_reports_duplicate_post_ids(self):
+        migrations.write_marker(paths.DATA, {"schema": migrations.LATEST})
+        for name in ("2026-07", "2026-08"):
+            self.write(f"projects/demo/profiles/profile-a/content/plan-{name}.json",
+                       json.dumps({"posts": [{"id": "pr1.pf1.sec00.po3"}]}))
+        code, out, _ = run("doctor", "--from", str(self.tmp / "nowhere"))
+        self.assertEqual(code, 1)
+        self.assertIn("FIX  duplicate post id 'pr1.pf1.sec00.po3'", out)
+        self.assertNotIn("OK   no duplicate ids", out)
+
+    def test_doctor_no_duplicates(self):
+        migrations.write_marker(paths.DATA, {"schema": migrations.LATEST})
+        _, out, _ = run("doctor", "--from", str(self.tmp / "nowhere"))
+        self.assertIn("OK   no duplicate ids", out)
+
+    def test_doctor_never_takes_a_boolean_schema_for_a_number(self):
+        (paths.DATA / migrations.MARKER).write_text(json.dumps({"schema": True}))
+        _, out, _ = run("doctor", "--from", str(self.tmp / "nowhere"))
+        self.assertNotIn("OK   data schema", out)
+        self.assertIn("FIX  data schema True is older", out)
 
 
 if __name__ == "__main__":

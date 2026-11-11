@@ -35,18 +35,22 @@ def write_marker(data: Path, rec: dict) -> None:
     data.mkdir(mode=0o700, parents=True, exist_ok=True)
     rec = {**rec, "version": version.current()}  # which app wrote it, for the newer-data message
     fd, tmp = tempfile.mkstemp(dir=data, prefix=".marker-")
-    with os.fdopen(fd, "w") as f:
-        json.dump(rec, f)
-        f.flush()
-        os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, data / MARKER)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(rec, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, data / MARKER)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def run(data: Path) -> int:
     rec = read_marker(data)
     schema = rec.get("schema", 0)
-    if not isinstance(schema, int):
+    if type(schema) is not int or schema < 0:  # true/false or a negative number: a damaged marker
         schema = 0
     if schema > LATEST:
         ver = rec.get("version")

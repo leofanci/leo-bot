@@ -95,6 +95,25 @@ class Walls(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertNotIn("DUMMY", json.dumps(out))
 
+    def test_read_file_reaches_the_public_code_folders(self):
+        # docs/, skills/, ... ship with the code, not the data folder: still readable, also
+        # from a shared thread, while every other path resolves in the data folder.
+        from core import paths
+        doc = sorted((paths.CODE / "docs").glob("*.md"))[0]
+        rel = f"docs/{doc.name}"
+        for ws, shared in ((None, False), ("acme", False), ("acme", True)):
+            with self.subTest(ws=ws, shared=shared):
+                code, out = run(["read-file", "--path", rel], ws=ws, shared=shared)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(out["content"], doc.read_text(encoding="utf-8"))
+
+    def test_read_file_code_lookup_never_leaves_its_folders(self):
+        for path in ("docs/../leobot.py", "docs/../dashboard/server.py", "VERSION"):
+            with self.subTest(path):
+                code, out = run(["read-file", "--path", path], ws="acme")
+                self.assertEqual(code, 1, out)
+
+
 
 if __name__ == "__main__":
     unittest.main()

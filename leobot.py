@@ -135,6 +135,14 @@ def cmd_start(args) -> int:
     if info["running"]:
         print(f"Leo Bot is already running at {_url(info['port'] or args.port)}")
         return 0
+    if not getattr(args, "own_lock", False):
+        # An update, rollback, restore or data move stops the server and starts it again itself;
+        # a server started in between would run during its backup or checkout.
+        from core import updater
+        if updater.is_updating():
+            print(f"{updater.busy_text()}, so Leo Bot was not started: it starts again on its own "
+                  f"when that finishes. See {paths.UPDATE_LOG}", file=sys.stderr)
+            return 1
     paths.ensure_dirs()
     if service.installed():  # the service manager owns the server: never spawn a second one
         return _start_service(args, explicit)
@@ -274,8 +282,9 @@ def _stop_if_running():
 
 
 def _restart(port) -> None:
+    """Start the server again after a data operation, which still holds the update lock."""
     if port:
-        cmd_start(argparse.Namespace(port=port))
+        cmd_start(argparse.Namespace(port=port, own_lock=True))
 
 
 def cmd_open(args=None) -> int:
@@ -322,8 +331,9 @@ def cmd_status(args) -> int:
         return 0
     print(f"running: {'yes' if info['running'] else 'no'}")
     for k in ("pid", "port", "version", "installed", "home", "data", "service"):
-        if info.get(k) is not None:
-            print(f"{k}: {info[k]}")
+        v = info.get(k)
+        if v is not None:
+            print(f"{k}: {('yes' if v else 'no') if isinstance(v, bool) else v}")
     return 0
 
 
@@ -374,9 +384,9 @@ def cmd_doctor(args) -> int:
         fix("data marker missing", "leobot start")
     else:
         schema = rec.get("schema")
-        if schema == migrations.LATEST:
+        if type(schema) is int and schema == migrations.LATEST:
             ok(f"data schema {schema}")
-        elif isinstance(schema, int) and schema > migrations.LATEST:
+        elif type(schema) is int and schema > migrations.LATEST:
             fix(f"data schema {schema} is newer than this app ({migrations.LATEST})",
                 "leobot update" if paths.is_installed() else "git pull (this is a development checkout)")
         else:
@@ -409,6 +419,11 @@ def cmd_doctor(args) -> int:
                          f"too. Choose one. Keep the home folder and archive the old copy. Run: "
                          f"leobot move-data --from {q} --archive. Or use the old copy instead (the home "
                          f"folder is backed up first). Run: leobot move-data --from {q} --replace")
+    dupes = _duplicate_ids()
+    for problem in dupes:
+        lines.append(f"FIX  {problem}. Give one of them a new id in its plan file, then: leobot start")
+    if not dupes:
+        ok("no duplicate ids")
     info = status_info()
     if info["running"]:
         ok(f"port {info['port']} is Leo Bot")
@@ -427,6 +442,21 @@ def cmd_doctor(args) -> int:
         ok(f"version {version.current()}")
     print("\n".join(lines))
     return 1 if any(l.startswith("FIX") for l in lines) else 0
+
+
+def _duplicate_ids() -> list:
+    """Composed ids shared by two things in the data folder (posts from the plan files; every
+    other kind from the index, when there is one). Empty when clean."""
+    from core.ids import find_duplicate_ids, find_duplicate_post_ids
+    try:
+        from dashboard import db
+        own = paths.DATA / "database" / "data" / "os.db"  # only this data folder's own index
+        if own.is_file() and Path(db.DB_PATH).resolve() == own.resolve():
+            return find_duplicate_ids(paths.DATA, db.tree(), db.posts())
+    except Exception:  # noqa: BLE001  an unreadable index: the plan files still say enough
+        pass
+    return [f"duplicate post id '{pid}' in: {', '.join(files)}"
+            for pid, files in sorted(find_duplicate_post_ids(paths.DATA).items())]
 
 
 def _stamp() -> str:
@@ -700,9 +730,19 @@ def _replace_data(src: Path, snap_path: Path) -> Path:
     return snap
 
 
+REINDEX_TIMEOUT = 600
+
+
 def _reindex() -> None:
-    subprocess.run([sys.executable, str(paths.CODE / "index.py"), str(paths.DATA)],
-                   capture_output=True, text=True, env=_child_env())
+    """Rebuild the index from the data folder. Raises RuntimeError when index.py fails."""
+    try:
+        r = subprocess.run([sys.executable, str(paths.CODE / "index.py"), str(paths.DATA)],
+                           capture_output=True, text=True, env=_child_env(), timeout=REINDEX_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as e:
+        raise RuntimeError(f"index.py did not run: {e}") from e
+    if r.returncode != 0:
+        lines = (r.stderr or r.stdout or "").strip().splitlines()
+        raise RuntimeError(lines[-1] if lines else f"index.py exited with {r.returncode}")
 
 
 def cmd_move_data(args) -> int:
@@ -729,7 +769,10 @@ def cmd_move_data(args) -> int:
                     print(f"Backup: {res.backup}")
             else:
                 print("Nothing to move.")
-            _reindex()
+            try:
+                _reindex()
+            except RuntimeError as e:
+                print(f"Re-index failed ({e}). Start Leo Bot to rebuild it.", file=sys.stderr)
             return 0
     except Busy as e:
         print(str(e), file=sys.stderr)

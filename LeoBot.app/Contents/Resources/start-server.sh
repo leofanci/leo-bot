@@ -50,7 +50,8 @@ import hmac, json, secrets, sys, urllib.request
 url, token_file = sys.argv[1], sys.argv[2]
 token = open(token_file).read().strip()
 nonce = secrets.token_hex(16)
-with urllib.request.urlopen(f"{url}/healthz?nonce={nonce}", timeout=1) as r:
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
+with opener.open(f"{url}/healthz?nonce={nonce}", timeout=1) as r:
     proof = json.load(r).get("proof", "")
 want = hmac.new(token.encode(), b"leobot-healthz:" + nonce.encode(), "sha256").hexdigest()
 sys.exit(0 if token and hmac.compare_digest(proof, want) else 1)
@@ -58,6 +59,18 @@ PY
 }
 if is_leobot; then
     echo "RUNNING"
+    exit 0
+fi
+
+# A background service is installed (leobot service install): launchd owns the server, so
+# start it there. A second server spawned here would fight it for the pid lock. The app
+# waits for the service's server like any other.
+PLIST="$HOME/Library/LaunchAgents/leobot.server.plist"
+if [ -f "$PLIST" ]; then
+    DOMAIN="gui/$(id -u)"
+    launchctl kickstart "$DOMAIN/leobot.server" >/dev/null 2>&1 \
+        || launchctl bootstrap "$DOMAIN" "$PLIST" >/dev/null 2>&1
+    echo "SERVICE"
     exit 0
 fi
 

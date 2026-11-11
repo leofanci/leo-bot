@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -134,17 +135,32 @@ def _frontmatter_values(path, keys=frozenset({"name", "handle"})):
     return values
 
 
+def real_data_projects():
+    """projects/ in the real home folder's data (read only): where the owner's ventures live
+    since the data left the checkout. The home is the one the shell named before
+    tests/__init__.py pinned a temp one, else the default ~/.leobot."""
+    import tests
+    from core.paths import home_for
+    original = getattr(tests, "ORIGINAL_HOME", None)
+    return home_for({"LEOBOT_HOME": original} if original else {}) / "data" / "projects"
+
+
 def project_dirs():
-    """This checkout's projects/ plus the main checkout's: a linked worktree has
-    none of its own, and the private-term check must not skip silently there."""
+    """Every projects/ folder that holds real names: the home folder's data (where Leo Bot keeps
+    them), this checkout's (a clone not moved yet) and the main checkout's (a linked worktree
+    has none of its own). The private-term check must not skip silently anywhere."""
     common = subprocess.run(
         ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=ROOT,
         capture_output=True, text=True, check=False,
     ).stdout.strip()
-    dirs = [PROJECTS]
-    if common and (Path(common).parent / "projects").resolve() != PROJECTS.resolve():
+    dirs = [real_data_projects(), PROJECTS]
+    if common:
         dirs.append(Path(common).parent / "projects")
-    return [d for d in dirs if d.is_dir()]
+    out = {}
+    for d in dirs:
+        if d.is_dir():
+            out.setdefault(d.resolve(), d)
+    return list(out.values())
 
 
 def private_terms():
@@ -383,6 +399,24 @@ class TestNoUsageData(unittest.TestCase):
         ).stdout.splitlines()[0].split(" ", 1)[1]
         self.assertIn((Path(main) / "projects").resolve(),
                       [p.resolve() for p in project_dirs()])
+
+    def test_home_folder_data_names_are_guarded(self):
+        # The real names live in the home folder's data/projects/ since the data left the
+        # checkout: the guard must learn them there, or it stops catching anything.
+        import tests
+        with tempfile.TemporaryDirectory() as tmp:
+            venture = Path(tmp) / "data" / "projects" / "fixture-venture-x"
+            (venture / "profiles" / "fixture-profile-y").mkdir(parents=True)
+            prior = tests.ORIGINAL_HOME
+            tests.ORIGINAL_HOME = tmp
+            try:
+                self.assertIn((Path(tmp) / "data" / "projects").resolve(),
+                              [p.resolve() for p in project_dirs()])
+                terms = private_terms()
+            finally:
+                tests.ORIGINAL_HOME = prior
+        self.assertIn("fixture-venture-x", terms)
+        self.assertIn("fixture-profile-y", terms)
 
     def test_staged_snapshot_contains_no_private_data_paths(self):
         hits = [path for path, _oid in staged_entries() if sensitive_path(path)]

@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 from dashboard import chat_session, db, fileops  # noqa: E402
-from core import bots  # noqa: E402
+from core import bots, paths  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -73,6 +73,21 @@ _SHARED_ALLOWED = frozenset({
     "update-subsections", "update-technical", "update-validation-tab", "update-voice",
 })
 _SHARED_READ_PREFIXES = ("skills/", "docs/", "templates/", "prompts/", "bots/")
+# Those folders ship with the code (paths.CODE), not the data folder: read-file finds them there.
+_CODE_READ_DIRS = tuple(p.rstrip("/") for p in _SHARED_READ_PREFIXES)
+
+
+def _code_file(path):
+    """The file `path` names inside one of the public code folders (docs/, skills/, ...), when
+    it exists there, else None (read-file then looks in the data folder)."""
+    code = paths.CODE.resolve()
+    try:
+        target = (code / path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if any(target.is_relative_to(code / d) for d in _CODE_READ_DIRS) and target.is_file():
+        return target
+    return None
 # Args whose value names an existing entity (create commands mint new slugs,
 # which resolve to no owner and pass).
 _OWNER_ARGS = ("project", "entity", "profile", "product", "slug", "id", "channel")
@@ -142,7 +157,7 @@ def _guard(args, ws):
         if owner and owner.lower() != ws.lower():
             raise fileops.ActionError(f"'{value}' belongs to another workspace")
     path = getattr(args, "path", None)
-    if isinstance(path, str) and path:
+    if isinstance(path, str) and path and _code_file(path) is None:  # public code docs: no workspace data
         # Resolve the way read-file does, then compare lowercased: absolute
         # paths, "..", symlinks and a case-insensitive disk all land here.
         root = fileops.ROOT.resolve()
@@ -790,13 +805,14 @@ def _build_parser():
         return {"project": data}
     p.set_defaults(_run=_get_project)
 
-    p = sub.add_parser("read-file", help="Read any authored file by repo-relative path")
+    p = sub.add_parser("read-file", help="Read an authored file by its path in the data folder "
+                                         "(docs/, skills/, templates/, prompts/, bots/: the app's own)")
     p.add_argument("--path", required=True)
     def _read_file(a):
-        repo_root = fileops.ROOT
-        target = (repo_root / a.path).resolve()
-        if not target.is_relative_to(repo_root.resolve()):
-            raise fileops.ActionError("path outside repo")
+        data_root = fileops.ROOT
+        target = _code_file(a.path) or (data_root / a.path).resolve()
+        if not (target.is_relative_to(data_root.resolve()) or _code_file(a.path)):
+            raise fileops.ActionError("path outside the data folder")
         # Same secret-file policy as the chat agent's Read deny rules.
         # Case-blind, as a Mac disk is: .AUTH-TOKEN opens .auth-token.
         name = target.name.lower()

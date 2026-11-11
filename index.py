@@ -6,7 +6,7 @@ repopulates it from the workspace, so a rebuild is always safe and idempotent.
 Never hand-edit os.db; never let anything but this script write its structure.
 
 Usage:
-    python3 index.py [WORKSPACE_ROOT]     # default: current directory
+    python3 index.py [WORKSPACE_ROOT]     # default: the data folder (~/.leobot/data)
 
 Reads, under WORKSPACE_ROOT:
     projects/<slug>/project.md                      -> project entities

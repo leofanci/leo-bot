@@ -102,15 +102,33 @@ class ReleaseDryRunTest(unittest.TestCase):
     def test_current_version_is_tagged_without_a_bump(self):
         r = self.release("0.1.0")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("[dry-run] tag v0.1.0 at HEAD", r.stdout)
+        self.assertIn("tag v0.1.0 at HEAD", r.stdout)
         self.assertNotIn("write VERSION", r.stdout)
         self.assertIn("[dry-run] push tag", r.stdout)
+        self.assertIn("[dry-run] gh release create v0.1.0", r.stdout)
 
-    def test_higher_version_bumps(self):
+    def test_higher_version_opens_a_pull_request(self):
+        # main is protected (pull requests only): the bump goes through a release branch and a
+        # pull request, and nothing is tagged or published until a second run after the merge.
         r = self.release("0.2.0")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("[dry-run] create branch release-v0.2.0", r.stdout)
         self.assertIn("[dry-run] write VERSION 0.2.0", r.stdout)
-        self.assertIn("[dry-run] push commit and tag", r.stdout)
+        self.assertIn("open a pull request", r.stdout)
+        self.assertIn("run scripts/release.sh 0.2.0 again", r.stdout)
+        self.assertNotIn("tag v0.2.0", r.stdout)
+        self.assertNotIn("gh release create", r.stdout)
+
+    def test_bump_never_pushes_to_main(self):
+        text = RELEASE.read_text()
+        self.assertNotIn("git push --atomic origin main", text)
+        self.assertNotIn("git push origin main", text)
+
+    def test_existing_release_branch_refused(self):
+        self.git("branch", "release-v0.2.0")
+        r = self.release("0.2.0")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("branch release-v0.2.0 exists already", r.stderr)
 
     def test_lower_version_refused(self):
         r = self.release("0.0.9")

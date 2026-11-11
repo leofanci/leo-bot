@@ -68,18 +68,20 @@ class TestSchemaConsistency(unittest.TestCase):
         self.assertEqual(schemas_for_api()["memo_type_labels"], MEMO_TYPE_LABELS)
 
     def test_index_normalizes_demo_intake_sections(self):
+        # A throwaway workspace: the real data lives in the home folder, which tests never touch.
+        import tempfile
         from core.project_schemas import INTAKE_SECTIONS, normalize_workspace_artifacts
 
-        demo = ROOT / "projects" / "demo" / "strategy" / "intake.md"
-        if not demo.is_file():
-            self.skipTest("demo intake not present")
-        before = demo.read_text(encoding="utf-8")
-        normalize_workspace_artifacts(ROOT)
-        after = demo.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as tmp:
+            demo = Path(tmp) / "projects" / "demo" / "strategy" / "intake.md"
+            demo.parent.mkdir(parents=True)
+            demo.write_text(f"## {INTAKE_SECTIONS[0]}\nSome notes.\n", encoding="utf-8")
+            changed = normalize_workspace_artifacts(tmp)
+            after = demo.read_text(encoding="utf-8")
         for sec in INTAKE_SECTIONS:
             self.assertIn(f"## {sec}", after)
-        if before != after:
-            demo.write_text(before, encoding="utf-8")
+        self.assertIn("Some notes.", after)
+        self.assertIn("projects/demo/strategy/intake.md", changed)
 
     def test_http_and_osctl_memo_same_bytes(self):
         from core.project_schemas import dumps_json, normalize_memo_body

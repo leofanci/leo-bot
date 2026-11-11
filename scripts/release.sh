@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # Cut a release. Usage: release.sh X.Y.Z [--dry-run]
 #
-# X.Y.Z must be above VERSION, or equal to it while tag vX.Y.Z does not exist yet (locally or
-# on origin): the first release of the version already in VERSION. Then there is no bump
-# commit and HEAD itself is tagged. A lower version is always refused.
+# main only changes through pull requests, so a release takes two runs when VERSION is lower:
+#   1. release.sh X.Y.Z  opens a pull request that writes X.Y.Z into VERSION (branch release-vX.Y.Z).
+#   2. Merge it once CI is green, update main, then run release.sh X.Y.Z again: VERSION now says
+#      X.Y.Z, so HEAD is tagged vX.Y.Z and the GitHub Release is published.
+# The second step alone is the first release of the version already in VERSION. A lower
+# version, or a tag that exists (locally or on origin), is always refused.
 set -euo pipefail
 
-# What releasing $2 means when VERSION says $1: bump (write VERSION and commit), tag (tag
-# HEAD as it is), or refuse.
+# What releasing $2 means when VERSION says $1: bump (a pull request that writes VERSION),
+# tag (tag HEAD as it is), or refuse.
 version_action() {
   local cur="$1" ver="$2" newest
   if [ "$ver" = "$cur" ]; then
@@ -21,7 +24,7 @@ version_action() {
 usage() { echo "usage: release.sh X.Y.Z [--dry-run]" >&2; exit 2; }
 
 main() {
-  local ver="" dry=0 arg root cur action head concls tmp
+  local ver="" dry=0 arg root cur action head concls tmp branch
   for arg in "$@"; do
     case "$arg" in
       --dry-run) dry=1 ;;
@@ -67,6 +70,32 @@ main() {
     exit 1
   fi
 
+  if [ "$action" = bump ]; then
+    branch="release-v$ver"
+    if git rev-parse -q --verify "refs/heads/$branch" >/dev/null \
+        || git ls-remote --heads origin "refs/heads/$branch" | grep -q .; then
+      echo "release: branch $branch exists already (an open release pull request?)" >&2
+      exit 1
+    fi
+    step "create branch $branch"
+    step "write VERSION $ver"
+    step "commit Release v$ver"
+    step "push $branch and open a pull request"
+    step "after it merges with CI green: update main, then run scripts/release.sh $ver again"
+    if [ "$dry" = 0 ]; then
+      git switch -c "$branch"
+      printf '%s\n' "$ver" > VERSION
+      git add VERSION
+      git commit -m "Release v$ver"
+      git push -u origin "$branch"
+      gh pr create --base main --head "$branch" --title "Release v$ver" \
+        --body "Sets VERSION to $ver. After this merges with CI green, run: scripts/release.sh $ver"
+      git switch main
+      echo "Opened the release pull request. Merge it once CI is green, then run: git pull && scripts/release.sh $ver"
+    fi
+    return 0
+  fi
+
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064  # expand now: tmp is local to main
   trap "rm -rf '$tmp'" EXIT
@@ -74,28 +103,12 @@ main() {
   "$root/scripts/render-installer.sh" "$tmp/install.sh"
   echo "installer repo line: $(grep '^REPO_URL_DEFAULT=' "$tmp/install.sh")"
 
-  if [ "$action" = bump ]; then
-    step "write VERSION $ver"
-    step "commit Release v$ver"
-    step "tag v$ver"
-    step "push commit and tag"
-  else
-    step "VERSION is already $ver: no bump commit"
-    step "tag v$ver at HEAD"
-    step "push tag"
-  fi
+  step "VERSION is $ver: tag v$ver at HEAD"
+  step "push tag"
   step "gh release create v$ver with install.sh"
   if [ "$dry" = 0 ]; then
-    if [ "$action" = bump ]; then
-      printf '%s\n' "$ver" > VERSION
-      git add VERSION
-      git commit -m "Release v$ver"
-      git tag "v$ver"
-      git push --atomic origin main "v$ver"
-    else
-      git tag "v$ver"
-      git push origin "v$ver"
-    fi
+    git tag "v$ver"
+    git push origin "v$ver"
     if ! gh release create "v$ver" --generate-notes "$tmp/install.sh#install.sh"; then
       echo "release: tag v$ver is pushed but the GitHub Release failed. Recover with:" >&2
       echo "  scripts/render-installer.sh /tmp/install.sh && gh release create v$ver --generate-notes /tmp/install.sh#install.sh" >&2
