@@ -57,7 +57,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, job_ledger, spend  # noqa: E402
+from dashboard import costs, job_ledger, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -2849,6 +2849,16 @@ class Handler(BaseHTTPRequestHandler):
                         shared=shared, reactions=reacts, ws=ws)
                 except (OSError, ValueError):
                     traceback.print_exc()
+                else:
+                    # A memory file past its threshold gets one background tidy-up. Never
+                    # from a turn invited people can see: that thread runs on the relay only.
+                    if not shared and not person:
+                        for b in dict.fromkeys(m.get("bot") for m in msgs if m.get("bot")):
+                            try:
+                                memory_consolidate.maybe_start(ROOT, ws, b, shared=False,
+                                                               records=_spend_records)
+                            except Exception:  # noqa: BLE001 - never fails the reply
+                                traceback.print_exc()
             try:
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
@@ -3459,6 +3469,8 @@ class Handler(BaseHTTPRequestHandler):
                 if path == "/api/memory":
                     bots.remember(bot_id, body.get("text"), project, ROOT, shared=team_scope,
                                   type=str(body.get("type") or "fact"))
+                    memory_consolidate.maybe_start(ROOT, project or bots.HQ, bot_id, shared=team_scope,
+                                                   records=_spend_records)
                 elif not bots.forget(bot_id, body.get("line"), project, ROOT, shared=team_scope):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0, shared=team_scope)

@@ -136,6 +136,24 @@ bots all react. A bot reacts to the message it answers with one line `REACT: ðŸ‘
 reply, and a reply of only that line shows as the emoji alone. Bots see people's reactions
 as context on their next turn; a reaction never triggers an action.
 
+### Bot memory
+
+Each bot keeps one short list per workspace (a private one and, in a company, a team
+one), one entry per line: `- 2026-11-11 [decision] text`. Types are `fact`,
+`preference` and `decision`; a line without one reads as a fact. Add entries in Team
+under the bot's Memory, or let a bot save one with `osctl remember --type ...`.
+
+- A bot's card carries its decisions and preferences (newest 10) plus the 5 entries that
+  best match the message that opened it. Older entries stay a lookup away:
+  `osctl recall --bot <id> --query "..."`, scoped to the thread's workspace and scope.
+- A list holds up to 400 entries. Past that the oldest facts go first; decisions and
+  preferences are never dropped, so a list full of them asks you to forget one.
+- At 300 entries a bot's list gets one background tidy-up on the fast model: near
+  duplicates merged, replaced facts dropped. It keeps the previous list as
+  `<bot>.md.bak`, is rejected if it drops or changes a decision or preference, never
+  runs from a thread invited people can see, and counts against your caps. Its cost
+  shows on the Team screen under "Background jobs".
+
 ### Spending caps
 
 Every reply records its tokens, model, skill and estimated cost; the Team screen shows
