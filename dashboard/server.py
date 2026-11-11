@@ -17,6 +17,7 @@ import fcntl
 import hmac
 import html
 import json
+import itertools
 import os
 import re
 import secrets
@@ -56,7 +57,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, spend  # noqa: E402
+from dashboard import costs, job_ledger, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1296,9 +1297,15 @@ SHARED_NOTE = (
     "here is the team's: use it freely.")
 
 
+def _spend_records():
+    """Everything that spent: saved threads plus background runs (job_ledger). Passed to
+    spend.py and costs.py so both read this server's own chat_store copy."""
+    return itertools.chain(chat_store.records(), job_ledger.records(ROOT))
+
+
 def _costs(ws, projects, days=30):
     """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
-    return costs.summarize(ws, chat_store.records(), {w["id"] for w in _workspaces(projects)}, days)
+    return costs.summarize(ws, _spend_records(), {w["id"] for w in _workspaces(projects)}, days)
 
 
 def _known_ws(value, projects):
@@ -2411,7 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
         # An invited person's allowance holds on every engine, their own Mac included.
-        allowance = spend.refusal(None, person["id"], records=chat_store.records) if person else None
+        allowance = spend.refusal(None, person["id"], records=_spend_records) if person else None
         if allowance:
             return self._sse_message(allowance)
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
@@ -2507,7 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse_message(message)
         # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
         if engine.kind != "runner":  # a person's own Mac is never capped
-            capped = spend.refusal(ws, sender, records=chat_store.records)
+            capped = spend.refusal(ws, sender, records=_spend_records)
             if capped:
                 return self._sse_message(capped)
         tokensave_task = re.sub(
@@ -2626,7 +2633,7 @@ class Handler(BaseHTTPRequestHandler):
             if not metered_turn:
                 return True
             text = spend.refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs),
-                                 records=chat_store.records)
+                                 records=_spend_records)
             if text:
                 cap_hit.append(text)
                 notice(text)
@@ -2819,7 +2826,7 @@ class Handler(BaseHTTPRequestHandler):
             if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
                 try:
                     near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
-                                             records=chat_store.records)
+                                             records=_spend_records)
                     if near:
                         notice(near)
                 except (BrokenPipeError, ConnectionResetError):
