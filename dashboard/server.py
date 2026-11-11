@@ -43,7 +43,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots, datadir, paths, updater, version  # noqa: E402
+from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -877,9 +877,10 @@ def _tag_gate_message(suggest, team=None):
 
 
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
-               members=None, readonly=False, shared=False):
+               members=None, readonly=False, shared=False, query=""):
     """Persona for the speaking bot. Full card (job, team, memory) when the
-    session is fresh or the speaker changed; a one-line marker otherwise."""
+    session is fresh or the speaker changed; a one-line marker otherwise.
+    `query`: the message that opened the card, to pick the memory it carries."""
     b = team.get(bot_id) if team else None
     if not b:
         return ""
@@ -900,14 +901,16 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                          + "\n".join(team.roster_line(o.id) for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
         shared = shared and bool(project_slug)
-        mem = bots.read_memory(bot_id, project_slug or None, ROOT, shared=shared)
+        mem = memory.card_block(bot_id, project_slug or None, ROOT, shared=shared, query=query)
         where = f"{project_slug}, team" if shared else (project_slug or "HQ")
-        lines.append(f"Your memory ({where}):\n{mem}" if mem
-                     else f"Your memory ({where}): empty")
+        lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
+                     else f"Your memory ({where}): nothing pinned or matching.")
+        lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`.")
         scope = f" --project {project_slug}" if project_slug else ""
         if not readonly and not shared:
             lines.append("When the user states a lasting decision or preference, save one line: "
-                         f"`remember --bot {b.id}{scope} --text \"...\"`. Never secrets.")
+                         f"`remember --bot {b.id}{scope} --type decision|preference|fact "
+                         "--text \"...\"`. Never secrets.")
     else:
         lines.append(f"(speaking as @{b.handle})")
     if handoff_from and team.get(handoff_from):
@@ -1112,7 +1115,8 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
         parts.append(state_snapshot(projects, only=project_slug))
     except Exception:  # noqa: BLE001
         pass
-    parts.append(_bot_block(team, bot_id, None, project_slug, fresh=True, readonly=True, shared=shared))
+    parts.append(_bot_block(team, bot_id, None, project_slug, fresh=True, readonly=True, shared=shared,
+                            query=question))
     if folders_block:
         parts.append(folders_block)
     if skill:
@@ -2559,7 +2563,7 @@ class Handler(BaseHTTPRequestHandler):
             explicit=bool(explicit),
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
-                           handoff_from, fresh=sess.is_fresh(), shared=shared,
+                           handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
             suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),

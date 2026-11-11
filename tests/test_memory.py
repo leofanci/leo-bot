@@ -12,6 +12,7 @@ from unittest import mock
 import index
 from core import bots, memory
 from dashboard import db, fileops, osctl
+import dashboard.server as server
 
 
 def make_root(tmp):
@@ -165,6 +166,66 @@ class Recall(TempRoot):
         memory.remember("cos", "hq note", None, self.root)
         (self.root / memory.INDEX_RELPATH).unlink()
         self.assertEqual(memory.rebuild_index(self.root), 3)
+
+
+class Card(TempRoot):
+    def fixture(self):
+        for i in range(12):
+            memory.remember("cmo", f"rule {i}", "acme", self.root, type="preference")
+        memory.remember("cmo", "Pricing anchor is 49 euros", "acme", self.root)
+        for i in range(50):
+            memory.remember("cmo", f"weekly note {i} about the newsletter and the agency", "acme", self.root)
+
+    def test_pinned_newest_first_then_hits(self):
+        self.fixture()
+        lines = memory.card_block("cmo", "acme", self.root, query="what is the pricing anchor?").splitlines()
+        self.assertEqual(lines[0].split("] ", 1)[1], "rule 11")
+        self.assertEqual(sum("[preference]" in ln for ln in lines), memory.PINNED_IN_CARD)
+        self.assertIn("49 euros", "\n".join(lines))
+        self.assertLessEqual(len(lines), memory.PINNED_IN_CARD + memory.HITS_IN_CARD)
+
+    def test_hits_never_repeat_a_pinned_line(self):
+        memory.remember("cmo", "pricing is B2B only", "acme", self.root, type="decision")
+        lines = memory.card_block("cmo", "acme", self.root, query="pricing").splitlines()
+        self.assertEqual(len(lines), 1)
+
+    def test_empty_when_nothing_pinned_or_matching(self):
+        memory.remember("cmo", "weekly note", "acme", self.root)
+        self.assertEqual(memory.card_block("cmo", "acme", self.root, query="zebra"), "")
+        self.assertEqual(memory.card_block("cmo", "missing", self.root, query="zebra"), "")
+
+    def test_block_is_smaller_than_the_old_tail(self):
+        self.fixture()
+        old = memory.read_memory("cmo", "acme", self.root, tail=20)
+        new = memory.card_block("cmo", "acme", self.root, query="what is the pricing anchor?")
+        self.assertLess(len(new), len(old))
+
+    def test_bot_card_uses_the_message_and_names_recall(self):
+        self.fixture()
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True, query="pricing anchor?")
+        self.assertIn("49 euros", text)
+        self.assertNotIn("weekly note 49", text)
+        self.assertIn("recall --bot cmo", text)
+        self.assertIn("--type decision|preference|fact", text)
+
+    def test_shared_card_reads_team_memory_only(self):
+        self.fixture()
+        memory.remember("cmo", "team pricing rule", "acme", self.root, shared=True, type="decision")
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True, shared=True, query="pricing")
+        self.assertIn("team pricing rule", text)
+        self.assertNotIn("49 euros", text)
+        self.assertNotIn("remember --bot", text)
+
+    def test_empty_card_still_names_recall(self):
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True, query="pricing")
+        self.assertIn("nothing pinned or matching", text)
+        self.assertIn("recall --bot cmo", text)
 
 
 def run_osctl(*argv):

@@ -40,6 +40,8 @@ LINE_MAX = 300
 TAIL_LINES = 20
 RECALL_CHARS = 800
 RECALL_MAX = 20
+PINNED_IN_CARD = 10
+HITS_IN_CARD = 5
 INDEX_RELPATH = Path("database") / "data" / "memory.db"
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -361,3 +363,14 @@ def recall(bot_id, query, project=None, root=ROOT, shared=False, limit=8):
     if lines is None:
         lines = _scan(path, words, limit)
     return _fit(lines)
+
+
+def card_block(bot_id, project=None, root=ROOT, shared=False, query=""):
+    """The memory a bot card carries: pinned entries (decisions, preferences) newest
+    first, then the top recall hits for the message that opened the card. "" if none."""
+    pinned = [e.line for e in reversed(entries(bot_id, project, root, shared))
+              if e.type in PINNED][:PINNED_IN_CARD]
+    seen = set(pinned)
+    hits = [ln for ln in recall(bot_id, query, project, root, shared,
+                                limit=HITS_IN_CARD + PINNED_IN_CARD) if ln not in seen]
+    return "\n".join(pinned + hits[:HITS_IN_CARD])
