@@ -247,7 +247,7 @@ class CapWiring(AskHarness):
 
     def test_invited_person_cap_holds_mid_message(self):
         with env(LEOBOT_PERSON_DAILY_CAP="0.01"):
-            refused = server._cap_refusal("acme", "p1", pending=0.02)
+            refused = server.spend.refusal("acme", "p1", pending=0.02, records=server.chat_store.records)
         self.assertIn("allowance", refused)
 
     def test_zero_model_reply_not_refused(self):
@@ -267,8 +267,12 @@ def thread(ws, msgs):
     return {"id": f"t-{ws}", "room": f"{ws}/general", "messages": msgs}
 
 
+LABELS = {"claude-code": "Claude Code", "codex": "Codex"}
+
+
 def reply(bot, *, engine, model, skill, cost, tokens, usage, metered=True, ts=None):
-    return {"role": "assistant", "bot": bot, "ts": ts or time.time(), "engine": engine, "model": model,
+    return {"role": "assistant", "bot": bot, "ts": ts or time.time(), "engine": engine,
+            "engine_label": LABELS.get(engine), "model": model,
             "skill": skill, "cost": cost, "tokens": tokens, "usage": usage, "metered": metered}
 
 
@@ -290,6 +294,8 @@ class Report(unittest.TestCase):
         self.assertEqual(list(out["by_day"]), [time.strftime("%Y-%m-%d")])
         self.assertEqual(out["total"]["turns"], 2)
         self.assertEqual(out["bots"]["cmo"]["turns"], 1)
+        self.assertEqual(out["by_engine"]["claude-code"]["label"], "Claude Code")
+        self.assertEqual(out["by_skill"]["-"]["label"], "no skill")
         hq = costs.summarize("hq", recs, {"acme", "demo"})
         self.assertEqual(hq["total"]["turns"], 3)
 
@@ -299,6 +305,7 @@ class Report(unittest.TestCase):
         out = costs.summarize("acme", recs, {"acme"})
         self.assertEqual(out["total"]["tokens"], 1500)
         self.assertEqual(out["by_engine"]["-"]["turns"], 1)
+        self.assertEqual(out["by_engine"]["-"]["label"], "not recorded")
         self.assertIsNone(out["cache_read_share"])
         self.assertEqual(out["unmetered"], 0)
 

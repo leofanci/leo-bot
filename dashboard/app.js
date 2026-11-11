@@ -1228,7 +1228,7 @@ async function renderTeam(){
     const top = (groups, label) => {
       const rows = Object.entries(groups || {}).sort((a, b) => b[1].cost - a[1].cost || b[1].turns - a[1].turns).slice(0, 5);
       return rows.length ? `<div class="ts-group"><h4>${label}</h4>${rows.map(([k, v]) =>
-        `<div class="ts-row"><span>${esc(k === "-" ? "not recorded" : k)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : "";
+        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : "";
     };
     const days = Object.entries(c.by_day || {}).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 7);
     const lines = [

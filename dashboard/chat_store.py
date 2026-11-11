@@ -279,7 +279,7 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     `asked_at` = when `user_msg` was sent (default: now);
     `ws` = the workspace the turn ran in, kept on its spend row for workspace caps.
     A reply with no text (only an emoji, or only an approval) is still kept when it
-    carries an approval, deliverables or spend: cost roll-ups read the messages."""
+    carries an approval, deliverables, spend or a cap notice: cost roll-ups read the messages."""
     rec = load(sess.session_id) or {
         "id": sess.session_id,
         "title": title_from(user_msg),
@@ -349,29 +349,3 @@ def record_turn(*args, **kwargs):
 
 
 record_turn.__doc__ = _record_turn.__doc__
-
-
-DEFAULT_PERSON_DAILY_CAP = 5.0  # dollars per invited person per rolling 24 hours; 0 = no cap
-
-
-def person_daily_cap():
-    try:
-        return max(0.0, float(os.environ.get("LEOBOT_PERSON_DAILY_CAP", DEFAULT_PERSON_DAILY_CAP)))
-    except ValueError:
-        return DEFAULT_PERSON_DAILY_CAP
-
-
-def spent_since(person_id, seconds=86_400):
-    """What this person's turns cost over the last `seconds`, across every chat."""
-    cutoff = time.time() - seconds
-    total = 0.0
-    for rec in records():
-        for row in rec.get("spend") or ():
-            if isinstance(row, dict) and row.get("by") == person_id and (row.get("ts") or 0) >= cutoff:
-                total += float(row.get("cost") or 0)
-    return total
-
-
-def over_cap(person_id):
-    cap = person_daily_cap()
-    return bool(cap) and spent_since(person_id) >= cap
