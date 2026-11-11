@@ -4,7 +4,8 @@ CONSOLIDATE_AT entries, on the fast tier of the engine that bot runs on.
 Guards: counts against the owner and workspace caps (checked before, recorded in
 job_ledger after); never started from a turn invited people can see (the server
 decides); the output is checked line by line and rejected when it drops or
-changes a decision or preference, invents a date, grows, or is not a memory list;
+changes a decision or preference, invents a date, grows, loses the newest date (a
+reply cut short), or is not a memory list;
 the file is written only if nobody touched it during the run (a `remember` that
 lands meanwhile wins and this run gives up). One backup: `<bot>.md.bak`.
 """
@@ -45,14 +46,19 @@ def check(before, text):
         return None
     dates = {e.date for e in before if e.date}
     pinned_in = {e.line.strip() for e in before if e.type in memory.PINNED}
-    pinned_out = set()
+    pinned_out, dates_out = [], set()
     for ln in lines:
         e = memory.parse(ln)
         if not _STRICT.match(ln) or len(e.text) > memory.LINE_MAX or e.date not in dates:
             return None
+        dates_out.add(e.date)
         if e.type in memory.PINNED:
-            pinned_out.add(ln)
-    return lines if pinned_out == pinned_in else None
+            pinned_out.append(ln)
+    # Merging keeps the newest date and only a newer entry replaces a fact, so the newest
+    # date always survives: without it the reply was cut short and lost the file's tail.
+    if max(dates) not in dates_out or len(pinned_out) != len(set(pinned_out)):
+        return None
+    return lines if set(pinned_out) == pinned_in else None
 
 
 def _project(ws):
@@ -85,7 +91,7 @@ def consolidate(root, ws, bot, shared=False, records=None, engine=None):
     except Exception:  # noqa: BLE001 - the engine's own failure: nothing written
         traceback.print_exc()
         return "failed"
-    lines = check(before, out.get("text"))
+    lines = None if out.get("truncated") else check(before, out.get("text"))
     usage, model, cost = out.get("usage"), out.get("model") or MODEL, out.get("cost")
     if cost is None:
         cost = prices.estimate(model, usage)

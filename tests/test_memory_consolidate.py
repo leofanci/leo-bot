@@ -89,6 +89,26 @@ class Consolidate(unittest.TestCase):
                     self.merged.replace("[fact] fact 9", "fact 9")):
             self.assertIsNone(mc.check(before, bad), bad[:80])
 
+    def test_output_without_the_newest_entries_is_rejected(self):
+        # A reply cut short loses the tail of the file, its newest entries. Merging keeps
+        # the newest date and only a newer entry replaces a fact, so that date always survives.
+        before = memory.entries("cmo", "acme", self.root)
+        newest = max(e.date for e in before)
+        cut = "\n".join(ln for ln in self.merged.splitlines() if newest not in ln) + "\n"
+        self.assertIsNone(mc.check(before, cut))
+
+    def test_repeated_pinned_line_is_rejected(self):
+        before = memory.entries("cmo", "acme", self.root)
+        self.assertIsNone(mc.check(before, self.merged + "- 2026-09-01 [decision] B2B only\n"))
+
+    def test_reply_cut_at_the_token_limit_is_rejected(self):
+        def cut(*_):
+            return {"text": self.merged, "model": "claude-haiku-5-5", "usage": None, "cost": 0.001,
+                    "truncated": True}
+        self.assertEqual(mc.consolidate(self.root, "acme", "cmo", engine=self.fake(cut)), "rejected")
+        self.assertEqual(self.path.read_text(), self.before_text)
+        self.assertEqual(len(job_ledger.records(self.root)), 1)  # it still spent
+
     def test_code_fences_are_stripped(self):
         got = mc.check(memory.entries("cmo", "acme", self.root), "```\n" + self.merged + "```\n")
         self.assertEqual(len(got), 200)

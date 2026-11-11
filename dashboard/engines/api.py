@@ -509,12 +509,13 @@ class ApiEngine(Engine):
 
     # ---- one-shot jobs ------------------------------------------------- #
     def _one_shot(self, prompt, stdin_text, model):
-        """Zero tools, nothing stored. Returns (text, raw usage, resolved model)."""
+        """Zero tools, nothing stored. Returns (text, raw usage, resolved model, truncated):
+        truncated when the reply stopped at the token limit."""
         model = self.resolve_model(model)
         if not model:
             raise ProviderError(f"{self.label} has no model set")
         content = f"{stdin_text}" if stdin_text else "Begin."
-        out, usage = [], {}
+        out, usage, stop = [], {}, None
         if self.provider.get("format") == "anthropic":
             payload = {"model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": prompt,
                        "messages": [{"role": "user", "content": content}]}
@@ -533,9 +534,10 @@ class ApiEngine(Engine):
                         n = (ev.get("usage") or {}).get("output_tokens")
                         if isinstance(n, int):
                             usage["output_tokens"] = usage.get("output_tokens", 0) + n
+                        stop = (ev.get("delta") or {}).get("stop_reason") or stop
                     elif et == "error":
                         raise ProviderError(str((ev.get("error") or {}).get("message", "stream error")))
-            return "".join(out), usage, model
+            return "".join(out), usage, model, stop == "max_tokens"
         payload = {"model": model, "stream": True, "stream_options": {"include_usage": True},
                    "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}]}
         with self._open("/chat/completions", payload) as resp:
@@ -555,7 +557,8 @@ class ApiEngine(Engine):
                     text = (choice.get("delta") or {}).get("content")
                     if text:
                         out.append(text)
-        return "".join(out), usage, model
+                    stop = choice.get("finish_reason") or stop
+        return "".join(out), usage, model, stop == "length"
 
     def complete(self, prompt, stdin_text, model):
         """Zero tools, nothing stored: generate.py jobs. Returns the reply text."""
@@ -564,9 +567,10 @@ class ApiEngine(Engine):
     def complete_metered(self, prompt, stdin_text, model):
         """`complete` plus its usage and cost (estimated from the price table when the
         provider reports none)."""
-        text, usage, model = self._one_shot(prompt, stdin_text, model)
+        text, usage, model, truncated = self._one_shot(prompt, stdin_text, model)
         done = self._done([text], usage, model)[1]
-        return {"text": text, "model": model, "usage": done["usage"], "cost": done["cost"]}
+        return {"text": text, "model": model, "usage": done["usage"], "cost": done["cost"],
+                "truncated": truncated}
 
     def status(self):
         p = self.provider

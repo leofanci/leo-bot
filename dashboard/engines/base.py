@@ -113,9 +113,9 @@ class Engine:
         raise EngineRefused(f"{self.label} cannot run generation jobs.")
 
     def complete_metered(self, prompt, stdin_text, model):
-        """Like `complete`, plus what it spent: {"text", "model", "usage", "cost"}
-        (usage and cost None when the engine reports none). Background jobs use it,
-        so their spend counts against caps."""
+        """Like `complete`, plus what it spent: {"text", "model", "usage", "cost", "truncated"}
+        (usage and cost None when the engine reports none; truncated True when the reply
+        stopped at the token limit). Background jobs use it, so their spend counts against caps."""
         raise EngineRefused(f"{self.label} cannot run generation jobs.")
 
     def status(self):

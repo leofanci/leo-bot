@@ -227,13 +227,17 @@ class Anthropic(Base):
         self.assertEqual(body["system"], "PROMPT")
         self.assertEqual(body["messages"][0]["content"], "INPUT")
 
-
     def test_complete_metered_reads_usage(self):
         self.fake.replies = [anthropic_text("tidy")]
         got = self.engine.complete_metered("PROMPT", "INPUT", "haiku")
         self.assertEqual((got["text"], got["usage"]["in"], got["usage"]["out"], got["model"]),
                          ("tidy", 10, 5, "m-fast"))
         self.assertNotIn("tools", self.fake.requests[0]["body"])
+        self.assertFalse(got["truncated"])
+
+    def test_complete_metered_flags_a_reply_cut_at_the_token_limit(self):
+        self.fake.replies = [anthropic_text("half a li", stop="max_tokens")]
+        self.assertTrue(self.engine.complete_metered("PROMPT", "INPUT", "haiku")["truncated"])
 
 
 class OpenAI(Base):
@@ -244,6 +248,13 @@ class OpenAI(Base):
         got = self.engine.complete_metered("PROMPT", "INPUT", "haiku")
         self.assertEqual((got["text"], got["usage"]["in"], got["usage"]["out"]), ("tidy", 7, 3))
         self.assertTrue(self.fake.requests[0]["body"]["stream_options"]["include_usage"])
+        self.assertFalse(got["truncated"])
+
+    def test_complete_metered_flags_a_reply_cut_at_the_token_limit(self):
+        cut = [{"choices": [{"delta": {"content": "half a li"}}]},
+               {"choices": [{"delta": {}, "finish_reason": "length"}]}]
+        self.fake.replies = [cut]
+        self.assertTrue(self.engine.complete_metered("PROMPT", "INPUT", "haiku")["truncated"])
 
     def test_tool_loop_and_usage(self):
         self.fake.replies = [openai_tool("osctl", {"args": ["get-project"]}), openai_text("done")]

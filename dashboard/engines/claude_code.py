@@ -416,7 +416,8 @@ class ClaudeCodeEngine(Engine):
             raise RuntimeError("claude returned no JSON result")
         used = [m for m in (obj.get("modelUsage") or {}) if isinstance(m, str)]
         return {"text": done["result"] or "", "model": used[0] if len(used) == 1 else model,
-                "usage": done["usage"], "cost": done["cost"]}
+                "usage": done["usage"], "cost": done["cost"],
+                "truncated": obj.get("stop_reason") == "max_tokens"}
 
     def status(self):
         path = shutil.which(self.claude_bin)

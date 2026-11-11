@@ -177,6 +177,12 @@ class Recall(TempRoot):
         self.assertTrue((self.root / "database" / "data" / "os.db").exists())
         self.assertIn("memory entries", out.getvalue())
 
+    def test_index_py_survives_a_memory_index_os_error(self):
+        with mock.patch.object(memory, "rebuild_index", side_effect=PermissionError("read-only")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            index.build(self.root)
+        self.assertIn("skipped (read-only)", out.getvalue())
+
     def test_index_py_rebuilds_memory(self):
         memory.remember("cmo", "pricing anchor", "acme", self.root)
         memory.remember("cmo", "team note", "acme", self.root, shared=True)
@@ -236,6 +242,16 @@ class Card(TempRoot):
         self.assertIn("team pricing rule", text)
         self.assertNotIn("49 euros", text)
         self.assertNotIn("remember --bot", text)
+
+    def test_shared_hq_card_never_reads_private_memory(self):
+        # Nobody joins HQ; if a thread there were ever shared, the owner's HQ memory stays out.
+        memory.remember("cos", "pricing secret", None, self.root, type="decision")
+        team = bots.team(self.root, bots.HQ, None)
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cos", None, None, fresh=True, shared=True, query="pricing")
+        self.assertNotIn("pricing secret", text)
+        self.assertNotIn("remember --bot", text)
+        self.assertIn("Your memory (HQ): nothing pinned or matching.", text)
 
     def test_empty_card_still_names_recall(self):
         team = bots.team(self.root, "acme", {"slug": "acme"})
