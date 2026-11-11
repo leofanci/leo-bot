@@ -176,3 +176,23 @@ class Caps(unittest.TestCase):
         with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
             self.assertIsNone(spend.near_notice("acme", "owner", self.root))
             self.assertFalse((self.root / "team" / "cap_notices.json").exists())
+
+    def test_workspace_notice_reaches_owner_after_a_person(self):
+        from dashboard import spend
+        self.save_rows([{"ts": time.time(), "by": "p1", "cost": 4.5, "ws": "acme"}])
+        with self.env(LEOBOT_WORKSPACE_DAILY_CAP="5"):
+            self.assertIsNotNone(spend.near_notice("acme", "p1", self.root))
+            self.assertIsNotNone(spend.near_notice("acme", "owner", self.root))
+            self.assertIsNone(spend.near_notice("acme", "owner", self.root))
+
+    def test_one_scan_per_check(self):
+        from dashboard import spend
+        calls = []
+
+        def records():
+            calls.append(1)
+            return iter([{"spend": [{"ts": time.time(), "by": "owner", "cost": 1.0, "ws": "acme"}]}])
+        with self.env(LEOBOT_WORKSPACE_DAILY_CAP="5", LEOBOT_OWNER_DAILY_CAP="5"):
+            spend.refusal("acme", "owner", records=records)
+            spend.near_notice("acme", "owner", self.root, records=records)
+        self.assertEqual(len(calls), 2)

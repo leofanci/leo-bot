@@ -250,6 +250,13 @@ class CapWiring(AskHarness):
             refused = server._cap_refusal("acme", "p1", pending=0.02)
         self.assertIn("allowance", refused)
 
+    def test_zero_model_reply_not_refused(self):
+        self.seed_spend(owner=6.0, ws="acme")
+        with env(LEOBOT_OWNER_DAILY_CAP="5"):
+            out, _ = self.ask("save a positioning memo for acme", "should not run")
+        self.assertNotIn("daily cap", out)  # the tag-gate hint costs nothing
+        self.assertEqual(self.engine_calls, 0)
+
     def test_ui_handles_notice(self):
         self.assertIn("if (obj.notice)", JS)
         self.assertIn("m.notices", JS)

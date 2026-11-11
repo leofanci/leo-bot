@@ -2466,10 +2466,6 @@ class Handler(BaseHTTPRequestHandler):
                                                 apps=bool(app_turn)))
         except EngineRefused as e:
             return self._sse_message(str(e))
-        if engine.kind != "runner":  # a person's own Mac is never capped
-            capped = spend.refusal(ws, sender, records=chat_store.records)
-            if capped:
-                return self._sse_message(capped)
         sess.engine = engine
         locked = shared or engine.kind == "runner"
         sess.shared = locked
@@ -2518,6 +2514,11 @@ class Handler(BaseHTTPRequestHandler):
                 "once inside the folder, then use /tokensave again. No model turn was spent."
             )
             return self._sse_message(message)
+        # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
+        if engine.kind != "runner":  # a person's own Mac is never capped
+            capped = spend.refusal(ws, sender, records=chat_store.records)
+            if capped:
+                return self._sse_message(capped)
         tokensave_task = re.sub(
             r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
         ).replace("\x00", "").strip()[:tokensave_bridge.MAX_QUERY_CHARS]

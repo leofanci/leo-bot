@@ -31,21 +31,23 @@ def cap_value(kind):
     return value if math.isfinite(value) and value > 0 else 0.0
 
 
-def spent(kind, key=None, now=None, records=None):
-    """(total over the last 24 hours, ts of the oldest counted row or None).
-    `owner` counts rows by the owner; `workspace` counts rows with ws == key.
-    `records` = the saved-thread source (default chat_store.records; the server passes
-    its own chat_store copy, imported as a top-level module)."""
-    now = time.time() if now is None else now
+def _counts(kind, key, row):
+    if kind == "owner":
+        return row.get("by") == "owner"
+    return bool(key) and row.get("ws") == key
+
+
+def _spent_many(caps, now, records=None):
+    """[(total, oldest ts or None)] for each (kind, key, ...) in `caps`, in one pass over the
+    saved threads. `records` = the saved-thread source (default chat_store.records; the server
+    passes its own chat_store copy, imported as a top-level module)."""
     cutoff = now - WINDOW
-    total, oldest = 0.0, None
+    out = [[0.0, None] for _ in caps]
+    if not caps:
+        return out
     for rec in (records or chat_store.records)():
         for row in rec.get("spend") or ():
             if not isinstance(row, dict):
-                continue
-            if kind == "owner" and row.get("by") != "owner":
-                continue
-            if kind == "workspace" and (not key or row.get("ws") != key):
                 continue
             try:
                 ts, cost = float(row.get("ts") or 0), float(row.get("cost") or 0)
@@ -53,9 +55,17 @@ def spent(kind, key=None, now=None, records=None):
                 continue
             if ts < cutoff or ts > now or cost <= 0:
                 continue
-            total += cost
-            oldest = ts if oldest is None else min(oldest, ts)
-    return total, oldest
+            for slot, cap in zip(out, caps):
+                if _counts(cap[0], cap[1], row):
+                    slot[0] += cost
+                    slot[1] = ts if slot[1] is None else min(slot[1], ts)
+    return [tuple(x) for x in out]
+
+
+def spent(kind, key=None, now=None, records=None):
+    """(total over the last 24 hours, ts of the oldest counted row or None).
+    `owner` counts rows by the owner; `workspace` counts rows with ws == key."""
+    return _spent_many([(kind, key)], time.time() if now is None else now, records)[0]
 
 
 def _money(value):
@@ -76,8 +86,8 @@ def refusal(ws, by, now=None, pending=0.0, records=None):
     """Text that stops a run when a cap is reached, else None. `pending` is what this
     message already spent but has not saved yet (the turn is saved when it ends)."""
     now = time.time() if now is None else now
-    for kind, key, cap in _caps(ws, by):
-        total, oldest = spent(kind, key, now, records)
+    caps = _caps(ws, by)
+    for (kind, key, cap), (total, oldest) in zip(caps, _spent_many(caps, now, records)):
         if total + (pending or 0) < cap:
             continue
         at = time.localtime((oldest if oldest is not None else now) + WINDOW)
@@ -105,12 +115,14 @@ def near_notice(ws, by, root, now=None, pending=0.0, records=None):
     The last notice time is kept in team/cap_notices.json, so a restart does not repeat it.
     `pending` = this message's spend, not saved yet."""
     now = time.time() if now is None else now
-    for kind, key, cap in _caps(ws, by):
-        total, _ = spent(kind, key, now, records)
+    caps = _caps(ws, by)
+    for (kind, key, cap), (total, _) in zip(caps, _spent_many(caps, now, records)):
         share = (total + (pending or 0)) / cap
         if share < NEAR:
             continue
-        slot = "owner" if kind == "owner" else f"ws:{key}"
+        # Per cap and per person who sees it: the owner still hears of a workspace cap
+        # an invited person brought near.
+        slot = "owner" if kind == "owner" else f"ws:{key}:{by}"
         with _LOCK:
             seen = _load_notices(root)
             try:
