@@ -1,0 +1,179 @@
+"""Live evals: a few known-answer prompts sent to a real engine, on request only (they spend).
+
+The turns run in a throwaway home folder (a child process with its own LEOBOT_HOME), so nothing
+a bot saves reaches your data. The engine settings are copied there for the run and deleted with
+it. Each run is saved to <home>/evals/ and compared with the one before: which cases changed
+and what the run cost.
+
+    python -m evals --live [--engine ID] [--case ID ...] [--yes]
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+from evals import turns
+
+CASES = Path(__file__).parent / "cases" / "live.json"
+_LIVE_KEYS = ("mentions", "max_chars", "max_bullets", "teammates_include")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
+KEEP_RUNS = 20
+
+
+def load(path=CASES):
+    cases = json.loads(Path(path).read_text(encoding="utf-8"))
+    for c in cases:
+        std = {k: v for k, v in (c.get("expect") or {}).items() if k not in _LIVE_KEYS}
+        turns.load_check({**c, "expect": std})
+    return cases
+
+
+def grade(case, outcome):
+    """Failure lines: the turn checks, plus what only a real reply can show."""
+    expect = case.get("expect") or {}
+    fails = turns.check({"expect": {k: v for k, v in expect.items() if k not in _LIVE_KEYS}}, outcome)
+    reply = outcome.get("reply") or ""
+    if "mentions" in expect and not any(s.lower() in reply.lower() for s in expect["mentions"]):
+        fails.append(f"mentions: none of {expect['mentions']!r} in the reply")
+    if "max_chars" in expect and len(reply) > expect["max_chars"]:
+        fails.append(f"max_chars: reply is {len(reply)} characters, over {expect['max_chars']}")
+    if "max_bullets" in expect:
+        n = len(_BULLET_RE.findall(reply))
+        if n > expect["max_bullets"]:
+            fails.append(f"max_bullets: {n} bullets, over {expect['max_bullets']}")
+    missing = set(expect.get("teammates_include") or ()) - set(outcome.get("teammates") or ())
+    if missing:
+        fails.append(f"teammates_include: {sorted(missing)} not consulted")
+    return fails
+
+
+def _child(args):
+    """Inside the throwaway home: run each case on the real engine, write the results."""
+    from core import paths
+    results = []
+    for case in load():
+        if args.case and case["id"] not in args.case:
+            continue
+        started = time.time()
+        try:
+            outcome = turns.run(case, live_root=paths.DATA)
+            fails = grade(case, outcome)
+        except Exception as e:  # noqa: BLE001 - one broken case must not lose the others
+            outcome, fails = {}, [f"crashed: {type(e).__name__}: {e}"]
+        results.append({"id": case["id"], "pass": not fails, "fails": fails,
+                        "cost": outcome.get("cost") or 0, "engine": outcome.get("engine"),
+                        "model": outcome.get("model"), "seconds": round(time.time() - started, 1),
+                        "reply": (outcome.get("reply") or "")[:2000]})
+        print(f"{'ok  ' if not fails else 'FAIL'} {case['id']}", file=sys.stderr, flush=True)
+    Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")
+    return 0
+
+
+def compare(now, last):
+    """Scorecard lines for this run, against the last one when there is one."""
+    before = {r["id"]: r for r in (last or {}).get("results") or []}
+    lines = []
+    for r in now["results"]:
+        was = before.get(r["id"])
+        change = ""
+        if was and was["pass"] != r["pass"]:
+            change = "  (was passing)" if was["pass"] else "  (was failing)"
+        lines.append(f"{'ok  ' if r['pass'] else 'FAIL'} {r['id']}  ${r['cost']:.4f}  {r['seconds']}s{change}")
+        lines += [f"     {f}" for f in r["fails"]]
+    total = sum(r["cost"] for r in now["results"])
+    passed = sum(r["pass"] for r in now["results"])
+    line = f"{passed}/{len(now['results'])} passed, ${total:.4f} estimated on {now.get('engine') or '?'}"
+    if last:
+        line += (f" (last run {last.get('when', '?')}: {sum(r['pass'] for r in last['results'])}/"
+                 f"{len(last['results'])}, ${sum(r['cost'] for r in last['results']):.4f})")
+    return "\n".join(lines + [line])
+
+
+def _runs_dir():
+    from core import paths
+    return paths.HOME / "evals"
+
+
+def last_run(folder):
+    files = sorted(Path(folder).glob("live-*.json"))
+    if not files:
+        return None
+    try:
+        return json.loads(files[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def save_run(folder, run):
+    folder = Path(folder)
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = folder / f"live-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    path.write_text(json.dumps(run, indent=1), encoding="utf-8")
+    path.chmod(0o600)
+    for old in sorted(folder.glob("live-*.json"))[:-KEEP_RUNS]:
+        old.unlink(missing_ok=True)
+    return path
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="python -m evals --live", description="Run live evals on a real engine.")
+    ap.add_argument("--engine", help="engine id to use (default: your default engine)")
+    ap.add_argument("--case", action="append", help="run only this case id (repeatable)")
+    ap.add_argument("--yes", action="store_true", help="do not ask before spending")
+    ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--out", help=argparse.SUPPRESS)
+    args = ap.parse_args(argv)
+    if args.child:
+        return _child(args)
+
+    from core import paths
+    from dashboard.engines import config, registry
+    cases = [c for c in load() if not args.case or c["id"] in args.case]
+    unknown = set(args.case or ()) - {c["id"] for c in cases}
+    if unknown or not cases:
+        print(f"Unknown case: {', '.join(sorted(unknown)) or '(none selected)'}", file=sys.stderr)
+        return 2
+    settings = config.load(paths.DATA)
+    engine = args.engine or registry.default_id(settings)
+    if not args.yes:
+        answer = input(f"Live evals send {len(cases)} prompts (plus any teammate turns) to {engine}, "
+                       "billed to your account. Continue? [y/N] ")
+        if answer.strip().lower() not in ("y", "yes"):
+            print("Nothing was sent.")
+            return 1
+    with tempfile.TemporaryDirectory(prefix="leobot-eval-home-") as home:
+        team = Path(home) / "data" / "team"
+        team.mkdir(parents=True)
+        src = paths.DATA / "team" / "engines.json"
+        data = json.loads(src.read_text(encoding="utf-8")) if src.exists() else {}
+        data["default"] = engine
+        data["workspaces"], data["bots"] = {}, {}  # the fixture workspace runs on `engine`
+        copy = team / "engines.json"
+        copy.touch(mode=0o600)
+        copy.write_text(json.dumps(data), encoding="utf-8")
+        out = Path(home) / "results.json"
+        cmd = [sys.executable, "-m", "evals.live", "--child", "--out", str(out)]
+        for c in args.case or ():
+            cmd += ["--case", c]
+        proc = subprocess.run(cmd, cwd=str(paths.CODE), env={**os.environ, "LEOBOT_HOME": home})
+        if proc.returncode != 0 or not out.exists():
+            print("The live run stopped before it finished; see the error above.", file=sys.stderr)
+            return 1
+        results = json.loads(out.read_text(encoding="utf-8"))
+        shutil.rmtree(team, ignore_errors=True)  # the key copy goes first, before the folder
+    run = {"when": time.strftime("%Y-%m-%d %H:%M"), "engine": engine, "results": results}
+    folder = _runs_dir()
+    last = last_run(folder)
+    save_run(folder, run)
+    print(compare(run, last))
+    return 0 if all(r["pass"] for r in results) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

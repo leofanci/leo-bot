@@ -197,10 +197,12 @@ def forget(bot_id, line, project=None, root=ROOT, shared=False):
 # --------------------------------------------------------------------------- #
 # Recall: a derived FTS5 index, one row per entry.
 # --------------------------------------------------------------------------- #
+# porter: "deals" finds "deal", "hiring" finds "hire" (measured by evals/recall.py).
+_TOKENIZE = "porter unicode61 remove_diacritics 2"
 _SCHEMA = (
     "CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5(path UNINDEXED, workspace UNINDEXED,"
     " scope UNINDEXED, bot UNINDEXED, date UNINDEXED, type UNINDEXED, line UNINDEXED, text,"
-    " tokenize='unicode61 remove_diacritics 2')",
+    f" tokenize='{_TOKENIZE}')",
     "CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY, mtime_ns INTEGER, size INTEGER)",
 )
 
@@ -221,6 +223,11 @@ def _connect(root):
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db, timeout=5)
     try:
+        row = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'entries'").fetchone()
+        if row and _TOKENIZE not in (row[0] or ""):  # an index from an older tokenizer: rebuilt
+            with conn:
+                conn.execute("DROP TABLE entries")
+                conn.execute("DROP TABLE IF EXISTS files")
         for stmt in _SCHEMA:
             conn.execute(stmt)
         conn.execute("SELECT count(*) FROM files").fetchone()
@@ -315,8 +322,25 @@ def rebuild_index(root=ROOT):
     return _with_index(root, build)
 
 
+# Words that match nearly every entry: a query keeps them only when it has nothing else.
+_STOPWORDS = frozenset(
+    "a about all an and any anyone are as at be been but by can could did do does doing for from "
+    "get go going got had has have how i if in into is it its just me my now of on or our ours "
+    "please should so still than that the their them then there these they this those to up us "
+    "was we were what whats when where which who why will with would you your".split())
+
+
 def _words(query):
-    return [w for w in re.findall(r"\w+", (query or "").lower()) if len(w) >= 2][:20]
+    words = [w for w in re.findall(r"\w+", (query or "").lower()) if len(w) >= 2]
+    return ([w for w in words if w not in _STOPWORDS] or words)[:20]
+
+
+def _stem(word):
+    """A rough stem for the substring scan (no FTS5): "hiring" finds "hire"."""
+    for suffix in ("ing", "es", "ed", "s"):
+        if len(word) - len(suffix) >= 3 and word.endswith(suffix):
+            return word[:-len(suffix)]
+    return word
 
 
 def _fts(path, root, words, limit):
@@ -334,9 +358,10 @@ def _fts(path, root, words, limit):
 
 def _scan(path, words, limit):
     scored = []
+    stems = [_stem(w) for w in words]
     for i, e in enumerate(_read(path)):
         text = e.text.lower()
-        score = sum(w in text for w in words)
+        score = sum(s in text for s in stems)
         if score:
             scored.append((-score, -i, e.line))
     return [line for *_, line in sorted(scored)[:limit]]
