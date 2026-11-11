@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 
+from dashboard.engines import prices
 from dashboard.engines.base import Engine, SessionLost, drain, stop_child
 from dashboard.engines.claude_code import (
     APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
@@ -47,7 +48,9 @@ def parse_event(obj):
     elif t == "turn.completed":
         usage = obj.get("usage") or {}
         tokens = sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens"))
-        return [("done", {"result": None, "subtype": "success", "tokens": tokens, "cost": None})]
+        cached = int(usage.get("cached_input_tokens") or 0)
+        parts = prices.usage(int(usage.get("input_tokens") or 0) - cached, 0, cached, usage.get("output_tokens"))
+        return [("done", {"result": None, "subtype": "success", "tokens": tokens, "cost": None, "usage": parts})]
     elif t == "error":
         return [("error", str(obj.get("message") or "Codex failed"))]
     elif t == "turn.failed":

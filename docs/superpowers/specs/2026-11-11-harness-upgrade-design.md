@@ -55,12 +55,13 @@ summed `tokens` number. Keep the parts instead, mapped per engine:
   the cached part as `cache_read`, `completion_tokens` as `out`.
 - ACP: no usage; the reply is marked `metered: false`.
 
-Each assistant reply's metadata gains: `engine`, `model`, `skill`, `tokens` as
-`{in, cache_write, cache_read, out}`, `cost`, `reason` (a short code from `_pick_model` such as
-`read-turn`, `explicit-skill`, `web`, `edit-turn`, `skill-thread`, `default`) and `job` (Phase 3,
-else empty). When an engine reports no cost but the model is in the price table (`PRICES` in the
-API engine, moved to a shared module), the cost is estimated from the token parts. Old replies
-whose `tokens` is a number still sum as today.
+Each assistant reply's metadata gains: `engine`, `model`, `skill`, `usage` as
+`{in, cache_write, cache_read, out}` (`tokens` stays the summed number, since the UI and old
+threads read it), `cost`, `reason` (a short code from `_pick_model` such as `explicit-read`,
+`explicit-skill`, `web`, `edit-turn`, `skill-thread`, `default`) and `job` (Phase 3, else empty).
+When an engine reports no cost but the model is in the price table (`PRICES` in the API engine,
+moved to a shared module), the cost is estimated from the token parts. Old replies without
+`usage` still sum as today.
 
 On the owner's Claude Code login, `total_cost_usd` is a list-price estimate, not a bill. The
 dashboard labels it "estimated"; caps act on the same estimate.

@@ -1,0 +1,28 @@
+"""prices.py: list prices and the cost estimate for engines that report tokens but no cost.
+
+Usage is the four token parts every engine's done payload carries:
+{"in", "cache_write", "cache_read", "out"}. `in` is input not read from cache.
+"""
+
+# USD per million tokens (input, output, cache read). Cache writes cost input * 1.25.
+PRICES = {"claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+          "claude-opus-5-5": (4.0, 20.0, 0.20)}
+CACHE_WRITE_FACTOR = 1.25
+
+
+def usage(fresh=0, cache_write=0, cache_read=0, out=0):
+    """The usage dict, with every part a non-negative int."""
+    return {"in": max(0, int(fresh or 0)), "cache_write": max(0, int(cache_write or 0)),
+            "cache_read": max(0, int(cache_read or 0)), "out": max(0, int(out or 0))}
+
+
+def estimate(model, parts):
+    """Estimated USD for one reply, or None when the model is unpriced or usage is missing."""
+    price = PRICES.get(model or "")
+    if not price or not isinstance(parts, dict):
+        return None
+    p_in, p_out, p_cache = price
+    return ((int(parts.get("in") or 0) * p_in
+             + int(parts.get("cache_write") or 0) * p_in * CACHE_WRITE_FACTOR
+             + int(parts.get("cache_read") or 0) * p_cache
+             + int(parts.get("out") or 0) * p_out) / 1_000_000)

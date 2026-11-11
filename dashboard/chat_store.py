@@ -253,8 +253,9 @@ def recap(rec, engine_id=None):
 
 
 def kept(m):
-    """A message with no text still worth saving: it holds an approval, deliverables or spend."""
-    return any(m.get(k) for k in ("approval", "deliverables", "tokens", "cost"))
+    """A message with no text still worth saving: it holds an approval, deliverables, spend
+    or a cap notice."""
+    return any(m.get(k) for k in ("approval", "deliverables", "tokens", "cost", "notices"))
 
 
 def _paths(value):
@@ -262,7 +263,7 @@ def _paths(value):
 
 
 def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
-                by=None, by_name=None, shared=False, reactions=None, asked_at=None):
+                by=None, by_name=None, shared=False, reactions=None, asked_at=None, ws=None):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
@@ -275,7 +276,8 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     the chat keeps `shared` only while every turn did, so a thread with any
     full-tool history (file reads in its session) never reaches people.
     `reactions` = [(bot_id, emoji)] the bots of this turn put on `user_msg`;
-    `asked_at` = when `user_msg` was sent (default: now).
+    `asked_at` = when `user_msg` was sent (default: now);
+    `ws` = the workspace the turn ran in, kept on its spend row for workspace caps.
     A reply with no text (only an emoji, or only an approval) is still kept when it
     carries an approval, deliverables or spend: cost roll-ups read the messages."""
     rec = load(sess.session_id) or {
@@ -317,7 +319,8 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
         turn_cost += part.get("cost") or 0
     if turn_cost:  # per-turn ledger, so a person's recent spend can be summed
         rec["spend"] = ((rec.get("spend") or [])[-200:]
-                        + [{"ts": time.time(), "by": by or "owner", "cost": turn_cost}])
+                        + [{"ts": time.time(), "by": by or "owner", "cost": turn_cost,
+                            **({"ws": ws} if ws else {})}])
     rec.update({
         "updated": time.time(),
         "scope": list(scope) if scope else None,

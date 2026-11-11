@@ -136,6 +136,22 @@ bots all react. A bot reacts to the message it answers with one line `REACT: ðŸ‘
 reply, and a reply of only that line shows as the emoji alone. Bots see people's reactions
 as context on their next turn; a reaction never triggers an action.
 
+### Spending caps
+
+Every reply records its tokens, model, skill and estimated cost; the Team screen shows
+where spend went (by model, skill, engine and day). Three caps, in dollars per rolling
+24 hours, set as environment variables on the machine running Leo Bot:
+
+- `LEOBOT_PERSON_DAILY_CAP`: each invited person's turns. Default 5.
+- `LEOBOT_WORKSPACE_DAILY_CAP`: every turn in one workspace. Default off.
+- `LEOBOT_OWNER_DAILY_CAP`: your own turns, across workspaces. Default off.
+
+A cap is checked before every engine run, teammates and follow-ups included: a capped
+message never starts the engine and says when room frees up. At 80% of a cap you get
+one heads-up a day. Costs are estimates from list prices when an engine reports none;
+engines that report neither cost nor a known model are counted on the Team screen but
+not toward caps. Turns on your own Mac (runners) never count. `0` turns a cap off.
+
 ### Dashboard (macOS app)
 
 The app's launcher binary is not committed: build it from source once after cloning. With the repo hooks enabled (`git config core.hooksPath .githooks`), every pull or checkout that changes the app's source rebuilds it automatically.

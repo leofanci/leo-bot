@@ -53,9 +53,10 @@ import os_relay          # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
-from dashboard.engines import api as engine_api, config as engine_config, registry as engine_registry  # noqa: E402
+from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
+from dashboard import costs, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -828,7 +829,13 @@ def _turn_folders(ws, room, bot_id, *, locked, may_edit, drop_edit, engine):
 
 
 def _pick_model(skill, web, user_msg="", session=None, *, explicit=False, editing=False):
-    """Sonnet on explicit /skill, /web, or while an explicit-skill thread is
+    """The model for a turn; see _pick_model_reason."""
+    return _pick_model_reason(skill, web, user_msg, session, explicit=explicit, editing=editing)[0]
+
+
+def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False, editing=False):
+    """(model, reason): the reason is a short code saved on the reply for the cost report.
+    Sonnet on explicit /skill, /web, or while an explicit-skill thread is
     still active. The active-thread check is deliberately broader than
     _continuation_allowed's fixed phrase list ("yes"/"save"/...): a natural
     clarifying-answer reply mid-skill (e.g. "the segment is small businesses")
@@ -839,20 +846,35 @@ def _pick_model(skill, web, user_msg="", session=None, *, explicit=False, editin
     may change an edit folder takes the stronger model when it asks for a change."""
     msg = (user_msg or "").strip()
     if editing and (_WRITE_TURN_RE.search(msg) or _EDIT_WORD_RE.search(msg)):
-        return chat_session.ESCALATED_MODEL
+        return chat_session.ESCALATED_MODEL, "edit-turn"
     if skill == "tokensave" and not web:
-        return chat_session.CHAT_MODEL
+        return chat_session.CHAT_MODEL, "tokensave"
     if web:
-        return chat_session.ESCALATED_MODEL
+        return chat_session.ESCALATED_MODEL, "web"
     if skill and explicit:
         if _READ_TURN_RE.search(msg) and not _WRITE_TURN_RE.search(msg):
-            return chat_session.CHAT_MODEL
-        return chat_session.ESCALATED_MODEL
+            return chat_session.CHAT_MODEL, "explicit-read"
+        return chat_session.ESCALATED_MODEL, "explicit-skill"
     if _in_active_skill_thread(session):
         if _READ_TURN_RE.search(msg) and not _WRITE_TURN_RE.search(msg) and not _CONTINUATION_RE.search(msg):
-            return chat_session.CHAT_MODEL
-        return chat_session.ESCALATED_MODEL
-    return chat_session.CHAT_MODEL
+            return chat_session.CHAT_MODEL, "skill-thread-read"
+        return chat_session.ESCALATED_MODEL, "skill-thread"
+    return chat_session.CHAT_MODEL, "default"
+
+
+PERSON_CAP_TEXT = ("You have used today's allowance for this workspace. "
+                   "Try again tomorrow, or ask the owner to raise it.")
+
+
+def _cap_refusal(ws, by, pending=0.0):
+    """Text that stops the next engine run of a message, else None: an invited person's
+    allowance, then the workspace and owner caps. `pending` = what the message already
+    spent (it is saved when the message ends). Runner turns never come here."""
+    if by != "owner":
+        cap = chat_store.person_daily_cap()
+        if cap and chat_store.spent_since(by) + (pending or 0) >= cap:
+            return PERSON_CAP_TEXT
+    return spend.refusal(ws, by, pending=pending, records=chat_store.records)
 
 
 def _tag_gate_message(suggest, team=None):
@@ -1286,23 +1308,8 @@ SHARED_NOTE = (
 
 
 def _costs(ws, projects, days=30):
-    """Estimated spend + tokens per bot (and total) in a workspace over `days`;
-    HQ covers every workspace. Read from the saved threads' reply metadata."""
-    since = time.time() - days * 86400
-    spaces = {w["id"] for w in _workspaces(projects)}
-    per_bot, total = {}, {"cost": 0.0, "tokens": 0, "turns": 0}
-    for rec in chat_store.records():
-        if ws != bots.HQ and rooms.split_id(rooms.room_of_chat(rec, set(), spaces))[0] != ws:
-            continue
-        for m in rec.get("messages") or []:
-            if m.get("role") != "assistant" or (m.get("ts") or 0) < since:
-                continue
-            row = per_bot.setdefault(m.get("bot") or bots.ROOT_BOT, {"cost": 0.0, "tokens": 0, "turns": 0})
-            for agg in (row, total):
-                agg["cost"] += float(m.get("cost") or 0)
-                agg["tokens"] += int(m.get("tokens") or 0)
-                agg["turns"] += 1
-    return {"days": days, "bots": per_bot, "total": total}
+    """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
+    return costs.summarize(ws, chat_store.records(), {w["id"] for w in _workspaces(projects)}, days)
 
 
 def _known_ws(value, projects):
@@ -2415,8 +2422,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
         if person and chat_store.over_cap(person["id"]):
-            return self._sse_message("You have used today's allowance for this workspace. "
-                                     "Try again tomorrow, or ask the owner to raise it.")
+            return self._sse_message(PERSON_CAP_TEXT)
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
                 if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
         if chat_id:
@@ -2488,9 +2494,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         with_web = _needs_web(user_msg, skill) and not apps_used
-        model = (chat_session.ESCALATED_MODEL if app_turn
-                 else _pick_model(skill, with_web, user_msg, sess, explicit=bool(explicit),
-                                  editing=bool(may_edit and edit_dirs)))
+        model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
+                         else _pick_model_reason(skill, with_web, user_msg, sess, explicit=bool(explicit),
+                                                 editing=bool(may_edit and edit_dirs)))
 
         wants_file_search = _needs_workspace(user_msg, skill)
         wants_app_context = _needs_app_context(user_msg, skill, suggest)
@@ -2508,6 +2514,11 @@ class Handler(BaseHTTPRequestHandler):
                 "once inside the folder, then use /tokensave again. No model turn was spent."
             )
             return self._sse_message(message)
+        # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
+        if engine.kind != "runner":  # a person's own Mac is never capped
+            capped = spend.refusal(ws, sender, records=chat_store.records)
+            if capped:
+                return self._sse_message(capped)
         tokensave_task = re.sub(
             r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
         ).replace("\x00", "").strip()[:tokensave_bridge.MAX_QUERY_CHARS]
@@ -2610,9 +2621,28 @@ class Handler(BaseHTTPRequestHandler):
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
         web_domains = chat_session.user_web_domains(user_msg)
+        metered_turn = engine.kind != "runner"
+        cap_hit = []  # set once a cap stops this message: no further run, no 80% note
 
-        def run(s_, prompt_, model_, web_, msg, **kw):
-            """Stream one bot run into `msg` (content + usage)."""
+        def notice(text):
+            """A line under the latest reply; saved on it, so a reload keeps it."""
+            i = len(msgs) - 1
+            msgs[i].setdefault("notices", []).append(text)
+            emit({"notice": text, "msg": i})
+
+        def may_run():
+            """Before a teammate or follow-up run: the caps, counting what ran so far."""
+            if not metered_turn:
+                return True
+            text = _cap_refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs))
+            if text:
+                cap_hit.append(text)
+                notice(text)
+            return not text
+
+        def run(s_, prompt_, model_, web_, msg, skill_=None, reason_=None, **kw):
+            """Stream one bot run into `msg` (content + usage). A reply with no reported
+            cost gets one estimated from list prices; `metered` says whether it has one."""
             parts, fin, failed = [], {}, False
             eng = getattr(s_, "engine", None)
             model_ = eng.resolve_model(model_) if eng else model_
@@ -2629,10 +2659,18 @@ class Handler(BaseHTTPRequestHandler):
                     failed = True
                 elif kind == "done":
                     fin = payload or {}
-            msg.update(tokens=fin.get("tokens") or None, cost=fin.get("cost"), model=model_,
+            usage = fin.get("usage") if isinstance(fin.get("usage"), dict) else None
+            cost = fin.get("cost")
+            runner = bool(eng and eng.kind == "runner")
+            if cost is None and not runner:
+                cost = prices.estimate(model_, usage)
+            msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage,
+                       skill=skill_, reason=reason_,
                        engine=eng.id if eng else None, engine_label=eng.label if eng else None,
                        account=(person["id"] if person and eng and eng.kind == "runner"
                                 else "workspace" if person else "owner"))
+            if not runner:  # a person's own Mac: no cost, never counted
+                msg["metered"] = cost is not None
             if msg["tokens"] or msg["cost"]:
                 emit({"usage": {"tokens": msg["tokens"], "cost": msg["cost"], "model": model_,
                                 "engine": msg["engine"], "engine_label": msg["engine_label"]}})
@@ -2665,6 +2703,7 @@ class Handler(BaseHTTPRequestHandler):
             c_web = bool(with_web) and not apps_used  # app data in this thread
             c_model = (chat_session.ESCALATED_MODEL if (c_skill or c_web)
                        else chat_session.CHAT_MODEL)
+            c_reason = "teammate-skill" if c_skill else "teammate"
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, c_skill, shared=shared,
                                       folders_block=linked_workspace_prompt(project_slug, c_rows))
@@ -2677,7 +2716,7 @@ class Handler(BaseHTTPRequestHandler):
                                                                "shared": shared}),
                              "os_port": self.server.server_address[1]})
             try:
-                return run(c, prompt, c_model, c_web, msg, **c_kw)
+                return run(c, prompt, c_model, c_web, msg, skill_=c_skill, reason_=c_reason, **c_kw)
             finally:
                 _EXTRA[slot] = None
                 if c_kw.get("os_token"):
@@ -2709,7 +2748,8 @@ class Handler(BaseHTTPRequestHandler):
                       "project": project_scope[0] if project_scope else None})
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
-            lead_text = run(sess, text, model, with_web, msgs[0], **folder_kw, **apps_kw)
+            lead_kw = {"skill_": skill, "reason_": reason}
+            lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
@@ -2718,17 +2758,19 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"clean": lead_text, "msg": 0})
             answers = []
             for b2, question, asked_by in _plan_teammates(team, bot_id, handoff_from, user_msg, asks):
+                if not may_run():
+                    break
                 emit({"msg_start": {**_bot_info(team, b2), "asked_by": asked_by,
                                     "question": question if asked_by else None}})
                 m2 = {"bot": b2, "content": "", "asked_by": asked_by or "user"}
                 msgs.append(m2)
                 # The lead's follow-up reads the answer without its REACT line (m2 keeps it till below).
                 answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
-            if asks and answers:
+            if asks and answers and not cap_hit and may_run():
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
-                run(sess, _followup_prompt(team, answers), model, with_web, m3, **folder_kw, **apps_kw)
+                run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
             last = len(msgs) - 1
             if apps_kw.get("apps_token"):  # what the relay held this turn: cards in the thread
                 held = [r for r in approvals.pending(ROOT, ws)
@@ -2782,6 +2824,16 @@ class Handler(BaseHTTPRequestHandler):
                 _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)
             if apps_kw.get("os_token"):
                 os_relay.TOKENS.revoke(apps_kw["os_token"])
+            if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
+                try:
+                    near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
+                                             records=chat_store.records)
+                    if near:
+                        notice(near)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client left; the note is still saved on the reply
+                except (OSError, ValueError):
+                    traceback.print_exc()
             if isinstance(getattr(sess, "session_id", None), str):
                 try:
                     for m in msgs:  # a stopped turn: no marker line is ever saved
@@ -2795,7 +2847,7 @@ class Handler(BaseHTTPRequestHandler):
                         extra=msgs[1:],  # record_turn drops the empty ones
                         asked_at=turn_started,
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
-                        shared=shared, reactions=reacts)
+                        shared=shared, reactions=reacts, ws=ws)
                 except (OSError, ValueError):
                     traceback.print_exc()
             try:

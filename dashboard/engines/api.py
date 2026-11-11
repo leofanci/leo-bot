@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from dashboard.engines import prices
 from dashboard.engines.api_tools import ToolBox
 from dashboard.engines.base import Engine
 from dashboard.engines.claude_code import CHAT_MODEL, ESCALATED_MODEL
@@ -28,9 +29,7 @@ TURN_TIMEOUT = 900
 READ_TIMEOUT = 300
 RETRIES = 2
 HISTORY_CHARS = 400_000  # about 100k tokens; oldest messages go first, the first one stays
-# Current Anthropic prices, USD per million tokens (input, output, cache read). Other models report no cost.
-PRICES = {"claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-sonnet-5-5": (2.0, 10.0, 0.20),
-          "claude-opus-5-5": (4.0, 20.0, 0.20)}
+PRICES = prices.PRICES  # re-export; the table lives in prices.py
 # Backends the server plugs in (os_relay, apps_relay); generate.py jobs need none.
 BACKENDS = {}
 
@@ -303,14 +302,18 @@ class ApiEngine(Engine):
         tokens = sum(int(usage.get(k) or 0) for k in (
             "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
             "prompt_tokens", "completion_tokens"))
+        if "prompt_tokens" in usage or "completion_tokens" in usage:  # OpenAI-compatible: cached is inside prompt
+            cached = int(usage.get("cached_tokens") or 0)
+            split = prices.usage(int(usage.get("prompt_tokens") or 0) - cached, 0, cached,
+                                 usage.get("completion_tokens"))
+        else:
+            split = prices.usage(usage.get("input_tokens"), usage.get("cache_creation_input_tokens"),
+                                 usage.get("cache_read_input_tokens"), usage.get("output_tokens"))
         cost = usage.get("cost")
-        price = PRICES.get(model)
-        if cost is None and price:
-            cost = ((int(usage.get("input_tokens") or 0) * price[0]
-                     + int(usage.get("cache_read_input_tokens") or 0) * price[2]
-                     + int(usage.get("cache_creation_input_tokens") or 0) * price[0] * 1.25
-                     + int(usage.get("output_tokens") or 0) * price[1]) / 1_000_000)
-        return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost})
+        if cost is None:
+            cost = prices.estimate(model, split)
+        return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost,
+                         "usage": split})
 
     # ---- Anthropic Messages ------------------------------------------- #
     def _anthropic_tools(self, box, policy, model):
@@ -450,6 +453,10 @@ class ApiEngine(Engine):
                     if isinstance(u, dict):
                         for k in ("prompt_tokens", "completion_tokens"):
                             usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
+                        details = u.get("prompt_tokens_details")
+                        if isinstance(details, dict):
+                            usage["cached_tokens"] = (usage.get("cached_tokens", 0)
+                                                      + int(details.get("cached_tokens") or 0))
                         if u.get("cost") is not None:
                             usage["cost"] = (usage.get("cost") or 0) + float(u["cost"])
                     for choice in ev.get("choices") or []:

@@ -1222,6 +1222,25 @@ async function renderTeam(){
   let pv = null, link = "";
   const person = isPerson();
   const opened = new Set();  // bots whose details are open: kept across redraws
+  // Where the spend went: top models, skills and engines, the last 7 days, cache reads.
+  const tsLine = v => [fmtCost(v.cost), `${v.turns} ${v.turns === 1 ? "reply" : "replies"}`].filter(Boolean).join(" · ");
+  const spendDetails = c => {
+    const top = (groups, label) => {
+      const rows = Object.entries(groups || {}).sort((a, b) => b[1].cost - a[1].cost || b[1].turns - a[1].turns).slice(0, 5);
+      return rows.length ? `<div class="ts-group"><h4>${label}</h4>${rows.map(([k, v]) =>
+        `<div class="ts-row"><span>${esc(k === "-" ? "not recorded" : k)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : "";
+    };
+    const days = Object.entries(c.by_day || {}).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 7);
+    const lines = [
+      c.cache_read_share != null ? `Cache reads: ${Math.round(c.cache_read_share * 100)}% of input` : "",
+      c.unmetered ? `${c.unmetered} ${c.unmetered === 1 ? "reply" : "replies"} on engines that report no cost` : "",
+    ].filter(Boolean).map(x => `<small>${x}</small>`).join("");
+    return `<details class="team-spend"><summary>Where it went (est.)</summary>
+      ${top(c.by_model, "Models")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}
+      ${days.length ? `<div class="ts-group"><h4>Last 7 days</h4>${days.map(([d, v]) =>
+        `<div class="ts-row"><span>${esc(d)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : ""}
+      ${lines}</details>`;
+  };
   const draw = () => {
     const wsApps = Object.keys(integ.picked?.[_WS] || {}).sort();  // apps with an account ticked here
     const appName = slug => integ.apps_meta?.[slug]?.name || slug;
@@ -1265,7 +1284,7 @@ async function renderTeam(){
     const noApps = !person && integ.configured && (integ.connected || []).length && !wsApps.length
       ? `<div class="help">No app account is ticked for this workspace yet. Tick one in Settings, Integrations.</div>` : "";
     $("#team-list").innerHTML = peopleSection(pv, link) + noApps
-      + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>` : ""}
+      + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>${spendDetails(costs)}` : ""}
         <div class="rowc">${on.map(onRow).join("")}</div>
         ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}`;
     wirePeople();
@@ -4326,7 +4345,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
       // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
-      row.hidden = m.role !== "user" && !m.content && !row.querySelector(".approval-bar, .deliv-list");
+      row.hidden = m.role !== "user" && !m.content && !row.querySelector(".approval-bar, .deliv-list, .msg-notices");
       paintReactions(row, m.reactions);
     });
     renderAppCards();
@@ -4728,6 +4747,18 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const main = div.querySelector(".msg-main");
     main.querySelector(".deliv-list")?.remove();
     main.querySelector(".approval-bar")?.remove();
+    main.querySelector(".msg-notices")?.remove();
+    if (m.notices?.length) {   // spending cap notes, saved on the reply
+      const box = document.createElement("div");
+      box.className = "msg-notices";
+      m.notices.forEach(t => {
+        const chip = document.createElement("div");
+        chip.className = "tool-chip";
+        chip.textContent = t;
+        box.appendChild(chip);
+      });
+      main.appendChild(box);
+    }
     const usage = fmtUsage(m.tokens, m.cost);
     const via = m.engine_label ? `via ${m.engine_label}` : "";
     div.querySelector(".mh time").title = [usage && `${usage} (tokens · estimated cost)`, via].filter(Boolean).join(" · ");
@@ -4822,7 +4853,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     row.querySelector(".msg-main").appendChild(box);
   }
   // Function declarations only (hoisted): showChat, defined above, calls these.
-  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length); }
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length); }
   function reactPicker(){   // built on first use; its row and anchor live on the function
     if (reactPicker.el) return reactPicker.el;
     const el = reactPicker.el = document.createElement("div");
@@ -5277,6 +5308,12 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.app_actions) {
               obj.app_actions.forEach(a => { if (!_APPROVALS.some(x => x.id === a.id)) _APPROVALS.unshift(a); });
               heldThisTurn = true;
+            }
+            if (obj.notice) {   // a cap note: under the reply, never in place of it
+              const r = replyAt(obj.msg);
+              (r.meta.notices ||= []).push(obj.notice);
+              const row = r.bubble.closest(".msg");
+              decorateReply(row, r.meta); row.hidden = false;
             }
             if (obj.error) { bubble.innerHTML = formatChatText("Error: " + obj.error); reader.cancel().catch(() => {}); return; }
             if (obj.delta) {
