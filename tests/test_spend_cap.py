@@ -1,11 +1,15 @@
 import os
-import time
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from dashboard import chat_store
+
+# os_relay imports its dashboard siblings as top-level modules (as the server runs it).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dashboard"))
 
 
 class SpendCap(unittest.TestCase):
