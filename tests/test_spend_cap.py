@@ -14,18 +14,29 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dashboard"))
 
 class SpendCap(unittest.TestCase):
     def test_cap_counts_only_that_person_and_recent(self):
+        from dashboard import spend
         with tempfile.TemporaryDirectory() as d, mock.patch.object(chat_store, "CHATS_DIR", Path(d)):
-            import time
             cid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
             chat_store.save({"id": cid, "spend": [
                 {"ts": time.time(), "by": "p1", "cost": 4.0},
                 {"ts": time.time(), "by": "p2", "cost": 9.0},
                 {"ts": time.time() - 200_000, "by": "p1", "cost": 9.0}]})
             with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "5"}):
-                self.assertFalse(chat_store.over_cap("p1"))
-                self.assertTrue(chat_store.over_cap("p2"))
+                self.assertIsNone(spend.refusal(None, "p1"))
+                self.assertIn("allowance", spend.refusal(None, "p2"))
+                self.assertIsNone(spend.refusal(None, "owner"))  # the owner has no allowance
+                self.assertIn("allowance", spend.refusal(None, "p1", pending=1.0))
             with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "0"}):
-                self.assertFalse(chat_store.over_cap("p2"))
+                self.assertIsNone(spend.refusal(None, "p2"))
+
+    def test_person_cap_defaults_to_five(self):
+        from dashboard import spend
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(spend.cap_value("person"), 5.0)
+        with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "abc"}):
+            self.assertEqual(spend.cap_value("person"), 5.0)  # a typo never lifts an invited person's cap
+        with mock.patch.dict(os.environ, {"LEOBOT_PERSON_DAILY_CAP": "-1"}):
+            self.assertEqual(spend.cap_value("person"), 0.0)
 
 
 if __name__ == "__main__":

@@ -2,13 +2,14 @@
 
 Reads assistant replies from saved threads. Replies saved before the cost ledger
 (no engine, model, skill, usage or metered field) still count; missing keys
-group under "-".
+group under "-". Each group row carries a display `label`.
 """
 import time
 
 from core import bots, rooms
 
 NONE = "-"
+NOT_RECORDED = "not recorded"
 
 
 def _num(value, kind=float):
@@ -22,8 +23,10 @@ def _key(value):
     return value if isinstance(value, str) and value else NONE
 
 
-def _add(groups, key, cost, tokens):
-    row = groups.setdefault(key, {"cost": 0.0, "tokens": 0, "turns": 0})
+def _add(groups, key, cost, tokens, label=None):
+    row = groups.setdefault(key, {"cost": 0.0, "tokens": 0, "turns": 0, "label": key})
+    if isinstance(label, str) and label and row["label"] == key:
+        row["label"] = label
     row["cost"] += cost
     row["tokens"] += tokens
     row["turns"] += 1
@@ -51,13 +54,17 @@ def summarize(ws, records, spaces, days=30, now=None):
             if ts < since:
                 continue
             cost, tokens = _num(m.get("cost")), _num(m.get("tokens"), int)
-            _add(per_bot, _key(m.get("bot")) if m.get("bot") else bots.ROOT_BOT, cost, tokens)
+            bot = m.get("bot")
+            _add(per_bot, bot if isinstance(bot, str) and bot else bots.ROOT_BOT, cost, tokens)
             total["cost"] += cost
             total["tokens"] += tokens
             total["turns"] += 1
-            _add(by["by_engine"], _key(m.get("engine")), cost, tokens)
-            _add(by["by_model"], _key(m.get("model")), cost, tokens)
-            _add(by["by_skill"], _key(m.get("skill")), cost, tokens)
+            engine = _key(m.get("engine"))
+            _add(by["by_engine"], engine, cost, tokens, NOT_RECORDED if engine == NONE else m.get("engine_label"))
+            model = _key(m.get("model"))
+            _add(by["by_model"], model, cost, tokens, NOT_RECORDED if model == NONE else None)
+            skill = _key(m.get("skill"))
+            _add(by["by_skill"], skill, cost, tokens, "no skill" if skill == NONE else None)
             _add(by["by_day"], time.strftime("%Y-%m-%d", time.localtime(ts)), cost, tokens)
             usage = m.get("usage")
             if isinstance(usage, dict):

@@ -608,10 +608,11 @@ summary.pf-head::-webkit-details-marker{display:none}
 .team-spend{margin:0 0 var(--ui-space-2-5);color:var(--ui-color-text-muted);font-size:var(--ui-type-control)}
 .team-spend summary{cursor:pointer}
 .team-spend .ts-group{margin:var(--ui-space-2-5) 0 0}
-.team-spend h4{margin:0 0 4px;font-size:inherit;color:var(--ui-color-text)}
-.team-spend .ts-row{display:flex;justify-content:space-between;gap:12px}
+.team-spend h4{margin:0 0 var(--ui-space-1);font-size:inherit;color:var(--ui-color-text)}
+.team-spend .ts-row{display:flex;justify-content:space-between;gap:var(--ui-space-3)}
 .team-spend .ts-row span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.team-spend small{display:block;margin-top:4px}
+.team-spend small{display:block;margin-top:var(--ui-space-1)}
+.msg-notices{display:flex;flex-direction:column;gap:var(--ui-space-1);margin-top:var(--ui-space-1-5)}
 .mem-box{margin-top:var(--ui-space-2);padding:var(--ui-space-2) var(--ui-space-2-5);border:1px dashed var(--ui-color-border);border-radius:var(--ui-radius-control)}
 .mem-scope + .mem-scope{margin-top:var(--ui-space-3)}
 .mem-head{margin-bottom:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}

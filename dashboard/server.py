@@ -862,21 +862,6 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
     return chat_session.CHAT_MODEL, "default"
 
 
-PERSON_CAP_TEXT = ("You have used today's allowance for this workspace. "
-                   "Try again tomorrow, or ask the owner to raise it.")
-
-
-def _cap_refusal(ws, by, pending=0.0):
-    """Text that stops the next engine run of a message, else None: an invited person's
-    allowance, then the workspace and owner caps. `pending` = what the message already
-    spent (it is saved when the message ends). Runner turns never come here."""
-    if by != "owner":
-        cap = chat_store.person_daily_cap()
-        if cap and chat_store.spent_since(by) + (pending or 0) >= cap:
-            return PERSON_CAP_TEXT
-    return spend.refusal(ws, by, pending=pending, records=chat_store.records)
-
-
 def _tag_gate_message(suggest, team=None):
     skill = f"/{suggest}" if suggest else "/workspace or the skill for your task"
     who = ""
@@ -2421,8 +2406,10 @@ class Handler(BaseHTTPRequestHandler):
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
-        if person and chat_store.over_cap(person["id"]):
-            return self._sse_message(PERSON_CAP_TEXT)
+        # An invited person's allowance holds on every engine, their own Mac included.
+        allowance = spend.refusal(None, person["id"], records=chat_store.records) if person else None
+        if allowance:
+            return self._sse_message(allowance)
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
                 if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
         if chat_id:
@@ -2634,7 +2621,8 @@ class Handler(BaseHTTPRequestHandler):
             """Before a teammate or follow-up run: the caps, counting what ran so far."""
             if not metered_turn:
                 return True
-            text = _cap_refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs))
+            text = spend.refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs),
+                                 records=chat_store.records)
             if text:
                 cap_hit.append(text)
                 notice(text)
