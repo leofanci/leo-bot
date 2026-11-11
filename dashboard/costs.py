@@ -2,7 +2,8 @@
 
 Reads assistant replies from saved threads. Replies saved before the cost ledger
 (no engine, model, skill, usage or metered field) still count; missing keys
-group under "-". Each group row carries a display `label`.
+group under "-". Each group row carries a display `label`. Background runs
+(job_ledger.records) carry their workspace as `job_ws` and group under `by_job`.
 """
 import time
 
@@ -10,6 +11,8 @@ from core import bots, rooms
 
 NONE = "-"
 NOT_RECORDED = "not recorded"
+# Background runs with no thread (job_ledger.py), by job id.
+JOB_LABELS = {"memory-consolidate": "Memory tidy-up"}
 
 
 def _num(value, kind=float):
@@ -39,14 +42,16 @@ def summarize(ws, records, spaces, days=30, now=None):
     now = time.time() if now is None else now
     since = now - days * 86_400
     per_bot, total = {}, {"cost": 0.0, "tokens": 0, "turns": 0}
-    by = {"by_engine": {}, "by_model": {}, "by_skill": {}, "by_day": {}}
+    by = {"by_engine": {}, "by_model": {}, "by_skill": {}, "by_day": {}, "by_job": {}}
     cached = fed = 0
     unmetered = 0
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        if ws != bots.HQ and rooms.split_id(rooms.room_of_chat(rec, set(), spaces))[0] != ws:
-            continue
+        if ws != bots.HQ:
+            rec_ws = rec["job_ws"] if "job_ws" in rec else rooms.split_id(rooms.room_of_chat(rec, set(), spaces))[0]
+            if rec_ws != ws:
+                continue
         for m in rec.get("messages") or []:
             if not isinstance(m, dict) or m.get("role") != "assistant":
                 continue
@@ -66,6 +71,9 @@ def summarize(ws, records, spaces, days=30, now=None):
             skill = _key(m.get("skill"))
             _add(by["by_skill"], skill, cost, tokens, "no skill" if skill == NONE else None)
             _add(by["by_day"], time.strftime("%Y-%m-%d", time.localtime(ts)), cost, tokens)
+            job = m.get("job")
+            if isinstance(job, str) and job:
+                _add(by["by_job"], job, cost, tokens, JOB_LABELS.get(job))
             usage = m.get("usage")
             if isinstance(usage, dict):
                 cached += _num(usage.get("cache_read"), int)

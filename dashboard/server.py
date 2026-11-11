@@ -17,6 +17,7 @@ import fcntl
 import hmac
 import html
 import json
+import itertools
 import os
 import re
 import secrets
@@ -43,7 +44,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots, datadir, paths, updater, version  # noqa: E402
+from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals  # noqa: E402
@@ -56,7 +57,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, spend  # noqa: E402
+from dashboard import costs, job_ledger, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -877,9 +878,10 @@ def _tag_gate_message(suggest, team=None):
 
 
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
-               members=None, readonly=False, shared=False):
+               members=None, readonly=False, shared=False, query=""):
     """Persona for the speaking bot. Full card (job, team, memory) when the
-    session is fresh or the speaker changed; a one-line marker otherwise."""
+    session is fresh or the speaker changed; a one-line marker otherwise.
+    `query`: the message that opened the card, to pick the memory it carries."""
     b = team.get(bot_id) if team else None
     if not b:
         return ""
@@ -900,14 +902,16 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                          + "\n".join(team.roster_line(o.id) for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
         shared = shared and bool(project_slug)
-        mem = bots.read_memory(bot_id, project_slug or None, ROOT, shared=shared)
+        mem = memory.card_block(bot_id, project_slug or None, ROOT, shared=shared, query=query)
         where = f"{project_slug}, team" if shared else (project_slug or "HQ")
-        lines.append(f"Your memory ({where}):\n{mem}" if mem
-                     else f"Your memory ({where}): empty")
+        lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
+                     else f"Your memory ({where}): nothing pinned or matching.")
+        lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`.")
         scope = f" --project {project_slug}" if project_slug else ""
         if not readonly and not shared:
             lines.append("When the user states a lasting decision or preference, save one line: "
-                         f"`remember --bot {b.id}{scope} --text \"...\"`. Never secrets.")
+                         f"`remember --bot {b.id}{scope} --type decision|preference|fact "
+                         "--text \"...\"`. Never secrets.")
     else:
         lines.append(f"(speaking as @{b.handle})")
     if handoff_from and team.get(handoff_from):
@@ -1112,7 +1116,8 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
         parts.append(state_snapshot(projects, only=project_slug))
     except Exception:  # noqa: BLE001
         pass
-    parts.append(_bot_block(team, bot_id, None, project_slug, fresh=True, readonly=True, shared=shared))
+    parts.append(_bot_block(team, bot_id, None, project_slug, fresh=True, readonly=True, shared=shared,
+                            query=question))
     if folders_block:
         parts.append(folders_block)
     if skill:
@@ -1292,9 +1297,15 @@ SHARED_NOTE = (
     "here is the team's: use it freely.")
 
 
+def _spend_records():
+    """Everything that spent: saved threads plus background runs (job_ledger). Passed to
+    spend.py and costs.py so both read this server's own chat_store copy."""
+    return itertools.chain(chat_store.records(), job_ledger.records(ROOT))
+
+
 def _costs(ws, projects, days=30):
     """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
-    return costs.summarize(ws, chat_store.records(), {w["id"] for w in _workspaces(projects)}, days)
+    return costs.summarize(ws, _spend_records(), {w["id"] for w in _workspaces(projects)}, days)
 
 
 def _known_ws(value, projects):
@@ -2407,7 +2418,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
         # An invited person's allowance holds on every engine, their own Mac included.
-        allowance = spend.refusal(None, person["id"], records=chat_store.records) if person else None
+        allowance = spend.refusal(None, person["id"], records=_spend_records) if person else None
         if allowance:
             return self._sse_message(allowance)
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
@@ -2503,7 +2514,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse_message(message)
         # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
         if engine.kind != "runner":  # a person's own Mac is never capped
-            capped = spend.refusal(ws, sender, records=chat_store.records)
+            capped = spend.refusal(ws, sender, records=_spend_records)
             if capped:
                 return self._sse_message(capped)
         tokensave_task = re.sub(
@@ -2559,7 +2570,7 @@ class Handler(BaseHTTPRequestHandler):
             explicit=bool(explicit),
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
-                           handoff_from, fresh=sess.is_fresh(), shared=shared,
+                           handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
             suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
@@ -2622,7 +2633,7 @@ class Handler(BaseHTTPRequestHandler):
             if not metered_turn:
                 return True
             text = spend.refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs),
-                                 records=chat_store.records)
+                                 records=_spend_records)
             if text:
                 cap_hit.append(text)
                 notice(text)
@@ -2815,7 +2826,7 @@ class Handler(BaseHTTPRequestHandler):
             if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
                 try:
                     near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
-                                             records=chat_store.records)
+                                             records=_spend_records)
                     if near:
                         notice(near)
                 except (BrokenPipeError, ConnectionResetError):
@@ -2838,6 +2849,16 @@ class Handler(BaseHTTPRequestHandler):
                         shared=shared, reactions=reacts, ws=ws)
                 except (OSError, ValueError):
                     traceback.print_exc()
+                else:
+                    # A memory file past its threshold gets one background tidy-up. Never
+                    # from a turn invited people can see: that thread runs on the relay only.
+                    if not shared and not person:
+                        for b in dict.fromkeys(m.get("bot") for m in msgs if m.get("bot")):
+                            try:
+                                memory_consolidate.maybe_start(ROOT, ws, b, shared=False,
+                                                               records=_spend_records)
+                            except Exception:  # noqa: BLE001 - never fails the reply
+                                traceback.print_exc()
             try:
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
@@ -3446,7 +3467,10 @@ class Handler(BaseHTTPRequestHandler):
                 bot_id, project = str(body.get("bot") or ""), (ws if record else None)
                 team_scope = bool(record) and body.get("scope") == "team"
                 if path == "/api/memory":
-                    bots.remember(bot_id, body.get("text"), project, ROOT, shared=team_scope)
+                    bots.remember(bot_id, body.get("text"), project, ROOT, shared=team_scope,
+                                  type=str(body.get("type") or "fact"))
+                    memory_consolidate.maybe_start(ROOT, project or bots.HQ, bot_id, shared=team_scope,
+                                                   records=_spend_records)
                 elif not bots.forget(bot_id, body.get("line"), project, ROOT, shared=team_scope):
                     raise ValueError("memory line not found")
                 text = bots.read_memory(bot_id, project, ROOT, tail=0, shared=team_scope)

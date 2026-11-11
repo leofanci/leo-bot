@@ -1223,12 +1223,12 @@ async function renderTeam(){
   const person = isPerson();
   const opened = new Set();  // bots whose details are open: kept across redraws
   // Where the spend went: top models, skills and engines, the last 7 days, cache reads.
-  const tsLine = v => [fmtCost(v.cost), `${v.turns} ${v.turns === 1 ? "reply" : "replies"}`].filter(Boolean).join(" · ");
+  const tsLine = (v, unit = ["reply", "replies"]) => [fmtCost(v.cost), `${v.turns} ${v.turns === 1 ? unit[0] : unit[1]}`].filter(Boolean).join(" · ");
   const spendDetails = c => {
-    const top = (groups, label) => {
+    const top = (groups, label, unit) => {
       const rows = Object.entries(groups || {}).sort((a, b) => b[1].cost - a[1].cost || b[1].turns - a[1].turns).slice(0, 5);
       return rows.length ? `<div class="ts-group"><h4>${label}</h4>${rows.map(([k, v]) =>
-        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : "";
+        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v, unit)}</span></div>`).join("")}</div>` : "";
     };
     const days = Object.entries(c.by_day || {}).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 7);
     const lines = [
@@ -1236,7 +1236,7 @@ async function renderTeam(){
       c.unmetered ? `${c.unmetered} ${c.unmetered === 1 ? "reply" : "replies"} on engines that report no cost` : "",
     ].filter(Boolean).map(x => `<small>${x}</small>`).join("");
     return `<details class="team-spend"><summary>Where it went (est.)</summary>
-      ${top(c.by_model, "Models")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}
+      ${top(c.by_model, "Models")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}${top(c.by_job, "Background jobs", ["run", "runs"])}
       ${days.length ? `<div class="ts-group"><h4>Last 7 days</h4>${days.map(([d, v]) =>
         `<div class="ts-row"><span>${esc(d)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : ""}
       ${lines}</details>`;
@@ -1879,9 +1879,18 @@ async function toggleMemory(row, botId){
     ["team", "Team: channels with people, and invited people's own DMs. Anyone there can get the bot to repeat this.", "Add a fact for the team…"],
   ];
   box.innerHTML = scopes.map((_, i) => `<div class="mem-scope" data-i="${i}"></div>`).join("");
+  // One entry per line: "- YYYY-MM-DD [type] text"; an untyped or odd line is a fact.
+  const entry = l => {
+    const m = l.match(/^- (\d{4}-\d{2}-\d{2}) (?:\[(fact|preference|decision)\] )?(.*)$/);
+    return m ? { date: m[1], type: m[2] || "fact", text: m[3] } : { date: "", type: "fact", text: l.replace(/^- /, "") };
+  };
+  const line = l => {
+    const e = entry(l);
+    return `<div class="mem-line"${e.date ? ` title="${esc(e.date)}"` : ""}><span class="tool-chip mem-type">${esc(e.type)}</span><span>${esc(e.text)}</span><button class="cl-del" data-mem-del="${esc(l)}" title="Forget">✕</button></div>`;
+  };
   const draw = (el, [scope, head, hint], lines) => {
-    el.innerHTML = `${head ? `<div class="mem-head">${esc(head)}</div>` : ""}${lines.length ? lines.map(l => `<div class="mem-line"><span>${esc(l.replace(/^- /, ""))}</span><button class="cl-del" data-mem-del="${esc(l)}" title="Forget">✕</button></div>`).join("") : `<div class="mem-empty">Nothing remembered here yet.</div>`}
-      <form class="mem-add"><input name="text" placeholder="${esc(hint)}" maxlength="300"><button class="btn" type="submit">Add</button></form>`;
+    el.innerHTML = `${head ? `<div class="mem-head">${esc(head)}</div>` : ""}${lines.length ? lines.map(line).join("") : `<div class="mem-empty">Nothing remembered here yet.</div>`}
+      <form class="mem-add"><input name="text" placeholder="${esc(hint)}" maxlength="300"><select name="type" aria-label="Type"><option value="fact">Fact</option><option value="preference">Preference</option><option value="decision">Decision</option></select><button class="btn" type="submit">Add</button></form>`;
     const redraw = async (url, extra) => {
       try { draw(el, [scope, head, hint], (await jpost(url, { ws: _WS, bot: botId, scope, ...extra })).lines); } catch (e) { toast("✗ " + e.message); }
     };
@@ -1889,7 +1898,7 @@ async function toggleMemory(row, botId){
     el.querySelector(".mem-add").onsubmit = e => {
       e.preventDefault();
       const text = e.target.text.value.trim(); if (!text) return;
-      redraw("/api/memory", { text });
+      redraw("/api/memory", { text, type: e.target.type.value });
     };
   };
   box.hidden = false;

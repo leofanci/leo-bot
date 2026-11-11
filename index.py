@@ -36,7 +36,7 @@ HERE = Path(__file__).resolve().parent
 MIGRATIONS_DIR = HERE / "database" / "migrations"   # schema lives with the code
 DB_RELPATH = Path("database") / "data" / "os.db"    # generated under the workspace root
 
-from core import paths  # noqa: E402
+from core import memory, paths  # noqa: E402
 from core.project_schemas import MEMO_TYPES, normalize_workspace_artifacts  # noqa: E402
 EXPERIMENT_STATUSES = {"planned", "running", "done"}
 EXPERIMENT_DECISIONS = {"persist", "pivot", "kill"}
@@ -584,11 +584,18 @@ def build(root: Path):
     if fk:
         raise IndexError_(f"foreign_key_check found violations: {fk}")
     os.replace(tmp_path, db_path)
+    # Bot memory has its own derived index (core/memory.py): rebuilt from the
+    # files here, kept fresh by remember/forget in between.
+    try:
+        memory_n = memory.rebuild_index(root)
+    except sqlite3.Error as exc:  # derived and rebuilt on demand by recall: never fail the reindex
+        memory_n = f"skipped ({exc})"
 
     print(f"Rebuilt {rel(db_path, root)}")
     for name, rows in counts.items():
         print(f"  {name:<14} {len(rows)}")
     print(f"  {'timeline (view)':<14} {timeline_n}")
+    print(f"  {'memory entries':<14} {memory_n}")
 
 
 def main():

@@ -508,35 +508,65 @@ class ApiEngine(Engine):
         yield self._done(parts, usage, model)
 
     # ---- one-shot jobs ------------------------------------------------- #
-    def complete(self, prompt, stdin_text, model):
-        """Zero tools, nothing stored: generate.py jobs. Returns the reply text."""
+    def _one_shot(self, prompt, stdin_text, model):
+        """Zero tools, nothing stored. Returns (text, raw usage, resolved model)."""
         model = self.resolve_model(model)
         if not model:
             raise ProviderError(f"{self.label} has no model set")
         content = f"{stdin_text}" if stdin_text else "Begin."
+        out, usage = [], {}
         if self.provider.get("format") == "anthropic":
             payload = {"model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": prompt,
                        "messages": [{"role": "user", "content": content}]}
-            out = []
             with self._open("/v1/messages", payload) as resp:
                 for ev in _sse(resp):
-                    if ev.get("type") == "content_block_delta":
+                    et = ev.get("type")
+                    if et == "message_start":
+                        for k, v in ((ev.get("message") or {}).get("usage") or {}).items():
+                            if isinstance(v, int) and k != "output_tokens":  # message_delta has the real count
+                                usage[k] = usage.get(k, 0) + v
+                    elif et == "content_block_delta":
                         d = ev.get("delta") or {}
                         if d.get("type") == "text_delta":
                             out.append(d.get("text", ""))
-                    elif ev.get("type") == "error":
+                    elif et == "message_delta":
+                        n = (ev.get("usage") or {}).get("output_tokens")
+                        if isinstance(n, int):
+                            usage["output_tokens"] = usage.get("output_tokens", 0) + n
+                    elif et == "error":
                         raise ProviderError(str((ev.get("error") or {}).get("message", "stream error")))
-            return "".join(out)
-        payload = {"model": model, "stream": True,
+            return "".join(out), usage, model
+        payload = {"model": model, "stream": True, "stream_options": {"include_usage": True},
                    "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": content}]}
-        out = []
         with self._open("/chat/completions", payload) as resp:
             for ev in _sse(resp):
+                if isinstance(ev.get("error"), dict):
+                    raise ProviderError(f"{self.label}: {ev['error'].get('message', 'stream error')}")
+                u = ev.get("usage")
+                if isinstance(u, dict):
+                    for k in ("prompt_tokens", "completion_tokens"):
+                        usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
+                    details = u.get("prompt_tokens_details")
+                    if isinstance(details, dict):
+                        usage["cached_tokens"] = usage.get("cached_tokens", 0) + int(details.get("cached_tokens") or 0)
+                    if u.get("cost") is not None:
+                        usage["cost"] = (usage.get("cost") or 0) + float(u["cost"])
                 for choice in ev.get("choices") or []:
                     text = (choice.get("delta") or {}).get("content")
                     if text:
                         out.append(text)
-        return "".join(out)
+        return "".join(out), usage, model
+
+    def complete(self, prompt, stdin_text, model):
+        """Zero tools, nothing stored: generate.py jobs. Returns the reply text."""
+        return self._one_shot(prompt, stdin_text, model)[0]
+
+    def complete_metered(self, prompt, stdin_text, model):
+        """`complete` plus its usage and cost (estimated from the price table when the
+        provider reports none)."""
+        text, usage, model = self._one_shot(prompt, stdin_text, model)
+        done = self._done([text], usage, model)[1]
+        return {"text": text, "model": model, "usage": done["usage"], "cost": done["cost"]}
 
     def status(self):
         p = self.provider

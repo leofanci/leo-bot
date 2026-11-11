@@ -404,6 +404,20 @@ class ClaudeCodeEngine(Engine):
             raise RuntimeError(f"claude exited {proc.returncode}: {proc.stderr.strip()[:500]}")
         return proc.stdout
 
+    def complete_metered(self, prompt, stdin_text, model):
+        """`complete`, read from its JSON envelope: text, model, usage and cost."""
+        raw = self.complete(prompt, stdin_text, model)
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            raise RuntimeError("claude returned no JSON result") from None
+        kind, done = parse_event(obj) if isinstance(obj, dict) else (None, None)
+        if kind != "done":
+            raise RuntimeError("claude returned no JSON result")
+        used = [m for m in (obj.get("modelUsage") or {}) if isinstance(m, str)]
+        return {"text": done["result"] or "", "model": used[0] if len(used) == 1 else model,
+                "usage": done["usage"], "cost": done["cost"]}
+
     def status(self):
         path = shutil.which(self.claude_bin)
         row = {"id": self.id, "label": self.label, "kind": self.kind, "installed": bool(path),

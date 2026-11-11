@@ -26,7 +26,8 @@ but not your other workspaces, your files, your keys or your mail.
 workspace. Its private memory is for your DMs and channels with no people, and it
 never reaches a shared thread. Its team memory is what shared threads use. Only you
 add to team memory, in Team, under the bot's Memory. Everyone in those threads can
-get a bot to repeat what's in it.
+get a bot to repeat what's in it. A background tidy-up of a long memory keeps one
+backup of the previous list and never drops a decision or preference.
 Bots can still answer from an outline of a linked folder's code (names and
 structure, never its source code), but shared threads never get the folders
 themselves or their paths. A thread where a bot worked in your folders stays

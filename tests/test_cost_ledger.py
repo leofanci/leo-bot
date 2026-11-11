@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from dashboard import chat_session
+from dashboard import chat_session, costs, job_ledger, spend
 from dashboard.engines import api, claude_code, codex, prices
 import dashboard.server as server
 from tests.test_teammates import VENTURE
@@ -274,6 +274,86 @@ def reply(bot, *, engine, model, skill, cost, tokens, usage, metered=True, ts=No
     return {"role": "assistant", "bot": bot, "ts": ts or time.time(), "engine": engine,
             "engine_label": LABELS.get(engine), "model": model,
             "skill": skill, "cost": cost, "tokens": tokens, "usage": usage, "metered": metered}
+
+
+class JobLedger(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def row(self, **kw):
+        base = {"ts": time.time(), "ws": "acme", "by": "owner", "bot": "cmo", "job": "memory-consolidate",
+                "engine": "api:p1", "engine_label": "Provider", "model": "claude-haiku-5-5", "cost": 6.0,
+                "tokens": 10, "usage": {"in": 5, "cache_write": 0, "cache_read": 0, "out": 5}, "metered": True}
+        return {**base, **kw}
+
+    def test_claude_code_metered_one_shot(self):
+        out = json.dumps({"type": "result", "result": "ok", "total_cost_usd": 0.002,
+                          "usage": {"input_tokens": 5, "output_tokens": 2},
+                          "modelUsage": {"claude-haiku-5-5": {"outputTokens": 2}}})
+        eng = claude_code.ClaudeCodeEngine()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=out, stderr="")) as run:
+            got = eng.complete_metered("p", "in", "haiku")
+        self.assertEqual((got["text"], got["cost"], got["usage"]["out"], got["model"]),
+                         ("ok", 0.002, 2, "claude-haiku-5-5"))
+        cmd = run.call_args[0][0]
+        self.assertIn("--tools", cmd)
+        self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
+
+    def test_claude_code_bad_envelope_raises(self):
+        eng = claude_code.ClaudeCodeEngine()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="nope", stderr="")):
+            with self.assertRaises(RuntimeError):
+                eng.complete_metered("p", "in", "haiku")
+
+    def test_base_engine_refuses(self):
+        from dashboard.engines.base import Engine, EngineRefused
+        with self.assertRaises(EngineRefused):
+            Engine().complete_metered("p", "in", "haiku")
+
+    def test_rows_count_against_caps_and_show_in_report(self):
+        job_ledger.append(self.root, self.row())
+        recs = lambda: job_ledger.records(self.root)  # noqa: E731
+        with env(LEOBOT_WORKSPACE_DAILY_CAP="5"):
+            self.assertIsNotNone(spend.refusal("acme", "owner", records=recs))
+            self.assertIsNone(spend.refusal("demo", "owner", records=recs))
+        rep = costs.summarize("acme", recs(), {"acme"})
+        self.assertEqual(rep["by_job"]["memory-consolidate"]["turns"], 1)
+        self.assertEqual(rep["by_job"]["memory-consolidate"]["label"], "Memory tidy-up")
+        self.assertEqual(rep["total"]["turns"], 1)
+        self.assertEqual(costs.summarize("demo", recs(), {"demo"})["total"]["turns"], 0)
+        self.assertEqual(costs.summarize("hq", recs(), {"acme"})["total"]["turns"], 1)
+
+    def test_free_run_spends_nothing(self):
+        job_ledger.append(self.root, self.row(cost=None, metered=False))
+        self.assertEqual(job_ledger.records(self.root)[0]["spend"], [])
+
+    def test_ledger_keeps_last_500(self):
+        for i in range(505):
+            job_ledger.append(self.root, {"ts": i, "ws": "acme", "job": "memory-consolidate", "cost": 0})
+        recs = job_ledger.records(self.root)
+        self.assertEqual(len(recs), 500)
+        self.assertEqual(recs[0]["messages"][0]["ts"], 5)
+
+    def test_unreadable_ledger_reads_empty(self):
+        path = self.root / "team" / "job_ledger.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json")
+        self.assertEqual(job_ledger.records(self.root), [])
+        job_ledger.append(self.root, self.row())
+        self.assertEqual(len(job_ledger.records(self.root)), 1)
+
+    def test_server_spend_records_include_jobs(self):
+        job_ledger.append(self.root, self.row())
+        with mock.patch.object(server, "ROOT", self.root), \
+                mock.patch.object(server.chat_store, "records", return_value=iter([{"messages": []}])):
+            got = list(server._spend_records())
+        self.assertEqual(len(got), 2)
+        self.assertEqual(got[1]["job_ws"], "acme")
+
+    def test_team_view_shows_background_jobs(self):
+        self.assertIn('top(c.by_job, "Background jobs", ["run", "runs"])', JS)
 
 
 class Report(unittest.TestCase):

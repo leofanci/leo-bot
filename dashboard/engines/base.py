@@ -112,5 +112,11 @@ class Engine:
         """One-shot text generation with zero tools (generate.py jobs)."""
         raise EngineRefused(f"{self.label} cannot run generation jobs.")
 
+    def complete_metered(self, prompt, stdin_text, model):
+        """Like `complete`, plus what it spent: {"text", "model", "usage", "cost"}
+        (usage and cost None when the engine reports none). Background jobs use it,
+        so their spend counts against caps."""
+        raise EngineRefused(f"{self.label} cannot run generation jobs.")
+
     def status(self):
         return {"id": self.id, "label": self.label, "ok": False, "detail": ""}

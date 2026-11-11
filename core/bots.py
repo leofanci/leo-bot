@@ -19,7 +19,6 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from datetime import date
 from pathlib import Path
 
 from core import paths
@@ -28,9 +27,6 @@ ROOT = paths.DATA  # user data; bot definitions ship in paths.CODE
 ROOT_BOT = "cos"
 CEO = "ceo"  # the user; top of the org chart, not a bot
 HQ = "hq"    # the holding's own workspace (CEO office); every other workspace is a project
-MEMORY_MAX_LINES = 40
-MEMORY_TAIL_LINES = 20
-MEMORY_LINE_MAX = 300
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _MENTION_RE = re.compile(r"(?<![\w@/])@([a-z][a-z0-9-]*)\b")
@@ -254,58 +250,8 @@ def team(root=ROOT, ws=HQ, project=None):
     return t
 
 
-# --------------------------------------------------------------------------- #
-# Memory — one short markdown list per bot per project. Never mixes projects.
-# --------------------------------------------------------------------------- #
-def memory_path(bot_id, project=None, root=ROOT, shared=False):
-    """`shared`: the team memory of a project workspace. HQ has none: nobody joins HQ."""
-    if not _SLUG_RE.fullmatch(bot_id or ""):
-        raise ValueError("invalid bot id")
-    root = Path(root)
-    if project:
-        if not _SLUG_RE.fullmatch(project) or not (root / "projects" / project).is_dir():
-            raise ValueError(f"unknown project: {project}")
-        team_dir = root / "projects" / project / "team"
-        return (team_dir / "shared" if shared else team_dir) / f"{bot_id}.md"
-    if shared:
-        raise ValueError("HQ has no team memory")
-    return root / "team" / "memory" / f"{bot_id}.md"
-
-
-def read_memory(bot_id, project=None, root=ROOT, tail=MEMORY_TAIL_LINES, shared=False):
-    try:
-        lines = memory_path(bot_id, project, root, shared).read_text(encoding="utf-8").splitlines()
-    except (OSError, ValueError):
-        return ""
-    lines = [ln for ln in lines if ln.strip()]
-    return "\n".join(lines[-tail:]) if tail else "\n".join(lines)
-
-
-def remember(bot_id, text, project=None, root=ROOT, today=None, shared=False):
-    """Append one dated line to the bot's memory for this project (or HQ)."""
-    if bot_id not in load_defs():
-        raise ValueError(f"unknown bot: {bot_id}")
-    line = " ".join((text or "").split())
-    if not line:
-        raise ValueError("empty memory")
-    if len(line) > MEMORY_LINE_MAX:
-        raise ValueError(f"memory line over {MEMORY_LINE_MAX} chars; keep it to one fact")
-    path = memory_path(bot_id, project, root, shared)
-    existing = read_memory(bot_id, project, root, tail=0, shared=shared)
-    lines = existing.splitlines() if existing else []
-    lines.append(f"- {(today or date.today()).isoformat()} {line}")
-    _atomic_write(path, "\n".join(lines[-MEMORY_MAX_LINES:]) + "\n")
-    return str(path.relative_to(Path(root)))
-
-
-def forget(bot_id, line, project=None, root=ROOT, shared=False):
-    """Delete one memory line (exact text, first match). True if removed."""
-    existing = read_memory(bot_id, project, root, tail=0, shared=shared)
-    lines = existing.splitlines() if existing else []
-    target = (line or "").strip()
-    if target not in lines:
-        return False
-    lines.remove(target)
-    path = memory_path(bot_id, project, root, shared)
-    _atomic_write(path, ("\n".join(lines) + "\n") if lines else "")
-    return True
+# Memory lives in core/memory.py; these names stay importable from here.
+from core.memory import forget, memory_path, read_memory, remember  # noqa: E402,F401
+from core.memory import LINE_MAX as MEMORY_LINE_MAX  # noqa: E402,F401
+from core.memory import MAX_ENTRIES as MEMORY_MAX_LINES  # noqa: E402,F401
+from core.memory import TAIL_LINES as MEMORY_TAIL_LINES  # noqa: E402,F401

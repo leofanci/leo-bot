@@ -552,7 +552,9 @@ class PrivateMemoryStaysPrivate(Tmp):
     def prompt(self, shared, readonly=False):
         team = bots.team(self.root, "demo", {"slug": "demo"})
         with mock.patch.object(server, "ROOT", self.root):
-            return server._bot_block(team, "cmo", None, "demo", fresh=True, shared=shared, readonly=readonly)
+            # A query naming both notes: the card shows recall hits, so a leak would show.
+            return server._bot_block(team, "cmo", None, "demo", fresh=True, shared=shared, readonly=readonly,
+                                     query="note")
 
     def test_a_shared_prompt_carries_only_the_team_memory(self):
         text = self.prompt(shared=True)
@@ -568,7 +570,7 @@ class PrivateMemoryStaysPrivate(Tmp):
     def test_a_consulted_teammate_in_a_shared_thread_too(self):
         team = bots.team(self.root, "demo", {"slug": "demo"})
         with mock.patch.object(server, "ROOT", self.root):
-            text = server._teammate_prompt(team, "cmo", None, "q", "said", [], "demo", None, shared=True)
+            text = server._teammate_prompt(team, "cmo", None, "which note?", "said", [], "demo", None, shared=True)
         self.assertIn("TEAM-NOTE", text)
         self.assertNotIn("PRIVATE-NOTE", text)
 

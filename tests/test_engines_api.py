@@ -228,8 +228,22 @@ class Anthropic(Base):
         self.assertEqual(body["messages"][0]["content"], "INPUT")
 
 
+    def test_complete_metered_reads_usage(self):
+        self.fake.replies = [anthropic_text("tidy")]
+        got = self.engine.complete_metered("PROMPT", "INPUT", "haiku")
+        self.assertEqual((got["text"], got["usage"]["in"], got["usage"]["out"], got["model"]),
+                         ("tidy", 10, 5, "m-fast"))
+        self.assertNotIn("tools", self.fake.requests[0]["body"])
+
+
 class OpenAI(Base):
     fmt = "openai"
+
+    def test_complete_metered_reads_usage(self):
+        self.fake.replies = [openai_text("tidy")]
+        got = self.engine.complete_metered("PROMPT", "INPUT", "haiku")
+        self.assertEqual((got["text"], got["usage"]["in"], got["usage"]["out"]), ("tidy", 7, 3))
+        self.assertTrue(self.fake.requests[0]["body"]["stream_options"]["include_usage"])
 
     def test_tool_loop_and_usage(self):
         self.fake.replies = [openai_tool("osctl", {"args": ["get-project"]}), openai_text("done")]
