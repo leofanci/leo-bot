@@ -163,8 +163,7 @@ def remember(bot_id, text, project=None, root=ROOT, today=None, shared=False, ty
         kept = _read(path)
         over = len(kept) + 1 - MAX_ENTRIES
         if over > 0:
-            drop = {i for i, e in enumerate(kept) if e.type == "fact"}
-            drop = set(sorted(drop)[:over])
+            drop = set([i for i, e in enumerate(kept) if e.type == "fact"][:over])  # oldest facts
             if len(drop) < over:
                 raise ValueError(FULL)
             kept = [e for i, e in enumerate(kept) if i not in drop]
@@ -225,7 +224,8 @@ def _connect(root):
 
 
 def _with_index(root, fn):
-    """Run fn(conn) on the index; a corrupt file is deleted and the call tried once more."""
+    """Run fn(conn) on the index; a corrupt file is deleted and the call tried once more.
+    An OperationalError (busy, locked, no FTS5) is raised as is: the file may be fine."""
     for attempt in (1, 2):
         try:
             conn = _connect(root)
@@ -234,6 +234,8 @@ def _with_index(root, fn):
                     return fn(conn)
             finally:
                 conn.close()
+        except sqlite3.OperationalError:
+            raise
         except sqlite3.DatabaseError:
             if attempt == 2:
                 raise
@@ -273,14 +275,15 @@ def _sync(conn, path, root, force):
 
 def sync_file(path, root=ROOT, force=False):
     """Replace one file's rows when its stat changed (always with `force`, as writes do).
-    Never raises: the index is derived, and a failure here only costs a later re-read."""
+    Never raises: the index is derived, and a skipped sync only costs a later re-read
+    (the file's stat no longer matches its row)."""
     if not HAS_FTS5:
         return
     root = Path(root)
     try:
         _with_index(root, lambda conn: _sync(conn, Path(path), root, force))
     except (sqlite3.Error, OSError):
-        _drop_index(root)
+        pass
 
 
 def _memory_files(root):

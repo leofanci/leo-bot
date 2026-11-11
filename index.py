@@ -586,7 +586,10 @@ def build(root: Path):
     os.replace(tmp_path, db_path)
     # Bot memory has its own derived index (core/memory.py): rebuilt from the
     # files here, kept fresh by remember/forget in between.
-    memory_n = memory.rebuild_index(root)
+    try:
+        memory_n = memory.rebuild_index(root)
+    except sqlite3.Error as exc:  # derived and rebuilt on demand by recall: never fail the reindex
+        memory_n = f"skipped ({exc})"
 
     print(f"Rebuilt {rel(db_path, root)}")
     for name, rows in counts.items():

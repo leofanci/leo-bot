@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import date
@@ -159,6 +160,22 @@ class Recall(TempRoot):
         with mock.patch.object(memory, "HAS_FTS5", False):
             self.assertEqual(len(memory.recall("cmo", "Pricing?", "acme", self.root)), 1)
             self.assertIn("pricing anchor", memory.recall("cmo", "Pricing?", "acme", self.root)[0])
+
+    def test_busy_index_is_never_deleted(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        db_file = self.root / memory.INDEX_RELPATH
+        with mock.patch.object(memory, "_connect", side_effect=sqlite3.OperationalError("database is locked")):
+            memory.sync_file(memory.memory_path("cmo", "acme", self.root), self.root, force=True)
+            self.assertIn("pricing anchor", memory.recall("cmo", "pricing", "acme", self.root)[0])  # scan
+        self.assertTrue(db_file.exists())
+        self.assertTrue(memory.recall("cmo", "pricing", "acme", self.root))
+
+    def test_index_py_survives_a_memory_index_error(self):
+        with mock.patch.object(memory, "rebuild_index", side_effect=sqlite3.OperationalError("database is locked")), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            index.build(self.root)
+        self.assertTrue((self.root / "database" / "data" / "os.db").exists())
+        self.assertIn("memory entries", out.getvalue())
 
     def test_index_py_rebuilds_memory(self):
         memory.remember("cmo", "pricing anchor", "acme", self.root)
