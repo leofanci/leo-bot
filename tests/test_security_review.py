@@ -672,7 +672,7 @@ class NoBotLinksAFolder(unittest.TestCase):
                 text, failed = os_relay.run_osctl(
                     [cmd, "--slug", "no-such-slug-zz", "--local-folder", tempfile.gettempdir()], "", ctx)
                 self.assertTrue(failed, (cmd, ctx))
-                self.assertRegex(text, "only you can link|read-only: you were consulted", (cmd, ctx))
+                self.assertRegex(text, "only you can link|read-only here", (cmd, ctx))
 
 
 class OddTokensAreRefusedNotCrashed(sp.Base):
