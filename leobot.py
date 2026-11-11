@@ -416,12 +416,13 @@ def cmd_doctor(args) -> int:
         ok(f"port {DEFAULT_PORT} is free")
     else:
         fix(f"port {DEFAULT_PORT} is used by something else", f"leobot start --port {DEFAULT_PORT + 1}")
-    try:
-        latest = json.loads(paths.SETTINGS.read_text()).get("latest")
-    except (OSError, ValueError, AttributeError):
-        latest = None
-    if isinstance(latest, str) and version.newer(version.current(), latest):
-        fix(f"version {latest} is available (you have {version.current()})", "leobot update")
+    from core import updater
+    cfg = updater.settings()
+    latest = cfg.get("latest")
+    if isinstance(latest, str) and updater.cached_available(cfg, version.current(),
+                                                            lambda: updater._head(paths.CODE)):
+        what = f"main {latest[:12]}" if cfg.get("channel") == "main" else f"version {latest}"
+        fix(f"{what} is available (you have {version.current()})", "leobot update")
     else:
         ok(f"version {version.current()}")
     print("\n".join(lines))
@@ -551,7 +552,7 @@ def _pid_lock():
 
 
 @contextlib.contextmanager
-def _data_operation(what: str):
+def _data_operation(what: str, purpose: str):
     """Restore and move-data change the data folder under two locks: the update lock (so the
     app's watcher and the Settings button stand back), then, with the server stopped, the pid
     file lock (so nothing can start a server) for the whole operation. On the way out the pid
@@ -559,9 +560,9 @@ def _data_operation(what: str):
     op["port"] to None), then the update lock goes. Raises Busy, with nothing changed, when an
     update runs or a server came back."""
     from core import updater
-    with updater._update_lock() as mine:
+    with updater._update_lock(purpose) as mine:
         if not mine:
-            raise Busy(f"An update is running, so {what} did not start. Nothing was changed. "
+            raise Busy(f"{updater.busy_text()}, so {what} did not start. Nothing was changed. "
                        f"Try again when it has finished (see {paths.UPDATE_LOG}).")
         op = {"port": _stop_if_running()}
         try:
@@ -595,7 +596,7 @@ def cmd_backup(args) -> int:
         print("Cancelled.", file=sys.stderr)
         return 1
     try:
-        with _data_operation("the restore") as op:
+        with _data_operation("the restore", "restore") as op:
             try:
                 snap = _replace_data(src, paths.BACKUPS / f"pre-restore-{_stamp()}.tar.gz")
             except RestoreFailed as e:
@@ -707,7 +708,7 @@ def _reindex() -> None:
 def cmd_move_data(args) -> int:
     archive = getattr(args, "archive", False)
     try:
-        with _data_operation("moving the data"):
+        with _data_operation("moving the data", "move-data"):
             if archive:
                 res = datadir.archive_legacy(Path(args.source))
             else:

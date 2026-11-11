@@ -32,8 +32,10 @@ def refuse_real_home_in_tests(env: Mapping[str, str], modules=None) -> None:
             "temp home), or set LEOBOT_HOME to a temp folder.")
 
 
-refuse_real_home_in_tests(os.environ)
+refuse_real_home_in_tests(os.environ)  # before the export below, which would hide an unset home
 HOME = home_for(os.environ)
+# Every child (server, indexer, engines, osctl) gets the same absolute home, whatever was given.
+os.environ["LEOBOT_HOME"] = str(HOME)
 DATA = HOME / "data"
 RUN = HOME / "run"
 LOGS = HOME / "logs"

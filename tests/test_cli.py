@@ -458,6 +458,22 @@ class MoveAndDoctorTests(CliBase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             leobot.main(["move-data", "--from", str(src), "--archive", "--replace"])
 
+    def test_doctor_uses_the_same_rule_as_settings(self):
+        from core import updater
+        a, b = "a" * 40, "b" * 40
+        cur = version.current()
+        paths.SETTINGS.write_text(json.dumps({"latest": "v" + cur, "latest_commit": b}))
+        with mock.patch.object(updater, "_head", return_value=a):
+            _, out, _ = run("doctor")
+        self.assertIn(f"version v{cur} is available", out)  # same version, another commit
+        paths.SETTINGS.write_text(json.dumps({"latest": "v" + cur, "latest_commit": b, "failed_commit": b}))
+        with mock.patch.object(updater, "_head", return_value=a):
+            _, out, _ = run("doctor")
+        self.assertNotIn("is available", out)  # it failed last time
+        paths.SETTINGS.write_text(json.dumps({"latest": "v0.0.1"}))
+        _, out, _ = run("doctor")
+        self.assertNotIn("is available", out)  # older than this checkout
+
     def test_doctor_reports_newer_schema_on_dev_checkout(self):
         migrations.write_marker(paths.DATA, {"schema": migrations.LATEST + 1})
         _, out, _ = run("doctor")
@@ -524,6 +540,36 @@ class DataLockTests(CliBase):
         self.assertIn("An update is running", err)
         self.assertTrue((paths.DATA / "projects/demo/old.md").exists())
         self.assertEqual(list(paths.BACKUPS.glob("pre-restore-*")), [])
+
+    def test_update_during_restore_names_the_restore(self):
+        from core import updater
+        arc = self.archive({"projects/demo/new.md": b"new"})
+        seen = {}
+        real = leobot._replace_data
+
+        def replace(src, snap):
+            seen["purpose"] = updater.lock_purpose()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out), \
+                    mock.patch.object(paths, "is_installed", return_value=True), \
+                    mock.patch.object(updater, "refuse_reason", return_value=None):
+                seen["rc"] = updater.apply()
+            seen["out"] = out.getvalue()
+            return real(src, snap)
+        with self.not_running(), mock.patch.object(leobot, "_replace_data", side_effect=replace):
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen["purpose"], "restore")
+        self.assertEqual(seen["rc"], 1)
+        self.assertIn("A data restore is running", seen["out"])
+
+    def test_restore_refused_during_move_data_names_it(self):
+        from core import updater
+        arc = self.archive({"projects/demo/new.md": b"new"})
+        with updater._update_lock("move-data"), self.not_running():
+            code, _, err = run("backup", "--restore", str(arc), "--yes")
+        self.assertEqual(code, 1)
+        self.assertIn("A data move is running, so the restore did not start", err)
 
     def test_restore_refused_when_a_server_holds_the_pid_lock(self):
         self.write("projects/demo/old.md", "old")

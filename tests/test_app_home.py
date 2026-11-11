@@ -63,13 +63,22 @@ class WebviewSwift(unittest.TestCase):
         pid = self.src[self.src.index("private func pidFilePort"):]
         self.assertIn("LOCK_SH | LOCK_NB", pid[:600])  # a file nobody holds is a leftover
 
+    def test_second_start_after_a_failed_or_refused_one(self):
+        self.assertRegex(self.src, r"let maxStarts = 2\b")
+        wait = self.src[self.src.index("private func waitUp"):]
+        wait = wait[:wait.index("private func resolvePort")]
+        self.assertIn("lastStart = now", wait)
+        busy = wait[wait.index("if isUpdating() {"):wait.index("continue")]
+        self.assertIn("starts = 0", busy)  # an update or restore ran: a fresh window afterwards
+
     def test_home_must_be_absolute(self):
         home = self.src[self.src.index("private func homePath"):]
         home = home[:home.index("private func repoPath")]
         self.assertEqual(home.count('hasPrefix("/")'), 2)
 
     def test_start_gated_by_grace_and_update_lock(self):
-        self.assertIn("!started && elapsed >= startAfter && !isUpdating()", self.src)
+        self.assertIn("starts < maxStarts && elapsed >= startAfter && sinceStart >= startGrace && !isUpdating()",
+                      self.src)
         self.assertIn("run/update.lock", self.src)
         self.assertIn("LOCK_SH | LOCK_NB", self.src)
         # watch() must not start the server directly

@@ -27,7 +27,7 @@ from core import migrations, paths, service, version
 
 CHANNELS = ("stable", "main")
 DEFAULTS = {"channel": "stable", "checked_at": None, "latest": None, "latest_commit": None,
-            "previous_ref": None}
+            "failed_commit": None, "previous_ref": None}
 HEALTH_TIMEOUT = 60  # seconds for the new server to answer with the target version
 POLL = 0.5
 GIT_TIMEOUT = 300
@@ -230,11 +230,14 @@ def _remote_has_tag(code: Path, tag: str) -> "bool | None":
 
 
 def stable_update_needed(current: str, head: "str | None", tag: "str | None",
-                         tag_commit: "str | None") -> bool:
+                         tag_commit: "str | None", failed: "str | None" = None) -> bool:
     """Stable runs release tags only. An update is needed when the latest release is newer, or
     is this same version but HEAD is not its commit (say an untagged main checkout after a
-    switch from the main channel). Never when this checkout is newer than the latest release."""
+    switch from the main channel). Never when this checkout is newer than the latest release,
+    and never to `failed`, a commit that did not start last time (it is not offered again)."""
     if version.parse(current or "") is None or version.parse(tag or "") is None:
+        return False
+    if tag_commit and failed and tag_commit == failed:
         return False
     if version.newer(current, tag):
         return True
@@ -261,6 +264,30 @@ def _tag_of(target: str) -> "str | None":
     return t if _TAG.fullmatch(t) and version.parse(t) else None
 
 
+def cached_available(cfg: dict, current: str, head) -> bool:
+    """Whether the update remembered in leobot.json (`cfg`, from settings()) is worth offering,
+    without the network. `head` is a callable, run only when the answer depends on it."""
+    latest = cfg.get("latest")
+    if not latest:
+        return False
+    failed = cfg.get("failed_commit")
+    if cfg.get("channel") == "main":
+        if latest == failed:
+            return False
+        h = head()
+        return bool(h) and latest != h
+    latest_commit = cfg.get("latest_commit")
+    h = head() if latest_commit and not version.newer(current, latest) else None
+    return stable_update_needed(current, h, latest, latest_commit, failed)
+
+
+def _failed_text(label: str, current: str, tag: "str | None") -> str:
+    again = (f"To try it anyway, run: leobot update --version {tag}" if tag
+             else "It is offered again once main moves on")
+    return (f"Leo Bot {label} did not start when it was tried last time, so it is not offered again. "
+            f"Leo Bot stays on {current}. {again}.")
+
+
 # --------------------------------------------------------------------- check
 
 def check(code: "Path | None" = None) -> dict:
@@ -271,23 +298,29 @@ def check(code: "Path | None" = None) -> dict:
     current = _version_file(code)
     res = {"current": current, "latest": None, "available": False, "channel": channel, "notes_url": None}
     latest_commit = None  # stable: the commit of the latest tag; main: `latest` is itself a commit
+    failed = settings()["failed_commit"]
+    newest = None  # the commit an update would check out
     try:
         if origin_problem(code) is None:
             if channel == "main":
                 sha, head = _remote_main(code), _head(code)
                 if sha:
-                    res.update(latest=sha, available=bool(head) and sha != head,
+                    newest = sha
+                    res.update(latest=sha, available=bool(head) and sha != head and sha != failed,
                                notes_url=release_notes_url(code))
             else:
                 tag, tag_commit = _remote_latest(code)
                 if tag:
-                    res.update(latest=tag, available=stable_update_needed(current, _head(code), tag, tag_commit),
-                               notes_url=release_notes_url(code, tag))
+                    newest = tag_commit
+                    res.update(latest=tag, notes_url=release_notes_url(code, tag),
+                               available=stable_update_needed(current, _head(code), tag, tag_commit, failed))
                     latest_commit = tag_commit
         upd = {"checked_at": _now()}
         if res["latest"] is not None:
             upd["latest"] = res["latest"]
             upd["latest_commit"] = latest_commit
+        if failed and newest and newest != failed:  # something newer is out: offer it
+            upd["failed_commit"] = None
         save_settings(upd)
     except OSError:
         pass
@@ -314,20 +347,47 @@ def _lock_path() -> Path:
     return paths.RUN / LOCK_NAME
 
 
+PURPOSES = {"update": "An update", "rollback": "A rollback", "restore": "A data restore",
+            "move-data": "A data move"}
+
+
 @contextlib.contextmanager
-def _update_lock():
-    """Yields True when this process holds the update lock, False when another update runs."""
+def _update_lock(purpose: str = "update"):
+    """Yields True when this process holds the update lock, False when someone else does. The
+    holder writes its purpose (update, rollback, restore, move-data) into the file, so a refused
+    caller can say what is going on (busy_text)."""
     paths.RUN.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(_lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(_lock_path(), os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             yield False
             return
+        try:
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, purpose.encode(), 0)
+        except OSError:
+            pass  # the lock itself is what matters
         yield True
     finally:
         os.close(fd)
+
+
+def lock_purpose() -> "str | None":
+    """What holds the update lock (update, rollback, restore, move-data), or None when free."""
+    if not is_updating():
+        return None
+    try:
+        text = _lock_path().read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        text = ""
+    return text if text in PURPOSES else "update"
+
+
+def busy_text(purpose: "str | None" = None) -> str:
+    """`An update is running`, `A data restore is running`, ... for whoever holds the lock."""
+    return f"{PURPOSES.get(purpose or lock_purpose() or 'update', 'An update')} is running"
 
 
 def is_updating() -> bool:
@@ -517,9 +577,10 @@ def apply(target: "str | None" = None, *, channel: "str | None" = None, yes: boo
     if reason:
         _log(reason, err=True)
         return 1
-    with _update_lock() as mine:
+    with _update_lock("update") as mine:
         if not mine:
-            _log("An update is already running. See " + str(paths.UPDATE_LOG), err=True)
+            _log(f"{busy_text()}, so the update did not start. Try again when it has finished. "
+                 f"See {paths.UPDATE_LOG}", err=True)
             return 1
         return _apply(_cli(), code, target, channel, yes)
 
@@ -563,6 +624,9 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
         if not stable_update_needed(current, head, tag, tag_commit):
             _log(f"Leo Bot is up to date ({current}).")
             return 0
+        if tag_commit and tag_commit == settings()["failed_commit"]:
+            _log(_failed_text(tag, current, tag), err=True)
+            return 1
     else:
         tag = None
         sha = _remote_main(code)
@@ -572,6 +636,9 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
         if sha == head:
             _log(f"Leo Bot is up to date ({current}, main).")
             return 0
+        if sha == settings()["failed_commit"]:
+            _log(_failed_text(f"main {sha[:12]}", current, None), err=True)
+            return 1
 
     # 6a. download first: a failure here leaves the running server alone
     _log("Downloading the update from origin")
@@ -658,10 +725,18 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
     except Exception as e:  # noqa: BLE001
         return _recover(cli, code, proc=proc, why=f"The update failed ({e})", **ctx)
     if not ok:
+        try:  # not offered again until something newer is out (or asked for with --version)
+            save_settings({"failed_commit": commit})
+        except OSError as e:
+            _log(f"Could not remember the failed version in {paths.SETTINGS} ({e}).", err=True)
         return _recover(cli, code, proc=proc,
                         why=f"Leo Bot {want} did not answer with its version within {HEALTH_TIMEOUT} s",
                         **ctx)
     _log(f"Leo Bot is updated to {want}. Backup from before the update: {pre}")
+    try:
+        save_settings({"failed_commit": None})
+    except OSError:
+        pass
     return 0
 
 
@@ -810,9 +885,10 @@ def rollback(yes: bool) -> int:
     if reason:
         _log(reason, err=True)
         return 1
-    with _update_lock() as mine:
+    with _update_lock("rollback") as mine:
         if not mine:
-            _log("An update is already running. See " + str(paths.UPDATE_LOG), err=True)
+            _log(f"{busy_text()}, so the rollback did not start. Try again when it has finished. "
+                 f"See {paths.UPDATE_LOG}", err=True)
             return 1
         return _rollback(_cli(), code, yes)
 
@@ -936,7 +1012,7 @@ def spawn_detached() -> None:
     """Start `leobot update --yes` outside the server's process tree, so stopping the server
     does not stop the update. Output goes to the update log. Raises RuntimeError on failure."""
     if is_updating():
-        raise RuntimeError("An update is already running.")
+        raise RuntimeError(f"{busy_text()}. Try again when it has finished.")
     paths.ensure_dirs()
     log = str(paths.UPDATE_LOG)
     home = str(paths.HOME)

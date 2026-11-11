@@ -56,6 +56,19 @@ class UpdateRoutes(sp.Base):
             _, out, _ = request("GET", "/api/update", owner=True)
         self.assertFalse(out["available"])
 
+    def test_failed_commit_not_offered(self):
+        cfg = {"channel": "stable", "latest": "v9.9.9", "latest_commit": "b" * 40, "failed_commit": "b" * 40}
+        with mock.patch.object(updater, "settings", return_value=cfg):
+            _, out, _ = request("GET", "/api/update", owner=True)
+        self.assertFalse(out["available"])
+
+    def test_busy_post_names_the_holder(self):
+        with mock.patch.object(updater, "is_updating", return_value=True), \
+                mock.patch.object(updater, "lock_purpose", return_value="rollback"):
+            code, out, _ = request("POST", "/api/update", {}, owner=True)
+        self.assertEqual(code, 409)
+        self.assertIn("A rollback is running", out["error"])
+
     def test_updating_follows_the_updater_lock(self):
         with mock.patch.object(updater, "is_updating", return_value=True):
             _, out, _ = request("GET", "/api/update", owner=True)

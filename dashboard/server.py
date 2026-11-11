@@ -343,19 +343,12 @@ def _update_view() -> dict:
     cfg = updater.settings()
     latest = cfg.get("latest")
     installed = paths.is_installed()
-    available = False
+    # Same version on another commit still needs the tag; a commit that failed is not offered.
+    available = updater.cached_available(cfg, RUNNING_VERSION, _code_head)
     notes = None
     if latest:
-        if cfg.get("channel") == "main":
-            head = _code_head()
-            available = bool(head) and latest != head
-            notes = updater.release_notes_url()
-        else:
-            # Same version but another commit (an untagged main checkout) still needs the tag.
-            latest_commit = cfg.get("latest_commit")
-            head = _code_head() if latest_commit and not version.newer(RUNNING_VERSION, latest) else None
-            available = updater.stable_update_needed(RUNNING_VERSION, head, latest, latest_commit)
-            notes = updater.release_notes_url(tag=latest)
+        notes = (updater.release_notes_url() if cfg.get("channel") == "main"
+                 else updater.release_notes_url(tag=latest))
     return {"installed": installed, "current": RUNNING_VERSION, "latest": latest, "available": bool(available),
             "notes_url": notes, "updating": bool(_update_in_flight()),
             "data_dir": str(paths.DATA), "log": str(paths.UPDATE_LOG)}
@@ -2060,7 +2053,8 @@ class Handler(BaseHTTPRequestHandler):
             if not paths.is_installed():
                 return self._send(409, {"error": "This is a development checkout. Update it with git."})
             if _update_in_flight():
-                return self._send(409, {"error": "An update is already running."})
+                busy = updater.busy_text() if updater.is_updating() else "An update is running"
+                return self._send(409, {"error": f"{busy}. Try again when it has finished."})
             try:
                 updater.spawn_detached()
             except RuntimeError as e:

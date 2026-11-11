@@ -42,6 +42,21 @@ class PathsTests(unittest.TestCase):
                                cwd=paths.CODE, env=env, capture_output=True, text=True, timeout=60)
             self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_home_exported_absolute_for_children(self):
+        self.assertEqual(os.environ["LEOBOT_HOME"], str(paths.HOME))
+        code = "import os; from core import paths; print(os.environ['LEOBOT_HOME'])"
+        with tempfile.TemporaryDirectory() as fake_home:
+            env = {k: v for k, v in os.environ.items() if k != "LEOBOT_HOME"}
+            env["HOME"] = fake_home
+            for given, want in (("rel/h", str(Path(paths.CODE) / "rel" / "h")),
+                                (None, str(Path(fake_home) / ".leobot"))):
+                run_env = dict(env, **({"LEOBOT_HOME": given} if given else {}))
+                r = subprocess.run([sys.executable, "-c", code], cwd=paths.CODE, env=run_env,
+                                   capture_output=True, text=True, timeout=60)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertEqual(os.path.realpath(r.stdout.strip()), os.path.realpath(want))
+            self.assertEqual(os.listdir(fake_home), [])  # importing paths creates nothing
+
     def test_empty_env_ignored(self):
         self.assertEqual(paths.home_for({"LEOBOT_HOME": ""}), Path.home() / ".leobot")
 

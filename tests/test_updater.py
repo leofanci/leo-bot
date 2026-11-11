@@ -386,6 +386,50 @@ class ApplyTests(UpdaterBase):
         self.assertIn("up to date", out)
         self.assertEqual(self.server.stops, 0)
 
+    def test_failed_same_version_target_is_not_offered_again(self):
+        self.untagged_main_at("0.2.0")
+        self.server.bad_versions = {"0.2.0"}  # say a schema bump without a VERSION bump
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        tag_commit = self.sha("v0.2.0")
+        self.assertEqual(updater.settings()["failed_commit"], tag_commit)
+        self.assertFalse(updater.check()["available"])
+        self.assertFalse(updater.cached_available(updater.settings(), "0.2.0", self.head))
+        stops = self.server.stops
+        rc, out = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertIn("did not start when it was tried last time", out)
+        self.assertIn("leobot update --version v0.2.0", out)
+        self.assertEqual(self.server.stops, stops)  # refused before anything was stopped
+        self.server.bad_versions = set()
+        rc, out = self.call(updater.apply, "v0.2.0")  # asked for explicitly: tried again
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.head(), tag_commit)
+        self.assertIsNone(updater.settings()["failed_commit"])
+
+    def test_failed_commit_cleared_when_a_newer_release_appears(self):
+        self.server.bad_versions = {"0.2.0"}
+        rc, _ = self.call(updater.apply)
+        self.assertEqual(rc, 1)
+        self.assertEqual(updater.settings()["failed_commit"], self.sha("v0.2.0"))
+        self.assertFalse(updater.check()["available"])
+        commit_version(self.work, "0.3.0", "v0.3.0")
+        git(self.work, "push", "-q", "--tags", self.origin.as_uri(), "main")
+        self.assertTrue(updater.check()["available"])
+        self.assertIsNone(updater.settings()["failed_commit"])
+
+    def test_main_channel_failed_commit_not_offered(self):
+        commit_version(self.work, "0.3.0", None)
+        git(self.work, "push", "-q", self.origin.as_uri(), "main")
+        self.server.bad_versions = {"0.3.0"}
+        rc, _ = self.call(updater.apply, channel="main")
+        self.assertEqual(rc, 1)
+        updater.save_settings({"channel": "main"})
+        self.assertFalse(updater.check()["available"])
+        rc, out = self.call(updater.apply, channel="main")
+        self.assertEqual(rc, 1)
+        self.assertIn("once main moves on", out)
+
     def test_stable_update_needed_rules(self):
         a, b = "a" * 40, "b" * 40
         self.assertTrue(updater.stable_update_needed("0.1.0", a, "v0.2.0", b))
@@ -394,6 +438,8 @@ class ApplyTests(UpdaterBase):
         self.assertFalse(updater.stable_update_needed("0.3.0", a, "v0.2.0", b))
         self.assertFalse(updater.stable_update_needed("0.2.0", a, a, None))  # a main sha cached as latest
         self.assertFalse(updater.stable_update_needed("0.2.0", a, "v0.2.0", None))
+        self.assertFalse(updater.stable_update_needed("0.1.0", a, "v0.2.0", b, failed=b))
+        self.assertTrue(updater.stable_update_needed("0.1.0", a, "v0.2.0", b, failed=a))
 
     def test_explicit_version(self):
         git(self.app, "checkout", "-q", "--detach", "v0.2.0")
@@ -674,6 +720,21 @@ class ApplyTests(UpdaterBase):
         self.assertEqual(updater._restore_cmd(Path("/tmp/my backups/pre-x.tar.gz")),
                          "leobot backup --restore '/tmp/my backups/pre-x.tar.gz' --yes")
 
+    def test_lock_holder_names_its_purpose(self):
+        from core import updater as u
+        with u._update_lock("restore") as mine:
+            self.assertTrue(mine)
+            self.assertEqual(u.lock_purpose(), "restore")
+            self.assertEqual(u.busy_text(), "A data restore is running")
+            rc, out = self.call(updater.apply)
+            self.assertEqual(rc, 1)
+            self.assertIn("A data restore is running, so the update did not start", out)
+            self.assertNotIn("already running", out)
+            with self.assertRaises(RuntimeError) as cm:
+                updater.spawn_detached()
+            self.assertIn("A data restore is running", str(cm.exception))
+        self.assertIsNone(u.lock_purpose())
+
     def test_concurrent_update_refused(self):
         paths.RUN.mkdir(parents=True, exist_ok=True)
         fd = os.open(paths.RUN / "update.lock", os.O_RDWR | os.O_CREAT, 0o600)
@@ -682,7 +743,7 @@ class ApplyTests(UpdaterBase):
         self.assertTrue(updater.is_updating())
         rc, out = self.call(updater.apply)
         self.assertEqual(rc, 1)
-        self.assertIn("already", out)
+        self.assertIn("An update is running, so the update did not start", out)
         self.assertEqual(self.head(), self.sha("v0.1.0"))
 
 

@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     let retryInterval: TimeInterval = 2.0
     let startGrace: TimeInterval = 30.0
     let totalWait: TimeInterval = 90.0
+    let maxStarts = 2  // start tries per quiet window: startGrace, then another startGrace
     var url: URL { URL(string: "http://127.0.0.1:\(port)")! }
 
     func applicationDidFinishLaunching(_: Notification) {
@@ -225,23 +226,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
     }
 
     // True once a ping succeeds, polling every retryInterval. If nothing answers for
-    // startGrace, start the server once, but never while the updater holds its lock (it
-    // stops, backs up and restarts the server itself). Gives up after totalWait of silence
-    // with no update running: while an update runs the clock starts again, however long it takes.
+    // startGrace, start the server, never while the update lock is held (an update, rollback,
+    // restore or data move: it stops and restarts the server itself). A start that failed or
+    // was refused (say a restore took the lock just after it) gets one more try after another
+    // startGrace. Gives up after totalWait of silence with the lock free all along: while it is
+    // held the clock, and the tries, start again, however long that takes.
     private func waitUp(_ repo: String, startAfter: TimeInterval) -> Bool {
         var begin = Date()
-        var started = false
+        var starts = 0
+        var lastStart: Date? = nil
         while true {
             if ping(repo) { return true }
             if isUpdating() {
                 begin = Date()
+                starts = 0
+                lastStart = nil
                 Thread.sleep(forTimeInterval: retryInterval)
                 continue
             }
-            let elapsed = Date().timeIntervalSince(begin)
+            let now = Date()
+            let elapsed = now.timeIntervalSince(begin)
             if elapsed >= totalWait { return false }
-            if !started && elapsed >= startAfter && !isUpdating() {
-                started = true
+            let sinceStart = lastStart.map { now.timeIntervalSince($0) } ?? .infinity
+            if starts < maxStarts && elapsed >= startAfter && sinceStart >= startGrace && !isUpdating() {
+                starts += 1
+                lastStart = now
                 runStartScript(repo)
             }
             Thread.sleep(forTimeInterval: retryInterval)
