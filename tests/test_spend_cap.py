@@ -1,4 +1,5 @@
 import os
+import time
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,3 +74,90 @@ class JobBoundTests(unittest.TestCase):
                 text, failed = os_relay.run_osctl(["tree"], "", {"ws": "demo", "shared": False})
         self.assertTrue(failed)
         self.assertIn("too long", text)
+
+
+class Caps(unittest.TestCase):
+    """Owner and workspace caps over the per-thread spend ledger (dashboard/spend.py)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        patcher = mock.patch.object(chat_store, "CHATS_DIR", self.root / "chats")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.n = 0
+
+    def save_rows(self, rows):
+        self.n += 1
+        chat_store.save({"id": f"{self.n:08d}-0000-0000-0000-" + "0" * 12, "spend": rows})
+
+    @staticmethod
+    def env(**kw):
+        return mock.patch.dict(os.environ, kw)
+
+    def test_workspace_cap_counts_only_that_workspace(self):
+        from dashboard import spend
+        now = time.time()
+        self.save_rows([{"ts": now, "by": "owner", "cost": 4.0, "ws": "acme"},
+                        {"ts": now, "by": "owner", "cost": 9.0, "ws": "demo"}])
+        with self.env(LEOBOT_WORKSPACE_DAILY_CAP="5"):
+            self.assertIsNone(spend.refusal("acme", "owner"))
+            self.assertIn("workspace", spend.refusal("demo", "owner"))
+            self.assertIn("workspace", spend.refusal("demo", "p1"))  # the workspace cap holds for everyone
+
+    def test_owner_cap_skips_invited_people(self):
+        from dashboard import spend
+        self.save_rows([{"ts": time.time(), "by": "owner", "cost": 6.0, "ws": "acme"}])
+        with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
+            text = spend.refusal("acme", "owner")
+            self.assertIn("LEOBOT_OWNER_DAILY_CAP", text)
+            self.assertIn("$5.00", text)
+            self.assertNotIn("—", text)
+            self.assertIsNone(spend.refusal("acme", "p1"))
+
+    def test_old_rows_leave_the_window(self):
+        from dashboard import spend
+        self.save_rows([{"ts": time.time() - 90_000, "by": "owner", "cost": 99.0, "ws": "acme"}])
+        with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
+            self.assertIsNone(spend.refusal("acme", "owner"))
+
+    def test_pending_spend_counts(self):
+        from dashboard import spend
+        with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
+            self.assertIsNone(spend.refusal("acme", "owner"))
+            self.assertIsNotNone(spend.refusal("acme", "owner", pending=5.0))
+
+    def test_rows_without_ws_skip_workspace_cap(self):
+        from dashboard import spend
+        self.save_rows([{"ts": time.time(), "by": "owner", "cost": 9.0}])  # recorded before workspace caps
+        with self.env(LEOBOT_WORKSPACE_DAILY_CAP="5"):
+            self.assertIsNone(spend.refusal("acme", "owner"))
+
+    def test_bad_cap_values_mean_no_cap(self):
+        from dashboard import spend
+        for v in ("abc", "-3", "", "0", "nan", "inf"):
+            with self.env(LEOBOT_OWNER_DAILY_CAP=v):
+                self.assertEqual(spend.cap_value("owner"), 0.0)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(spend.cap_value("workspace"), 0.0)
+
+    def test_notice_once_per_day_survives_reload(self):
+        import importlib
+        from dashboard import spend
+        self.save_rows([{"ts": time.time(), "by": "owner", "cost": 4.2, "ws": "acme"}])
+        with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
+            note = spend.near_notice("acme", "owner", self.root)
+            self.assertIn("84%", note)
+            importlib.reload(spend)
+            self.assertIsNone(spend.near_notice("acme", "owner", self.root))
+            later = time.time() + 90_000  # a day on, and the owner is near the cap again
+            self.save_rows([{"ts": later - 60, "by": "owner", "cost": 4.5, "ws": "acme"}])
+            self.assertIsNotNone(spend.near_notice("acme", "owner", self.root, now=later))
+
+    def test_no_notice_under_80_percent(self):
+        from dashboard import spend
+        self.save_rows([{"ts": time.time(), "by": "owner", "cost": 3.0, "ws": "acme"}])
+        with self.env(LEOBOT_OWNER_DAILY_CAP="5"):
+            self.assertIsNone(spend.near_notice("acme", "owner", self.root))
+            self.assertFalse((self.root / "team" / "cap_notices.json").exists())
