@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, job_ledger, memory_consolidate, spend  # noqa: E402
+from dashboard import costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -3833,6 +3833,9 @@ def main():
         raise
     write_token_file()
     _start_update_checker()
+    # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
+    job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
+                      threads=chat_store.records, post=chat_store.post_note).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

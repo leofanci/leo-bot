@@ -38,6 +38,11 @@ def append(root, row):
         bots._atomic_write(path, json.dumps(rows[-KEEP:], ensure_ascii=False))
 
 
+def rows(root):
+    """Every saved run as written (the digest reads `before`/`after` of memory tidy-ups)."""
+    return _load(_path(root))
+
+
 def _cost(value):
     try:
         cost = float(value)
