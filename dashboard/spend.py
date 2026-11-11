@@ -31,13 +31,15 @@ def cap_value(kind):
     return value if math.isfinite(value) and value > 0 else 0.0
 
 
-def spent(kind, key=None, now=None):
+def spent(kind, key=None, now=None, records=None):
     """(total over the last 24 hours, ts of the oldest counted row or None).
-    `owner` counts rows by the owner; `workspace` counts rows with ws == key."""
+    `owner` counts rows by the owner; `workspace` counts rows with ws == key.
+    `records` = the saved-thread source (default chat_store.records; the server passes
+    its own chat_store copy, imported as a top-level module)."""
     now = time.time() if now is None else now
     cutoff = now - WINDOW
     total, oldest = 0.0, None
-    for rec in chat_store.records():
+    for rec in (records or chat_store.records)():
         for row in rec.get("spend") or ():
             if not isinstance(row, dict):
                 continue
@@ -66,12 +68,12 @@ def _caps(ws, by):
     return out
 
 
-def refusal(ws, by, now=None, pending=0.0):
+def refusal(ws, by, now=None, pending=0.0, records=None):
     """Text that stops a run when a cap is reached, else None. `pending` is what this
     message already spent but has not saved yet (the turn is saved when it ends)."""
     now = time.time() if now is None else now
     for kind, key, cap in _caps(ws, by):
-        total, oldest = spent(kind, key, now)
+        total, oldest = spent(kind, key, now, records)
         if total + (pending or 0) < cap:
             continue
         frees = time.strftime("%H:%M", time.localtime((oldest if oldest is not None else now) + WINDOW))
@@ -93,13 +95,14 @@ def _load_notices(root):
     return data if isinstance(data, dict) else {}
 
 
-def near_notice(ws, by, root, now=None):
+def near_notice(ws, by, root, now=None, pending=0.0, records=None):
     """A heads-up when a cap is at 80% or more, at most once per cap per 24 hours.
-    The last notice time is kept in team/cap_notices.json, so a restart does not repeat it."""
+    The last notice time is kept in team/cap_notices.json, so a restart does not repeat it.
+    `pending` = this message's spend, not saved yet."""
     now = time.time() if now is None else now
     for kind, key, cap in _caps(ws, by):
-        total, _ = spent(kind, key, now)
-        share = total / cap
+        total, _ = spent(kind, key, now, records)
+        share = (total + (pending or 0)) / cap
         if share < NEAR:
             continue
         slot = "owner" if kind == "owner" else f"ws:{key}"

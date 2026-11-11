@@ -56,6 +56,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
+from dashboard import spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -859,6 +860,21 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
             return chat_session.CHAT_MODEL, "skill-thread-read"
         return chat_session.ESCALATED_MODEL, "skill-thread"
     return chat_session.CHAT_MODEL, "default"
+
+
+PERSON_CAP_TEXT = ("You have used today's allowance for this workspace. "
+                   "Try again tomorrow, or ask the owner to raise it.")
+
+
+def _cap_refusal(ws, by, pending=0.0):
+    """Text that stops the next engine run of a message, else None: an invited person's
+    allowance, then the workspace and owner caps. `pending` = what the message already
+    spent (it is saved when the message ends). Runner turns never come here."""
+    if by != "owner":
+        cap = chat_store.person_daily_cap()
+        if cap and chat_store.spent_since(by) + (pending or 0) >= cap:
+            return PERSON_CAP_TEXT
+    return spend.refusal(ws, by, pending=pending, records=chat_store.records)
 
 
 def _tag_gate_message(suggest, team=None):
@@ -2421,8 +2437,7 @@ class Handler(BaseHTTPRequestHandler):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
         if person and chat_store.over_cap(person["id"]):
-            return self._sse_message("You have used today's allowance for this workspace. "
-                                     "Try again tomorrow, or ask the owner to raise it.")
+            return self._sse_message(PERSON_CAP_TEXT)
         sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
                 if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
         if chat_id:
@@ -2466,6 +2481,10 @@ class Handler(BaseHTTPRequestHandler):
                                                 apps=bool(app_turn)))
         except EngineRefused as e:
             return self._sse_message(str(e))
+        if engine.kind != "runner":  # a person's own Mac is never capped
+            capped = spend.refusal(ws, sender, records=chat_store.records)
+            if capped:
+                return self._sse_message(capped)
         sess.engine = engine
         locked = shared or engine.kind == "runner"
         sess.shared = locked
@@ -2616,6 +2635,24 @@ class Handler(BaseHTTPRequestHandler):
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
         web_domains = chat_session.user_web_domains(user_msg)
+        metered_turn = engine.kind != "runner"
+        cap_hit = []  # set once a cap stops this message: no further run, no 80% note
+
+        def notice(text):
+            """A line under the latest reply; saved on it, so a reload keeps it."""
+            i = len(msgs) - 1
+            msgs[i].setdefault("notices", []).append(text)
+            emit({"notice": text, "msg": i})
+
+        def may_run():
+            """Before a teammate or follow-up run: the caps, counting what ran so far."""
+            if not metered_turn:
+                return True
+            text = _cap_refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs))
+            if text:
+                cap_hit.append(text)
+                notice(text)
+            return not text
 
         def run(s_, prompt_, model_, web_, msg, skill_=None, reason_=None, **kw):
             """Stream one bot run into `msg` (content + usage). A reply with no reported
@@ -2735,13 +2772,15 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"clean": lead_text, "msg": 0})
             answers = []
             for b2, question, asked_by in _plan_teammates(team, bot_id, handoff_from, user_msg, asks):
+                if not may_run():
+                    break
                 emit({"msg_start": {**_bot_info(team, b2), "asked_by": asked_by,
                                     "question": question if asked_by else None}})
                 m2 = {"bot": b2, "content": "", "asked_by": asked_by or "user"}
                 msgs.append(m2)
                 # The lead's follow-up reads the answer without its REACT line (m2 keeps it till below).
                 answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
-            if asks and answers:
+            if asks and answers and not cap_hit and may_run():
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
@@ -2799,6 +2838,16 @@ class Handler(BaseHTTPRequestHandler):
                 _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)
             if apps_kw.get("os_token"):
                 os_relay.TOKENS.revoke(apps_kw["os_token"])
+            if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
+                try:
+                    near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
+                                             records=chat_store.records)
+                    if near:
+                        notice(near)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client left; the note is still saved on the reply
+                except (OSError, ValueError):
+                    traceback.print_exc()
             if isinstance(getattr(sess, "session_id", None), str):
                 try:
                     for m in msgs:  # a stopped turn: no marker line is ever saved

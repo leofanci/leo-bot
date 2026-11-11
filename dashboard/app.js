@@ -4326,7 +4326,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
       // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
-      row.hidden = m.role !== "user" && !m.content && !row.querySelector(".approval-bar, .deliv-list");
+      row.hidden = m.role !== "user" && !m.content && !row.querySelector(".approval-bar, .deliv-list, .msg-notices");
       paintReactions(row, m.reactions);
     });
     renderAppCards();
@@ -4728,6 +4728,18 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const main = div.querySelector(".msg-main");
     main.querySelector(".deliv-list")?.remove();
     main.querySelector(".approval-bar")?.remove();
+    main.querySelector(".msg-notices")?.remove();
+    if (m.notices?.length) {   // spending cap notes, saved on the reply
+      const box = document.createElement("div");
+      box.className = "msg-notices";
+      m.notices.forEach(t => {
+        const chip = document.createElement("div");
+        chip.className = "tool-chip";
+        chip.textContent = t;
+        box.appendChild(chip);
+      });
+      main.appendChild(box);
+    }
     const usage = fmtUsage(m.tokens, m.cost);
     const via = m.engine_label ? `via ${m.engine_label}` : "";
     div.querySelector(".mh time").title = [usage && `${usage} (tokens · estimated cost)`, via].filter(Boolean).join(" · ");
@@ -4822,7 +4834,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     row.querySelector(".msg-main").appendChild(box);
   }
   // Function declarations only (hoisted): showChat, defined above, calls these.
-  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length); }
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length); }
   function reactPicker(){   // built on first use; its row and anchor live on the function
     if (reactPicker.el) return reactPicker.el;
     const el = reactPicker.el = document.createElement("div");
@@ -5277,6 +5289,12 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.app_actions) {
               obj.app_actions.forEach(a => { if (!_APPROVALS.some(x => x.id === a.id)) _APPROVALS.unshift(a); });
               heldThisTurn = true;
+            }
+            if (obj.notice) {   // a cap note: under the reply, never in place of it
+              const r = replyAt(obj.msg);
+              (r.meta.notices ||= []).push(obj.notice);
+              const row = r.bubble.closest(".msg");
+              decorateReply(row, r.meta); row.hidden = false;
             }
             if (obj.error) { bubble.innerHTML = formatChatText("Error: " + obj.error); reader.cancel().catch(() => {}); return; }
             if (obj.delta) {

@@ -13,6 +13,7 @@ from dashboard.engines import api, claude_code, codex, prices
 import dashboard.server as server
 from tests.test_teammates import VENTURE
 
+JS = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text()
 USAGE = {"in": 100, "cache_write": 200, "cache_read": 1000, "out": 0}
 
 
@@ -121,6 +122,7 @@ class AskHarness(unittest.TestCase):
         h = server.Handler.__new__(server.Handler)
         h.wfile = sink
         h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
         with mock.patch.object(server, "ROOT", self.root), \
                 mock.patch.object(server.db, "tree", return_value=[VENTURE]), \
                 mock.patch.object(server.db, "posts", return_value=[]), \
@@ -172,6 +174,85 @@ class LedgerFields(AskHarness):
         mate = [m for m in rec["messages"] if m.get("bot") == "research"][0]
         self.assertIn(mate["reason"], {"teammate", "teammate-skill"})
         self.assertEqual(rec["messages"][-1]["reason"], rec["messages"][1]["reason"])
+
+
+
+def runner_online(owner):
+    return mock.patch.object(server.runners.HUB, "online", side_effect=lambda who: who == owner)
+
+
+def events(out):
+    return [json.loads(l[6:]) for l in out.splitlines() if l.startswith("data: {")]
+
+
+class CapWiring(AskHarness):
+    def test_capped_turn_never_starts_engine(self):
+        self.seed_spend(owner=6.0, ws="acme")
+        with env(LEOBOT_OWNER_DAILY_CAP="5"):
+            out, _ = self.ask("@cmo positioning for acme", "should not run")
+        self.assertIn("daily cap", out)
+        self.assertEqual(self.engine_calls, 0)
+
+    def test_workspace_cap_refuses_too(self):
+        self.seed_spend(owner=6.0, ws="acme")
+        with env(LEOBOT_WORKSPACE_DAILY_CAP="5"):
+            out, _ = self.ask("@cmo positioning for acme", "should not run")
+        self.assertIn("this workspace reached", out)
+        self.assertEqual(self.engine_calls, 0)
+
+    def test_teammate_refused_keeps_lead_reply(self):
+        # the lead's own cost (not yet saved) pushes the owner past the cap before the consult
+        with env(LEOBOT_OWNER_DAILY_CAP="0.01"):
+            out, rec = self.ask("@cmo plan for acme", ["Lead text.\nCONSULT @research: rivals?", "never"], cost=0.02)
+        evs = events(out)
+        self.assertTrue(any("notice" in e for e in evs))
+        self.assertFalse(any("error" in e for e in evs))
+        self.assertFalse(any("msg_start" in e for e in evs))  # no empty teammate bubble
+        self.assertEqual(self.engine_calls, 1)
+        last = rec["messages"][-1]
+        self.assertEqual(last["content"], "Lead text.")
+        self.assertTrue(any("daily cap" in n for n in last["notices"]))  # saved: survives the reload
+
+    def test_followup_refused_after_teammate(self):
+        with env(LEOBOT_OWNER_DAILY_CAP="0.03"):
+            out, rec = self.ask("@cmo plan for acme",
+                                ["Lead.\nCONSULT @research: rivals?", "Mate.", "never"], cost=0.02)
+        self.assertEqual(self.engine_calls, 2)
+        self.assertEqual([m.get("bot") for m in rec["messages"][1:]], ["cmo", "research"])
+        self.assertFalse(any("error" in e for e in events(out)))
+
+    def test_runner_turn_ignores_caps(self):
+        self.seed_spend(owner=6.0, ws="acme")
+        with env(LEOBOT_OWNER_DAILY_CAP="5", LEOBOT_WORKSPACE_DAILY_CAP="5"), runner_online("owner"):
+            _, rec = self.ask("@cmo positioning for acme", "ran", done={"tokens": 10, "cost": None, "usage": None})
+        self.assertEqual(self.engine_calls, 1)
+        last = rec["messages"][-1]
+        self.assertNotIn("metered", last)
+        self.assertNotIn("notices", last)
+
+    def test_no_cap_set_changes_nothing(self):
+        self.seed_spend(owner=600.0, ws="acme")
+        out, _ = self.ask("@cmo positioning for acme", "ran")
+        self.assertEqual(self.engine_calls, 1)
+        self.assertNotIn('"notice"', out)
+
+    def test_near_cap_notice_once(self):
+        self.seed_spend(owner=4.0, ws="acme")
+        with env(LEOBOT_OWNER_DAILY_CAP="5"):
+            out, rec = self.ask("@cmo positioning for acme", "ran", cost=0.5)
+            self.assertIn("Heads up: 90%", out)
+            self.assertIn("Heads up: 90%", rec["messages"][-1]["notices"][0])
+            out2, _ = self.ask("@cmo positioning for acme", "ran", cost=0.01)
+        self.assertNotIn('"notice"', out2)
+
+    def test_invited_person_cap_holds_mid_message(self):
+        with env(LEOBOT_PERSON_DAILY_CAP="0.01"):
+            refused = server._cap_refusal("acme", "p1", pending=0.02)
+        self.assertIn("allowance", refused)
+
+    def test_ui_handles_notice(self):
+        self.assertIn("if (obj.notice)", JS)
+        self.assertIn("m.notices", JS)
 
 
 if __name__ == "__main__":
