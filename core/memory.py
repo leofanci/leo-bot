@@ -18,6 +18,7 @@ The index is disposable: missing or corrupt, it is rebuilt; without FTS5, recall
 scans the file.
 """
 import contextlib
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -99,10 +100,16 @@ def memory_path(bot_id, project=None, root=ROOT, shared=False):
         if not _SLUG_RE.fullmatch(project) or not (root / "projects" / project).is_dir():
             raise ValueError(f"unknown project: {project}")
         team_dir = root / "projects" / project / "team"
-        return (team_dir / "shared" if shared else team_dir) / f"{bot_id}.md"
-    if shared:
+        path = (team_dir / "shared" if shared else team_dir) / f"{bot_id}.md"
+    elif shared:
         raise ValueError("HQ has no team memory")
-    return root / "team" / "memory" / f"{bot_id}.md"
+    else:
+        path = root / "team" / "memory" / f"{bot_id}.md"
+    # The slug checks above already keep it inside root; this says so to path scanners too.
+    base, full = os.path.normpath(str(root)), os.path.normpath(str(path))
+    if not full.startswith(base + os.sep):
+        raise ValueError("memory path outside the data folder")
+    return Path(full)
 
 
 def _read(path):
