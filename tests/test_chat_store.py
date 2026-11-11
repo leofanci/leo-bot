@@ -34,6 +34,25 @@ class ChatStore(unittest.TestCase):
         with self.assertRaises(ValueError):  # "$" alone would admit it
             store._path(s.session_id + "\n")
 
+    def test_job_and_title(self):
+        s = _Sess()
+        store.record_turn(s, None, "@cmo /positioning review", "reply", meta={"cost": 0.1}, ws="acme",
+                          job="j1", title="Job: weekly")
+        rec = store.load(s.session_id)
+        self.assertEqual((rec["title"], rec["job"], rec["spend"][-1]["job"]), ("Job: weekly", "j1", "j1"))
+        self.assertEqual(store.list_meta()[0]["job"], "j1")
+        store.record_turn(s, None, "Yes, approved.", "Saved.", meta={"cost": 0.1}, ws="acme")
+        rec = store.load(s.session_id)
+        self.assertEqual(rec["title"], "Job: weekly")
+        self.assertNotIn("job", rec["spend"][-1])  # the owner's own turn counts as theirs
+
+    def test_post_note_starts_a_thread(self):
+        rec = store.post_note("Digest 2026-06-01", "hq/general", "cos", "line one")
+        got = store.load(rec["id"])
+        self.assertEqual((got["title"], got["room"], got["scope"]), ("Digest 2026-06-01", "hq/general", None))
+        self.assertEqual([(m["role"], m["bot"], m["content"]) for m in got["messages"]],
+                         [("assistant", "cos", "line one")])
+
     def test_record_list_load_delete(self):
         s = _Sess()
         store.record_turn(s, ("demo", "/app"), "/workspace plan the demo launch", "ok")

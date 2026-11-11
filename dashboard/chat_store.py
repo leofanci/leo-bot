@@ -72,7 +72,7 @@ def list_meta():
             continue
         out.append({k: rec.get(k) for k in ("id", "title", "created", "updated", "turn_count",
                                             "room", "scope", "tokens", "cost", "by",
-                                            "shared", "apps_used")})
+                                            "shared", "apps_used", "job")})
     return sorted(out, key=lambda r: r.get("updated") or 0, reverse=True)
 
 
@@ -211,6 +211,18 @@ def reaction_note(rec):
     return REACTIONS_HEAD + "\n".join(lines[-REACTION_NOTE_LINES:]) if lines else ""
 
 
+def post_note(title, room, bot, text, scope=None):
+    """A new thread holding one bot line written with no model turn (the HQ digest)."""
+    import uuid
+    now = time.time()
+    rec = {"id": str(uuid.uuid4()), "title": (title or "Note")[:TITLE_MAX], "created": now,
+           "updated": now, "room": room, "scope": list(scope) if scope else None, "shared": False,
+           "turn_count": 0, "messages": [{"role": "assistant", "bot": bot, "content": text, "ts": now}]}
+    with _LOCK:
+        save(rec)
+    return rec
+
+
 def append_note(chat_id, bot, text):
     """One assistant line after the fact (an approved app action's result)."""
     with _LOCK:
@@ -263,7 +275,8 @@ def _paths(value):
 
 
 def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
-                by=None, by_name=None, shared=False, reactions=None, asked_at=None, ws=None):
+                by=None, by_name=None, shared=False, reactions=None, asked_at=None, ws=None,
+                job=None, title=None):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
@@ -277,12 +290,15 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     full-tool history (file reads in its session) never reaches people.
     `reactions` = [(bot_id, emoji)] the bots of this turn put on `user_msg`;
     `asked_at` = when `user_msg` was sent (default: now);
-    `ws` = the workspace the turn ran in, kept on its spend row for workspace caps.
+    `ws` = the workspace the turn ran in, kept on its spend row for workspace caps;
+    `job` = the scheduled job this turn ran for (on the thread and its spend row, for the
+    job's cap); `title` = a new thread's title (default: from `user_msg`).
     A reply with no text (only an emoji, or only an approval) is still kept when it
     carries an approval, deliverables, spend or a cap notice: cost roll-ups read the messages."""
     rec = load(sess.session_id) or {
         "id": sess.session_id,
-        "title": title_from(user_msg),
+        "title": (title or title_from(user_msg))[:TITLE_MAX],
+        **({"job": job} if job else {}),
         "created": time.time(),
         "messages": [],
         **({"by": by} if by else {}),
@@ -320,7 +336,7 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     if turn_cost:  # per-turn ledger, so a person's recent spend can be summed
         rec["spend"] = ((rec.get("spend") or [])[-200:]
                         + [{"ts": time.time(), "by": by or "owner", "cost": turn_cost,
-                            **({"ws": ws} if ws else {})}])
+                            **({"ws": ws} if ws else {}), **({"job": job} if job else {})}])
     rec.update({
         "updated": time.time(),
         "scope": list(scope) if scope else None,
