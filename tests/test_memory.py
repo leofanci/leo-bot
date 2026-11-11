@@ -84,6 +84,88 @@ class TypedEntries(TempRoot):
         self.assertEqual(memory.entries("cmo", "acme", self.root), [])
 
 
+class Recall(TempRoot):
+    def test_old_fact_beyond_the_tail_is_found(self):
+        memory.remember("cmo", "Pricing anchor is 49 euros per seat", "acme", self.root)
+        for i in range(60):
+            memory.remember("cmo", f"weekly note {i}", "acme", self.root)
+        self.assertNotIn("49 euros", memory.read_memory("cmo", "acme", self.root))  # outside the old 20-line tail
+        hits = memory.recall("cmo", "what is our pricing anchor", "acme", self.root)
+        self.assertIn("49 euros", hits[0])
+
+    def test_scopes_and_workspaces_never_mix(self):
+        memory.remember("cmo", "PRIVATE pricing", "acme", self.root)
+        memory.remember("cmo", "TEAM pricing", "acme", self.root, shared=True)
+        memory.remember("cmo", "OTHER pricing", "demo", self.root)
+        memory.remember("cmo", "HQ pricing", None, self.root)
+        team = memory.recall("cmo", "pricing", "acme", self.root, shared=True)
+        self.assertEqual(len(team), 1)
+        self.assertIn("TEAM pricing", team[0])
+        private = " ".join(memory.recall("cmo", "pricing", "acme", self.root))
+        self.assertIn("PRIVATE", private)
+        for other in ("TEAM", "OTHER", "HQ"):
+            self.assertNotIn(other, private)
+        self.assertEqual(len(memory.recall("cmo", "pricing", None, self.root)), 1)
+
+    def test_output_capped_at_800_chars(self):
+        for i in range(20):
+            memory.remember("cmo", f"pricing detail {i} " + "x" * 200, "acme", self.root)
+        hits = memory.recall("cmo", "pricing", "acme", self.root, limit=20)
+        self.assertLessEqual(sum(len(h) for h in hits), memory.RECALL_CHARS)
+        self.assertTrue(hits)
+
+    def test_limit_is_clamped(self):
+        for i in range(30):
+            memory.remember("cmo", f"pricing {i}", "acme", self.root)
+        self.assertEqual(len(memory.recall("cmo", "pricing", "acme", self.root, limit=0)), 1)
+        self.assertEqual(len(memory.recall("cmo", "pricing", "acme", self.root, limit=99)), 20)
+
+    def test_query_syntax_is_inert(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        for q in ('"', 'pric*', '-pricing', 'text:pricing', 'NEAR(a b)', 'AND OR', '(', '', '   ', None):
+            self.assertIsInstance(memory.recall("cmo", q, "acme", self.root), list, q)
+        self.assertTrue(memory.recall("cmo", 'text:"pricing"', "acme", self.root))
+
+    def test_unknown_scope_is_empty(self):
+        self.assertEqual(memory.recall("cmo", "pricing", "missing", self.root), [])
+        self.assertEqual(memory.recall("../x", "pricing", "acme", self.root), [])
+
+    def test_hand_edit_is_seen_without_reindex(self):
+        memory.remember("cmo", "first", "acme", self.root)
+        path = memory.memory_path("cmo", "acme", self.root)
+        path.write_text(path.read_text() + "- 2026-11-01 [fact] hand added zebra\n")
+        self.assertTrue(memory.recall("cmo", "zebra", "acme", self.root))
+
+    def test_forget_leaves_the_index(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root, today=date(2026, 11, 11))
+        memory.forget("cmo", "- 2026-11-11 [fact] pricing anchor", "acme", self.root)
+        self.assertEqual(memory.recall("cmo", "pricing", "acme", self.root), [])
+
+    def test_corrupt_index_is_rebuilt(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        (self.root / memory.INDEX_RELPATH).write_bytes(b"not a database")
+        self.assertTrue(memory.recall("cmo", "pricing", "acme", self.root))
+
+    def test_deleted_index_is_rebuilt(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        (self.root / memory.INDEX_RELPATH).unlink()
+        self.assertTrue(memory.recall("cmo", "pricing", "acme", self.root))
+
+    def test_scan_fallback_without_fts5(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        memory.remember("cmo", "unrelated", "acme", self.root)
+        with mock.patch.object(memory, "HAS_FTS5", False):
+            self.assertEqual(len(memory.recall("cmo", "Pricing?", "acme", self.root)), 1)
+            self.assertIn("pricing anchor", memory.recall("cmo", "Pricing?", "acme", self.root)[0])
+
+    def test_index_py_rebuilds_memory(self):
+        memory.remember("cmo", "pricing anchor", "acme", self.root)
+        memory.remember("cmo", "team note", "acme", self.root, shared=True)
+        memory.remember("cos", "hq note", None, self.root)
+        (self.root / memory.INDEX_RELPATH).unlink()
+        self.assertEqual(memory.rebuild_index(self.root), 3)
+
+
 def run_osctl(*argv):
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
