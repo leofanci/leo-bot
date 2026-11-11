@@ -9,8 +9,9 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
+import index
 from core import bots, memory
-from dashboard import osctl
+from dashboard import db, fileops, osctl
 
 
 def make_root(tmp):
@@ -194,6 +195,68 @@ class OsctlType(TempRoot):
     def test_unknown_type_is_rejected(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             osctl.main(["remember", "--bot", "cmo", "--project", "acme", "--text", "x", "--type", "todo"])
+
+
+class OsctlRecall(TempRoot):
+    def setUp(self):
+        super().setUp()
+        for p in [mock.patch.object(t, "ROOT", self.root) for t in (bots, memory, fileops)] + [
+                mock.patch.object(db, "DB_PATH", self.root / "database" / "data" / "os.db")]:
+            p.start()
+            self.addCleanup(p.stop)
+        with contextlib.redirect_stdout(io.StringIO()):
+            index.build(self.root)  # the workspace guard reads the index
+        memory.remember("cmo", "PRIVATE pricing", "acme", self.root)
+        memory.remember("cmo", "TEAM pricing", "acme", self.root, shared=True)
+        memory.remember("cmo", "OTHER pricing", "demo", self.root)
+        memory.remember("cmo", "HQ pricing", None, self.root)
+
+    def run_recall(self, env, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env, clear=False), contextlib.redirect_stdout(out):
+            for k in ("LEOBOT_WORKSPACE", "LEOBOT_SHARED", "LEOBOT_READONLY"):
+                if k not in env:
+                    os.environ.pop(k, None)
+            osctl.main(["recall", "--bot", "cmo", *argv])
+        return json.loads(out.getvalue().strip().splitlines()[-1])
+
+    def texts(self, r):
+        return [e.split("] ", 1)[1] for e in r["entries"]]
+
+    def test_shared_thread_reaches_only_team_memory(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "acme", "LEOBOT_SHARED": "1"}, "--query", "pricing")
+        self.assertEqual(self.texts(r), ["TEAM pricing"])
+
+    def test_private_thread_reaches_only_private_memory(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "acme"}, "--query", "pricing")
+        self.assertEqual(self.texts(r), ["PRIVATE pricing"])
+
+    def test_hq_reaches_only_hq_memory(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "hq"}, "--query", "pricing")
+        self.assertEqual(self.texts(r), ["HQ pricing"])
+
+    def test_workspace_never_reaches_another(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "demo"}, "--query", "pricing")
+        self.assertEqual(self.texts(r), ["OTHER pricing"])
+        self.assertNotIn("PRIVATE", json.dumps(r))
+        self.assertNotIn("HQ", json.dumps(r))
+
+    def test_no_project_argument(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.run_recall({"LEOBOT_WORKSPACE": "demo"}, "--query", "pricing", "--project", "acme")
+
+    def test_unknown_bot_is_an_error(self):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, {"LEOBOT_WORKSPACE": "acme"}), contextlib.redirect_stdout(out):
+            osctl.main(["recall", "--bot", "nobody", "--query", "pricing"])
+        r = json.loads(out.getvalue().strip().splitlines()[-1])
+        self.assertFalse(r["ok"])
+        self.assertIn("unknown bot", r["error"])
+
+    def test_allowed_when_consulted(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "acme", "LEOBOT_READONLY": "1"}, "--query", "pricing")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.texts(r), ["PRIVATE pricing"])
 
 
 if __name__ == "__main__":

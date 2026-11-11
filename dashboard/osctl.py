@@ -42,7 +42,7 @@ def _workspace():
 _BLOCKED_IN_WORKSPACE = {"create-project"}
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
-                   "resolve-id", "get-memory", "get-busy", "get-subsections",
+                   "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
                    "get-brief-spec", "get-voice", "research-signal"}
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV).
@@ -66,7 +66,7 @@ _SHARED_ALLOWED = frozenset({
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
     "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
-    "mark-done", "read-file", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
+    "mark-done", "read-file", "recall", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-brief-spec", "update-channel", "update-experiment", "update-feature",
     "update-intake", "update-memo", "update-milestone", "update-phase", "update-post",
     "update-profile", "update-project", "update-roadmap", "update-strategy",
@@ -344,6 +344,21 @@ def _build_parser():
     p.add_argument("--project")
     p.set_defaults(_run=lambda a: {"memory": bots.read_memory(a.bot, a.project, tail=0,
                                                               shared=bool(os.environ.get("LEOBOT_SHARED")))})
+
+    p = sub.add_parser("recall", help="Look up older entries in a bot's memory (this workspace and "
+                                      "thread's scope only)")
+    p.add_argument("--bot", required=True)
+    p.add_argument("--query", required=True)
+    p.add_argument("--limit", type=int, default=8)
+
+    def _recall(a):
+        # No --project: the server sets the workspace and scope, so a shared thread
+        # reaches only the team memory and one company never reaches another's.
+        if a.bot not in bots.load_defs():
+            raise fileops.ActionError(f"unknown bot: {a.bot}")
+        return {"entries": memory.recall(a.bot, a.query, _workspace(), root=bots.ROOT,
+                                         shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
+    p.set_defaults(_run=_recall)
 
     p = sub.add_parser("create-experiment", help="Create strategy/experiments/<stem>.json")
     p.add_argument("--project", required=True)
