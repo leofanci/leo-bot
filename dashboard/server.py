@@ -203,6 +203,18 @@ def write_token_file(path=None):
         f.write(AUTH_TOKEN)
 
 
+# A start refused until the owner acts (data in two places, newer data, no index): retrying
+# cannot help, so a service manager must not respawn it every few seconds. systemd skips this
+# status (RestartPreventExitStatus); launchd cannot skip one status, so its job restarts only
+# after a failure (KeepAlive SuccessfulExit=false) and a refusal there exits 0.
+REFUSED_EXIT = 78  # EX_CONFIG
+
+
+def refuse(msg):
+    print(msg, file=sys.stderr, flush=True)
+    sys.exit(0 if os.environ.get("LEOBOT_SERVICE") == "launchd" else REFUSED_EXIT)
+
+
 _PID_FD = None  # the pid file, open and flock-ed for the life of the process
 
 
@@ -355,13 +367,15 @@ def _update_view() -> dict:
 
 
 def _update_check_loop(sleep=time.sleep, rounds=None) -> None:
-    """First check after UPDATE_FIRST_CHECK seconds, then daily. Never raises."""
+    """First check after UPDATE_FIRST_CHECK seconds, then daily, unless the owner turned it off
+    (`leobot update --auto-check off`, read every time). Never raises."""
     wait, n = UPDATE_FIRST_CHECK, 0
     while rounds is None or n < rounds:
         sleep(wait)
         wait, n = UPDATE_CHECK_EVERY, n + 1
         try:
-            updater.check()
+            if updater.settings()["auto_check"]:
+                updater.check()
         except Exception as e:  # noqa: BLE001
             print(f"update check failed: {e}", file=sys.stderr)
 
@@ -3593,8 +3607,13 @@ def main():
     acquire_pid_lock(args.port)  # before the move and re-index: a second start must not touch the data
     try:
         datadir.prepare()  # one-time move out of a clone, marker, data migrations
+    except SystemExit as e:
+        release_pid_lock()
+        if isinstance(e.code, str):  # refused (two data folders, newer data): the owner must act
+            refuse(e.code)
+        raise
     except BaseException:
-        release_pid_lock()  # refused or failed (two data folders, newer data, disk error): no stale pid file
+        release_pid_lock()  # failed (disk error): no stale pid file
         raise
 
     if not args.no_reindex:
@@ -3608,7 +3627,7 @@ def main():
             # starts on that, says so in the log, and writes stay refused until it is fixed.
             if not db.db_exists():
                 release_pid_lock()
-                sys.exit("startup re-index failed — fix source files and retry")
+                refuse("startup re-index failed — fix source files and retry")
             print("WARNING: re-index failed; running on the last good index. Fix the file above.", file=sys.stderr)
 
     def _shutdown_children(*_a):

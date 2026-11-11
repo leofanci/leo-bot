@@ -17,13 +17,13 @@ class Stop(Exception):
 
 
 class MainWiringCase(unittest.TestCase):
-    def run_main(self, events, prepare):
+    def run_main(self, events, prepare, index_rc=0):
         def lock(port):
             events.append("lock")
 
         def run(cmd, **k):
             events.append("index")
-            return mock.Mock(returncode=0, stdout="", stderr="")
+            return mock.Mock(returncode=index_rc, stdout="", stderr="bad file" if index_rc else "")
         patches = [
             mock.patch.object(sys, "stdout", Tty()), mock.patch.object(sys, "stderr", Tty()),
             mock.patch.object(sys, "argv", ["server.py", "--port", "0"]),
@@ -52,9 +52,29 @@ class MainWiringCase(unittest.TestCase):
         def refuse():
             events.append("prepare")
             sys.exit("refused")
-        with self.assertRaises(SystemExit):
+        with mock.patch.dict(server.os.environ, {"LEOBOT_SERVICE": ""}), \
+                self.assertRaises(SystemExit) as cm:
             self.run_main(events, refuse)
         self.assertEqual(events, ["lock", "prepare", "release"])
+        self.assertEqual(cm.exception.code, server.REFUSED_EXIT)  # systemd: never respawned
+
+    def test_refusal_under_launchd_exits_zero(self):
+        # launchd cannot skip one status: its job restarts only after a failure
+        def refuse():
+            sys.exit("refused")
+        with mock.patch.dict(server.os.environ, {"LEOBOT_SERVICE": "launchd"}), \
+                self.assertRaises(SystemExit) as cm:
+            self.run_main([], refuse)
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_failed_reindex_without_index_is_a_refusal(self):
+        events = []
+        with mock.patch.object(server.db, "db_exists", return_value=False), \
+                mock.patch.dict(server.os.environ, {"LEOBOT_SERVICE": "systemd"}), \
+                self.assertRaises(SystemExit) as cm:
+            self.run_main(events, lambda: None, index_rc=1)
+        self.assertEqual(cm.exception.code, server.REFUSED_EXIT)
+        self.assertIn("release", events)
 
     def test_any_failure_releases_lock(self):
         events = []

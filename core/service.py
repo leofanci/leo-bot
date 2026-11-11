@@ -47,11 +47,13 @@ def launchd_plist(python: str, code: Path, port: int, home: Path) -> str:
         "ProgramArguments": [python, str(Path(code) / "dashboard" / "server.py"), "--port", str(port)],
         "WorkingDirectory": str(code),
         "RunAtLoad": True,
-        "KeepAlive": True,
+        # Restart after a crash, not after a refused start (the server exits 0 then: see
+        # server.refuse) or a deliberate stop.
+        "KeepAlive": {"SuccessfulExit": False},
         "AbandonProcessGroup": True,
         "StandardOutPath": str(paths.SERVER_LOG),
         "StandardErrorPath": str(paths.SERVER_LOG),
-        "EnvironmentVariables": {"LEOBOT_HOME": str(home), "PATH": _extra_path()},
+        "EnvironmentVariables": {"LEOBOT_HOME": str(home), "PATH": _extra_path(), "LEOBOT_SERVICE": "launchd"},
     }).decode()
 
 
@@ -76,8 +78,10 @@ def systemd_unit(python: str, code: Path, port: int, home: Path, server: bool, h
              "[Service]",
              f"ExecStart={exec_start}",
              f"WorkingDirectory={str(code).replace('%', '%%')}",
-             "Restart=always", "RestartSec=3",
+             # Restart after a crash, never after a start refused until the owner acts (78).
+             "Restart=on-failure", "RestartSec=3", "RestartPreventExitStatus=78",
              _sd_env("LEOBOT_HOME", str(home)),
+             "Environment=LEOBOT_SERVICE=systemd",
              _sd_env("PATH", _extra_path())]
     if server:
         lines.append("Environment=LEOBOT_DEPLOYMENT=server")
@@ -212,7 +216,7 @@ def install(port: int = DEFAULT_PORT, server: bool = False) -> str:
 def stop() -> None:
     """Stop so the manager does not respawn it. launchd: unload (the file stays). Raises
     RuntimeError when the service is still there afterwards (say systemctl could not reach the
-    user manager), so nobody goes on as if it were stopped while Restart=always brings it back."""
+    user manager), so nobody goes on as if it were stopped while the service manager can bring it back."""
     kind = _kind()
     if kind == "launchd":
         r = _run(["launchctl", "bootout", _target()])

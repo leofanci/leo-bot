@@ -74,6 +74,9 @@ for the latest code instead of releases, `--version vX.Y.Z`, `--service` / `--no
   and on a server it prints the link to open.
 - `leobot start`, `leobot stop`, `leobot status`
 - `leobot update` updates to the latest release (a backup is taken first); Settings has the same button.
+  Once a day the running server asks the repo it was installed from whether a release is out
+  (a `git ls-remote`: that host sees your address, nothing else is sent). Turn it off with
+  `leobot update --auto-check off`.
 - `leobot service install` keeps it running in the background (launchd on a Mac, a systemd user unit on Linux).
 - `leobot doctor` checks the setup; `leobot version` prints the version.
 - `leobot backup` snapshots your data into `~/.leobot/backups/`.

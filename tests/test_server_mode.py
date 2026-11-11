@@ -80,6 +80,10 @@ class Scripts(unittest.TestCase):
         self.assertIn(".leobot/data", text)
         self.assertIn("systemctl --user", text)
         self.assertNotIn("/leo-bot", text)
+        # this machine's index and an unfinished-move note never travel to the server
+        self.assertIn("--exclude=/database/", text)
+        self.assertIn("--exclude=/.leobot-moving", text)
+        self.assertEqual(text.count('"${SKIP[@]}"'), 2)
 
     def test_connect_reads_the_token_from_the_run_folder(self):
         text = (ROOT / "scripts" / "leobot-connect.sh").read_text()

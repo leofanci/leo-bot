@@ -894,5 +894,24 @@ class DoubleCheckTests(CliBase):
         self.assertIn("FIX  data schema True is older", out)
 
 
+class AutoCheckTests(CliBase):
+    def test_auto_check_off_and_on(self):
+        from core import updater
+        with mock.patch.object(paths, "SETTINGS", self.home / "leobot.json"):
+            self.assertTrue(updater.settings()["auto_check"])  # on by default
+            code, out, _ = run("update", "--auto-check", "off")
+            self.assertEqual(code, 0)
+            self.assertIn("no longer checks", out)
+            self.assertIs(updater.settings()["auto_check"], False)
+            code, _, _ = run("update", "--auto-check", "on")
+            self.assertEqual(code, 0)
+            self.assertIs(updater.settings()["auto_check"], True)
+
+    def test_damaged_setting_counts_as_on(self):
+        from core import updater
+        (self.home / "leobot.json").write_text('{"auto_check": "no"}')
+        self.assertIs(updater.settings()["auto_check"], True)
+
+
 if __name__ == "__main__":
     unittest.main()
