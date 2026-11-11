@@ -27,7 +27,10 @@ from core import migrations, paths, service, version
 
 CHANNELS = ("stable", "main")
 DEFAULTS = {"channel": "stable", "checked_at": None, "latest": None, "latest_commit": None,
-            "failed_commit": None, "previous_ref": None}
+            "failed_commit": None, "previous_ref": None,
+            # The running server asks origin once a day whether a release is out (git ls-remote:
+            # the origin host sees this machine's address, nothing else is sent). False: never.
+            "auto_check": True}
 HEALTH_TIMEOUT = 60  # seconds for the new server to answer with the target version
 POLL = 0.5
 GIT_TIMEOUT = 300
@@ -55,6 +58,8 @@ def settings() -> dict:
     d = {**DEFAULTS, **raw}
     if d["channel"] not in CHANNELS:
         d["channel"] = "stable"
+    if not isinstance(d["auto_check"], bool):
+        d["auto_check"] = True
     return d
 
 
@@ -434,7 +439,7 @@ def _service_port(cli):
 
 def _stop_server(cli):
     """Stop the server. With a service installed the service is always stopped, even when the
-    server is not up this instant, since KeepAlive / Restart=always would bring it back in the
+    server is not up this instant, since KeepAlive / Restart=on-failure would bring it back in the
     middle of a backup or checkout. Returns the port it ran on, or None when it was not
     running. Raises SystemExit when it cannot be stopped."""
     if _service_installed(cli):

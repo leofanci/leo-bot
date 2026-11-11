@@ -200,6 +200,13 @@ class CheckThread(unittest.TestCase):
         self.assertEqual(sleeps, [60, 86400, 86400])
         self.assertEqual(len(calls), 3)
 
+    def test_loop_skips_the_check_when_turned_off(self):
+        calls = []
+        with mock.patch.object(updater, "check", side_effect=lambda: calls.append(1)), \
+                mock.patch.object(updater, "settings", return_value={**updater.DEFAULTS, "auto_check": False}):
+            server._update_check_loop(sleep=lambda s: None, rounds=2)
+        self.assertEqual(calls, [])
+
     def test_thread_only_when_installed(self):
         with mock.patch.object(paths, "is_installed", return_value=False), \
                 mock.patch.object(threading, "Thread") as th:

@@ -47,6 +47,9 @@ finish() {
   remote_service start
 }
 trap finish EXIT
-rsync -a --rsync-path="sudo -n rsync" "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/" 2>/dev/null \
-  || rsync -a "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/"
+# Not copied: the index (this machine's paths; the server rebuilds its own at start) and the
+# note of an unfinished data move, which belongs to this machine only.
+SKIP=(--exclude=/database/ --exclude=/.leobot-moving)
+rsync -a "${SKIP[@]}" --rsync-path="sudo -n rsync" "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/" 2>/dev/null \
+  || rsync -a "${SKIP[@]}" "$LOCAL_DATA/" "$TARGET:$REMOTE_DATA/"
 echo "Done. Saved chats continue with a recap of their messages. Linked app folders need linking again on the server."

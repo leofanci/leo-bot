@@ -410,13 +410,14 @@ class TestNoUsageData(unittest.TestCase):
             prior = tests.ORIGINAL_HOME
             tests.ORIGINAL_HOME = tmp
             try:
-                self.assertIn((Path(tmp) / "data" / "projects").resolve(),
-                              [p.resolve() for p in project_dirs()])
+                found = (Path(tmp) / "data" / "projects").resolve() in [p.resolve() for p in project_dirs()]
                 terms = private_terms()
             finally:
                 tests.ORIGINAL_HOME = prior
-        self.assertIn("fixture-venture-x", terms)
-        self.assertIn("fixture-profile-y", terms)
+        # assertTrue, never assertIn: a failure must not print the real names in `terms`.
+        self.assertTrue(found, "the home folder's data/projects is not scanned")
+        self.assertTrue("fixture-venture-x" in terms and "fixture-profile-y" in terms,
+                        "names under the home folder's data/projects are not guarded")
 
     def test_staged_snapshot_contains_no_private_data_paths(self):
         hits = [path for path, _oid in staged_entries() if sensitive_path(path)]

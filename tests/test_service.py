@@ -18,7 +18,8 @@ class PureTests(unittest.TestCase):
         data = service.launchd_plist("/usr/bin/python3", Path("/opt/Leo Bot/app"), 8765, Path("/h/My Home"))
         p = plistlib.loads(data.encode() if isinstance(data, str) else data)
         self.assertEqual(p["Label"], "leobot.server")
-        self.assertIs(p["KeepAlive"], True)
+        self.assertEqual(p["KeepAlive"], {"SuccessfulExit": False})  # a refused start exits 0
+        self.assertEqual(p["EnvironmentVariables"]["LEOBOT_SERVICE"], "launchd")
         self.assertIs(p["RunAtLoad"], True)
         self.assertIs(p["AbandonProcessGroup"], True)
         self.assertEqual(p["EnvironmentVariables"]["LEOBOT_HOME"], "/h/My Home")
@@ -29,7 +30,8 @@ class PureTests(unittest.TestCase):
 
     def test_unit_contents(self):
         u = service.systemd_unit("/usr/bin/python3", Path("/a/app"), 8765, Path("/h"), False)
-        for want in ("Restart=always", "RestartSec=3", "NoNewPrivileges=true", "PrivateTmp=true",
+        for want in ("Restart=on-failure", "RestartSec=3", "RestartPreventExitStatus=78",
+                     "Environment=LEOBOT_SERVICE=systemd", "NoNewPrivileges=true", "PrivateTmp=true",
                      "Environment=LEOBOT_HOME=", "WantedBy=default.target"):
             self.assertIn(want, u)
         self.assertIn("ProtectSystem=full", u)

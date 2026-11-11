@@ -890,6 +890,16 @@ def cmd_service(args) -> int:
 
 def cmd_update(args) -> int:
     from core import updater
+    if getattr(args, "auto_check", None):
+        on = args.auto_check == "on"
+        try:
+            updater.save_settings({"auto_check": on})
+        except OSError as e:
+            print(f"Could not save the setting ({e}).", file=sys.stderr)
+            return 1
+        print("Leo Bot checks for updates once a day." if on
+              else "Leo Bot no longer checks for updates on its own. Check by hand: leobot update --check")
+        return 0
     if args.channel:
         reason = updater.refuse_reason(paths.CODE)  # a refused update must not switch the channel
         if reason:
@@ -957,6 +967,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--version", metavar="vX.Y.Z", help="move to this release")
     p.add_argument("--rollback", action="store_true", help="go back to the previous version")
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    p.add_argument("--auto-check", choices=("on", "off"),
+                   help="the daily check for a new release (on by default; asks origin only)")
     return ap
 
 
