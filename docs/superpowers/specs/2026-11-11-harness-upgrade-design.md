@@ -1,4 +1,4 @@
-# Harness upgrade: cost ledger, searchable memory, scheduled jobs, leaner turns
+# Harness upgrade: cost ledger, searchable memory, scheduled jobs, leaner turns, evals
 
 ## Why
 
@@ -205,6 +205,41 @@ Each item ships only if the Phase 1 data shows it matters.
   compaction check.
 - Fixtures use generic slugs only (`demo`, `acme`, `profile-a`).
 
+**Shape.** An `evals/` package beside `core/` and `dashboard/`, cases as JSON in `evals/cases/`.
+
+- `turns`: each case is one message through the server's real ask path on a throwaway data
+  folder, with a scripted engine whose replies the case gives. It compares the outcome: bot,
+  skill, hand-off, model tier and reason, web, tag gate, edit folders, approval card, consults,
+  follow-up, reactions, and text in the reply or in the lead and teammate prompts (the memory a
+  card carries). Case options set a thread under way, a DM, a shared thread, a connected-app
+  grant, a linked folder and memory files. A case marked `gap` states wanted behavior that fails
+  today: reported, not failed, and the suite fails once it passes so the mark gets dropped. Phase 4
+  routing starts as two open gaps.
+- `recall`: known-answer queries against one memory file through `memory.recall`, split into
+  keyword and paraphrase queries, on the FTS5 index and on the scan fallback. Its miss rate
+  decides the vector gate.
+- `live`: a few prompts graded on the real reply (a known answer named, length, bullet count,
+  teammates consulted) on top of the turn checks. It runs in a child process with a throwaway
+  home, so a bot's osctl writes never reach real data; the engine settings are copied in for the
+  run. Runs are saved to `<home>/evals/` (last 20, owner-only) and compared with the previous one.
+- Entry points: `python -m evals` and `leobot eval` (offline), `--live` (asks before spending
+  unless `--yes`, `--engine`, `--case`).
+
+**First results.** The offline cases found two defects, fixed with this phase: a tagged read
+(`/positioning what is...`) always took the strong model, since the read check looked at the
+start of the message where the tag sits; and recall matched on words such as "the" and "what",
+so unrelated facts filled the card. Recall now drops stop words (unless a query has nothing
+else), the index uses the porter stemmer (an index built with the old tokenizer is rebuilt on
+first use), and the scan fallback matches rough stems. Keyword recall went from 21/25 to 25/25;
+the miss rate from 20% to 13% on FTS5 and from 33% to 17% on the scan. Paraphrases still miss
+4 of 5, which keeps the vector gate closed (13% is under 20%). The live paraphrase case (a fact
+the card does not carry) passed on the first live run. Add paraphrase queries as real misses
+show up; reopen the gate if the rate passes 20%.
+
+**Done when:** `python -m evals` passes every non-gap case and stays under the recall gate in the
+suite, a declined live run sends nothing, and one live run on the default engine passes and is
+saved for the next comparison.
+
 ## Order and dependencies
 
 1. Phase 1, because every later choice needs its numbers and caps make the rest safe to enable.
@@ -233,6 +268,7 @@ Each item ships only if the Phase 1 data shows it matters.
 - Is a 400-entry file cap plus consolidation at 300 right, or should old entries move to an
   archive file the index still reads?
 - Is the vector-gate threshold (20% misses) reasonable, or should the eval set decide it?
+  (Phase 5 measured 13% on the recall set, 4 of 5 paraphrases missed: kept at 20% overall.)
 - Should the owner and workspace caps default to a nonzero value on a fresh install, as the
   person cap ($5) already does?
 

@@ -759,6 +759,8 @@ _WRITE_TURN_RE = re.compile(
     r"validate|assess|design|plan|build|launch|revise|brief)\b",
     re.I,
 )
+# The @bot and /skill tags a message opens with (the picker puts them first).
+_LEADING_TAGS_RE = re.compile(r"^(?:[@/][a-z][a-z0-9-]*[\s,:]*)+", re.I)
 _CONTINUATION_RE = re.compile(
     r"\b(yes|yep|yeah|ok|okay|sure|go ahead|save|commit|do it|approved|"
     r"looks good|next tab|proceed|continue|save all)\b",
@@ -846,6 +848,7 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
     Only standalone read-only queries fall back to the cheap model. `editing`: a turn that
     may change an edit folder takes the stronger model when it asks for a change."""
     msg = (user_msg or "").strip()
+    asked = _LEADING_TAGS_RE.sub("", msg)  # "/positioning what is..." reads like "what is..."
     if editing and (_WRITE_TURN_RE.search(msg) or _EDIT_WORD_RE.search(msg)):
         return chat_session.ESCALATED_MODEL, "edit-turn"
     if skill == "tokensave" and not web:
@@ -853,11 +856,11 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
     if web:
         return chat_session.ESCALATED_MODEL, "web"
     if skill and explicit:
-        if _READ_TURN_RE.search(msg) and not _WRITE_TURN_RE.search(msg):
+        if _READ_TURN_RE.search(asked) and not _WRITE_TURN_RE.search(msg):
             return chat_session.CHAT_MODEL, "explicit-read"
         return chat_session.ESCALATED_MODEL, "explicit-skill"
     if _in_active_skill_thread(session):
-        if _READ_TURN_RE.search(msg) and not _WRITE_TURN_RE.search(msg) and not _CONTINUATION_RE.search(msg):
+        if _READ_TURN_RE.search(asked) and not _WRITE_TURN_RE.search(msg) and not _CONTINUATION_RE.search(msg):
             return chat_session.CHAT_MODEL, "skill-thread-read"
         return chat_session.ESCALATED_MODEL, "skill-thread"
     return chat_session.CHAT_MODEL, "default"

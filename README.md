@@ -80,6 +80,10 @@ for the latest code instead of releases, `--version vX.Y.Z`, `--service` / `--no
 - `leobot service install` keeps it running in the background (launchd on a Mac, a systemd user unit on Linux).
 - `leobot doctor` checks the setup; `leobot version` prints the version.
 - `leobot backup` snapshots your data into `~/.leobot/backups/`.
+- `leobot eval` checks bot behavior offline for free: routing, model choice, the save gate,
+  approval cards and memory recall, on a throwaway workspace. `leobot eval --live` sends a few
+  known-answer prompts to your engine (it asks first and shows the cost) and compares the run
+  with the last one, saved in `~/.leobot/evals/`.
 - `leobot uninstall` removes the app and keeps your data unless you add `--data`.
 
 Your data lives in `~/.leobot/data` (`projects/`, `portfolio/`, `chats/`, `team/`). It never

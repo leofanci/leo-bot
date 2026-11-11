@@ -930,6 +930,23 @@ def cmd_update(args) -> int:
     return updater.apply(args.version, channel=args.channel, yes=args.yes)
 
 
+def cmd_eval(args) -> int:
+    """Behavior evals: the offline scorecard (free), or --live on a real engine (spends)."""
+    cmd = [sys.executable, "-m", "evals"]
+    if args.live:
+        cmd.append("--live")
+        if args.engine:
+            cmd += ["--engine", args.engine]
+        for case in args.case or ():
+            cmd += ["--case", case]
+        if args.yes:
+            cmd.append("--yes")
+    elif args.engine or args.case or args.yes:
+        print("--engine, --case and --yes go with --live.", file=sys.stderr)
+        return 2
+    return subprocess.call(cmd, cwd=str(paths.CODE))
+
+
 # ----------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -969,13 +986,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--auto-check", choices=("on", "off"),
                    help="the daily check for a new release (on by default; asks origin only)")
+    p = sub.add_parser("eval", help="check bot behavior: offline (free), or --live on a real engine")
+    p.add_argument("--live", action="store_true", help="send the live cases to a real engine (spends)")
+    p.add_argument("--engine", help="with --live: engine id to use (default: your default engine)")
+    p.add_argument("--case", action="append", help="with --live: run only this case (repeatable)")
+    p.add_argument("--yes", action="store_true", help="with --live: do not ask before spending")
     return ap
 
 
 COMMANDS = {"open": cmd_open, "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
             "version": cmd_version, "doctor": cmd_doctor, "backup": cmd_backup,
             "move-data": cmd_move_data, "uninstall": cmd_uninstall,
-            "service": cmd_service, "update": cmd_update}
+            "service": cmd_service, "update": cmd_update, "eval": cmd_eval}
 
 
 def main(argv=None) -> int:
