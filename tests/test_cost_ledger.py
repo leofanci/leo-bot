@@ -301,6 +301,12 @@ class JobLedger(unittest.TestCase):
         self.assertIn("--tools", cmd)
         self.assertEqual(cmd[cmd.index("--model") + 1], "haiku")
 
+    def test_claude_code_reply_cut_at_the_token_limit_is_flagged(self):
+        out = json.dumps({"type": "result", "result": "half a li", "stop_reason": "max_tokens",
+                          "usage": {"input_tokens": 5, "output_tokens": 2}})
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout=out, stderr="")):
+            self.assertTrue(claude_code.ClaudeCodeEngine().complete_metered("p", "in", "haiku")["truncated"])
+
     def test_claude_code_bad_envelope_raises(self):
         eng = claude_code.ClaudeCodeEngine()
         with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0, stdout="nope", stderr="")):

@@ -901,9 +901,10 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
             lines.append("In this channel (tag the owner for work outside your skills):\n"
                          + "\n".join(team.roster_line(o.id) for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
-        shared = shared and bool(project_slug)
-        mem = memory.card_block(bot_id, project_slug or None, ROOT, shared=shared, query=query)
-        where = f"{project_slug}, team" if shared else (project_slug or "HQ")
+        # HQ has no team memory (nobody joins HQ), so a shared thread there carries none.
+        mem = ("" if shared and not project_slug
+               else memory.card_block(bot_id, project_slug or None, ROOT, shared=shared, query=query))
+        where = f"{project_slug}, team" if shared and project_slug else (project_slug or "HQ")
         lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
                      else f"Your memory ({where}): nothing pinned or matching.")
         lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`.")

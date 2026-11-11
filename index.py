@@ -588,7 +588,7 @@ def build(root: Path):
     # files here, kept fresh by remember/forget in between.
     try:
         memory_n = memory.rebuild_index(root)
-    except sqlite3.Error as exc:  # derived and rebuilt on demand by recall: never fail the reindex
+    except (sqlite3.Error, OSError) as exc:  # derived, rebuilt on demand by recall: never fail the reindex
         memory_n = f"skipped ({exc})"
 
     print(f"Rebuilt {rel(db_path, root)}")
