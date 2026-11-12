@@ -261,14 +261,25 @@ def recover(root):
     return _change(root, fn)
 
 
+def _fresh(rows, now):
+    def age(p):
+        try:
+            return now - float(p.get("created") or 0)
+        except (TypeError, ValueError):
+            return PROPOSAL_TTL + 1
+    return [p for p in rows if age(p) <= PROPOSAL_TTL]
+
+
 def add_proposal(root, rec, now=None):
     """Queue one bot proposal for its thread (`rec["chat"]`); the server collects it."""
     chat = rec.get("chat")
     if not isinstance(chat, str) or not chat:
         raise ValueError("a job is proposed from a chat thread")
-    row = {**rec, "created": time.time() if now is None else now}
+    now = time.time() if now is None else now
+    row = {**rec, "created": now}
 
     def fn(data):
+        data["proposals"] = _fresh(data["proposals"], now)
         if sum(1 for p in data["proposals"] if p.get("chat") == chat) >= PROPOSALS_PER_CHAT:
             raise ValueError(f"at most {PROPOSALS_PER_CHAT} job proposals per thread")
         data["proposals"].append(row)
@@ -281,7 +292,7 @@ def take_proposals(root, chat, now=None):
     now = time.time() if now is None else now
 
     def fn(data):
-        fresh = [p for p in data["proposals"] if now - float(p.get("created") or 0) <= PROPOSAL_TTL]
+        fresh = _fresh(data["proposals"], now)
         mine = [p for p in fresh if p.get("chat") == chat]
         data["proposals"] = [p for p in fresh if p.get("chat") != chat]
         return mine

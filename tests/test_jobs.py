@@ -170,6 +170,10 @@ class Store(unittest.TestCase):
         self.assertEqual(jobs.take_proposals(self.root, "c2", now=now + jobs.PROPOSAL_TTL + 1), [])
         self.assertEqual(jobs.take_proposals(self.root, "c3", now=now + 1), [])
         self.assertEqual(len(jobs.load(self.root)), 1)
+        # Adding sweeps stale rows too, so threads nobody collects never pile up.
+        jobs.add_proposal(self.root, {"chat": "c8", "op": "delete"}, now=now)
+        jobs.add_proposal(self.root, {"chat": "c9", "op": "delete"}, now=now + jobs.PROPOSAL_TTL + 5)
+        self.assertEqual([p["chat"] for p in jobs._read(self.root)["proposals"]], ["c9"])
 
     def test_digest_state_kept_beside_jobs(self):
         self.make()
