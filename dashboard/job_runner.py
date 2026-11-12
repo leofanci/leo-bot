@@ -136,8 +136,10 @@ class Runner:
 
     def _run(self, job):
         try:
-            jobs.mark_start(self.root, job["id"], self.now())
+            job = jobs.mark_start(self.root, job["id"], self.now())
         except LookupError:  # deleted since the tick read the file
+            return False
+        if job is None:  # turned off while an earlier job ran
             return False
         fired = threading.Event()
 
