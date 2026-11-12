@@ -23,6 +23,7 @@ from pathlib import Path
 import apps_relay
 import chat_session
 from core import bots
+from dashboard.engines.base import TURN_ENV
 
 TOKENS = apps_relay.Tokens()  # own store: an apps token never opens this relay
 TOOL = "osctl"
@@ -79,7 +80,7 @@ def clean_args(arguments):
 def env_for(ctx):
     """The child's environment: the token's workspace, never a caller's."""
     drop = {chat_session.APPS_TOKEN_ENV, chat_session.APPS_USED_ENV, chat_session.OS_TOKEN_ENV,
-            chat_session.ENGINE_ENV, "LEOBOT_WORKSPACE", "LEOBOT_READONLY", SHARED_ENV}
+            chat_session.ENGINE_ENV, "LEOBOT_WORKSPACE", SHARED_ENV, *TURN_ENV}
     env = {k: v for k, v in os.environ.items() if k not in drop}
     env["LEOBOT_WORKSPACE"] = ctx["ws"]
     if ctx.get("shared", True):  # an owner's private turn on the api engine sets it False
@@ -90,6 +91,11 @@ def env_for(ctx):
         env["LEOBOT_READONLY"] = "1"
     if ctx.get("apps_used"):
         env[chat_session.APPS_USED_ENV] = "1"
+    for key, var in (("chat", "LEOBOT_CHAT"), ("job", "LEOBOT_JOB")):
+        if isinstance(ctx.get(key), str) and ctx[key]:
+            env[var] = ctx[key]
+    if env.get("LEOBOT_JOB") and isinstance(ctx.get("job_mode"), str):
+        env["LEOBOT_JOB_MODE"] = ctx["job_mode"]
     return env
 
 

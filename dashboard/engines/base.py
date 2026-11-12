@@ -32,6 +32,21 @@ class TurnPolicy:
     deny_dirs: tuple = ()
     deny_files: tuple = ()
     apps_used: bool = False
+    chat: str = None               # LEOBOT_CHAT: the thread (osctl propose-job keys its outbox on it)
+    job: str = None                # LEOBOT_JOB: a scheduled job's turn (its id)
+    job_mode: str = None           # LEOBOT_JOB_MODE: approval, auto or report
+
+
+# osctl reads these from its environment; a child never inherits the server's own copy.
+TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE")
+
+
+def turn_vars(policy):
+    """The osctl variables this turn sets (TURN_ENV), from its policy."""
+    return {**({"LEOBOT_READONLY": "1"} if policy.readonly else {}),
+            **({"LEOBOT_CHAT": policy.chat} if policy.chat else {}),
+            **({"LEOBOT_JOB": policy.job} if policy.job else {}),
+            **({"LEOBOT_JOB_MODE": policy.job_mode} if policy.job and policy.job_mode else {})}
 
 
 @dataclass(frozen=True)

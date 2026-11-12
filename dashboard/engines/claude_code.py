@@ -26,7 +26,7 @@ from pathlib import Path
 
 from core import folders, paths
 from dashboard.engines import prices
-from dashboard.engines.base import Engine, SessionLost, drain, stop_child
+from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, stop_child, turn_vars
 
 
 def parse_event(obj):
@@ -340,12 +340,12 @@ class ClaudeCodeEngine(Engine):
         return cmd
 
     def turn_env(self, policy, tokens):
-        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV)
+        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(),
                 ENGINE_ENV: self.id,
-                **({"LEOBOT_READONLY": "1"} if policy.readonly else {}),
+                **turn_vars(policy),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
