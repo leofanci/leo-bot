@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import dashboard.chat_session as cs
 from dashboard.engines.base import Engine, EngineRefused, SessionLost, TurnPolicy
@@ -126,6 +127,18 @@ class ClaudeDriver(unittest.TestCase):
         self.assertNotIn(sess.session_id, cmd)
         sess._started = True
         cmd = sess._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], new)
+
+    def test_reopened_chat_resumes_the_compacted_session(self):
+        from dashboard import chat_store
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess.engine.compact(sess)
+        new = sess.engine_state["claude-code"]["session"]
+        sess._started = True
+        with mock.patch.object(chat_store, "CHATS_DIR", Path(self.tmp.name) / "chats"):
+            chat_store.record_turn(sess, None, "hi", "ok", bot="cos")
+            back = cs.ChatSession.restore(self.tmp.name, "R", chat_store.load(sess.session_id))
+        cmd = back._base_cmd()
         self.assertEqual(cmd[cmd.index("--resume") + 1], new)
 
     def test_claude_session_id_must_look_like_one(self):
