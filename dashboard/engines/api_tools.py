@@ -484,7 +484,7 @@ class ToolBox:
         p = self.policy
         return {"ws": p.workspace or "hq", "readonly": p.readonly, "apps_used": p.apps_used,
                 "shared": p.shared, "engine": self.engine_id,
-                "chat": p.chat, "job": p.job, "job_mode": p.job_mode}
+                "chat": p.chat, "job": p.job, "job_mode": p.job_mode, "job_spent": p.job_spent}
 
     def run(self, name, arguments):
         """(text, is_error) for one tool call. Never raises for the model's own mistakes."""

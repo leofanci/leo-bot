@@ -35,10 +35,11 @@ class TurnPolicy:
     chat: str = None               # LEOBOT_CHAT: the thread (osctl propose-job keys its outbox on it)
     job: str = None                # LEOBOT_JOB: a scheduled job's turn (its id)
     job_mode: str = None           # LEOBOT_JOB_MODE: approval, auto or report
+    job_spent: float = 0.0         # LEOBOT_JOB_SPENT: what the job's turn spent before this run
 
 
 # osctl reads these from its environment; a child never inherits the server's own copy.
-TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE")
+TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE", "LEOBOT_JOB_SPENT")
 
 
 def turn_vars(policy):
@@ -46,7 +47,8 @@ def turn_vars(policy):
     return {**({"LEOBOT_READONLY": "1"} if policy.readonly else {}),
             **({"LEOBOT_CHAT": policy.chat} if policy.chat else {}),
             **({"LEOBOT_JOB": policy.job} if policy.job else {}),
-            **({"LEOBOT_JOB_MODE": policy.job_mode} if policy.job and policy.job_mode else {})}
+            **({"LEOBOT_JOB_MODE": policy.job_mode} if policy.job and policy.job_mode else {}),
+            **({"LEOBOT_JOB_SPENT": f"{policy.job_spent:.6f}"} if policy.job and policy.job_spent else {})}
 
 
 @dataclass(frozen=True)

@@ -174,6 +174,17 @@ class Digest(Base):
         self.assertIn("Waiting for your approval (2)", text)
         self.assertIn("- acme: New job: daily", text)
 
+    def test_generate_cost_of_a_job_without_a_run_in_the_window(self):
+        job = self.make()
+        job_ledger.append(self.root, {"ts": self.clock() - 300, "ws": "acme", "job": "generate",
+                                      "for_job": job["id"], "cost": 0.04})  # its run began earlier
+        job_ledger.append(self.root, {"ts": self.clock() - 200, "ws": "acme", "job": "generate",
+                                      "for_job": "gone1234", "cost": 0.01})  # a job since deleted
+        text = job_runner.digest_text(self.root, self.clock() - 3600, self.clock())
+        self.assertIn("- weekly (acme, @cmo): no new run, $0.04", text)
+        self.assertNotIn("gone1234", text)
+        self.assertIn("Generation runs\n- 1 run, $0.01", text)
+
     def test_posted_once_a_day_from_the_hour(self):
         self.seed()
         r = self.runner(lambda j: {"status": "done"})

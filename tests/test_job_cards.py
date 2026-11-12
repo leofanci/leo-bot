@@ -102,6 +102,17 @@ class Proposal(JobCardsBase):
         with self.assertRaises(ValueError):
             self.propose(op="update", job_id="missing1", cap="2")
 
+    def test_one_name_per_workspace(self):
+        jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="Weekly",
+                    message="m", schedule="every 6h", cap=1)
+        with self.assertRaises(ValueError):
+            self.propose()  # "weekly" exists in acme, case aside
+        other = jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="other",
+                            message="m", schedule="every 6h", cap=1)
+        with self.assertRaises(ValueError):
+            self.propose(op="update", job_id=other["id"], name="WEEKLY")
+        self.assertEqual(self.propose(op="update", job_id=other["id"], name="other")["summary"], "Change job: other")
+
 
 class Apply(JobCardsBase):
     def test_create_then_update_then_delete(self):

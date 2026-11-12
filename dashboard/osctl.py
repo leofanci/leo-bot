@@ -58,9 +58,13 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
                    "propose-job", "list-jobs"}
-# An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself; deletes and
-# memory still wait for an APPROVAL line, and it never proposes jobs.
-_AUTO_BLOCKED = {"remember", "propose-job"}
+# An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself. What removes work
+# still waits for an APPROVAL line: every delete-* command, and the commands that replace a whole
+# document or a section list (text a job read must not wipe a doc). It never writes memory and
+# never proposes jobs.
+_AUTO_REPLACES = {"update-intake", "update-technical", "update-roadmap", "update-subsections",
+                  "update-validation-tab"}
+_AUTO_BLOCKED = {"remember", "propose-job", *_AUTO_REPLACES}
 READONLY_TEXT = {
     None: "read-only here: you can look things up but not save. Say what should be saved: "
           "the lead saves it.",
@@ -373,13 +377,6 @@ def _build_parser():
     p.set_defaults(_run=_recall)
 
     # -- scheduled jobs (core/jobs.py): a bot proposes, the owner approves -- #
-    def _job_out(job):
-        try:
-            due = jobs.next_due(job) if job.get("enabled") else None
-        except ValueError:
-            due = None
-        return {**job, "mode": jobs.mode_of(job), "next_due": due}
-
     p = sub.add_parser("propose-job", help="Propose a new job, a change or a deletion: the owner "
                                            "gets a card in this thread; nothing is saved until they approve")
     p.add_argument("--job", help="the job to change or delete; omit for a new job")
@@ -421,7 +418,7 @@ def _build_parser():
     p.set_defaults(_run=_propose_job)
 
     p = sub.add_parser("list-jobs", help="Scheduled jobs (this workspace's, or every one from HQ)")
-    p.set_defaults(_run=lambda a: {"jobs": [_job_out(j) for j in jobs.load(bots.ROOT)
+    p.set_defaults(_run=lambda a: {"jobs": [jobs.view(j) for j in jobs.load(bots.ROOT)
                                             if not _workspace() or j.get("workspace") == _workspace()]})
 
     p = sub.add_parser("create-experiment", help="Create strategy/experiments/<stem>.json")
@@ -1023,8 +1020,9 @@ def main(argv=None):
         if in_job and (args.cmd in _AUTO_BLOCKED or args.cmd.startswith("delete-")):
             raise fileops.ActionError(
                 "a scheduled job never proposes jobs." if args.cmd == "propose-job" else
-                f"{args.cmd} waits for the owner even in an Auto job: say what and where, and end "
-                "with one APPROVAL: line.")
+                f"{args.cmd} waits for the owner even in an Auto job"
+                + (" (it replaces a whole document or list)" if args.cmd in _AUTO_REPLACES else "")
+                + ": say what and where, and end with one APPROVAL: line.")
         if os.environ.get("LEOBOT_WORKSPACE") and getattr(args, "local_folder", None) is not None:
             # A linked folder becomes --add-dir on that company's turns: only the
             # user links one, in the dashboard. Any bot (HQ too) is refused.

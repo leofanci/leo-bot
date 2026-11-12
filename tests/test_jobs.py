@@ -129,13 +129,31 @@ class Store(unittest.TestCase):
         self.assertIsNone(jobs.mark_start(self.root, job["id"], 200.0))
         self.assertEqual(jobs.get(self.root, job["id"])["last_run"], 100.0)  # a disabled job is not marked
 
-    def test_corrupt_file_reads_empty(self):
+    def test_corrupt_file_reads_empty_and_is_never_overwritten(self):
         path = self.root / jobs.RELPATH
         path.parent.mkdir(parents=True)
         path.write_text("not json")
         self.assertEqual(jobs.load(self.root), [])
-        self.make()
-        self.assertEqual(len(jobs.load(self.root)), 1)
+        with self.assertRaises(ValueError):  # a write would replace every job with nothing
+            self.make()
+        self.assertEqual(jobs.take_proposals(self.root, "c1"), [])  # every chat turn ends here
+        self.assertEqual(path.read_text(), "not json")
+
+    def test_take_proposals_rewrites_only_when_the_thread_has_some(self):
+        job = self.make()
+        with mock.patch.object(jobs, "_write") as write:
+            self.assertEqual(jobs.take_proposals(self.root, "c1"), [])
+        write.assert_not_called()
+        jobs.add_proposal(self.root, {"chat": "c1", "op": "delete", "job_id": job["id"]})
+        self.assertEqual(len(jobs.take_proposals(self.root, "c1")), 1)
+        self.assertEqual(jobs.take_proposals(self.root, "c1"), [])
+
+    def test_view_resolves_mode_and_next_run(self):
+        job = self.make()
+        self.assertEqual(jobs.view({**job, "mode": "bogus"})["mode"], "approval")
+        self.assertIsNotNone(jobs.view(job)["next_due"])
+        self.assertIsNone(jobs.view({**job, "enabled": False})["next_due"])
+        self.assertIsNone(jobs.view({**job, "schedule": "whenever"})["next_due"])
 
     def test_mode_defaults_and_validates(self):
         job = self.make()
@@ -285,10 +303,19 @@ class Osctl(unittest.TestCase):
     def test_auto_job_refuses_deletes_and_memory(self):
         auto = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_JOB": "j1", "LEOBOT_JOB_MODE": "auto"}
         for argv in (["delete-memo", "--project", "acme", "--type", "positioning", "--version", "1"],
-                     ["remember", "--bot", "cmo", "--text", "a fact"]):
+                     ["remember", "--bot", "cmo", "--text", "a fact"],
+                     # whole-document and section-list replaces remove work too
+                     ["update-intake", "--project", "acme", "--text", "x"],
+                     ["update-technical", "--project", "acme", "--text", "x"],
+                     ["update-roadmap", "--product", "p", "--text", "x"],
+                     ["update-subsections", "--project", "acme", "--doc", "intake", "--subsections", "A"],
+                     ["update-validation-tab", "--project", "acme", "--subsections", "A"]):
             r = self.run_osctl(*argv, env=auto)
             self.assertFalse(r["ok"], argv)
             self.assertIn("APPROVAL", r["error"])
+        self.assertIn("whole document", self.run_osctl("update-intake", "--project", "acme", "--text", "x",
+                                                       env=auto)["error"])
+        self.assertTrue(osctl._AUTO_REPLACES <= osctl._AUTO_BLOCKED)
         r = self.run_osctl("create-memo", "--project", "acme", "--type", "positioning", "--summary", "s", env=auto)
         self.assertNotIn("Auto job", r.get("error", ""))  # past the mode gate
 

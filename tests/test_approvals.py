@@ -198,6 +198,29 @@ class JobCards(unittest.TestCase):
             self.assertEqual(approvals.pending(self.root), [])
         self.assertEqual(approvals.get(rec["id"], self.root)["status"], "expired")
 
+    def test_a_second_card_for_the_same_target_supersedes_the_first(self):
+        first, other_thread = self.card(), self.card(chat="c2")
+        second = self.card()  # the same new job proposed again in c1
+        self.assertEqual(approvals.get(first["id"], self.root)["status"], "superseded")
+        self.assertEqual(approvals.get(other_thread["id"], self.root)["status"], "pending")
+        change = approvals.add_job(self.root, ws="acme", room="acme/dm-cmo", chat="c1", bot="cmo",
+                                   job={"op": "update", "job_id": "j1", "fields": {"cap": 2}},
+                                   summary="Change job: weekly", preview={})
+        self.assertEqual(approvals.get(second["id"], self.root)["status"], "pending")  # another target
+        approvals.add_job(self.root, ws="acme", room="acme/dm-cmo", chat="c1", bot="cmo",
+                          job={"op": "update", "job_id": "j1", "fields": {"cap": 3}},
+                          summary="Change job: weekly", preview={})
+        self.assertEqual(approvals.get(change["id"], self.root)["status"], "superseded")
+
+    def test_stale_running_card_says_check_jobs(self):
+        rec = self.card()
+        approvals.claim(rec["id"], self.root)
+        started = approvals.get(rec["id"], self.root)["started"]
+        with mock.patch("core.approvals.time.time", return_value=started + approvals.RUNNING_STALE + 1):
+            approvals.pending(self.root)
+        got = approvals.get(rec["id"], self.root)
+        self.assertEqual((got["status"], got["result"]), ("failed", approvals.JOB_STALE_NOTE))
+
 
 class AppActions(unittest.TestCase):
     def setUp(self):

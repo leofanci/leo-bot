@@ -74,8 +74,8 @@ def digest_text(root, since, now, threads=None):
             continue
         if r.get("job") == "memory-consolidate":
             tidy.append(f"- @{r.get('bot')} in {r.get('ws') or bots.HQ}: {r.get('before')} → {r.get('after')} entries")
-        elif isinstance(r.get("for_job"), str) and r["for_job"]:  # a generate run of an Auto job
-            slot(r["for_job"])["cost"] += _num(r.get("cost"))
+        elif isinstance(r.get("for_job"), str) and (r["for_job"] in runs or r["for_job"] in known):
+            slot(r["for_job"])["cost"] += _num(r.get("cost"))  # a generate run of an Auto job
         elif r.get("job") == "generate":
             gen_runs += 1
             gen_cost += _num(r.get("cost"))
@@ -87,7 +87,8 @@ def digest_text(root, since, now, threads=None):
         for row in runs.values():
             where = f" ({row['where']})" if row["where"] else ""
             last = f", last: {row['status']}" if row["status"] else ""
-            times = "1 run" if row["runs"] == 1 else f"{row['runs']} runs"
+            times = ("no new run" if not row["runs"] else  # spend from a run that began earlier
+                     "1 run" if row["runs"] == 1 else f"{row['runs']} runs")
             lines.append(f"- {row['name']}{where}: {times}, {_money(row['cost'])}{last}")
         parts.append("Scheduled jobs\n" + "\n".join(lines))
     if tidy:
