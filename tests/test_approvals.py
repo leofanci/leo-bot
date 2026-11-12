@@ -152,6 +152,53 @@ class Memory(unittest.TestCase):
         self.assertIn("premium tier", bots.read_memory("cmo", "acme", self.root))
 
 
+class JobCards(unittest.TestCase):
+    """Job proposals: held like app actions, answered only through their own card."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def card(self, chat="c1"):
+        return approvals.add_job(self.root, ws="acme", room="acme/dm-cmo", chat=chat, bot="cmo",
+                                 job={"op": "create", "job_id": None, "fields": {"name": "weekly"}},
+                                 summary="New job: weekly", preview={"title": "New job: weekly", "fields": []})
+
+    def test_held_like_an_app_action(self):
+        rec = self.card()
+        self.assertEqual((rec["kind"], rec["status"]), ("job", "pending"))
+        approvals.add(self.root, ws="acme", room="acme/dm-cmo", chat="c1", bot="cmo", summary="save a memo")
+        self.assertEqual(approvals.resolve_chat("c1", "answered", self.root), 1)  # the chat row only
+        self.assertEqual(approvals.get(rec["id"], self.root)["status"], "pending")
+        self.assertIn(rec["id"], [r["id"] for r in approvals.pending(self.root, "acme")])
+
+    def test_claim_once_and_finish(self):
+        rec = self.card()
+        approvals.claim(rec["id"], self.root)
+        with self.assertRaises(ValueError):
+            approvals.claim(rec["id"], self.root)
+        approvals.finish(rec["id"], "done", "Job created.", self.root)
+        self.assertEqual(approvals.get(rec["id"], self.root)["result"], "Job created.")
+
+    def test_edit_and_reject(self):
+        rec = self.card()
+        got = approvals.edit_job(rec["id"], {"op": "create", "job_id": None, "fields": {"name": "daily"}},
+                                 "New job: daily", {"title": "New job: daily", "fields": []}, self.root)
+        self.assertEqual((got["job"]["fields"]["name"], got["summary"]), ("daily", "New job: daily"))
+        with self.assertRaises(ValueError):  # an app-only edit never reaches a job row
+            approvals.edit_arguments(rec["id"], {}, self.root)
+        approvals.reject(rec["id"], self.root)
+        with self.assertRaises(ValueError):
+            approvals.edit_job(rec["id"], got["job"], "x", {}, self.root)
+
+    def test_week_old_card_expires(self):
+        rec = self.card()
+        with mock.patch.object(approvals.time, "time", return_value=time.time() + approvals.APP_TTL + 5):
+            self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual(approvals.get(rec["id"], self.root)["status"], "expired")
+
+
 class AppActions(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
