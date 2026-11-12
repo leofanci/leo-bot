@@ -331,6 +331,14 @@ class JobLedger(unittest.TestCase):
         self.assertEqual(costs.summarize("demo", recs(), {"demo"})["total"]["turns"], 0)
         self.assertEqual(costs.summarize("hq", recs(), {"acme"})["total"]["turns"], 1)
 
+    def test_job_threads_and_generate_runs_are_labelled(self):
+        job_ledger.append(self.root, self.row(job="generate", bot=None))
+        thread_rec = {"id": "x", "title": "Job: weekly", "job": "j1", "room": "acme/dm-cmo",
+                      "messages": [{"role": "assistant", "bot": "cmo", "ts": time.time(), "cost": 0.1, "job": "j1"}]}
+        rep = costs.summarize("acme", [thread_rec, *job_ledger.records(self.root)], {"acme"})
+        self.assertEqual(rep["by_job"]["generate"]["label"], "Generation")
+        self.assertEqual(rep["by_job"]["j1"]["label"], "Job: weekly")
+
     def test_free_run_spends_nothing(self):
         job_ledger.append(self.root, self.row(cost=None, metered=False))
         self.assertEqual(job_ledger.records(self.root)[0]["spend"], [])
