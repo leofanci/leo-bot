@@ -66,7 +66,8 @@ class FilesystemBoundaryTest(unittest.TestCase):
 
 class GenerationSandboxTest(unittest.TestCase):
     def test_generation_claude_runs_without_tools_mcp_or_user_settings(self):
-        done = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        envelope = '{"type": "result", "subtype": "success", "result": "{}", "total_cost_usd": 0.001}'
+        done = SimpleNamespace(returncode=0, stdout=envelope, stderr="")
         with mock.patch.object(generate.subprocess, "run", return_value=done) as run:
             generate.run_claude("prompt", "untrusted brief text")
         cmd = run.call_args.args[0]

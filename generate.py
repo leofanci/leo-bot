@@ -105,22 +105,47 @@ def _safe_post_id(value: str) -> str:
 # claude invocation + output handling (split out so they're unit-testable)
 # --------------------------------------------------------------------------- #
 def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
-    """Invoke `claude -p ... --output-format json`, return the raw stdout.
+    """Run one generation, return its JSON result envelope ({"type": "result", "result": ...}).
 
     Pure text generation: no tools, no MCP servers, no user/project settings or
     skills. Brief/voice text is untrusted input, so it must not be able to steer
     the model into running commands, reading files or fetching URLs.
+
+    Metered like every background run: the owner and workspace caps are checked first
+    (a capped run raises JobError with the cap's text), and what it spent is one
+    job_ledger row (`job: "generate"`), counted by the caps and the cost report. Who
+    asked is not known here, so a run from a shared thread counts as the owner's.
     """
+    import itertools
+    import os
+    import time
+    from dashboard import chat_store, fileops, job_ledger, spend
+    from dashboard.engines import prices
     from dashboard.engines.registry import for_job  # the engine its turn runs on (LEOBOT_ENGINE)
 
+    root = fileops.ROOT
+    ws = (os.environ.get("LEOBOT_WORKSPACE") or "").strip() or "hq"
+    capped = spend.refusal(ws, "owner",
+                           records=lambda: itertools.chain(chat_store.records(), job_ledger.records(root)))
+    if capped:
+        raise JobError(capped)
     try:
         engine = for_job()
-        out = engine.complete(prompt, stdin_text, model)
+        out = engine.complete_metered(prompt, stdin_text, model)
     except Exception as e:  # noqa: BLE001  EngineRefused, a provider error, a failed CLI
         raise JobError(str(e)) from None
-    if engine.kind == "api":
-        return json.dumps({"type": "result", "subtype": "success", "result": out})
-    return out
+    usage, used, cost = out.get("usage"), out.get("model") or model, out.get("cost")
+    if cost is None:
+        cost = prices.estimate(used, usage)
+    try:
+        job_ledger.append(root, {
+            "ts": time.time(), "ws": ws, "by": "owner", "bot": None, "job": "generate",
+            "engine": engine.id, "engine_label": engine.label, "model": used, "usage": usage,
+            "cost": cost, "metered": cost is not None,
+            "tokens": sum(int(v or 0) for v in usage.values()) if isinstance(usage, dict) else 0})
+    except OSError as e:  # the text is still good: never lose a paid result over the ledger
+        print(f"generate: could not record spend: {e}", file=sys.stderr)
+    return json.dumps({"type": "result", "subtype": "success", "result": out.get("text") or ""})
 
 
 def extract_result(stdout: str) -> str:
