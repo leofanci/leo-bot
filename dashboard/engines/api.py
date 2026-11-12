@@ -316,6 +316,27 @@ class ApiEngine(Engine):
                          "usage": split})
 
     # ---- Anthropic Messages ------------------------------------------- #
+    @staticmethod
+    def _cached(rail, messages):
+        """(system, messages) for one request, with two prompt-cache breakpoints: the system
+        prompt (the same in every thread) and the newest message, so the next request in this
+        turn, or the next turn, reads everything before it from cache. A copy: the stored
+        history never carries a breakpoint."""
+        mark = {"type": "ephemeral"}
+        system = [{"type": "text", "text": rail, "cache_control": mark}]
+        if not messages:
+            return system, []
+        last = messages[-1]
+        content = last.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}] if content else []
+        else:
+            blocks = [dict(b) if isinstance(b, dict) else b for b in content or []]
+        if blocks and isinstance(blocks[-1], dict):
+            blocks[-1]["cache_control"] = mark
+            last = {**last, "content": blocks}
+        return system, messages[:-1] + [last]
+
     def _anthropic_tools(self, box, policy, model):
         tools = [{"name": s["name"], "description": s["description"], "input_schema": s["input_schema"]}
                  for s in box.specs]
@@ -338,9 +359,10 @@ class ApiEngine(Engine):
             if time.time() - started > TURN_TIMEOUT:
                 yield ("error", f"This turn on {self.label} took too long, so it was stopped.")
                 return
+            system, request = self._cached(session.rail, messages)
             resp = self._open("/v1/messages", {
-                "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": session.rail,
-                "messages": messages, **({"tools": tools} if tools else {})}, cancel)
+                "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": system,
+                "messages": request, **({"tools": tools} if tools else {})}, cancel)
             cancel.resp = resp
             content, stop = [], None
             with resp:

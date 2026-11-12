@@ -123,7 +123,7 @@ class Anthropic(Base):
         req = self.fake.requests[0]
         self.assertEqual(req["path"], "/v1/messages")
         self.assertEqual(req["body"]["model"], "m-strong")
-        self.assertEqual(req["body"]["system"], "RAIL")
+        self.assertEqual(req["body"]["system"][0]["text"], "RAIL")
         self.assertEqual(req["headers"]["x-api-key"], "sk-secret-1234")
 
     def test_tool_loop_runs_osctl_bound_to_the_workspace_and_keeps_thinking_blocks(self):
@@ -226,6 +226,7 @@ class Anthropic(Base):
         self.assertNotIn("tools", body)
         self.assertEqual(body["system"], "PROMPT")
         self.assertEqual(body["messages"][0]["content"], "INPUT")
+
 
     def test_complete_metered_reads_usage(self):
         self.fake.replies = [anthropic_text("tidy")]
@@ -676,6 +677,82 @@ class Recap(unittest.TestCase):
     def test_lost_session_gets_everything(self):
         rec = {"engines": {"claude-code": {"seen": 1}}, "messages": [{"role": "user", "content": "a"}]}
         self.assertIn("a", self.store.recap(rec))
+
+
+
+
+EPHEMERAL = {"type": "ephemeral"}
+
+
+def _strip_marks(value):
+    """A request body without its cache_control keys (what the cache compares is the rest)."""
+    if isinstance(value, dict):
+        return {k: _strip_marks(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip_marks(v) for v in value]
+    return value
+
+
+def _marks(value):
+    if isinstance(value, dict):
+        return ("cache_control" in value) + sum(_marks(v) for v in value.values())
+    if isinstance(value, list):
+        return sum(_marks(v) for v in value)
+    return 0
+
+
+class CacheBreakpoints(Base):
+    def test_anthropic_request_marks_system_and_last_message(self):
+        self.fake.replies = [anthropic_text("hello")]
+        list(self.session().ask("hi"))
+        body = self.fake.requests[0]["body"]
+        self.assertEqual(body["system"], [{"type": "text", "text": "RAIL", "cache_control": EPHEMERAL}])
+        self.assertEqual(body["messages"][-1]["content"][-1],
+                         {"type": "text", "text": "hi", "cache_control": EPHEMERAL})
+        self.assertEqual(_marks(body), 2)
+
+    def test_tool_loop_moves_breakpoint_to_tool_result(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done")]
+        list(self.session().ask("hi"))
+        msgs = self.fake.requests[1]["body"]["messages"]
+        self.assertEqual(msgs[-1]["content"][-1]["type"], "tool_result")
+        self.assertEqual(msgs[-1]["content"][-1]["cache_control"], EPHEMERAL)
+        self.assertEqual(_marks(msgs[:-1]), 0)
+        self.assertEqual(_marks(self.fake.requests[1]["body"]), 2)
+
+    def test_cached_prefix_is_stable_across_turns(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done"), anthropic_text("two")]
+        s = self.session()
+        list(s.ask("one"))
+        list(s.ask("again"))
+        last_of_first = _strip_marks(self.fake.requests[1]["body"]["messages"])
+        first_of_second = _strip_marks(self.fake.requests[2]["body"]["messages"])
+        self.assertEqual(first_of_second[:len(last_of_first)], last_of_first)
+        self.assertEqual(self.fake.requests[2]["body"]["system"], self.fake.requests[1]["body"]["system"])
+
+    def test_history_file_never_stores_cache_control(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done")]
+        list(self.session().ask("hi"))
+        stored = "".join(p.read_text() for p in (self.root / "chats").glob("*.jsonl"))
+        self.assertIn("tool_result", stored)
+        self.assertNotIn("cache_control", stored)
+
+    def test_cached_does_not_change_its_input(self):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "a"}]}]
+        before = json.dumps(msgs)
+        api.ApiEngine._cached("R", msgs)
+        self.assertEqual(json.dumps(msgs), before)
+
+
+class OpenAICache(Base):
+    fmt = "openai"
+
+    def test_openai_request_unchanged(self):
+        self.fake.replies = [openai_text("x")]
+        list(self.session().ask("hi"))
+        body = self.fake.requests[0]["body"]
+        self.assertEqual(_marks(body), 0)
+        self.assertEqual(body["messages"][0], {"role": "system", "content": "RAIL"})
 
 
 if __name__ == "__main__":
