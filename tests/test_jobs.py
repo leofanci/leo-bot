@@ -148,6 +148,18 @@ class Store(unittest.TestCase):
         self.assertEqual(len(jobs.take_proposals(self.root, "c1")), 1)
         self.assertEqual(jobs.take_proposals(self.root, "c1"), [])
 
+    def test_live_spend_is_the_running_jobs_only(self):
+        self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)
+        jobs.set_live(self.root, "j1", 0.25, now=1000.0)
+        self.assertEqual(jobs.live_spent(self.root, "j1", now=1010.0), 0.25)
+        self.assertEqual(jobs.live_spent(self.root, "j2", now=1010.0), 0.0)
+        self.assertEqual(jobs.live_spent(self.root, "j1", now=1000.0 + jobs.LIVE_MAX_AGE + 1), 0.0)  # a crash's leftover
+        jobs.set_live(self.root, None, 0)
+        self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)
+        jobs.set_live(self.root, None, 0)  # clearing twice is fine
+        (self.root / jobs.LIVE_RELPATH).write_text("not json")
+        self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)
+
     def test_view_resolves_mode_and_next_run(self):
         job = self.make()
         self.assertEqual(jobs.view({**job, "mode": "bogus"})["mode"], "approval")

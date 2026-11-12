@@ -11,8 +11,9 @@ tuples for the SSE layer.
 The event field paths below were confirmed against claude 2.1.179
 (`--output-format stream-json --include-partial-messages --verbose`): text
 deltas arrive as stream_event/content_block_delta/text_delta, tool starts as
-stream_event/content_block_start/tool_use, and the turn ends with a top-level
-`result` line. A plain-text stdin turn (no positional prompt) is accepted.
+stream_event/content_block_start/tool_use, each model call's tokens as
+stream_event/message_start (input) and message_delta (output), and the turn ends with
+a top-level `result` line. A plain-text stdin turn (no positional prompt) is accepted.
 """
 import json
 import os
@@ -56,6 +57,25 @@ def parse_event(obj):
         return ("done", {"result": obj.get("result"), "subtype": obj.get("subtype"),
                          "tokens": tokens, "cost": obj.get("total_cost_usd"), "usage": parts})
     return (None, None)
+
+
+_IN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def call_usage(obj, run):
+    """Add one model call's tokens to `run` (this run's totals so far); True once a call's
+    output is counted (message_delta), when the run's spend so far can be reported."""
+    ev = obj.get("event") or {} if obj.get("type") == "stream_event" else {}
+    if ev.get("type") == "message_start":
+        usage = (ev.get("message") or {}).get("usage") or {}
+        for k in _IN_KEYS:
+            run[k] = run.get(k, 0) + int(usage.get(k) or 0)
+    elif ev.get("type") == "message_delta":
+        out = (ev.get("usage") or {}).get("output_tokens")
+        if isinstance(out, int):
+            run["output_tokens"] = run.get("output_tokens", 0) + out
+            return True
+    return False
 
 
 # Hostnames typed by the user. Bare names need a real-looking TLD so file names
@@ -369,7 +389,7 @@ class ClaudeCodeEngine(Engine):
             return
         session._started = True
         session._proc = proc
-        said, context = "", None
+        said, context, run_usage = "", None, {}
         stderr = drain(proc.stderr)
         try:
             proc.stdin.write(text + "\n")
@@ -385,6 +405,9 @@ class ClaudeCodeEngine(Engine):
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if call_usage(obj, run_usage):  # a model call ended: its tools run next
+                    yield ("spent", {"usage": prices.usage(*(run_usage.get(k) for k in (
+                        *_IN_KEYS, "output_tokens"))), "cost": None})
                 kind, payload = parse_event(obj)
                 if kind == "context":  # the last call's size rides on the done event
                     context = payload

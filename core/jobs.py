@@ -32,6 +32,8 @@ from pathlib import Path
 from core import bots, memory
 
 RELPATH = Path("team") / "jobs.json"
+LIVE_RELPATH = Path("team") / "job_live.json"  # the running job's spend so far (one at a time)
+LIVE_MAX_AGE = 2 * 3600  # older than any job turn: a crash's leftover, never counted
 MIN_EVERY = 3600
 MAX_JOBS = 20  # across workspaces: a runaway bot cannot pile up recurring spend
 NAME_MAX = 60
@@ -319,6 +321,34 @@ def take_proposals(root, chat, now=None):
     if not any(p.get("chat") == chat for p in _read(root)["proposals"]):
         return []
     return _change(root, fn)
+
+
+def set_live(root, job_id, spent, now=None):
+    """What the running job's turn has spent so far, saved runs and the run in flight. A model
+    run the turn starts (generate-*, revise-post) counts it against the job's cap: the turn's
+    own spend is saved only when it ends. `job_id` None clears it."""
+    path = Path(root) / LIVE_RELPATH
+    if job_id is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    bots._atomic_write(path, json.dumps({"job": job_id, "spent": round(float(spent), 6),
+                                         "ts": time.time() if now is None else now}) + "\n")
+
+
+def live_spent(root, job_id, now=None):
+    """The spend set_live saved for this job's running turn, else 0."""
+    try:
+        data = json.loads((Path(root) / LIVE_RELPATH).read_text(encoding="utf-8"))
+        spent, ts = float(data["spent"]), float(data["ts"])
+    except (OSError, ValueError, TypeError, KeyError):
+        return 0.0
+    now = time.time() if now is None else now
+    if data.get("job") != job_id or not math.isfinite(spent) or not 0 <= now - ts <= LIVE_MAX_AGE:
+        return 0.0
+    return max(0.0, spent)
 
 
 def digest_state(root):

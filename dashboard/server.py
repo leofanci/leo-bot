@@ -2924,9 +2924,15 @@ class Handler(BaseHTTPRequestHandler):
             parts, fin, failed = [], {}, False
             eng = getattr(s_, "engine", None)
             model_ = eng.resolve_model(model_) if eng else model_
+            job_live(msg, 0.0)
             for kind, payload in s_.ask(prompt_, with_web=web_, model=model_,
                                         web_domains=web_domains, **kw):
-                if kind == "delta":
+                if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
+                    so_far = payload.get("cost")
+                    if so_far is None:
+                        so_far = prices.estimate(model_, payload.get("usage"))
+                    job_live(msg, so_far)
+                elif kind == "delta":
                     parts.append(payload)
                     msg["content"] = "".join(parts)
                     emit({"delta": payload})
@@ -2957,6 +2963,17 @@ class Handler(BaseHTTPRequestHandler):
             if failed:
                 raise _RunFailed
             return msg["content"]
+
+        def job_live(msg, so_far):
+            """A job turn: its spend so far (saved runs plus the run in flight) where a model
+            run it starts (generate-*, revise-post) reads it for the job's cap."""
+            if not job:
+                return
+            saved = sum(m.get("cost") or 0 for m in msgs if m is not msg)
+            try:
+                jobs.set_live(ROOT, job["id"], saved + max(0.0, float(so_far or 0)))
+            except (OSError, TypeError, ValueError):
+                traceback.print_exc()
 
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
@@ -3059,10 +3076,6 @@ class Handler(BaseHTTPRequestHandler):
                 answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
             if asks and answers and not cap_hit and may_run():
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
-                if job:  # the job's cap, checked by a generate run in this follow-up, counts the turn so far
-                    sess.job_spent = sum(m.get("cost") or 0 for m in msgs)
-                    if apps_kw.get("os_token"):
-                        os_relay.TOKENS.update(apps_kw["os_token"], job_spent=sess.job_spent)
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
                 run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
@@ -3121,6 +3134,11 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
+            if job:  # the turn's spend is saved below: no longer live
+                try:
+                    jobs.set_live(ROOT, None, 0)
+                except OSError:
+                    traceback.print_exc()
             # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
             # checked again from this thread's workspace, then held as cards. Never from a shared
             # thread or a job's own turn.

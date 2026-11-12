@@ -63,12 +63,11 @@ class Environment(unittest.TestCase):
         self.assertNotIn("LEOBOT_READONLY", os_relay.env_for(CTX))
 
     def test_thread_and_job_come_from_the_token_never_the_caller(self):
-        leak = {"LEOBOT_CHAT": "other", "LEOBOT_JOB": "jx", "LEOBOT_JOB_MODE": "auto", "LEOBOT_JOB_SPENT": "9"}
+        leak = {"LEOBOT_CHAT": "other", "LEOBOT_JOB": "jx", "LEOBOT_JOB_MODE": "auto"}
         with mock.patch.dict(os.environ, leak):
-            env = os_relay.env_for({"ws": "acme", "chat": "c1", "job": "j1", "job_mode": "report", "job_spent": 0.5})
+            env = os_relay.env_for({"ws": "acme", "chat": "c1", "job": "j1", "job_mode": "report"})
             plain = os_relay.env_for({"ws": "acme"})
         self.assertEqual((env["LEOBOT_CHAT"], env["LEOBOT_JOB"], env["LEOBOT_JOB_MODE"]), ("c1", "j1", "report"))
-        self.assertEqual(float(env["LEOBOT_JOB_SPENT"]), 0.5)
         for var in leak:
             self.assertNotIn(var, plain)
 

@@ -60,13 +60,6 @@ class Tokens:
                     return dict(ctx)
         return None
 
-    def update(self, token, **values):
-        """Change a live token's context (a job turn's spend so far, before its next run)."""
-        with self._lock:
-            if token in self._live:
-                ctx, made = self._live[token]
-                self._live[token] = ({**ctx, **values}, made)
-
     def revoke(self, token):
         with self._lock:
             self._live.pop(token, None)
