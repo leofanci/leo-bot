@@ -3015,10 +3015,10 @@ class Handler(BaseHTTPRequestHandler):
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(sess.readonly),
+            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                          "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
-                                                         "shared": shared, "chat": sess.session_id,
+                                                         "shared": shared, "chat": getattr(sess, "session_id", None),
                                                          "job": job["id"] if job else None,
                                                          "job_mode": job_mode}),
                        "os_port": self.server.server_address[1]}

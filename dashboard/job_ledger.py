@@ -1,5 +1,6 @@
 """job_ledger.py: spend of background runs that have no thread (memory tidy-ups,
-later the scheduled jobs).
+generate runs). A generate run inside an Auto scheduled job carries `for_job`: its spend
+row then names that job, so the job's cap counts it.
 
 One row per run in `team/job_ledger.json` (user data, last KEEP rows). `records`
 shapes each row like a saved thread, so the caps (spend.py) and the cost report
@@ -59,7 +60,8 @@ def records(root):
         cost = _cost(r.get("cost"))
         msg = {"role": "assistant", **{k: r.get(k) for k in _MESSAGE_KEYS}}
         out.append({"job_ws": ws,
-                    "spend": [{"ts": r.get("ts"), "by": r.get("by") or "owner", "cost": cost, "ws": ws}]
+                    "spend": [{"ts": r.get("ts"), "by": r.get("by") or "owner", "cost": cost, "ws": ws,
+                               **({"job": r["for_job"]} if isinstance(r.get("for_job"), str) else {})}]
                     if cost else [],
                     "messages": [msg]})
     return out

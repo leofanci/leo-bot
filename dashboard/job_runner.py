@@ -74,6 +74,8 @@ def digest_text(root, since, now, threads=None):
             continue
         if r.get("job") == "memory-consolidate":
             tidy.append(f"- @{r.get('bot')} in {r.get('ws') or bots.HQ}: {r.get('before')} → {r.get('after')} entries")
+        elif isinstance(r.get("for_job"), str) and r["for_job"]:  # a generate run of an Auto job
+            slot(r["for_job"])["cost"] += _num(r.get("cost"))
         elif r.get("job") == "generate":
             gen_runs += 1
             gen_cost += _num(r.get("cost"))

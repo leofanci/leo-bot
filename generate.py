@@ -114,18 +114,22 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     Metered like every background run: the owner and workspace caps are checked first
     (a capped run raises JobError with the cap's text), and what it spent is one
     job_ledger row (`job: "generate"`), counted by the caps and the cost report. Who
-    asked is not known here, so a run from a shared thread counts as the owner's.
+    asked is not known here, so a run from a shared thread counts as the owner's. Inside an
+    Auto scheduled job (LEOBOT_JOB names a saved job) that job's cap is checked too and the
+    row carries `for_job`, so the run counts against it.
     """
     import itertools
     import os
     import time
+    from core import jobs
     from dashboard import chat_store, fileops, job_ledger, spend
     from dashboard.engines import prices
     from dashboard.engines.registry import for_job  # the engine its turn runs on (LEOBOT_ENGINE)
 
     root = fileops.ROOT
     ws = (os.environ.get("LEOBOT_WORKSPACE") or "").strip() or "hq"
-    capped = spend.refusal(ws, "owner",
+    job = jobs.get(root, (os.environ.get("LEOBOT_JOB") or "").strip()) if os.environ.get("LEOBOT_JOB") else None
+    capped = spend.refusal(ws, "owner", job=(job["id"], job["cap"]) if job else None,
                            records=lambda: itertools.chain(chat_store.records(), job_ledger.records(root)))
     if capped:
         raise JobError(capped)
@@ -142,7 +146,8 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
             "ts": time.time(), "ws": ws, "by": "owner", "bot": None, "job": "generate",
             "engine": engine.id, "engine_label": engine.label, "model": used, "usage": usage,
             "cost": cost, "metered": cost is not None,
-            "tokens": sum(int(v or 0) for v in usage.values()) if isinstance(usage, dict) else 0})
+            "tokens": sum(int(v or 0) for v in usage.values()) if isinstance(usage, dict) else 0,
+            **({"for_job": job["id"]} if job else {})})
     except OSError as e:  # the text is still good: never lose a paid result over the ledger
         print(f"generate: could not record spend: {e}", file=sys.stderr)
     return json.dumps({"type": "result", "subtype": "success", "result": out.get("text") or ""})
