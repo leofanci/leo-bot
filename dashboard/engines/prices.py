@@ -7,6 +7,8 @@ Usage is the four token parts every engine's done payload carries:
 # USD per million tokens (input, output, cache read). Cache writes cost input * 1.25.
 PRICES = {"claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-sonnet-5-5": (2.0, 10.0, 0.20),
           "claude-opus-5-5": (4.0, 20.0, 0.20)}
+# Tier names the server asks Claude Code for (it maps them to the newest model of that tier).
+TIERS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 CACHE_WRITE_FACTOR = 1.25
 
 
@@ -18,7 +20,7 @@ def usage(fresh=0, cache_write=0, cache_read=0, out=0):
 
 def estimate(model, parts):
     """Estimated USD for one reply, or None when the model is unpriced or usage is missing."""
-    price = PRICES.get(model or "")
+    price = PRICES.get(TIERS.get(model, model) or "")
     if not price or not isinstance(parts, dict):
         return None
     p_in, p_out, p_cache = price

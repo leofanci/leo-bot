@@ -1351,7 +1351,8 @@ JOB_NOTES = {
         "job's message asks: the owner approved that message, so a skill's write gate is already "
         "answered for it. An experiment, calendar activity, milestone or plan the message does not ask "
         "for is not: propose it. Deletes, whole-document replaces (update-intake, update-technical, "
-        "update-roadmap, update-subsections, update-validation-tab) and memory (remember) are refused: "
+        "update-roadmap, update-subsections, update-validation-tab, update-brief-spec, update-voice) "
+        "and memory (remember) are refused: "
         "say what and where, and end with one APPROVAL: line. App actions that are not reads wait for "
         "the owner's click. Never propose jobs."),
     "report": _JOB_HEAD + (

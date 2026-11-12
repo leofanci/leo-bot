@@ -62,18 +62,24 @@ def parse_event(obj):
 _IN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
-def call_usage(obj, run):
-    """Add one model call's tokens to `run` (this run's totals so far); True once a call's
-    output is counted (message_delta), when the run's spend so far can be reported."""
-    ev = obj.get("event") or {} if obj.get("type") == "stream_event" else {}
+def call_usage(obj, run, model=None):
+    """Add one model call's tokens to `run` (this run's totals so far, with "cost": each call
+    priced by the model it names, else `model`); True once a call's output is counted
+    (message_delta), when the run's spend so far can be reported."""
+    ev = (obj.get("event") or {}) if obj.get("type") == "stream_event" else {}
     if ev.get("type") == "message_start":
-        usage = (ev.get("message") or {}).get("usage") or {}
+        msg = ev.get("message") or {}
+        usage = msg.get("usage") or {}
+        run["call"] = {"model": msg.get("model") or model, **{k: int(usage.get(k) or 0) for k in _IN_KEYS}}
         for k in _IN_KEYS:
-            run[k] = run.get(k, 0) + int(usage.get(k) or 0)
+            run[k] = run.get(k, 0) + run["call"][k]
     elif ev.get("type") == "message_delta":
         out = (ev.get("usage") or {}).get("output_tokens")
         if isinstance(out, int):
             run["output_tokens"] = run.get("output_tokens", 0) + out
+            call = run.pop("call", None) or {"model": model}
+            cost = prices.estimate(call["model"], prices.usage(*(call.get(k) for k in _IN_KEYS), out))
+            run["cost"] = run.get("cost", 0.0) + (cost or 0.0)
             return True
     return False
 
@@ -405,9 +411,9 @@ class ClaudeCodeEngine(Engine):
                     obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if call_usage(obj, run_usage):  # a model call ended: its tools run next
+                if call_usage(obj, run_usage, model):  # a model call ended: its tools run next
                     yield ("spent", {"usage": prices.usage(*(run_usage.get(k) for k in (
-                        *_IN_KEYS, "output_tokens"))), "cost": None})
+                        *_IN_KEYS, "output_tokens"))), "cost": run_usage["cost"]})
                 kind, payload = parse_event(obj)
                 if kind == "context":  # the last call's size rides on the done event
                     context = payload

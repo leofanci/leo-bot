@@ -79,11 +79,14 @@ class JobTurn(unittest.TestCase):
             seen.append(jobs.live_spent(test.root, "j1"))  # before any call ends
             yield ("spent", {"usage": None, "cost": 0.3})  # a call ended: a generate run would see it
             seen.append(jobs.live_spent(test.root, "j1"))
+            # No cost from the engine: priced from its tokens by the model the turn asked for.
+            yield ("spent", {"usage": {"in": 100_000, "cache_write": 0, "cache_read": 0, "out": 0}, "cost": None})
+            seen.append(jobs.live_spent(test.root, "j1") > 0)
             yield ("delta", "Updated the draft list.")
             yield ("done", {"cost": 0.4})
         with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
             out = self.run_job(mode="auto")
-        self.assertEqual(seen, [0.0, 0.3])
+        self.assertEqual(seen, [0.0, 0.3, True])
         self.assertAlmostEqual(out["cost"], 0.4)
         self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)  # saved with the turn, no longer live
         self.assertFalse((self.root / jobs.LIVE_RELPATH).exists())

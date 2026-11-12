@@ -63,7 +63,7 @@ _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text 
 # document or a section list (text a job read must not wipe a doc). It never writes memory and
 # never proposes jobs.
 _AUTO_REPLACES = {"update-intake", "update-technical", "update-roadmap", "update-subsections",
-                  "update-validation-tab"}
+                  "update-validation-tab", "update-brief-spec", "update-voice"}
 _AUTO_BLOCKED = {"remember", "propose-job", *_AUTO_REPLACES}
 READONLY_TEXT = {
     None: "read-only here: you can look things up but not save. Say what should be saved: "

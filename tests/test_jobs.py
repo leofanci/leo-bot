@@ -321,7 +321,9 @@ class Osctl(unittest.TestCase):
                      ["update-technical", "--project", "acme", "--text", "x"],
                      ["update-roadmap", "--product", "p", "--text", "x"],
                      ["update-subsections", "--project", "acme", "--doc", "intake", "--subsections", "A"],
-                     ["update-validation-tab", "--project", "acme", "--subsections", "A"]):
+                     ["update-validation-tab", "--project", "acme", "--subsections", "A"],
+                     ["update-brief-spec", "--profile", "profile-a", "--text", "x"],
+                     ["update-voice", "--profile", "profile-a", "--text", "x"]):
             r = self.run_osctl(*argv, env=auto)
             self.assertFalse(r["ok"], argv)
             self.assertIn("APPROVAL", r["error"])
