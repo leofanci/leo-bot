@@ -215,6 +215,39 @@ Each item ships only if the Phase 1 data shows it matters.
 - **Model picker.** Keep the regex rules, log every decision with its reason (Phase 1), and review
   the log before changing any rule.
 
+**As built** (plan `docs/superpowers/plans/2026-11-12-leaner-turns.md`):
+
+- **Context size.** Every metered engine reports `context` on its reply: the prompt size, in
+  tokens, of the turn's last model call (Claude Code: the last `message_start`; the API engine:
+  its last request; Codex: the turn's input, an upper bound). The server keeps it only as an
+  int, since a runner's reply comes from another machine.
+- **API engine caching.** Anthropic requests carry two `cache_control` breakpoints: the system
+  prompt and the newest message, recomputed on every request of a tool loop. Text is sent as
+  blocks everywhere so a marked message reads the same in later requests. The stored history
+  never carries a breakpoint.
+- **Thread compaction.** `LEOBOT_COMPACT_TOKENS` (default 60000, `0` off). When the thread's
+  newest reply on the turn's engine (not a consulted teammate's) reached it, the engine drops its
+  session (`Engine.compact`) and the turn gets the recap of visible messages, the snapshot and
+  the bot card. Claude Code starts a new session id kept in the thread's engine state (only a
+  UUID reaches its command line). A runner never compacts (its session is on another Mac); a job
+  turn is fresh already.
+- **API history.** The same threshold sizes the history the API engine resends (4 characters a
+  token). The cut is kept in the thread's engine state and moves only when the part after it
+  passes the budget, then to half of it, at a message that starts a turn, so the cached prefix
+  stays the same for many turns. With the threshold off, `HISTORY_CHARS` applies as before.
+- **Routing.** An untagged message whose wording `_suggest_skill` matches to another active bot's
+  skill goes to that bot (in a topic room, only to a member). The skill stays inactive. The reply
+  is labeled "picked for <skill>", live and when reopened. DMs, tags and continuations are
+  unchanged. The two routing eval gaps are closed.
+- **Model picker.** The cost view groups replies by `reason` ("Model picks") and shows each
+  engine's cache-read share, so the before/after of caching can be read per engine.
+- **Prompt order: no change.** The system prompt is the fixed rail; the snapshot is only in a
+  fresh session's first message; every changing block is in the turn's own message, the newest
+  part of the prompt.
+- **Deferred.** Parallel consults and the per-message token budget wait until the cost view shows
+  consult turns in use. An engine fallback waits for failures to show up: Claude Code and Codex
+  retry API errors themselves and the API engine retries transient HTTP errors twice.
+
 ## Phase 5: behavior evals
 
 - **Offline (default, free).** A fake engine plus fixed prompts per skill check routing (which
