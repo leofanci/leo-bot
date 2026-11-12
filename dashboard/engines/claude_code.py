@@ -70,7 +70,9 @@ def call_usage(obj, run, model=None):
     if ev.get("type") == "message_start":
         msg = ev.get("message") or {}
         usage = msg.get("usage") or {}
-        run["call"] = {"model": msg.get("model") or model, **{k: int(usage.get(k) or 0) for k in _IN_KEYS}}
+        run["call"] = {"model": msg.get("model") or model, **{k: int(usage.get(k) or 0) for k in _IN_KEYS},
+                       # Claude Code keeps the hour-long cache: those writes cost more.
+                       "hour": int((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0)}
         for k in _IN_KEYS:
             run[k] = run.get(k, 0) + run["call"][k]
     elif ev.get("type") == "message_delta":
@@ -78,7 +80,8 @@ def call_usage(obj, run, model=None):
         if isinstance(out, int):
             run["output_tokens"] = run.get("output_tokens", 0) + out
             call = run.pop("call", None) or {"model": model}
-            cost = prices.estimate(call["model"], prices.usage(*(call.get(k) for k in _IN_KEYS), out))
+            parts = {**prices.usage(*(call.get(k) for k in _IN_KEYS), out), "cache_write_1h": call.get("hour", 0)}
+            cost = prices.estimate(call["model"], parts)
             run["cost"] = run.get("cost", 0.0) + (cost or 0.0)
             return True
     return False
