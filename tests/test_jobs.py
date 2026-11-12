@@ -137,6 +137,40 @@ class Store(unittest.TestCase):
         self.make()
         self.assertEqual(len(jobs.load(self.root)), 1)
 
+    def test_mode_defaults_and_validates(self):
+        job = self.make()
+        self.assertEqual(job["mode"], "approval")
+        with self.assertRaises(ValueError):
+            self.make(mode="bogus")
+        self.assertEqual(self.make(mode="report")["mode"], "report")
+        jobs.update(self.root, job["id"], mode="auto")
+        self.assertEqual(jobs.get(self.root, job["id"])["mode"], "auto")
+        with self.assertRaises(ValueError):
+            jobs.update(self.root, job["id"], mode="free")
+        self.assertEqual(jobs.mode_of({}), "approval")
+        self.assertEqual(jobs.mode_of({"mode": "x"}), "approval")
+        self.assertEqual(jobs.mode_of({"mode": "auto"}), "auto")
+
+    def test_proposal_outbox(self):
+        now = 1_000_000.0
+        for chat in ("c1", "c1", "c2"):
+            jobs.add_proposal(self.root, {"chat": chat, "ws": "acme", "op": "create", "fields": {}}, now=now)
+        self.make()  # the outbox lives beside the jobs and survives their writes
+        got = jobs.take_proposals(self.root, "c1", now=now + 1)
+        self.assertEqual([p["chat"] for p in got], ["c1", "c1"])
+        self.assertEqual(got[0]["created"], now)
+        self.assertEqual(jobs.take_proposals(self.root, "c1", now=now + 2), [])
+        for _ in range(jobs.PROPOSALS_PER_CHAT):
+            jobs.add_proposal(self.root, {"chat": "c3", "op": "delete"}, now=now)
+        with self.assertRaises(ValueError):
+            jobs.add_proposal(self.root, {"chat": "c3", "op": "delete"}, now=now)
+        with self.assertRaises(ValueError):
+            jobs.add_proposal(self.root, {"op": "delete"}, now=now)  # no thread
+        # A day later nothing left behind shows up anywhere.
+        self.assertEqual(jobs.take_proposals(self.root, "c2", now=now + jobs.PROPOSAL_TTL + 1), [])
+        self.assertEqual(jobs.take_proposals(self.root, "c3", now=now + 1), [])
+        self.assertEqual(len(jobs.load(self.root)), 1)
+
     def test_digest_state_kept_beside_jobs(self):
         self.make()
         self.assertEqual(jobs.digest_state(self.root), {})
