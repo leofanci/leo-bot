@@ -594,7 +594,9 @@ summary.pf-head::-webkit-details-marker{display:none}
 .team-row .team-about{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ui-color-text-secondary)}
 .team-row .team-meta{color:var(--ui-color-text-muted)}
 .team-fixed{align-self:center;font-size:var(--ui-type-label);color:var(--ui-color-text-muted);white-space:nowrap}
-.team-row .more,.team-row .go{align-self:center}
+.team-row .more,.team-row .go,.job-row select{align-self:center}
+.job-row .t{flex:1 1 220px;min-width:0}
+.job-row .more.armed{color:var(--ui-color-danger)}
 .team-more[aria-expanded="true"]{background:var(--ui-color-hover);color:var(--ui-color-text)}
 .team-detail{flex-basis:100%;margin:var(--ui-space-2) 0 0 42px;padding-top:var(--ui-space-3);border-top:1px solid var(--ui-color-border-subtle);display:grid;gap:var(--ui-space-3)}
 .team-detail[hidden]{display:none}
@@ -846,8 +848,8 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .eng-choice em{font-style:normal;color:var(--ui-color-text-muted);font-size:12px;margin-left:4px}
 .eng-ws{margin:8px 0;padding:4px 14px;border-radius:14px;background:var(--eng-warm);border:1px solid var(--eng-warm-line)}
 .eng-ws h4{margin:10px 0 2px;font-size:14px;font-weight:600}
-.integ-key input,.integ-q,.eng-choice select,.integ-key select,#fold select,.app-grants select{min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit}
-.integ-key input:focus,.integ-q:focus,.eng-choice select:focus,.integ-key select:focus,#fold select:focus,.app-grants select:focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
+.integ-key input,.integ-q,.eng-choice select,.integ-key select,#fold select,.app-grants select,.job-row select,.app-edit select{min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit}
+.integ-key input:focus,.integ-q:focus,.eng-choice select:focus,.integ-key select:focus,#fold select:focus,.app-grants select:focus,.job-row select:focus,.app-edit select:focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
 .integ-key input[type=password]{flex:1 1 220px;min-width:0}
 .settings-top{padding-bottom:0;border-bottom:0}
 .settings-top>div{flex:1;min-width:0}

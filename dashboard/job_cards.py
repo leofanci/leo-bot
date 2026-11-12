@@ -47,6 +47,10 @@ def check_target(root, ws, bot, skill, projects):
                          "Pick another engine for this bot in Settings, Engines.")
 
 
+def _ws_name(ws):
+    return "HQ" if ws == bots.HQ else ws
+
+
 def _when(ts):
     return time.strftime("%a %d %b %H:%M", time.localtime(ts))
 
@@ -96,7 +100,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
             raise ValueError(f"at most {jobs.MAX_JOBS} jobs: delete one first")
         next_run = jobs.next_due({"schedule": clean["schedule"], "created": time.time()})
         name = clean["name"]
-        rows = [["Bot", f"@{clean['bot']} /{clean['skill']}"], ["Workspace", ws],
+        rows = [["Bot", f"@{clean['bot']} /{clean['skill']}"], ["Workspace", _ws_name(ws)],
                 ["Schedule", clean["schedule"]], ["Next run", _when(next_run)],
                 ["Mode", MODE_TEXT[clean["mode"]]], ["Cap", _show("cap", clean["cap"])],
                 ["Message", clean["message"]]]
@@ -105,7 +109,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
     job = _in_scope(root, thread_ws, job_id)
     name = job.get("name") or job_id
     if op == "delete":
-        rows = [["Bot", f"@{job.get('bot')} /{job.get('skill')}"], ["Workspace", job.get("workspace")],
+        rows = [["Bot", f"@{job.get('bot')} /{job.get('skill')}"], ["Workspace", _ws_name(job.get("workspace") or bots.HQ)],
                 ["Schedule", job.get("schedule")]]
         return {"op": op, "job_id": job["id"], "fields": {}, "summary": f"Delete job: {name}",
                 "preview": {"title": f"Delete job: {name}", "fields": rows}}

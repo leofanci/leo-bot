@@ -22,10 +22,22 @@ def _run(names, expr):
 
 
 class Helpers(unittest.TestCase):
-    def test_is_app_action(self):
-        self.assertEqual(_run(["isAppAction"],
-                              '[isAppAction({kind:"app_action"}), isAppAction({summary:"x"}), isAppAction(null)]'),
-                         [True, False, False])
+    def test_held_rows_and_what_edit_changes(self):
+        self.assertEqual(_run(["isHeld"], '[isHeld({kind:"app_action"}), isHeld({kind:"job"}), isHeld({summary:"x"}), isHeld(null)]'),
+                         [True, True, False, False])
+        self.assertEqual(_run(["heldEditable"],
+                              '[heldEditable({kind:"job", job:{fields:{cap:1}}}), heldEditable({kind:"app_action", action:{arguments:{to:"a"}}}), heldEditable({kind:"job"})]'),
+                         [{"key": "fields", "values": {"cap": 1}}, {"key": "arguments", "values": {"to": "a"}},
+                          {"key": "fields", "values": {}}])
+
+    def test_job_meta_line(self):
+        out = _run(["jobMetaText"],
+                   '[jobMetaText({bot:"cmo", skill:"positioning", schedule:"daily 09:00", enabled:false}, "Acme", 100),'
+                   ' jobMetaText({bot:"cmo", skill:"positioning", schedule:"every 6h", enabled:true, next_due:50,'
+                   ' last_run:40, last_status:"waiting"}, "Acme", 100)]')
+        self.assertEqual(out[0], "Acme · @cmo /positioning · daily 09:00 · off · not run yet")
+        self.assertTrue(out[1].startswith("Acme · @cmo /positioning · every 6h · runs at the next check · last "), out[1])
+        self.assertTrue(out[1].endswith(": waiting"), out[1])
 
     def test_grant_label(self):
         self.assertEqual(_run(["grantLabel"], '[grantLabel(undefined), grantLabel("read"), grantLabel("write")]'),
@@ -68,7 +80,7 @@ class Guards(unittest.TestCase):
 
     def test_dismiss_skips_app_actions(self):
         body = _fn("renderApprovals")
-        self.assertIn("isAppAction", body)
+        self.assertIn("isHeld", body)
         self.assertIn("/api/approvals/dismiss", body)
         card = _fn("wireAppCard")
         self.assertIn('answer("reject")', card)

@@ -2890,7 +2890,7 @@ class Handler(BaseHTTPRequestHandler):
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
         # Only hosts the owner or a person typed become fetch grants. A job's message was
-        # written by a bot (osctl create-job), so it grants none: WebSearch only.
+        # written by a bot (osctl propose-job), so it grants none: WebSearch only.
         web_domains = () if job else chat_session.user_web_domains(user_msg)
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
