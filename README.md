@@ -173,7 +173,7 @@ Each job has a mode:
   thread.
 - **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans), for
   what the job's message asks. Deletes, replacing a whole document (intake, technical,
-  roadmap, section lists) and bot memory still wait for your click, and so does every app
+  roadmap, section lists, a brief spec or voice) and bot memory still wait for your click, and so does every app
   action that is not a read (posting, sending email).
 - **Report only**: reads and writes a summary. No cards, no saves, no app writes.
 

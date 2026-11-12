@@ -9,6 +9,7 @@ from unittest import mock
 
 import dashboard.chat_session as cs
 from dashboard.engines.base import Engine, EngineRefused, SessionLost, TurnPolicy
+from dashboard.engines import claude_code, prices
 from dashboard.engines.claude_code import ClaudeCodeEngine
 
 
@@ -122,9 +123,22 @@ class ClaudeDriver(unittest.TestCase):
         result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "usage": {}})
         bin_ = self.stub(f"cat <<'X'\n{start(1000)}\n{delta}\n{start(3000)}\n{delta}\n{result}\nX\n")
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
-        spent = [p["usage"] for k, p in sess.ask("hi") if k == "spent"]
-        self.assertEqual([(u["in"], u["cache_read"], u["out"]) for u in spent],
+        spent = [p for k, p in sess.ask("hi", model="sonnet") if k == "spent"]
+        self.assertEqual([(p["usage"]["in"], p["usage"]["cache_read"], p["usage"]["out"]) for p in spent],
                          [(1000, 100, 20), (4000, 200, 40)])  # this run so far, call by call
+        # Priced by the tier asked for (the CLI takes "sonnet"): never 0 for a priced model.
+        one = prices.estimate("claude-sonnet-5-5", prices.usage(1000, 0, 100, 20))
+        self.assertAlmostEqual(spent[0]["cost"], one)
+        self.assertAlmostEqual(spent[1]["cost"], one + prices.estimate("claude-sonnet-5-5", prices.usage(3000, 0, 100, 20)))
+
+    def test_claude_code_prices_each_call_by_the_model_it_names(self):
+        run = {}
+        start = {"type": "stream_event", "event": {"type": "message_start", "message": {
+            "model": "claude-opus-5-5", "usage": {"input_tokens": 1000}}}}
+        delta = {"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 10}}}
+        self.assertFalse(claude_code.call_usage(start, run, "haiku"))
+        self.assertTrue(claude_code.call_usage(delta, run, "haiku"))
+        self.assertAlmostEqual(run["cost"], prices.estimate("claude-opus-5-5", prices.usage(1000, 0, 0, 10)))
 
     def test_claude_code_compact_starts_new_session_id(self):
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
