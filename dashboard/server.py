@@ -48,7 +48,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
-from core import approvals  # noqa: E402
+from core import approvals, jobs  # noqa: E402
 from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -1338,11 +1338,24 @@ def _spend_records():
     return itertools.chain(chat_store.records(), job_ledger.records(ROOT))
 
 
-JOB_NOTE = (
-    "## Scheduled job\n"
-    "This turn is the scheduled job \"{name}\". Nobody is watching it live. You can read and look "
-    "things up; every osctl write is refused. If something should be saved, say what and where, and end "
-    "with one APPROVAL: line. The owner approves it in this thread.")
+_JOB_HEAD = ("## Scheduled job\n"
+             "This turn is the scheduled job \"{name}\". Nobody is watching it live. ")
+# One note per mode (core/jobs.py MODES): what this run may do, so it never tries the rest.
+JOB_NOTES = {
+    "approval": _JOB_HEAD + (
+        "Mode: Approval. You can read and look things up; every osctl write is refused. If something "
+        "should be saved, say what and where, and end with one APPROVAL: line. The owner approves it in "
+        "this thread. App actions that are not reads wait for the owner's click."),
+    "auto": _JOB_HEAD + (
+        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans): the owner chose "
+        "Auto, so a skill's write gate is already answered for those. Deletes and "
+        "memory (remember) are refused: say what and where, and end with one APPROVAL: line. App actions "
+        "that are not reads wait for the owner's click. Never propose jobs."),
+    "report": _JOB_HEAD + (
+        "Mode: Report only. Read and look things up, then write a short summary of what you found. "
+        "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
+        "line is ignored."),
+}
 JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
                  "Pick another engine for @{bot} in Settings, Engines.")
 JOB_MATE_UNMETERED = ("@{bot}'s engine ({label}) does not report cost, so a scheduled job "
@@ -2542,6 +2555,7 @@ class Handler(BaseHTTPRequestHandler):
         job = viewer.get("job") if viewer.get("kind") == "job" else None
         live = viewer.setdefault("live", {}) if job else {}
         job_cap = (job["id"], job["cap"]) if job else None
+        job_mode = jobs.mode_of(job) if job else None
         if job:
             chat_id = None
             live["status"] = "refused"  # until the model turn starts: every early return
@@ -2551,7 +2565,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse_message(allowance)
         if job:
             sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
-            sess.readonly = True  # osctl refuses every write: saves come back as an APPROVAL line
+            # Approval and Report only: osctl refuses every write. Auto: osctl creates and updates,
+            # deletes and memory still wait (osctl reads LEOBOT_JOB and LEOBOT_JOB_MODE).
+            sess.readonly = job_mode != "auto"
+            sess.job_id, sess.job_mode = job["id"], job_mode
             live["sess"] = sess
         elif person:
             sess = person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
@@ -2700,7 +2717,7 @@ class Handler(BaseHTTPRequestHandler):
         elif engine.full_disk:
             workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
         if job:
-            workspace = "\n\n".join(x for x in (workspace, JOB_NOTE.format(name=job["name"])) if x)
+            workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"])) if x)
         saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
         # A thread whose last call on this engine passed LEOBOT_COMPACT_TOKENS starts a fresh
         # session here: the snapshot, the bot card and the recap of its visible messages go in
@@ -2889,14 +2906,18 @@ class Handler(BaseHTTPRequestHandler):
         if app_turn:
             apps_kw = {"apps_token": apps_relay.TOKENS.mint(
                            {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
-                            "room": (room or {}).get("id"), "person": bots.CEO}),
+                            "room": (room or {}).get("id"), "person": bots.CEO,
+                            "report": job_mode == "report"}),
                        "apps_port": self.server.server_address[1]}
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(job), "apps_used": apps_used,
+            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(sess.readonly),
+                                                         "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
-                                                         "shared": shared}),
+                                                         "shared": shared, "chat": sess.session_id,
+                                                         "job": job["id"] if job else None,
+                                                         "job_mode": job_mode}),
                        "os_port": self.server.server_address[1]}
         if job:
             live["status"] = "done"
@@ -2960,8 +2981,8 @@ class Handler(BaseHTTPRequestHandler):
                     m["content"] = clean
                     emit({"clean": clean, "msg": i})
                     asked = (i, summary)
-            # A chat-only turn's stray marker gets no buttons.
-            if asked and may_write and isinstance(getattr(sess, "session_id", None), str):
+            # A chat-only turn's stray marker gets no buttons; a Report only job saves nothing.
+            if asked and may_write and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
                 i, summary = asked
                 rec = approvals.add(ROOT, ws=ws, room=(room or {}).get("id"), chat=sess.session_id,
                                     bot=bot_id, summary=summary)

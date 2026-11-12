@@ -117,6 +117,17 @@ class Gate(unittest.TestCase):
         self.assertEqual(text_of(reply), f"Held for approval ({rows[0]['id']}): Send email. It has not run. "
                                          "Tell the user it is waiting in Approvals.")
 
+    def test_report_only_job_refuses_writes_without_holding(self):
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        read = {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}
+        reply, _ = apps_relay.handle(multi(send, read), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT)
+        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"tools": [read]})  # reads still run
+        self.assertIn("only reports", text_of(reply))
+        reply, _ = apps_relay.handle(multi(send), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT)
+        self.assertTrue(reply["result"]["isError"])
+        self.assertEqual(approvals.pending(self.root), [])
+
     def test_mixed_call(self):
         reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}},
                                   {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))

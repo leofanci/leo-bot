@@ -89,6 +89,46 @@ class JobTurn(unittest.TestCase):
         self.assertEqual([(p["chat"], p["summary"]) for p in pend], [(out["chat"], "save the review memo to sec04")])
         self.assertAlmostEqual(out["cost"], 0.01)
 
+    def test_auto_job_saves_by_itself(self):
+        self.reply = "Updated the draft list."
+        out = self.run_job(mode="auto")
+        self.assertEqual(out["status"], "done")
+        a = self.asks[0]
+        self.assertFalse(a["readonly"])
+        self.assertEqual((a["sess"].job_id, a["sess"].job_mode), ("j1", "auto"))
+        self.assertEqual(a["edit_dirs"], ())
+        self.assertIn("Auto", a["text"])
+        self.assertIn("APPROVAL", a["text"])  # deletes and memory still go through one
+
+    def test_report_job_drops_the_approval_line(self):
+        out = self.run_job(mode="report")
+        self.assertEqual(out["status"], "done")
+        a = self.asks[0]
+        self.assertTrue(a["readonly"])
+        self.assertEqual(a["sess"].job_mode, "report")
+        self.assertIn("Mode: Report only", a["text"])
+        self.assertEqual(approvals.pending(self.root), [])
+        rec = server.chat_store.load(out["chat"])
+        self.assertNotIn("APPROVAL", rec["messages"][-1]["content"])
+        self.assertIn("Weekly numbers.", rec["messages"][-1]["content"])
+
+    def test_unknown_mode_runs_as_approval(self):
+        out = self.run_job(mode="whatever")
+        self.assertEqual(out["status"], "waiting")
+        self.assertTrue(self.asks[0]["readonly"])
+        self.assertEqual(self.asks[0]["sess"].job_mode, "approval")
+
+    def test_report_job_app_token_refuses_writes(self):
+        minted = []
+        real = server.apps_relay.TOKENS.mint
+        with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}), \
+                mock.patch.object(server, "_needs_apps", return_value=True):
+            self.run_job(mode="report", message="draft the weekly email")
+            self.run_job(mode="auto", message="draft the weekly email")
+        self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
+
     def test_plain_reply_is_done(self):
         self.reply = "Nothing changed this week."
         out = self.run_job()
@@ -182,7 +222,7 @@ class JobTurn(unittest.TestCase):
         self.assertIn("does not report cost", out["detail"])
 
     def test_job_message_grants_no_web_host(self):
-        # A job's message was written by a bot (osctl create-job), not typed by the owner:
+        # A job's message was written by a bot (osctl propose-job), not typed by the owner:
         # a host in it must not become a fetch grant.
         out = self.run_job(message="search the web and check https://example.com/pricing")
         self.assertEqual(out["status"], "waiting")
