@@ -3,6 +3,10 @@ import unittest
 
 from core import app_rules
 
+
+def _YES(slug):  # Composio tags the tool readOnlyHint
+    return True
+
 CAT = ["gmail", "googlecalendar", "googledrive", "google_search_console", "google_maps",
        "supabase", "apollo", "firecrawl", "instagram"]
 
@@ -45,17 +49,30 @@ class Classify(unittest.TestCase):
 
     def test_decide(self):
         g = {"gmail": "write", "googledrive": "read", "apollo": "write", "firecrawl": "write"}
-        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, CAT), ("read", "gmail"))
-        self.assertEqual(app_rules.decide("GMAIL_SEND_EMAIL", g, CAT), ("hold", "gmail"))
-        self.assertEqual(app_rules.decide("GOOGLEDRIVE_UPLOAD_FILE", g, CAT), ("refuse", "googledrive"))
-        self.assertEqual(app_rules.decide("GOOGLEDRIVE_FIND_FILE", g, CAT), ("read", "googledrive"))
-        self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", g, CAT), ("hold", "apollo"))  # paid read
-        self.assertEqual(app_rules.decide("FIRECRAWL_SCRAPE", g, CAT)[0], "refuse")            # blocked
-        self.assertEqual(app_rules.decide("INSTAGRAM_GET_USER_INFO", g, CAT)[0], "refuse")     # not granted
-        self.assertEqual(app_rules.decide("NOPE_X", g, CAT), ("refuse", None))
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, CAT, read_only=_YES), ("read", "gmail"))
+        self.assertEqual(app_rules.decide("GMAIL_SEND_EMAIL", g, CAT, read_only=_YES), ("hold", "gmail"))
+        self.assertEqual(app_rules.decide("GOOGLEDRIVE_UPLOAD_FILE", g, CAT, read_only=_YES), ("refuse", "googledrive"))
+        self.assertEqual(app_rules.decide("GOOGLEDRIVE_FIND_FILE", g, CAT, read_only=_YES), ("read", "googledrive"))
+        self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", g, CAT, read_only=_YES), ("hold", "apollo"))  # paid read
+        self.assertEqual(app_rules.decide("FIRECRAWL_SCRAPE", g, CAT, read_only=_YES)[0], "refuse")            # blocked
+        self.assertEqual(app_rules.decide("INSTAGRAM_GET_USER_INFO", g, CAT, read_only=_YES)[0], "refuse")     # not granted
+        self.assertEqual(app_rules.decide("NOPE_X", g, CAT, read_only=_YES), ("refuse", None))
+
+    def test_a_read_needs_composios_read_only_tag_too(self):
+        g = {"gmail": "write", "slack": "read"}
+        cat = CAT + ["slack"]
+        untagged, unknown = (lambda s: False), (lambda s: None)
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, cat, read_only=untagged), ("hold", "gmail"))
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, cat, read_only=unknown), ("hold", "gmail"))
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, cat), ("hold", "gmail"))  # nobody asked
+        # Composio tags this write read-only: the name still makes it a write.
+        self.assertEqual(app_rules.decide("SLACK_SET_USER_ACTIVE", g, cat, read_only=_YES), ("refuse", "slack"))
+        asked = []
+        app_rules.decide("GMAIL_SEND_EMAIL", g, cat, read_only=asked.append)
+        self.assertEqual(asked, [])  # a write by name never costs a lookup
 
     def test_read_grant_refuses_paid_read(self):
-        self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", {"apollo": "read"}, CAT), ("refuse", "apollo"))
+        self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", {"apollo": "read"}, CAT, read_only=_YES), ("refuse", "apollo"))
 
     def test_calls_in(self):
         args = {"tools": [{"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {"q": "x"}}],

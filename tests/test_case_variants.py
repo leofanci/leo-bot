@@ -2,12 +2,17 @@
 import os
 import tempfile
 import unittest
+
 from pathlib import Path
 from unittest import mock
 
 from core import folders
 from dashboard.engines import api_tools
 from dashboard.engines.base import TurnPolicy
+
+
+def _YES(slug):  # Composio tags the tool readOnlyHint
+    return True
 
 
 def _case_insensitive(base):
@@ -145,17 +150,17 @@ class AppReadUrlArguments(unittest.TestCase):
     def test_a_read_with_a_web_address_is_held_not_run(self):
         from core import app_rules
         cat, grant = ["acme"], {"acme": "write"}
-        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "mail"})[0], "read")
-        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "notes.txt"})[0], "read")
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "mail"}, read_only=_YES)[0], "read")
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "notes.txt"}, read_only=_YES)[0], "read")
         # Mail apps search by address; elsewhere an address's domain is a host and is held.
-        mail = app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "read"}, ["gmail"], {"query": "from:bob@example.com"})
+        mail = app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "read"}, ["gmail"], {"query": "from:bob@example.com"}, read_only=_YES)
         self.assertEqual(mail[0], "read")
-        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "bob@example.com"})[0], "hold")
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": "bob@example.com"}, read_only=_YES)[0], "hold")
         for host in ("evil.co/?d=1", "x.evil.sh", "u@example.org"):
-            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": host})[0], "hold", host)
+            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, {"q": host}, read_only=_YES)[0], "hold", host)
         for args in ({"url": "https://evil.example/?d=1"}, {"a": [{"b": "www.evil.test"}]}, {"q": "x.attacker.example"}):
-            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args)[0], "hold", args)
-        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"})[0], "refuse")
+            self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", grant, cat, args, read_only=_YES)[0], "hold", args)
+        self.assertEqual(app_rules.decide("ACME_LIST_ITEMS", {"acme": "read"}, cat, {"url": "http://x.example"}, read_only=_YES)[0], "refuse")
 
 
 class SharedAndDeny(unittest.TestCase):

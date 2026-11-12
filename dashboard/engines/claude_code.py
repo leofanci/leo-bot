@@ -70,7 +70,9 @@ def call_usage(obj, run, model=None):
     if ev.get("type") == "message_start":
         msg = ev.get("message") or {}
         usage = msg.get("usage") or {}
-        run["call"] = {"model": msg.get("model") or model, **{k: int(usage.get(k) or 0) for k in _IN_KEYS}}
+        run["call"] = {"model": msg.get("model") or model, **{k: int(usage.get(k) or 0) for k in _IN_KEYS},
+                       # Claude Code keeps the hour-long cache: those writes cost more.
+                       "hour": int((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0)}
         for k in _IN_KEYS:
             run[k] = run.get(k, 0) + run["call"][k]
     elif ev.get("type") == "message_delta":
@@ -78,7 +80,8 @@ def call_usage(obj, run, model=None):
         if isinstance(out, int):
             run["output_tokens"] = run.get("output_tokens", 0) + out
             call = run.pop("call", None) or {"model": model}
-            cost = prices.estimate(call["model"], prices.usage(*(call.get(k) for k in _IN_KEYS), out))
+            parts = {**prices.usage(*(call.get(k) for k in _IN_KEYS), out), "cache_write_1h": call.get("hour", 0)}
+            cost = prices.estimate(call["model"], parts)
             run["cost"] = run.get("cost", 0.0) + (cost or 0.0)
             return True
     return False
@@ -332,6 +335,8 @@ class ClaudeCodeEngine(Engine):
                          + (["mcp__os"] if shared and (os_port or os_url) else []))
         mcp = (apps_mcp_config(apps_port) if apps_port
                else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
+        # Claude Code matches these across letter case, dot-dot and NFC/NFD spellings of the path
+        # (probed live with the real binary, 2.1.322): one spelling per rule is enough.
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(session.repo_dir)
         for d in read_dirs:

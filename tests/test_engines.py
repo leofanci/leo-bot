@@ -140,6 +140,22 @@ class ClaudeDriver(unittest.TestCase):
         self.assertTrue(claude_code.call_usage(delta, run, "haiku"))
         self.assertAlmostEqual(run["cost"], prices.estimate("claude-opus-5-5", prices.usage(1000, 0, 0, 10)))
 
+    def test_claude_code_hour_cache_writes_cost_twice_input(self):
+        # Usage from a real Claude Code run (2.1.322): the CLI reported $0.00063971 for these two calls.
+        def call(fresh, write, read, out):
+            return [{"type": "stream_event", "event": {"type": "message_start", "message": {
+                        "model": "claude-haiku-5-5", "usage": {
+                            "input_tokens": fresh, "cache_creation_input_tokens": write,
+                            "cache_read_input_tokens": read,
+                            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": write}}}}},
+                    {"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": out}}}]
+        run = {}
+        for obj in call(2, 2017, 6582, 54) + call(2, 183, 8599, 41):
+            claude_code.call_usage(obj, run, "haiku")
+        self.assertAlmostEqual(run["cost"], 0.00063971, places=8)
+        self.assertAlmostEqual(prices.estimate("claude-haiku-5-5", {"cache_write": 10, "cache_write_1h": 99}),
+                               10 * 0.10 * 2 / 1_000_000)  # never more hour writes than writes
+
     def test_claude_code_compact_starts_new_session_id(self):
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
         sess._started = True

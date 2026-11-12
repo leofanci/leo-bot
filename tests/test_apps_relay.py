@@ -63,8 +63,11 @@ class Gate(unittest.TestCase):
         self.tmp.cleanup()
 
     def handle(self, frame):
-        reply, _ = apps_relay.handle(frame, CTX, None, self.up, self.root, catalog=CAT)
+        reply, _ = apps_relay.handle(frame, CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
         return reply
+
+    def tagged(self, slug):  # Composio's readOnlyHint tag: every tool here carries it
+        return True
 
     def test_methods_allowlist(self):
         self.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
@@ -105,6 +108,15 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"tools": [read]})
         self.assertIn("upstream ok", text_of(reply))
 
+    def test_read_without_composios_tag_is_held(self):
+        read = {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}
+        with mock.patch.object(composio, "tool_read_only", return_value=None) as asked:
+            reply, _ = apps_relay.handle(multi(read), CTX, None, self.up, self.root, catalog=CAT)
+        asked.assert_called_once_with("GMAIL_FETCH_EMAILS", self.root)
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(len(approvals.pending(self.root)), 1)
+        self.assertIn("Held for approval", text_of(reply))
+
     def test_write_held_not_forwarded(self):
         reply = self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL",
                                    "arguments": {"recipient_email": "a@example.com", "body": "hi"}}))
@@ -120,11 +132,13 @@ class Gate(unittest.TestCase):
     def test_report_only_job_refuses_writes_without_holding(self):
         send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
         read = {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}
-        reply, _ = apps_relay.handle(multi(send, read), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT)
+        reply, _ = apps_relay.handle(multi(send, read), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT,
+                                     read_only=self.tagged)
         self.assertEqual(approvals.pending(self.root), [])
         self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"tools": [read]})  # reads still run
         self.assertIn("only reports", text_of(reply))
-        reply, _ = apps_relay.handle(multi(send), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT)
+        reply, _ = apps_relay.handle(multi(send), {**CTX, "report": True}, None, self.up, self.root, catalog=CAT,
+                                     read_only=self.tagged)
         self.assertTrue(reply["result"]["isError"])
         self.assertEqual(approvals.pending(self.root), [])
 
