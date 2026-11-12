@@ -264,8 +264,12 @@ class Runners(unittest.TestCase):
 
 class Jobs(Tmp):
     def test_a_stuck_child_ends_with_a_clear_error(self):
-        with self.assertRaises(fileops.ActionError):
-            fileops._run([sys.executable, "-c", "import time; time.sleep(5)"], 0.2)
+        with mock.patch.object(fileops.subprocess, "run",
+                               side_effect=subprocess.TimeoutExpired("generate.py", 1600)) as run:
+            with self.assertRaises(fileops.ActionError) as err:
+                fileops.reindex()
+        self.assertEqual(run.call_args.kwargs["timeout"], fileops.REINDEX_TIMEOUT)
+        self.assertIn("did not finish", str(err.exception))
 
     def test_plan_keeps_known_plain_fields_only(self):
         import generate
