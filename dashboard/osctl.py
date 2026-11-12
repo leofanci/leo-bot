@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
-from dashboard import chat_session, db, fileops  # noqa: E402
+from dashboard import chat_session, db, fileops, job_cards  # noqa: E402
 from core import bots, jobs, memory, paths  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
@@ -56,8 +56,18 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
 _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
-                   # Scheduled jobs: the owner's own threads only, never a job turn (read-only).
-                   "create-job", "update-job", "delete-job", "list-jobs"}
+                   # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
+                   "propose-job", "list-jobs"}
+# An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself; deletes and
+# memory still wait for an APPROVAL line, and it never proposes jobs.
+_AUTO_BLOCKED = {"remember", "propose-job"}
+READONLY_TEXT = {
+    None: "read-only here: you can look things up but not save. Say what should be saved: "
+          "the lead saves it.",
+    "approval": "read-only here: this scheduled job saves nothing by itself. Say what should be "
+                "saved and where, and end with one APPROVAL: line.",
+    "report": "this scheduled job only reports: nothing is saved. Put what you found in your summary.",
+}
 # A thread invited people can see runs an ALLOWLIST: a new command is refused there until
 # someone adds it here (tests/test_case_variants.py fails on any command in neither set).
 _SHARED_ALLOWED = frozenset({
@@ -140,7 +150,7 @@ def _guard(args, ws):
     """Refuse anything that reaches outside workspace `ws`."""
     if args.cmd in _BLOCKED_IN_WORKSPACE:
         raise fileops.ActionError(f"{args.cmd} is only available in HQ")
-    if args.cmd in ("remember", "get-memory", "create-job") and not args.project:
+    if args.cmd in ("remember", "get-memory", "propose-job") and not args.project:
         args.project = ws  # a company's bot keeps memory in its company, never in HQ
     if args.cmd in ("create-milestone", "mark-done") and not args.entity:
         args.entity = ws  # same for its milestones and activities
@@ -362,87 +372,53 @@ def _build_parser():
                                          shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
     p.set_defaults(_run=_recall)
 
-    # -- scheduled jobs (core/jobs.py): the owner's threads only ------------ #
-    def _job_target(ws, bot, skill):
-        """Refuse a job its workspace, bot, skill or engine could not run."""
-        project = None
-        if ws != bots.HQ:
-            project = next((p for p in db.tree() if p.get("slug") == ws), None)
-            if project is None:
-                raise fileops.ActionError(f"no workspace {ws}")
-        team = bots.team(bots.ROOT, ws, project)
-        b = team.get(bot)
-        if not b or not b.active:
-            raise fileops.ActionError(f"@{bot} is not an active bot in this workspace")
-        if skill not in team.skills_of(bot):
-            raise fileops.ActionError(f"/{skill} is not one of @{bot}'s skills")
-        from dashboard.engines import registry
-        from dashboard.engines.base import EngineRefused
-        try:
-            engine = registry.pick(bots.ROOT, ws, bot)
-        except EngineRefused as e:
-            raise fileops.ActionError(str(e)) from None
-        if not registry.metered(engine):
-            raise fileops.ActionError(f"Jobs need an engine that reports cost; {engine.label} does not. "
-                                      "Pick another engine for this bot in Settings, Engines.")
-
-    def _own_job(job_id):
-        job = jobs.get(bots.ROOT, job_id)
-        ws = _workspace()
-        if job is None or (ws and job.get("workspace") != ws):
-            raise fileops.ActionError(f"no job {job_id}")
-        return job
-
+    # -- scheduled jobs (core/jobs.py): a bot proposes, the owner approves -- #
     def _job_out(job):
         try:
             due = jobs.next_due(job) if job.get("enabled") else None
         except ValueError:
             due = None
-        return {**job, "next_due": due}
+        return {**job, "mode": jobs.mode_of(job), "next_due": due}
 
-    p = sub.add_parser("create-job", help="Schedule a bot's skill (read-only runs, writes wait for approval)")
-    p.add_argument("--bot", required=True)
-    p.add_argument("--skill", required=True)
-    p.add_argument("--name", required=True)
-    p.add_argument("--message", required=True)
-    p.add_argument("--schedule", required=True, help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
-    p.add_argument("--cap", required=True, help="dollars per 24 hours for this job, above 0")
-    p.add_argument("--project", help="workspace slug; omit for HQ")
-
-    def _create_job(a):
-        ws = a.project or bots.HQ
-        _job_target(ws, a.bot, a.skill)
-        try:
-            return {"job": _job_out(jobs.create(bots.ROOT, ws=ws, bot=a.bot, skill=a.skill, name=a.name,
-                                                message=a.message, schedule=a.schedule, cap=a.cap))}
-        except ValueError as e:
-            raise fileops.ActionError(str(e)) from None
-    p.set_defaults(_run=_create_job)
-
-    p = sub.add_parser("update-job", help="Change a scheduled job")
-    p.add_argument("--job", required=True)
+    p = sub.add_parser("propose-job", help="Propose a new job, a change or a deletion: the owner "
+                                           "gets a card in this thread; nothing is saved until they approve")
+    p.add_argument("--job", help="the job to change or delete; omit for a new job")
+    p.add_argument("--delete", action="store_true", help="with --job: propose deleting it")
+    p.add_argument("--bot")
+    p.add_argument("--skill")
     p.add_argument("--name")
     p.add_argument("--message")
-    p.add_argument("--schedule")
-    p.add_argument("--cap")
-    p.add_argument("--skill")
-    p.add_argument("--enabled", choices=("true", "false"))
+    p.add_argument("--schedule", help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
+    p.add_argument("--cap", help="dollars per 24 hours for this job, above 0")
+    p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
+    p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
 
-    def _update_job(a):
-        job = _own_job(a.job)
-        if a.skill or a.enabled == "true":
-            _job_target(job["workspace"], job["bot"], a.skill or job["skill"])
-        fields = {"name": a.name, "message": a.message, "schedule": a.schedule, "cap": a.cap,
-                  "skill": a.skill, "enabled": None if a.enabled is None else a.enabled == "true"}
+    def _propose_job(a):
+        chat = (os.environ.get("LEOBOT_CHAT") or "").strip()
+        if not chat:
+            raise fileops.ActionError("propose-job runs inside a chat turn; the owner manages jobs on the Team screen")
+        thread_ws = _workspace() or bots.HQ
+        if a.delete and not a.job:
+            raise fileops.ActionError("--delete needs --job")
+        if a.job and (a.bot or a.project not in (None, _workspace())):  # _guard fills --project
+            raise fileops.ActionError("a job keeps its bot and workspace: propose a new job instead")
+        op = "delete" if a.delete else "update" if a.job else "create"
+        names = ("name", "message", "schedule", "cap", "skill", "mode") if op == "update" else (
+            ("bot", "skill", "name", "message", "schedule", "cap", "mode") if op == "create" else ())
+        fields = {k: getattr(a, k) for k in names if getattr(a, k) is not None}
+        if op == "create" and a.project:
+            fields["workspace"] = a.project
         try:
-            return {"job": _job_out(jobs.update(bots.ROOT, job["id"], **fields))}
-        except (ValueError, LookupError) as e:
+            prop = job_cards.proposal(bots.ROOT, thread_ws=thread_ws, op=op, job_id=a.job,
+                                      fields=fields, projects=db.tree())
+            jobs.add_proposal(bots.ROOT, {"chat": chat, "ws": thread_ws, "op": op,
+                                          "job_id": prop["job_id"], "fields": prop["fields"]})
+        except ValueError as e:
             raise fileops.ActionError(str(e)) from None
-    p.set_defaults(_run=_update_job)
-
-    p = sub.add_parser("delete-job", help="Remove a scheduled job (its threads stay)")
-    p.add_argument("--job", required=True)
-    p.set_defaults(_run=lambda a: {"deleted": jobs.delete(bots.ROOT, _own_job(a.job)["id"])})
+        return {"proposed": prop["summary"],
+                "note": "The owner sees a card in this thread when your reply ends; nothing is saved "
+                        "until they approve. Do not add an APPROVAL: line for it."}
+    p.set_defaults(_run=_propose_job)
 
     p = sub.add_parser("list-jobs", help="Scheduled jobs (this workspace's, or every one from HQ)")
     p.set_defaults(_run=lambda a: {"jobs": [_job_out(j) for j in jobs.load(bots.ROOT)
@@ -1040,10 +1016,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     _owners.cache_clear()
     try:
+        job_mode = (os.environ.get("LEOBOT_JOB_MODE") or "").strip() or None
+        in_job = bool((os.environ.get("LEOBOT_JOB") or "").strip())
         if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
-            raise fileops.ActionError("read-only here: you can look things up but not save. Say what "
-                                      "should be saved: a teammate saves it, or, in a scheduled job, end "
-                                      "with one APPROVAL: line.")
+            raise fileops.ActionError(READONLY_TEXT.get(job_mode if in_job else None, READONLY_TEXT["approval"]))
+        if in_job and (args.cmd in _AUTO_BLOCKED or args.cmd.startswith("delete-")):
+            raise fileops.ActionError(
+                "a scheduled job never proposes jobs." if args.cmd == "propose-job" else
+                f"{args.cmd} waits for the owner even in an Auto job: say what and where, and end "
+                "with one APPROVAL: line.")
         if os.environ.get("LEOBOT_WORKSPACE") and getattr(args, "local_folder", None) is not None:
             # A linked folder becomes --add-dir on that company's turns: only the
             # user links one, in the dashboard. Any bot (HQ too) is refused.

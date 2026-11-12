@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest import mock
 
 import generate
-from dashboard import chat_store, fileops, job_ledger
+from core import jobs
+from dashboard import chat_store, fileops, job_ledger, spend
 from dashboard.engines import registry
 
 
@@ -57,6 +58,36 @@ class Metered(unittest.TestCase):
                 generate.run_claude("prompt", "text")
         self.assertIn("Paused:", str(err.exception))
         self.assertEqual(self.engine.calls, [])
+
+    def auto_job(self, cap=1.0):
+        return jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="weekly",
+                           message="m", schedule="every 6h", cap=cap, mode="auto")
+
+    def test_auto_job_run_counts_against_the_job(self):
+        job = self.auto_job()
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": job["id"]}):
+            generate.run_claude("prompt", "text")
+        row = job_ledger.rows(self.root)[0]
+        self.assertEqual((row["job"], row["for_job"]), ("generate", job["id"]))  # still grouped as generate
+        records = lambda: job_ledger.records(self.root)  # noqa: E731
+        self.assertEqual(spend.spent("job", job["id"], records=records)[0], 0.002)
+
+    def test_job_cap_stops_a_run_before_the_engine(self):
+        job = self.auto_job(cap=1.0)
+        job_ledger.append(self.root, {"ts": time.time(), "ws": "acme", "by": "owner", "job": "generate",
+                                      "for_job": job["id"], "cost": 1.5})
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": job["id"]}):
+            with self.assertRaises(generate.JobError) as err:
+                generate.run_claude("prompt", "text")
+        self.assertIn("this job reached its cap", str(err.exception))
+        self.assertEqual(self.engine.calls, [])
+        generate.run_claude("prompt", "text")  # outside the job: no job cap
+        self.assertEqual(len(self.engine.calls), 1)
+
+    def test_unknown_job_id_is_not_a_cap(self):
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": "missing1"}):
+            generate.run_claude("prompt", "text")
+        self.assertNotIn("for_job", job_ledger.rows(self.root)[0])
 
 
 if __name__ == "__main__":

@@ -1220,6 +1220,7 @@ async function renderTeam(){
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
   let pv = null, link = "";
+  let jobList = [];
   const person = isPerson();
   const opened = new Set();  // bots whose details are open: kept across redraws
   // Where the spend went: top models, skills and engines, the last 7 days, cache reads.
@@ -1287,8 +1288,10 @@ async function renderTeam(){
     $("#team-list").innerHTML = peopleSection(pv, link) + noApps
       + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>${spendDetails(costs)}` : ""}
         <div class="rowc">${on.map(onRow).join("")}</div>
-        ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}`;
+        ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}
+        ${person ? "" : jobsSection()}`;
     wirePeople();
+    wireJobs();
     $("#team-list").querySelectorAll("[data-bot-more]").forEach(btn => btn.onclick = () => {
       const row = btn.closest(".team-row"), detail = row.querySelector(".team-detail"), id = btn.dataset.botMore;
       const open = detail.hidden;
@@ -1318,6 +1321,41 @@ async function renderTeam(){
         const d = await jpost(`/api/bots/${btn.dataset.botToggle}/active`, { ws: _WS, active: btn.dataset.on !== "1" });
         _BOTS = d.bots || _BOTS; draw(); renderRail().catch(() => {});
       } catch (e) { toast("✗ " + e.message); }
+    });
+  };
+  // Scheduled jobs (owner only): mode, on/off and delete here; the rest through a bot's card.
+  const jobsSection = () => {
+    if (!jobList.length) return "";
+    const now = Date.now() / 1000;
+    const row = j => `<div class="post team-row job-row${j.enabled ? "" : " off"}" data-job="${esc(j.id)}">
+        <div class="t"><b>${esc(j.name)}</b>
+          <small class="team-meta">${esc(jobMetaText(j, wsById(j.workspace)?.name || j.workspace, now))}${j.last_chat ? ` · <a href="#" data-job-open>Open</a>` : ""}</small></div>
+        <select data-job-mode aria-label="Mode">${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${j.mode === m ? " selected" : ""}>${label}</option>`).join("")}</select>
+        <button class="more" data-job-on="${j.enabled ? "0" : "1"}">${j.enabled ? "Turn off" : "Turn on"}</button>
+        <button class="more" data-job-rm>Delete</button>
+      </div>`;
+    return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
+      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, memory and app actions still wait. Report only: reads and reports. To change the schedule, message, cap or skill, ask the bot in chat.</div>
+      <div class="rowc">${jobList.map(row).join("")}</div>`;
+  };
+  const wireJobs = () => {
+    const box = $("#team-list");
+    const jobOf = el => jobList.find(j => j.id === el.closest("[data-job]")?.dataset.job);
+    const change = async (j, verb, body) => {
+      try { jobList = (await jpost(`/api/jobs/${encodeURIComponent(j.id)}/${verb}`, { ws: _WS, ...body })).jobs || []; }
+      catch (e) { toast("✗ " + e.message); }
+      draw();
+    };
+    box.querySelectorAll("[data-job-mode]").forEach(sel => sel.onchange = () => change(jobOf(sel), "mode", { mode: sel.value }));
+    box.querySelectorAll("[data-job-on]").forEach(b => b.onclick = () => change(jobOf(b), "enabled", { enabled: b.dataset.jobOn === "1" }));
+    box.querySelectorAll("[data-job-rm]").forEach(b => b.onclick = () => {
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to delete"; return; }
+      change(jobOf(b), "delete", {});
+    });
+    box.querySelectorAll("[data-job-open]").forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      const j = jobOf(a);
+      window.ChatRooms?.openThread({ chat: j.last_chat, ws: j.workspace, room: j.room });
     });
   };
   const wirePeople = () => {
@@ -1361,6 +1399,7 @@ async function renderTeam(){
   if (!person) {
     costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
     integ = await api("/api/integrations").catch(() => integ);
+    jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
   }
   if (stillOn()) draw();
 }
@@ -1376,7 +1415,7 @@ async function renderApprovals(){
     const b = botById(a.bot) || { id: a.bot, name: a.bot };
     const room = (a.room || "").split("/")[1] || "general";
     const where = `${wsById(a.ws)?.name || a.ws} · ${room.startsWith("dm-") ? "DM" : "#" + room.replace(/^t-/, "")}`;
-    if (isAppAction(a)) return `<div class="post approval-row app-row" data-app-id="${esc(a.id)}">
+    if (isHeld(a)) return `<div class="post approval-row app-row" data-app-id="${esc(a.id)}">
       ${botAvatar(b)}
       <div class="t"><small>${esc(b.name)} · ${esc(where)} · ${relAge(a.created)}</small>
         <div class="approval-bar app-card">${appCardHtml(a)}</div></div>
@@ -1392,13 +1431,13 @@ async function renderApprovals(){
   }).join("") : `<div class="empty">Nothing waiting on you.</div>`;
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">${esc(_WS === "hq" ? "Every workspace" : wsById(_WS)?.name || "")}</div><h1 class="title">Approvals</h1></div></div>
-    <div class="scroll"><div class="help">Saves your bots proposed and are waiting on. Approve sends "yes" in that thread; the bot then writes it. App actions (an email, a post, an event) run only when you approve them here or in the thread.</div><div class="rowc">${rows}</div></div>`;
+    <div class="scroll"><div class="help">Saves your bots proposed and are waiting on. Approve sends "yes" in that thread; the bot then writes it. App actions (an email, a post, an event) and scheduled jobs run only when you approve them here or in the thread.</div><div class="rowc">${rows}</div></div>`;
   const find = id => items.find(a => a.id === id);
   $("#main").querySelectorAll("[data-ap-go]").forEach(b => b.onclick = () => window.ChatRooms?.openThread(find(b.dataset.apGo)));
   $("#main").querySelectorAll("[data-ap-ok]").forEach(b => b.onclick = () => window.ChatRooms?.openThread(find(b.dataset.apOk), "approved"));
   $("#main").querySelectorAll("[data-ap-no]").forEach(b => b.onclick = async () => {
     const a = find(b.dataset.apNo);
-    if (isAppAction(a)) return;  // app actions answer only through their own card
+    if (isHeld(a)) return;  // app actions and job cards answer only through their own card
     try { await jpost("/api/approvals/dismiss", { chat: a.chat }); await renderRail(); renderApprovals(); }
     catch (e) { toast("✗ " + e.message); }
   });
@@ -1407,8 +1446,21 @@ async function renderApprovals(){
 }
 
 // ── Connected apps: held app actions (cards) and the Integrations panel.
-function isAppAction(a){
-  return !!a && a.kind === "app_action";
+const JOB_MODES = { approval: "Approval", auto: "Auto", report: "Report only" };
+// One line under a job's name on the Team screen: where it runs, when, and how it went.
+function jobMetaText(j, wsName, now){
+  const when = ts => new Date(ts * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const next = !j.enabled ? "off" : j.next_due ? (j.next_due <= now ? "runs at the next check" : `next ${when(j.next_due)}`) : "";
+  const last = j.last_run ? `last ${when(j.last_run)}${j.last_status ? `: ${j.last_status}` : ""}` : "not run yet";
+  return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, next, last].filter(Boolean).join(" · ");
+}
+// Rows only their own card answers: held app actions and scheduled-job proposals.
+function isHeld(a){
+  return !!a && (a.kind === "app_action" || a.kind === "job");
+}
+// What Edit on a card changes: an app action's arguments, a job card's fields.
+function heldEditable(a){
+  return a?.kind === "job" ? { key: "fields", values: a.job?.fields || {} } : { key: "arguments", values: a?.action?.arguments || {} };
 }
 function grantLabel(scope){
   return scope === "write" ? "Read + write" : scope === "read" ? "Read" : "Off";
@@ -1428,8 +1480,9 @@ function acctPicked(picked, ws, slug, id){
   return ((picked?.[ws]?.[slug]) || []).includes(id);
 }
 function appCardHtml(a){
-  const p = a.preview || { title: a.action?.slug || "App action", fields: [] };
-  return `<div class="app-card-h"><b>${esc(p.title)}</b><small>Not run yet. It runs only when you approve.</small></div>
+  const p = a.preview || { title: a.action?.slug || a.summary || "App action", fields: [] };
+  const sub = a.kind === "job" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
+  return `<div class="app-card-h"><b>${esc(p.title)}</b><small>${sub}</small></div>
     <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
       <button class="btn sm" data-app="edit">Edit</button>
@@ -1443,18 +1496,21 @@ function wireAppCard(el, a){
     try {
       const r = await jpost(`/api/approvals/${encodeURIComponent(a.id)}/${verb}`, body || {});
       _APPROVALS = _APPROVALS.filter(x => x.id !== a.id);
-      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? "Not sent." : r.result || r.status)}</div>`;
+      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? (a.kind === "job" ? "Not saved." : "Not sent.") : r.result || r.status)}</div>`;
       renderRail().catch(() => {});
     } catch (e) { toast("✗ " + e.message); lock(false); }
   };
   el.querySelector('[data-app="approve"]').onclick = () => answer("approve");
   el.querySelector('[data-app="reject"]').onclick = () => answer("reject");
   el.querySelector('[data-app="edit"]').onclick = e => {
-    const args = a.action?.arguments || {};
+    const { key, values: args } = heldEditable(a);
     const form = document.createElement("form");
     form.className = "app-edit";
     form.innerHTML = Object.entries(args).map(([k, v]) => {
-      const field = typeof v !== "string"
+      const field = a.kind === "job" && k === "mode"
+        ? `<select data-k="mode">${["approval", "auto", "report"].map(m => `<option value="${m}"${v === m ? " selected" : ""}>${JOB_MODES[m]}</option>`).join("")}</select>`
+        : typeof v === "number" ? `<input data-k="${esc(k)}" data-num="1" inputmode="decimal" value="${esc(String(v))}">`
+        : typeof v !== "string"
         ? `<textarea data-k="${esc(k)}" data-json="1" rows="4">${esc(JSON.stringify(v, null, 2))}</textarea>`
         : v.length > 80 || v.includes("\n") ? `<textarea data-k="${esc(k)}" rows="6">${esc(v)}</textarea>`
         : `<input data-k="${esc(k)}" value="${esc(v)}">`;
@@ -1463,9 +1519,9 @@ function wireAppCard(el, a){
     form.onsubmit = ev => {
       ev.preventDefault();
       const out = {};
-      try { form.querySelectorAll("[data-k]").forEach(f => out[f.dataset.k] = f.dataset.json ? JSON.parse(f.value) : f.value); }
+      try { form.querySelectorAll("[data-k]").forEach(f => out[f.dataset.k] = f.dataset.json ? JSON.parse(f.value) : f.dataset.num ? Number(f.value) : f.value); }
       catch { return toast("✗ One field is not valid JSON"); }
-      answer("approve", { arguments: out });
+      answer("approve", { [key]: out });
     };
     el.querySelector(".app-fields").replaceWith(form);
     e.currentTarget.remove();
@@ -4364,7 +4420,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   // Held app actions of this thread, at its end, until answered.
   function renderAppCards(){
     stream.querySelectorAll(".app-card").forEach(el => el.remove());
-    _APPROVALS.filter(a => isAppAction(a) && a.chat && a.chat === activeChatId).forEach(a => {
+    _APPROVALS.filter(a => isHeld(a) && a.chat && a.chat === activeChatId).forEach(a => {
       const el = document.createElement("div");
       el.className = "approval-bar app-card";
       el.innerHTML = appCardHtml(a);

@@ -160,6 +160,20 @@ class Digest(Base):
         self.assertIn("Waiting for your approval (1)\n- acme: save the review memo to sec04", text)
         self.assertNotIn("—", text)
 
+    def test_auto_job_generate_cost_and_job_cards(self):
+        self.seed()
+        jid = jobs.load(self.root)[0]["id"]
+        job_ledger.append(self.root, {"ts": self.clock() - 400, "ws": "acme", "job": "generate",
+                                      "for_job": jid, "cost": 0.05})
+        approvals.add_job(self.root, ws="acme", room="acme/dm-cmo", chat="c9", bot="cmo",
+                          job={"op": "create", "job_id": None, "fields": {}}, summary="New job: daily",
+                          preview={"title": "New job: daily", "fields": []})
+        text = job_runner.digest_text(self.root, self.clock() - 86400, self.clock())
+        self.assertIn("- weekly (acme, @cmo): 1 run, $0.08, last: waiting", text)
+        self.assertIn("Generation runs\n- 1 run, $0.0020", text)  # the job's run is on the job's line
+        self.assertIn("Waiting for your approval (2)", text)
+        self.assertIn("- acme: New job: daily", text)
+
     def test_posted_once_a_day_from_the_hour(self):
         self.seed()
         r = self.runner(lambda j: {"status": "done"})

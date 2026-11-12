@@ -17,7 +17,7 @@ import shutil
 import subprocess
 
 from dashboard.engines import prices
-from dashboard.engines.base import Engine, SessionLost, drain, stop_child
+from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, stop_child, turn_vars
 from dashboard.engines.claude_code import (
     APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
 )
@@ -97,9 +97,10 @@ class CodexEngine(Engine):
         return cmd
 
     def turn_env(self, policy, tokens):
-        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV)
+        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
+                **turn_vars(policy),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {})}
 
     def turn(self, session, text, policy, model, tokens):

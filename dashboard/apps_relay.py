@@ -7,7 +7,8 @@ to the accounts the workspace picked), adding the key, and gates every call:
 
   tools/list   only the search, schema and multi-execute meta tools
   tools/call   each app tool inside a multi-execute: read -> runs now,
-               not a read on a write grant -> held in Approvals, else refused;
+               not a read on a write grant -> held in Approvals (refused in a
+               Report only job), else refused;
                with several accounts of one app, the call names one of them
 
 The bot's body is never forwarded as is: reads are rebuilt into a fresh
@@ -27,6 +28,7 @@ METHODS = ("initialize", "ping", "tools/list", "tools/call")
 PASS_THROUGH = ("COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS")
 HELD = "Held for approval ({id}): {title}. It has not run. Tell the user it is waiting in Approvals."
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
+REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
 NO_ACCOUNT = '"{slug}": {toolkit} has no account picked in this workspace. This call was not performed.'
 PICK_ACCOUNT = ('"{slug}": set "account" on the tool to one of this workspace\'s {toolkit} accounts: '
@@ -151,6 +153,8 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
             # The account travels only when there is a choice: one account is the pin.
             reads.append({"tool_slug": c["tool_slug"], "arguments": c["arguments"],
                           **({"account": account} if len(picks[tk]) > 1 else {})})
+        elif ctx.get("report"):  # a Report only job: nothing waits for a click
+            notes.append(REPORT_ONLY.format(slug=c["tool_slug"]))
         else:
             rec = approvals.add_app_action(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
                                            bot=ctx["bot"], person=ctx["person"], toolkit=tk,

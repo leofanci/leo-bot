@@ -1,11 +1,12 @@
 """A scheduled job's turn through the server's ask path (server.run_job), on a fake engine."""
+import io
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, bots, folders
+from core import approvals, bots, folders, jobs
 import dashboard.server as server
 
 WS = "acme"
@@ -88,6 +89,46 @@ class JobTurn(unittest.TestCase):
         pend = approvals.pending(self.root, WS)
         self.assertEqual([(p["chat"], p["summary"]) for p in pend], [(out["chat"], "save the review memo to sec04")])
         self.assertAlmostEqual(out["cost"], 0.01)
+
+    def test_auto_job_saves_by_itself(self):
+        self.reply = "Updated the draft list."
+        out = self.run_job(mode="auto")
+        self.assertEqual(out["status"], "done")
+        a = self.asks[0]
+        self.assertFalse(a["readonly"])
+        self.assertEqual((a["sess"].job_id, a["sess"].job_mode), ("j1", "auto"))
+        self.assertEqual(a["edit_dirs"], ())
+        self.assertIn("Auto", a["text"])
+        self.assertIn("APPROVAL", a["text"])  # deletes and memory still go through one
+
+    def test_report_job_drops_the_approval_line(self):
+        out = self.run_job(mode="report")
+        self.assertEqual(out["status"], "done")
+        a = self.asks[0]
+        self.assertTrue(a["readonly"])
+        self.assertEqual(a["sess"].job_mode, "report")
+        self.assertIn("Mode: Report only", a["text"])
+        self.assertEqual(approvals.pending(self.root), [])
+        rec = server.chat_store.load(out["chat"])
+        self.assertNotIn("APPROVAL", rec["messages"][-1]["content"])
+        self.assertIn("Weekly numbers.", rec["messages"][-1]["content"])
+
+    def test_unknown_mode_runs_as_approval(self):
+        out = self.run_job(mode="whatever")
+        self.assertEqual(out["status"], "waiting")
+        self.assertTrue(self.asks[0]["readonly"])
+        self.assertEqual(self.asks[0]["sess"].job_mode, "approval")
+
+    def test_report_job_app_token_refuses_writes(self):
+        minted = []
+        real = server.apps_relay.TOKENS.mint
+        with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}), \
+                mock.patch.object(server, "_needs_apps", return_value=True):
+            self.run_job(mode="report", message="draft the weekly email")
+            self.run_job(mode="auto", message="draft the weekly email")
+        self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
 
     def test_plain_reply_is_done(self):
         self.reply = "Nothing changed this week."
@@ -182,7 +223,7 @@ class JobTurn(unittest.TestCase):
         self.assertIn("does not report cost", out["detail"])
 
     def test_job_message_grants_no_web_host(self):
-        # A job's message was written by a bot (osctl create-job), not typed by the owner:
+        # A job's message was written by a bot (osctl propose-job), not typed by the owner:
         # a host in it must not become a fetch grant.
         out = self.run_job(message="search the web and check https://example.com/pricing")
         self.assertEqual(out["status"], "waiting")
@@ -204,6 +245,136 @@ class JobTurn(unittest.TestCase):
                 mock.patch.object(server.chat_session.ChatSession, "ask", ask):
             out = self.run_job(message="draft the weekly email")
         self.assertEqual(out["status"], "waiting")
+
+
+    # -- proposals: a bot's propose-job becomes a card; only Approve writes the job ------- #
+    def owner_ask(self, msg="@cmo /positioning set up a weekly review job", room=f"{WS}/dm-cmo", propose=None):
+        """An owner turn whose bot ran `osctl propose-job` (simulated: an outbox row for its thread)."""
+        test = self
+
+        def ask(sess, text, **kw):
+            for prop in propose or ():
+                jobs.add_proposal(test.root, {"chat": sess.session_id, "ws": WS, **prop})
+            yield ("delta", "Proposed a weekly job.")
+            yield ("done", {"cost": 0.01})
+        h = server.Handler.__new__(server.Handler)
+        h.wfile = io.BytesIO()
+        h.server = self.srv
+        h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+        made = []
+
+        def session(*a, **k):
+            made.append(server.chat_session.ChatSession(repo_dir=".", rail=""))
+            return made[-1]
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask), \
+                mock.patch.object(server, "get_chat_session", side_effect=session):
+            h._handle_ask({"messages": [{"role": "user", "content": msg}], "room_id": room})
+        return made[-1].session_id, h.wfile.getvalue().decode()
+
+    NEW = {"op": "create", "fields": {"bot": "cmo", "skill": "positioning", "name": "weekly",
+                                      "message": "review the week", "schedule": "mon 09:00", "cap": 0.5,
+                                      "mode": "auto"}}
+
+    def post(self, path, body):
+        h = server.Handler.__new__(server.Handler)
+        sent = []
+        h._send = lambda code, obj: sent.append((code, obj))
+        h._jobs_post(path, body)
+        return sent[-1]
+
+    def test_proposal_becomes_a_card_and_approve_writes_once(self):
+        chat, out = self.owner_ask(propose=[self.NEW])
+        cards = [r for r in approvals.pending(self.root, WS) if r.get("kind") == approvals.JOB]
+        self.assertEqual(len(cards), 1)
+        card = cards[0]
+        self.assertEqual((card["chat"], card["bot"], card["room"], card["summary"]),
+                         (chat, "cmo", f"{WS}/dm-cmo", "New job: weekly"))
+        self.assertIn('"app_actions"', out)
+        self.assertEqual(jobs.load(self.root), [])  # nothing saved before the click
+        self.assertEqual(jobs.take_proposals(self.root, chat), [])  # the outbox was emptied
+        done = server._approve_job_card(card["id"])
+        self.assertEqual(done["status"], "done", done)
+        self.assertTrue(done["result"].startswith("Job created: weekly"))
+        got = jobs.load(self.root)
+        self.assertEqual([(j["name"], j["mode"], j["workspace"]) for j in got], [("weekly", "auto", WS)])
+        with self.assertRaises(server._AppRefused):  # a second click (another tab)
+            server._approve_job_card(card["id"])
+        self.assertEqual(len(jobs.load(self.root)), 1)
+        note = server.chat_store.load(chat)["messages"][-1]
+        self.assertIn("Job created", note["content"])
+
+    def test_edited_card_saves_the_edit(self):
+        self.owner_ask(propose=[self.NEW])
+        card = approvals.pending(self.root, WS)[0]
+        fields = dict(card["job"]["fields"], cap=2, mode="report")
+        server._approve_job_card(card["id"], fields)
+        self.assertEqual((jobs.load(self.root)[0]["cap"], jobs.load(self.root)[0]["mode"]), (2.0, "report"))
+
+    def test_bad_edit_and_stale_card_stay_pending(self):
+        self.owner_ask(propose=[self.NEW])
+        card = approvals.pending(self.root, WS)[0]
+        with self.assertRaises(server._AppRefused):
+            server._approve_job_card(card["id"], dict(card["job"]["fields"], schedule="whenever"))
+        bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})
+        with self.assertRaises(server._AppRefused):
+            server._approve_job_card(card["id"])
+        self.assertEqual(approvals.get(card["id"], self.root)["status"], "pending")
+        self.assertEqual(jobs.load(self.root), [])
+
+    def test_invalid_proposal_is_dropped_with_a_notice(self):
+        chat, out = self.owner_ask(propose=[{"op": "create", "fields": dict(self.NEW["fields"], workspace="demo")}])
+        self.assertEqual(approvals.pending(self.root), [])
+        self.assertIn("Job proposal dropped", out)
+
+    def test_shared_thread_proposals_are_discarded(self):
+        with mock.patch.object(server, "_shared_room", return_value=True):
+            chat, _ = self.owner_ask(msg="@cmo hello", room=f"{WS}/general", propose=[self.NEW])
+        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual(jobs.take_proposals(self.root, chat), [])
+
+    def test_job_turn_proposals_are_discarded(self):
+        test = self
+
+        def ask(sess, text, **kw):
+            jobs.add_proposal(test.root, {"chat": sess.session_id, "ws": WS, **test.NEW})
+            yield ("delta", "done")
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job(mode="auto")
+        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual(jobs.take_proposals(self.root, out["chat"]), [])
+
+    def test_team_endpoints(self):
+        mine = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                           message="m", schedule="every 6h", cap=1)
+        other = jobs.create(self.root, ws="hq", bot="cos", skill="weekly-review", name="hq",
+                            message="m", schedule="every 6h", cap=1)
+        view = server._jobs_view(WS)
+        self.assertEqual([j["id"] for j in view["jobs"]], [mine["id"]])
+        self.assertEqual((view["jobs"][0]["mode"], view["jobs"][0]["room"]), ("approval", f"{WS}/dm-cmo"))
+        self.assertEqual(len(server._jobs_view("hq")["jobs"]), 2)
+        code, _ = self.post(f"/api/jobs/{other['id']}/mode", {"ws": WS, "mode": "auto"})
+        self.assertEqual(code, 404)  # another workspace's job
+        code, body = self.post(f"/api/jobs/{mine['id']}/mode", {"ws": WS, "mode": "report"})
+        self.assertEqual((code, body["jobs"][0]["mode"]), (200, "report"))
+        self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": False})
+        self.assertFalse(jobs.get(self.root, mine["id"])["enabled"])
+        bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})
+        code, body = self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": True})
+        self.assertEqual(code, 409)  # it could not run
+        self.assertFalse(jobs.get(self.root, mine["id"])["enabled"])
+        self.post(f"/api/jobs/{other['id']}/delete", {"ws": "hq"})
+        self.assertIsNone(jobs.get(self.root, other["id"]))
+
+    def test_invited_person_has_no_job_routes(self):
+        h = server.Handler.__new__(server.Handler)
+        sent = []
+        h._send = lambda code, obj: sent.append(code)
+        h._read_json = lambda: {"ws": WS, "mode": "auto"}
+        h._person_post("/api/jobs/x/mode", {"id": "p1", "name": "P", "ws": [WS]})
+        h.path = f"/api/jobs?ws={WS}"
+        h._person_get("/api/jobs", {"id": "p1", "name": "P", "ws": [WS]})
+        self.assertEqual(sent, [403, 403])
 
 
 if __name__ == "__main__":

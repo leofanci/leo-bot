@@ -13,6 +13,10 @@ it, exactly once (pending -> running -> done/failed). Chat rules never touch
 these rows: a new message does not resolve them and a newer proposal does not
 supersede them. Rows with no `kind` are chat approvals.
 
+A third kind, `job`, is a scheduled-job proposal (create, change or delete), built by
+the server from what a bot proposed (dashboard/job_cards.py). It is held like an app
+action: only its own card answers it, and Approve applies it exactly once.
+
 Stored in gitignored team/approvals.json (spans workspaces, so company bots
 are denied Read on team/).
 """
@@ -31,6 +35,8 @@ KEEP = 200
 STATUSES = {"pending", "approved", "rejected", "answered", "superseded",
             "running", "done", "failed", "expired"}
 APP = "app_action"
+JOB = "job"
+HELD = (APP, JOB)  # answered only through their own card
 APP_TTL = 7 * 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
@@ -60,12 +66,12 @@ def load(root=bots.ROOT):
     return [r for r in rows or [] if isinstance(r, dict) and r.get("id")]
 
 
-def _is_app(r):
-    return r.get("kind") == APP
+def _is_held(r):
+    return r.get("kind") in HELD
 
 
 def _protected(r):
-    return _is_app(r) and r.get("status") in ("pending", "running")
+    return _is_held(r) and r.get("status") in ("pending", "running")
 
 
 def _save(root, rows):
@@ -80,7 +86,7 @@ def add(root=bots.ROOT, *, ws, room, chat, bot, summary):
     with LOCK:
         rows = load(root)
         for r in rows:
-            if r.get("chat") == chat and r.get("status") == "pending" and not _is_app(r):
+            if r.get("chat") == chat and r.get("status") == "pending" and not _is_held(r):
                 r["status"] = "superseded"
         rec = {"id": uuid.uuid4().hex[:12], "ws": ws, "room": room, "chat": chat, "bot": bot,
                "summary": summary, "created": time.time(), "status": "pending"}
@@ -97,7 +103,7 @@ def resolve_chat(chat, status, root=bots.ROOT):
         rows = load(root)
         n = 0
         for r in rows:
-            if r.get("chat") == chat and r.get("status") == "pending" and not _is_app(r):
+            if r.get("chat") == chat and r.get("status") == "pending" and not _is_held(r):
                 r["status"], r["resolved"] = status, time.time()
                 n += 1
         if n:
@@ -144,10 +150,10 @@ def pending(root=bots.ROOT, ws=None):
 
 
 def _housekeep(rows):
-    """Expire week-old app actions; a run cut off by a restart is failed, never re-run."""
+    """Expire week-old held rows; a run cut off by a restart is failed, never re-run."""
     now, changed = time.time(), False
     for r in rows:
-        if not _is_app(r):
+        if not _is_held(r):
             continue
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
@@ -172,17 +178,29 @@ def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug
     return rec
 
 
+def add_job(root=bots.ROOT, *, ws, room, chat, bot, job, summary, preview):
+    """Hold one job proposal ({"op", "job_id", "fields"}) for an Approve click."""
+    rec = {"id": uuid.uuid4().hex[:12], "kind": JOB, "ws": ws, "room": room, "chat": chat,
+           "bot": bot, "status": "pending", "created": time.time(), "job": job,
+           "summary": str(summary)[:SUMMARY_MAX], "preview": preview}
+    with LOCK:
+        rows = load(root)
+        rows.append(rec)
+        _save(root, rows)
+    return rec
+
+
 def get(aid, root=bots.ROOT):
     return next((r for r in load(root) if r.get("id") == aid), None)
 
 
-def _mutate_app(aid, root, fn):
+def _mutate_held(aid, root, fn, kinds=HELD):
     with LOCK:
         rows = load(root)
         _housekeep(rows)
-        rec = next((r for r in rows if r.get("id") == aid and _is_app(r)), None)
+        rec = next((r for r in rows if r.get("id") == aid and r.get("kind") in kinds), None)
         if rec is None:
-            raise ValueError("no such app action")
+            raise ValueError("no such app action" if kinds == (APP,) else "no such card")
         fn(rec)
         _save(root, rows)
         return dict(rec)
@@ -198,7 +216,7 @@ def claim(aid, root=bots.ROOT):
     def fn(r):
         _need(r, "pending")
         r.update(status="running", started=time.time())
-    return _mutate_app(aid, root, fn)
+    return _mutate_held(aid, root, fn)
 
 
 def finish(aid, status, result, root=bots.ROOT):
@@ -207,14 +225,14 @@ def finish(aid, status, result, root=bots.ROOT):
     def fn(r):
         _need(r, "running")
         r.update(status=status, result=result, resolved=time.time())
-    return _mutate_app(aid, root, fn)
+    return _mutate_held(aid, root, fn)
 
 
 def reject(aid, root=bots.ROOT):
     def fn(r):
         _need(r, "pending")
         r.update(status="rejected", resolved=time.time())
-    return _mutate_app(aid, root, fn)
+    return _mutate_held(aid, root, fn)
 
 
 def edit_arguments(aid, arguments, root=bots.ROOT):
@@ -225,4 +243,12 @@ def edit_arguments(aid, arguments, root=bots.ROOT):
         r["action"]["arguments"] = arguments
         r["preview"] = app_preview.build(r["action"]["slug"], arguments, r["action"].get("toolkit"),
                                          account=r["action"].get("account_label"))
-    return _mutate_app(aid, root, fn)
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def edit_job(aid, job, summary, preview, root=bots.ROOT):
+    """Replace a pending job card's proposal (already validated by the caller)."""
+    def fn(r):
+        _need(r, "pending")
+        r.update(job=job, summary=str(summary)[:SUMMARY_MAX], preview=preview)
+    return _mutate_held(aid, root, fn, kinds=(JOB,))

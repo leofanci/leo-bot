@@ -48,7 +48,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
-from core import approvals  # noqa: E402
+from core import approvals, jobs  # noqa: E402
 from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import compaction, costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_cards, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1338,11 +1338,24 @@ def _spend_records():
     return itertools.chain(chat_store.records(), job_ledger.records(ROOT))
 
 
-JOB_NOTE = (
-    "## Scheduled job\n"
-    "This turn is the scheduled job \"{name}\". Nobody is watching it live. You can read and look "
-    "things up; every osctl write is refused. If something should be saved, say what and where, and end "
-    "with one APPROVAL: line. The owner approves it in this thread.")
+_JOB_HEAD = ("## Scheduled job\n"
+             "This turn is the scheduled job \"{name}\". Nobody is watching it live. ")
+# One note per mode (core/jobs.py MODES): what this run may do, so it never tries the rest.
+JOB_NOTES = {
+    "approval": _JOB_HEAD + (
+        "Mode: Approval. You can read and look things up; every osctl write is refused. If something "
+        "should be saved, say what and where, and end with one APPROVAL: line. The owner approves it in "
+        "this thread. App actions that are not reads wait for the owner's click."),
+    "auto": _JOB_HEAD + (
+        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans): the owner chose "
+        "Auto, so a skill's write gate is already answered for those. Deletes and "
+        "memory (remember) are refused: say what and where, and end with one APPROVAL: line. App actions "
+        "that are not reads wait for the owner's click. Never propose jobs."),
+    "report": _JOB_HEAD + (
+        "Mode: Report only. Read and look things up, then write a short summary of what you found. "
+        "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
+        "line is ignored."),
+}
 JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
                  "Pick another engine for @{bot} in Settings, Engines.")
 JOB_MATE_UNMETERED = ("@{bot}'s engine ({label}) does not report cost, so a scheduled job "
@@ -1788,6 +1801,84 @@ def _catalog_search(q):
                          for s in pinned if q in s][:CATALOG_LIMIT], "offline": True}
     hits = [a for a in apps if q in a["slug"].lower() or q in (a.get("name") or "").lower()]
     return {"apps": hits[:CATALOG_LIMIT]}
+
+
+def _jobs_view(ws):
+    """The Team screen's jobs: every one from HQ, a workspace's own elsewhere."""
+    out = []
+    for j in jobs.load(ROOT):
+        jws = j.get("workspace") or bots.HQ
+        if ws != bots.HQ and jws != ws:
+            continue
+        try:
+            due = jobs.next_due(j) if j.get("enabled") else None
+        except ValueError:
+            due = None
+        out.append({**j, "mode": jobs.mode_of(j), "next_due": due, "room": f"{jws}/dm-{j.get('bot')}"})
+    return {"ws": ws, "jobs": out}
+
+
+def _job_cards_for_turn(chat, ws, room, bot_id, allowed, notice):
+    """Take this thread's job proposals; when `allowed`, hold each that still checks out as a
+    card (the turn's own workspace, room and bot, never the proposal's), else drop them."""
+    if not isinstance(chat, str) or not chat:
+        return []
+    try:
+        proposed = jobs.take_proposals(ROOT, chat)
+    except (OSError, ValueError):
+        traceback.print_exc()
+        return []
+    if not proposed or not allowed:
+        return []
+    cards, projects = [], db.tree()
+    for prop in proposed:
+        try:
+            ok = job_cards.proposal(ROOT, thread_ws=ws, op=prop.get("op"), job_id=prop.get("job_id"),
+                                    fields=prop.get("fields") if isinstance(prop.get("fields"), dict) else {},
+                                    projects=projects)
+        except ValueError as e:
+            notice(f"Job proposal dropped: {e}")
+            continue
+        cards.append(approvals.add_job(ROOT, ws=ws, room=(room or {}).get("id"), chat=chat, bot=bot_id,
+                                       job={k: ok[k] for k in ("op", "job_id", "fields")},
+                                       summary=ok["summary"], preview=ok["preview"]))
+    return cards
+
+
+def _approve_job_card(aid, fields=None):
+    """Apply one job card, exactly once, after checking it again. `fields` (the card's Edit)
+    replace the proposal's fields and are checked like the bot's were."""
+    rec = approvals.get(aid, ROOT)
+    if not rec or rec.get("kind") != approvals.JOB:
+        raise LookupError("no such card")
+    if rec.get("status") != "pending":
+        raise _AppRefused(f"already {rec.get('status')}")
+    projects = db.tree()
+    stored = rec.get("job") or {}
+    try:  # still savable? A refusal leaves the card pending (switch the bot back on, approve again)
+        ok = job_cards.proposal(ROOT, thread_ws=rec.get("ws") or bots.HQ, op=stored.get("op"),
+                                job_id=stored.get("job_id"),
+                                fields=fields if fields is not None else stored.get("fields"), projects=projects)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    if fields is not None:
+        rec = approvals.edit_job(aid, {k: ok[k] for k in ("op", "job_id", "fields")}, ok["summary"],
+                                 ok["preview"], ROOT)
+    try:
+        claimed = approvals.claim(aid, ROOT)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    # Apply what was claimed, not the copy read before: a second edit in between must not slip through.
+    if claimed.get("job") != rec.get("job"):
+        return approvals.finish(aid, "failed", "Changed while it was being approved; nothing was saved.", ROOT)
+    try:
+        status, line = "done", job_cards.apply(ROOT, claimed, projects)
+    except ValueError as e:
+        status, line = "failed", f"Not saved: {e}"
+    out = approvals.finish(aid, status, line, ROOT)
+    if out.get("chat"):
+        chat_store.append_note(out["chat"], out["bot"], line)
+    return out
 
 
 def _approve_app_action(aid, arguments=None):
@@ -2464,6 +2555,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": "internal error"})
         return self._send(403, {"error": "forbidden"})
 
+    def _jobs_post(self, path, body):
+        """Owner only: a job's mode, on/off and delete, from the Team screen. Everything else
+        about a job changes through a bot's proposal and its card."""
+        jid, _, verb = path[len("/api/jobs/"):].partition("/")
+        ws = _strict_ws(body.get("ws"))
+        job = jobs.get(ROOT, jid)
+        if job is None or (ws != bots.HQ and (job.get("workspace") or bots.HQ) != ws):
+            return self._send(404, {"error": "no such job"})
+        if verb == "mode":
+            jobs.update(ROOT, jid, mode=body.get("mode"))
+        elif verb == "enabled":
+            on = body.get("enabled") is True
+            if on:  # it must still be able to run
+                try:
+                    job_cards.check_target(ROOT, job.get("workspace") or bots.HQ, job.get("bot"),
+                                           job.get("skill"), db.tree())
+                except ValueError as e:
+                    return self._send(409, {"error": str(e)})
+            jobs.update(ROOT, jid, enabled=on)
+        elif verb == "delete":
+            jobs.delete(ROOT, jid)
+        else:
+            return self._send(404, {"error": "unknown endpoint"})
+        return self._send(200, _jobs_view(ws))
+
     def _react_post(self, chat_id, body, by, by_name=None):
         """Toggle one emoji on message `i` of a thread the caller may read."""
         rows = chat_store.toggle_reaction(chat_id, body.get("i"), body.get("emoji"), by=by, by_name=by_name)
@@ -2542,6 +2658,7 @@ class Handler(BaseHTTPRequestHandler):
         job = viewer.get("job") if viewer.get("kind") == "job" else None
         live = viewer.setdefault("live", {}) if job else {}
         job_cap = (job["id"], job["cap"]) if job else None
+        job_mode = jobs.mode_of(job) if job else None
         if job:
             chat_id = None
             live["status"] = "refused"  # until the model turn starts: every early return
@@ -2551,7 +2668,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse_message(allowance)
         if job:
             sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
-            sess.readonly = True  # osctl refuses every write: saves come back as an APPROVAL line
+            # Approval and Report only: osctl refuses every write. Auto: osctl creates and updates,
+            # deletes and memory still wait (osctl reads LEOBOT_JOB and LEOBOT_JOB_MODE).
+            sess.readonly = job_mode != "auto"
+            sess.job_id, sess.job_mode = job["id"], job_mode
             live["sess"] = sess
         elif person:
             sess = person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
@@ -2700,7 +2820,7 @@ class Handler(BaseHTTPRequestHandler):
         elif engine.full_disk:
             workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
         if job:
-            workspace = "\n\n".join(x for x in (workspace, JOB_NOTE.format(name=job["name"])) if x)
+            workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"])) if x)
         saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
         # A thread whose last call on this engine passed LEOBOT_COMPACT_TOKENS starts a fresh
         # session here: the snapshot, the bot card and the recap of its visible messages go in
@@ -2770,7 +2890,7 @@ class Handler(BaseHTTPRequestHandler):
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
         # Only hosts the owner or a person typed become fetch grants. A job's message was
-        # written by a bot (osctl create-job), so it grants none: WebSearch only.
+        # written by a bot (osctl propose-job), so it grants none: WebSearch only.
         web_domains = () if job else chat_session.user_web_domains(user_msg)
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
@@ -2889,14 +3009,18 @@ class Handler(BaseHTTPRequestHandler):
         if app_turn:
             apps_kw = {"apps_token": apps_relay.TOKENS.mint(
                            {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
-                            "room": (room or {}).get("id"), "person": bots.CEO}),
+                            "room": (room or {}).get("id"), "person": bots.CEO,
+                            "report": job_mode == "report"}),
                        "apps_port": self.server.server_address[1]}
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(job), "apps_used": apps_used,
+            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
+                                                         "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
-                                                         "shared": shared}),
+                                                         "shared": shared, "chat": getattr(sess, "session_id", None),
+                                                         "job": job["id"] if job else None,
+                                                         "job_mode": job_mode}),
                        "os_port": self.server.server_address[1]}
         if job:
             live["status"] = "done"
@@ -2944,6 +3068,12 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"app_actions": held, "msg": last})
                     if job:
                         live["status"] = "waiting"
+            # Jobs this turn proposed (osctl propose-job): checked again from this thread's
+            # workspace, then held as cards. Never from a shared thread or a job's own turn.
+            cards = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
+                                        allowed=not job and not shared and not person, notice=notice)
+            if cards:
+                emit({"app_actions": cards, "msg": last})
             if files_before is not None:
                 handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
                 if handed:
@@ -2960,8 +3090,8 @@ class Handler(BaseHTTPRequestHandler):
                     m["content"] = clean
                     emit({"clean": clean, "msg": i})
                     asked = (i, summary)
-            # A chat-only turn's stray marker gets no buttons.
-            if asked and may_write and isinstance(getattr(sess, "session_id", None), str):
+            # A chat-only turn's stray marker gets no buttons; a Report only job saves nothing.
+            if asked and may_write and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
                 i, summary = asked
                 rec = approvals.add(ROOT, ws=ws, room=(room or {}).get("id"), chat=sess.session_id,
                                     bot=bot_id, summary=summary)
@@ -3258,6 +3388,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_logo(path[len("/api/integrations/logo/"):])
             if path.startswith("/api/workspace-logo/"):
                 return self._send_ws_logo(path[len("/api/workspace-logo/"):])
+            if path == "/api/jobs":
+                ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                return self._send(200, _jobs_view(ws))
             if path in ("/api/approvals", "/api/costs", "/api/memory"):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
@@ -3657,6 +3790,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._folders_post(path, body)
+            if path.startswith("/api/jobs/"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._jobs_post(path, body)
             if path in ("/api/runners", "/api/runners/revoke"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
@@ -3728,6 +3865,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
+                        held = approvals.get(aid, ROOT) or {}
+                        if held.get("kind") == approvals.JOB:
+                            fields = body.get("fields")
+                            return self._send(200, _approve_job_card(aid, fields if isinstance(fields, dict) else None))
                         args = body.get("arguments")
                         return self._send(200, _approve_app_action(aid, args if isinstance(args, dict) else None))
                     except LookupError as e:

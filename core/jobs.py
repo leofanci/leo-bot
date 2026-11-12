@@ -1,12 +1,20 @@
 """jobs.py: scheduled jobs, stored in `team/jobs.json` in the data folder.
 
 A job is one bot's recurring work: a skill plus a message, run on a schedule by the
-server (dashboard/job_runner.py), read-only, with its own daily cap. The file spans
-workspaces like team/approvals.json, so company bots cannot read it; osctl is the only
-way to create or change a job.
+server (dashboard/job_runner.py) in its mode, with its own daily cap. The file spans
+workspaces like team/approvals.json, so company bots cannot read it. Only an owner action
+creates, changes or deletes a job: an Approve click on a job card, or the Team screen.
 
 Record: id, name, workspace, bot, skill, message, schedule, cap (dollars per rolling
-24 hours, above 0), enabled, created, last_run, last_status, last_chat.
+24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat.
+
+Modes: `approval` (reads and drafts; every save waits for Approve), `auto` (creates and
+updates in Leo Bot by itself; deletes, memory and app writes still wait), `report` (reads
+and reports, saves nothing). A missing or unknown mode reads as `approval`.
+
+The file also holds a proposal outbox: `osctl propose-job` drops a bot's proposal there,
+keyed by its thread, and the server turns it into a job card when that turn ends
+(dashboard/job_cards.py). Nothing in the outbox ever runs by itself.
 
 Schedule text, local time:
   every <N>m|h|d       an interval, at least MIN_EVERY
@@ -33,7 +41,10 @@ DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _EVERY_RE = re.compile(r"^every\s+(\d{1,4})\s*([mhd])$")
 _WEEKLY_RE = re.compile(r"^([a-z,\s]+?)\s+(\d{1,2}):(\d{2})$")
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
-_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled"}
+MODES = ("approval", "auto", "report")
+_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode"}
+PROPOSALS_PER_CHAT = 5
+PROPOSAL_TTL = 86400  # a proposal no turn collected (crash, spoofed thread) is dropped
 
 
 def parse_schedule(text):
@@ -93,13 +104,13 @@ def _read(root):
     try:
         data = json.loads(_path(root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return {"jobs": [], "digest": {}}
+        return {"jobs": [], "digest": {}, "proposals": []}
     if not isinstance(data, dict):
-        return {"jobs": [], "digest": {}}
-    rows = data.get("jobs")
-    digest = data.get("digest")
+        return {"jobs": [], "digest": {}, "proposals": []}
+    rows, digest, props = data.get("jobs"), data.get("digest"), data.get("proposals")
     return {"jobs": [r for r in rows if isinstance(r, dict) and r.get("id")] if isinstance(rows, list) else [],
-            "digest": digest if isinstance(digest, dict) else {}}
+            "digest": digest if isinstance(digest, dict) else {},
+            "proposals": [r for r in props if isinstance(r, dict)] if isinstance(props, list) else []}
 
 
 def _write(root, data):
@@ -121,6 +132,11 @@ def load(root):
 
 def get(root, job_id):
     return next((j for j in load(root) if j.get("id") == job_id), None)
+
+
+def mode_of(job):
+    mode = (job or {}).get("mode")
+    return mode if mode in MODES else "approval"
 
 
 def _clean(field, value):
@@ -153,13 +169,19 @@ def _clean(field, value):
         return v
     if field == "enabled":
         return bool(value)
+    if field == "mode":
+        v = str(value or "").strip().lower()
+        if v not in MODES:
+            raise ValueError(f"mode: one of {', '.join(MODES)}")
+        return v
     raise ValueError(f"unknown field {field}")
 
 
-def create(root, *, ws, bot, skill, name, message, schedule, cap, now=None):
+def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", now=None):
     job = {"id": uuid.uuid4().hex[:8], "name": _clean("name", name), "workspace": _clean("workspace", ws),
            "bot": _clean("bot", bot), "skill": _clean("skill", skill), "message": _clean("message", message),
-           "schedule": _clean("schedule", schedule), "cap": _clean("cap", cap), "enabled": True,
+           "schedule": _clean("schedule", schedule), "cap": _clean("cap", cap),
+           "mode": _clean("mode", mode), "enabled": True,
            "created": time.time() if now is None else now, "last_run": None, "last_status": None,
            "last_chat": None}
 
@@ -236,6 +258,46 @@ def recover(root):
         return n
     if not _path(root).exists():
         return 0
+    return _change(root, fn)
+
+
+def _fresh(rows, now):
+    def age(p):
+        try:
+            return now - float(p.get("created") or 0)
+        except (TypeError, ValueError):
+            return PROPOSAL_TTL + 1
+    return [p for p in rows if age(p) <= PROPOSAL_TTL]
+
+
+def add_proposal(root, rec, now=None):
+    """Queue one bot proposal for its thread (`rec["chat"]`); the server collects it."""
+    chat = rec.get("chat")
+    if not isinstance(chat, str) or not chat:
+        raise ValueError("a job is proposed from a chat thread")
+    now = time.time() if now is None else now
+    row = {**rec, "created": now}
+
+    def fn(data):
+        data["proposals"] = _fresh(data["proposals"], now)
+        if sum(1 for p in data["proposals"] if p.get("chat") == chat) >= PROPOSALS_PER_CHAT:
+            raise ValueError(f"at most {PROPOSALS_PER_CHAT} job proposals per thread")
+        data["proposals"].append(row)
+    _change(root, fn)
+    return dict(row)
+
+
+def take_proposals(root, chat, now=None):
+    """Remove and return this thread's proposals; drop any older than PROPOSAL_TTL."""
+    now = time.time() if now is None else now
+
+    def fn(data):
+        fresh = _fresh(data["proposals"], now)
+        mine = [p for p in fresh if p.get("chat") == chat]
+        data["proposals"] = [p for p in fresh if p.get("chat") != chat]
+        return mine
+    if not _path(root).exists():
+        return []
     return _change(root, fn)
 
 

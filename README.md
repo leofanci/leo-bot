@@ -162,16 +162,30 @@ under the bot's Memory, or let a bot save one with `osctl remember --type ...`.
 
 A job is one bot's recurring work: a skill plus a message, on a schedule such as
 `every 6h`, `daily 09:00` or `mon,thu 09:00` (local time). Ask a bot for one: it proposes
-the job with an approval line, and on your yes saves it with `osctl create-job`
-(`update-job`, `delete-job` and `list-jobs` change or list them).
+the job (`osctl propose-job`) and you get a card in that thread with everything Approve
+will save: bot, skill, schedule, next run, mode, cap and message. Edit it, approve it or
+say no. A change or a deletion a bot proposes comes as the same kind of card. No bot
+creates, changes or deletes a job by itself.
 
-- Each run is its own thread in the bot's DM, titled `Job: <name>`. It can read and look
-  things up but not save: a save it wants comes back as an approval in that thread, and
-  approving it there saves it as a normal turn.
+Each job has a mode:
+
+- **Approval** (default): reads and drafts. Every save waits for your click in the job's
+  thread.
+- **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans).
+  Deletes and bot memory still wait for your click, and so does every app action that is
+  not a read (posting, sending email).
+- **Report only**: reads and writes a summary. No cards, no saves, no app writes.
+
+The Team screen lists every job: where and when it runs, how the last run went (with a
+link to its thread), and its mode, on/off and delete. Schedule, message, cap and skill
+change through a bot's card.
+
+- Each run is its own thread in the bot's DM, titled `Job: <name>`.
 - A job's message was written by a bot, so a site named in it is never opened: a job
   can search the web, not fetch a page.
 - Every job has its own cap in dollars per 24 hours, and also counts against your
-  workspace and owner caps. A job runs only on an engine that reports cost, and consults
+  workspace and owner caps. Generation an Auto job runs (`generate-*`, `revise-post`)
+  counts against it too. A job runs only on an engine that reports cost, and consults
   only teammates whose engine does too. At most 20 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
   starts again, never once per missed slot. A run stops after 30 minutes, teammates included.
