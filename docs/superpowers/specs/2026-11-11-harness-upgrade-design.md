@@ -224,7 +224,8 @@ Each item ships only if the Phase 1 data shows it matters.
 - **API engine caching.** Anthropic requests carry two `cache_control` breakpoints: the system
   prompt and the newest message, recomputed on every request of a tool loop. Text is sent as
   blocks everywhere so a marked message reads the same in later requests. The stored history
-  never carries a breakpoint.
+  never carries a breakpoint, and a thinking block never gets one (a paused turn resends the
+  assistant message last).
 - **Thread compaction.** `LEOBOT_COMPACT_TOKENS` (default 60000, `0` off). When the thread's
   newest reply on the turn's engine (not a consulted teammate's) reached it, the engine drops its
   session (`Engine.compact`) and the turn gets the recap of visible messages, the snapshot and
@@ -232,7 +233,7 @@ Each item ships only if the Phase 1 data shows it matters.
   UUID reaches its command line). A runner never compacts (its session is on another Mac); a job
   turn is fresh already.
 - **API history.** The same threshold sizes the history the API engine resends (4 characters a
-  token). The cut is kept in the thread's engine state and moves only when the part after it
+  token, less the system prompt, but never under half). The cut is kept in the thread's engine state and moves only when the part after it
   passes the budget, then to half of it, at a message that starts a turn, so the cached prefix
   stays the same for many turns. With the threshold off, `HISTORY_CHARS` applies as before.
 - **Routing.** An untagged message whose wording `_suggest_skill` matches to another active bot's

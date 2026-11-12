@@ -747,6 +747,30 @@ class CacheBreakpoints(Base):
         self.assertIn("tool_result", stored)
         self.assertNotIn("cache_control", stored)
 
+    def test_breakpoint_never_lands_on_thinking(self):
+        msgs = [{"role": "user", "content": "q"},
+                {"role": "assistant", "content": [{"type": "text", "text": "a"},
+                                                  {"type": "thinking", "thinking": "t", "signature": "s"}]}]
+        _, out = api.ApiEngine._cached("R", msgs)
+        self.assertEqual(out[-1]["content"][0]["cache_control"], EPHEMERAL)
+        self.assertNotIn("cache_control", out[-1]["content"][1])
+        only = [{"role": "assistant", "content": [{"type": "redacted_thinking", "data": "x"}]}]
+        self.assertEqual(_marks(api.ApiEngine._cached("R", only)[1]), 0)
+
+    def test_paused_turn_resends_without_marking_thinking(self):
+        paused = [{"type": "message_start", "message": {"usage": {"input_tokens": 10}}},
+                  {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+                  {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "looking"}},
+                  {"type": "content_block_start", "index": 1, "content_block": {"type": "thinking", "thinking": "", "signature": ""}},
+                  {"type": "content_block_delta", "index": 1, "delta": {"type": "signature_delta", "signature": "sig"}},
+                  {"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 5}}]
+        self.fake.replies = [paused, anthropic_text("done")]
+        list(self.session().ask("hi"))
+        last = self.fake.requests[1]["body"]["messages"][-1]
+        self.assertEqual(last["role"], "assistant")
+        self.assertNotIn("cache_control", last["content"][-1])
+        self.assertEqual(last["content"][0]["cache_control"], EPHEMERAL)
+
     def test_cached_does_not_change_its_input(self):
         msgs = [{"role": "user", "content": [{"type": "text", "text": "a"}]}]
         before = json.dumps(msgs)
@@ -756,6 +780,13 @@ class CacheBreakpoints(Base):
 
 class OpenAICache(Base):
     fmt = "openai"
+
+    def test_usage_chunk_without_prompt_tokens_keeps_context(self):
+        self.fake.replies = [[{"choices": [{"delta": {"content": "x"}}]},
+                              {"choices": [], "usage": {"prompt_tokens": 70, "completion_tokens": 3}},
+                              {"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"completion_tokens": 0}}]]
+        ev = list(self.session().ask("hi"))
+        self.assertEqual(ev[-1][1]["context"], 70)
 
     def test_openai_request_unchanged(self):
         self.fake.replies = [openai_text("x")]
@@ -799,6 +830,13 @@ class StableTrim(Base):
         self.assertEqual(out[1], api.ApiEngine._bridge())
         self.assertTrue(api.ApiEngine._starts_turn(out[2]))
         self.assertTrue(api.ApiEngine._starts_turn(msgs[state["cut"]]))
+
+    def test_trim_budget_leaves_room_for_the_system_prompt(self):
+        msgs = [{"role": "user", "content": "SNAP"}] + [
+            {"role": r, "content": "x" * 100} for r in ("assistant", "user") * 3]
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "250"}):  # 1000 characters
+            self.assertEqual(self.engine._trim(msgs, {}, rail=""), msgs)
+            self.assertNotEqual(self.engine._trim(msgs, {}, rail="R" * 600), msgs)
 
     def test_trim_off_keeps_history_chars(self):
         msgs = [{"role": "user", "content": "SNAP"}] + [
