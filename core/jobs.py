@@ -100,12 +100,20 @@ def _path(root):
     return Path(root) / RELPATH
 
 
-def _read(root):
+def _read(root, strict=False):
+    """The file's rows. A missing file is empty; one that cannot be read or parsed is empty too,
+    or ValueError when `strict` (a write must never replace it with nothing)."""
     try:
         data = json.loads(_path(root).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
     except (OSError, ValueError):
-        return {"jobs": [], "digest": {}, "proposals": []}
+        if strict:
+            raise ValueError(f"{RELPATH} cannot be read: fix or remove it") from None
+        data = {}
     if not isinstance(data, dict):
+        if strict:
+            raise ValueError(f"{RELPATH} cannot be read: fix or remove it")
         return {"jobs": [], "digest": {}, "proposals": []}
     rows, digest, props = data.get("jobs"), data.get("digest"), data.get("proposals")
     return {"jobs": [r for r in rows if isinstance(r, dict) and r.get("id")] if isinstance(rows, list) else [],
@@ -120,7 +128,7 @@ def _write(root, data):
 def _change(root, fn):
     """Load, change and save under the file lock; returns what `fn` returns."""
     with memory.locked(_path(root)):
-        data = _read(root)
+        data = _read(root, strict=True)
         out = fn(data)
         _write(root, data)
         return out
@@ -139,7 +147,18 @@ def mode_of(job):
     return mode if mode in MODES else "approval"
 
 
-def _clean(field, value):
+def view(job):
+    """A job as screens and list-jobs show it: its mode resolved and its next run (None when off
+    or unreadable)."""
+    try:
+        due = next_due(job) if job.get("enabled") else None
+    except ValueError:
+        due = None
+    return {**job, "mode": mode_of(job), "next_due": due}
+
+
+def clean(field, value):
+    """One field as saved, or ValueError naming what is wrong."""
     if field == "name":
         v = " ".join(str(value or "").split())
         if not 1 <= len(v) <= NAME_MAX:
@@ -178,10 +197,10 @@ def _clean(field, value):
 
 
 def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", now=None):
-    job = {"id": uuid.uuid4().hex[:8], "name": _clean("name", name), "workspace": _clean("workspace", ws),
-           "bot": _clean("bot", bot), "skill": _clean("skill", skill), "message": _clean("message", message),
-           "schedule": _clean("schedule", schedule), "cap": _clean("cap", cap),
-           "mode": _clean("mode", mode), "enabled": True,
+    job = {"id": uuid.uuid4().hex[:8], "name": clean("name", name), "workspace": clean("workspace", ws),
+           "bot": clean("bot", bot), "skill": clean("skill", skill), "message": clean("message", message),
+           "schedule": clean("schedule", schedule), "cap": clean("cap", cap),
+           "mode": clean("mode", mode), "enabled": True,
            "created": time.time() if now is None else now, "last_run": None, "last_status": None,
            "last_chat": None}
 
@@ -204,11 +223,11 @@ def update(root, job_id, **fields):
     unknown = set(fields) - _EDITABLE
     if unknown:
         raise ValueError(f"not editable: {', '.join(sorted(unknown))}")
-    clean = {k: _clean(k, v) for k, v in fields.items() if v is not None}
+    changes = {k: clean(k, v) for k, v in fields.items() if v is not None}
 
     def fn(data):
         job = _find(data, job_id)
-        job.update(clean)
+        job.update(changes)
         return dict(job)
     return _change(root, fn)
 
@@ -296,7 +315,8 @@ def take_proposals(root, chat, now=None):
         mine = [p for p in fresh if p.get("chat") == chat]
         data["proposals"] = [p for p in fresh if p.get("chat") != chat]
         return mine
-    if not _path(root).exists():
+    # Every chat turn ends here: read first, and lock and rewrite only when this thread has some.
+    if not any(p.get("chat") == chat for p in _read(root)["proposals"]):
         return []
     return _change(root, fn)
 

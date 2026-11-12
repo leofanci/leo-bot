@@ -51,7 +51,7 @@ runs again and again with the owner's budget.
 |---|---|---|---|
 | osctl reads | yes | yes | yes |
 | osctl creates and updates (content) | refused | yes | refused |
-| osctl deletes, `remember` | refused | refused, APPROVAL line | refused |
+| osctl deletes, whole-document and section-list replaces, `remember` | refused | refused, APPROVAL line | refused |
 | osctl job commands | refused | refused | refused |
 | APPROVAL line | card | card | dropped, no card |
 | App reads | yes | yes | yes |

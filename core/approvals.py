@@ -40,6 +40,7 @@ HELD = (APP, JOB)  # answered only through their own card
 APP_TTL = 7 * 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
+JOB_STALE_NOTE = "May or may not be saved. Check Team, Scheduled jobs."
 # Every read-modify-write holds this: the relay thread writes here too.
 LOCK = threading.RLock()
 
@@ -158,7 +159,8 @@ def _housekeep(rows):
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
         elif r.get("status") == "running" and now - (r.get("started") or 0) > RUNNING_STALE:
-            r.update(status="failed", result=STALE_NOTE, resolved=now)
+            r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") == JOB else STALE_NOTE,
+                     resolved=now)
             changed = True
     return changed
 
@@ -178,13 +180,28 @@ def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug
     return rec
 
 
+def _job_target(job):
+    """What a job card acts on: the job for a change or deletion, the name for a new one."""
+    job = job or {}
+    if job.get("op") == "create":
+        f = job.get("fields") or {}
+        return ("create", f.get("workspace"), " ".join(str(f.get("name") or "").lower().split()))
+    return (job.get("op"), job.get("job_id"))
+
+
 def add_job(root=bots.ROOT, *, ws, room, chat, bot, job, summary, preview):
-    """Hold one job proposal ({"op", "job_id", "fields"}) for an Approve click."""
+    """Hold one job proposal ({"op", "job_id", "fields"}) for an Approve click. A pending card
+    in the same thread for the same target (that job, or a new job of that name) is
+    superseded: a bot that proposes again never leaves two cards that would both apply."""
     rec = {"id": uuid.uuid4().hex[:12], "kind": JOB, "ws": ws, "room": room, "chat": chat,
            "bot": bot, "status": "pending", "created": time.time(), "job": job,
            "summary": str(summary)[:SUMMARY_MAX], "preview": preview}
     with LOCK:
         rows = load(root)
+        for r in rows:
+            if (r.get("kind") == JOB and r.get("status") == "pending" and r.get("chat") == chat
+                    and _job_target(r.get("job")) == _job_target(job)):
+                r.update(status="superseded", resolved=rec["created"])
         rows.append(rec)
         _save(root, rows)
     return rec

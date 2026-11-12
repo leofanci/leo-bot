@@ -171,9 +171,10 @@ Each job has a mode:
 
 - **Approval** (default): reads and drafts. Every save waits for your click in the job's
   thread.
-- **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans).
-  Deletes and bot memory still wait for your click, and so does every app action that is
-  not a read (posting, sending email).
+- **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans), for
+  what the job's message asks. Deletes, replacing a whole document (intake, technical,
+  roadmap, section lists) and bot memory still wait for your click, and so does every app
+  action that is not a read (posting, sending email).
 - **Report only**: reads and writes a summary. No cards, no saves, no app writes.
 
 The Team screen lists every job: where and when it runs, how the last run went (with a

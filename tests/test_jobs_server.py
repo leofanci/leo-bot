@@ -248,13 +248,16 @@ class JobTurn(unittest.TestCase):
 
 
     # -- proposals: a bot's propose-job becomes a card; only Approve writes the job ------- #
-    def owner_ask(self, msg="@cmo /positioning set up a weekly review job", room=f"{WS}/dm-cmo", propose=None):
+    def owner_ask(self, msg="@cmo /positioning set up a weekly review job", room=f"{WS}/dm-cmo", propose=None,
+                  fail=False):
         """An owner turn whose bot ran `osctl propose-job` (simulated: an outbox row for its thread)."""
         test = self
 
         def ask(sess, text, **kw):
             for prop in propose or ():
                 jobs.add_proposal(test.root, {"chat": sess.session_id, "ws": WS, **prop})
+            if fail:  # the engine errors after the proposal
+                yield ("error", "engine failed")
             yield ("delta", "Proposed a weekly job.")
             yield ("done", {"cost": 0.01})
         h = server.Handler.__new__(server.Handler)
@@ -302,6 +305,12 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(len(jobs.load(self.root)), 1)
         note = server.chat_store.load(chat)["messages"][-1]
         self.assertIn("Job created", note["content"])
+
+    def test_failed_turn_still_shows_its_card(self):
+        chat, out = self.owner_ask(propose=[self.NEW], fail=True)
+        self.assertEqual([r["summary"] for r in approvals.pending(self.root, WS)], ["New job: weekly"])
+        self.assertIn('"app_actions"', out)
+        self.assertEqual(jobs.take_proposals(self.root, chat), [])
 
     def test_edited_card_saves_the_edit(self):
         self.owner_ask(propose=[self.NEW])
@@ -357,6 +366,11 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(code, 404)  # another workspace's job
         code, body = self.post(f"/api/jobs/{mine['id']}/mode", {"ws": WS, "mode": "report"})
         self.assertEqual((code, body["jobs"][0]["mode"]), (200, "report"))
+        for bad in ({"ws": WS}, {"ws": WS, "mode": None}, {"ws": WS, "mode": "free"}):
+            self.assertEqual(self.post(f"/api/jobs/{mine['id']}/mode", bad)[0], 400, bad)
+        self.assertEqual(self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": "no"})[0], 400)
+        self.assertEqual(jobs.get(self.root, mine["id"])["mode"], "report")
+        self.assertTrue(jobs.get(self.root, mine["id"])["enabled"])
         self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": False})
         self.assertFalse(jobs.get(self.root, mine["id"])["enabled"])
         bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})

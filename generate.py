@@ -115,8 +115,8 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     (a capped run raises JobError with the cap's text), and what it spent is one
     job_ledger row (`job: "generate"`), counted by the caps and the cost report. Who
     asked is not known here, so a run from a shared thread counts as the owner's. Inside an
-    Auto scheduled job (LEOBOT_JOB names a saved job) that job's cap is checked too and the
-    row carries `for_job`, so the run counts against it.
+    Auto scheduled job (LEOBOT_JOB names a saved job) that job's cap is checked too, counting
+    what its turn spent before this run (LEOBOT_JOB_SPENT), and the row carries `for_job`.
     """
     import itertools
     import os
@@ -129,7 +129,11 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     root = fileops.ROOT
     ws = (os.environ.get("LEOBOT_WORKSPACE") or "").strip() or "hq"
     job = jobs.get(root, (os.environ.get("LEOBOT_JOB") or "").strip()) if os.environ.get("LEOBOT_JOB") else None
-    capped = spend.refusal(ws, "owner", job=(job["id"], job["cap"]) if job else None,
+    try:  # what the job's own turn spent before the run that called this (not saved yet)
+        pending = max(0.0, float(os.environ.get("LEOBOT_JOB_SPENT") or 0)) if job else 0.0
+    except ValueError:
+        pending = 0.0
+    capped = spend.refusal(ws, "owner", job=(job["id"], job["cap"]) if job else None, pending=pending,
                            records=lambda: itertools.chain(chat_store.records(), job_ledger.records(root)))
     if capped:
         raise JobError(capped)

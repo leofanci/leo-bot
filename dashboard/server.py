@@ -1347,10 +1347,13 @@ JOB_NOTES = {
         "should be saved, say what and where, and end with one APPROVAL: line. The owner approves it in "
         "this thread. App actions that are not reads wait for the owner's click."),
     "auto": _JOB_HEAD + (
-        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans): the owner chose "
-        "Auto, so a skill's write gate is already answered for those. Deletes and "
-        "memory (remember) are refused: say what and where, and end with one APPROVAL: line. App actions "
-        "that are not reads wait for the owner's click. Never propose jobs."),
+        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans) for what this "
+        "job's message asks: the owner approved that message, so a skill's write gate is already "
+        "answered for it. An experiment, calendar activity, milestone or plan the message does not ask "
+        "for is not: propose it. Deletes, whole-document replaces (update-intake, update-technical, "
+        "update-roadmap, update-subsections, update-validation-tab) and memory (remember) are refused: "
+        "say what and where, and end with one APPROVAL: line. App actions that are not reads wait for "
+        "the owner's click. Never propose jobs."),
     "report": _JOB_HEAD + (
         "Mode: Report only. Read and look things up, then write a short summary of what you found. "
         "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
@@ -1810,11 +1813,7 @@ def _jobs_view(ws):
         jws = j.get("workspace") or bots.HQ
         if ws != bots.HQ and jws != ws:
             continue
-        try:
-            due = jobs.next_due(j) if j.get("enabled") else None
-        except ValueError:
-            due = None
-        out.append({**j, "mode": jobs.mode_of(j), "next_due": due, "room": f"{jws}/dm-{j.get('bot')}"})
+        out.append({**jobs.view(j), "room": f"{jws}/dm-{j.get('bot')}"})
     return {"ws": ws, "jobs": out}
 
 
@@ -2564,9 +2563,13 @@ class Handler(BaseHTTPRequestHandler):
         if job is None or (ws != bots.HQ and (job.get("workspace") or bots.HQ) != ws):
             return self._send(404, {"error": "no such job"})
         if verb == "mode":
-            jobs.update(ROOT, jid, mode=body.get("mode"))
+            if body.get("mode") not in jobs.MODES:
+                return self._send(400, {"error": f"mode: one of {', '.join(jobs.MODES)}"})
+            jobs.update(ROOT, jid, mode=body["mode"])
         elif verb == "enabled":
-            on = body.get("enabled") is True
+            on = body.get("enabled")
+            if not isinstance(on, bool):
+                return self._send(400, {"error": "enabled: true or false"})
             if on:  # it must still be able to run
                 try:
                     job_cards.check_target(ROOT, job.get("workspace") or bots.HQ, job.get("bot"),
@@ -3056,6 +3059,10 @@ class Handler(BaseHTTPRequestHandler):
                 answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
             if asks and answers and not cap_hit and may_run():
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
+                if job:  # the job's cap, checked by a generate run in this follow-up, counts the turn so far
+                    sess.job_spent = sum(m.get("cost") or 0 for m in msgs)
+                    if apps_kw.get("os_token"):
+                        os_relay.TOKENS.update(apps_kw["os_token"], job_spent=sess.job_spent)
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
                 run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
@@ -3068,12 +3075,6 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"app_actions": held, "msg": last})
                     if job:
                         live["status"] = "waiting"
-            # Jobs this turn proposed (osctl propose-job): checked again from this thread's
-            # workspace, then held as cards. Never from a shared thread or a job's own turn.
-            cards = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
-                                        allowed=not job and not shared and not person, notice=notice)
-            if cards:
-                emit({"app_actions": cards, "msg": last})
             if files_before is not None:
                 handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
                 if handed:
@@ -3120,6 +3121,23 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
+            # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
+            # checked again from this thread's workspace, then held as cards. Never from a shared
+            # thread or a job's own turn.
+            def _quiet(fn, *a):
+                try:
+                    fn(*a)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client left; the card is saved in the thread
+            try:
+                cards = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
+                                            allowed=not job and not shared and not person,
+                                            notice=lambda t: _quiet(notice, t))
+            except Exception:  # noqa: BLE001 - the turn is still saved
+                traceback.print_exc()
+                cards = []
+            if cards:
+                _quiet(emit, {"app_actions": cards, "msg": len(msgs) - 1})
             if apps_kw.get("apps_token"):
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
                 _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)

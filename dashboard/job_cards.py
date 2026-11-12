@@ -19,7 +19,7 @@ _UPDATABLE = ("name", "message", "schedule", "cap", "skill", "mode")
 _LABELS = {"name": "Name", "message": "Message", "schedule": "Schedule", "cap": "Cap",
            "skill": "Skill", "mode": "Mode"}
 MODE_TEXT = {"approval": "Approval: saves wait for your click",
-             "auto": "Auto: saves by itself; deletes, memory and app actions wait for you",
+             "auto": "Auto: saves by itself; deletes, whole-document replaces, memory and app actions wait for you",
              "report": "Report only: reads and reports, saves nothing"}
 
 
@@ -65,11 +65,11 @@ def _show(field, value):
     return str(value)
 
 
-def _clean(field, value):
-    try:
-        return jobs._clean(field, value)
-    except ValueError as e:
-        raise ValueError(str(e)) from None
+def _name_free(existing, ws, name, skip=None):
+    """One name per workspace: a second card for the same job never makes a twin."""
+    if any(j.get("id") != skip and j.get("workspace") == ws
+           and str(j.get("name") or "").lower() == name.lower() for j in existing):
+        raise ValueError(f"a job named {name} already exists here: propose a change to it")
 
 
 def _in_scope(root, thread_ws, job_id):
@@ -92,12 +92,14 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
         ws = str(fields.get("workspace") or thread_ws).strip()
         if thread_ws != bots.HQ and ws != thread_ws:
             raise ValueError("a workspace thread proposes jobs for its own workspace only")
-        clean = {k: _clean(k, fields[k]) for k in ("bot", "skill", "name", "message", "schedule", "cap")}
-        clean["mode"] = _clean("mode", fields.get("mode") or "approval")
+        clean = {k: jobs.clean(k, fields[k]) for k in ("bot", "skill", "name", "message", "schedule", "cap")}
+        clean["mode"] = jobs.clean("mode", fields.get("mode") or "approval")
         clean["workspace"] = ws
         check_target(root, ws, clean["bot"], clean["skill"], projects)
-        if len(jobs.load(root)) >= jobs.MAX_JOBS:
+        existing = jobs.load(root)
+        if len(existing) >= jobs.MAX_JOBS:
             raise ValueError(f"at most {jobs.MAX_JOBS} jobs: delete one first")
+        _name_free(existing, ws, clean["name"])
         next_run = jobs.next_due({"schedule": clean["schedule"], "created": time.time()})
         name = clean["name"]
         rows = [["Bot", f"@{clean['bot']} /{clean['skill']}"], ["Workspace", _ws_name(ws)],
@@ -116,9 +118,11 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
     unknown = sorted(k for k in fields if k not in _UPDATABLE)
     if unknown:
         raise ValueError(f"not changeable here: {', '.join(unknown)}")
-    clean = {k: _clean(k, v) for k, v in fields.items() if v not in (None, "")}
+    clean = {k: jobs.clean(k, v) for k, v in fields.items() if v not in (None, "")}
     if not clean:
         raise ValueError("say what changes: name, message, schedule, cap, skill or mode")
+    if "name" in clean:
+        _name_free(jobs.load(root), job.get("workspace"), clean["name"], skip=job["id"])
     if "skill" in clean:
         check_target(root, job.get("workspace") or bots.HQ, job.get("bot"), clean["skill"], projects)
     rows = []

@@ -1335,7 +1335,7 @@ async function renderTeam(){
         <button class="more" data-job-rm>Delete</button>
       </div>`;
     return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
-      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, memory and app actions still wait. Report only: reads and reports. To change the schedule, message, cap or skill, ask the bot in chat.</div>
+      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. To change the schedule, message, cap or skill, ask the bot in chat.</div>
       <div class="rowc">${jobList.map(row).join("")}</div>`;
   };
   const wireJobs = () => {
