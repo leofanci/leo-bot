@@ -28,7 +28,7 @@ from unittest import mock
 CASES = Path(__file__).parent / "cases" / "turns.json"
 WS = "acme"
 THREAD_ID = "e7a10000-0000-4000-8000-000000000000"  # chat_store takes UUID-shaped ids only
-_EQUAL = ("bot", "skill", "handoff_from", "tier", "reason", "web", "gate", "approval",
+_EQUAL = ("bot", "skill", "handoff_from", "picked", "tier", "reason", "web", "gate", "approval",
           "teammates", "followup", "reactions", "edit", "runs")
 _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
          "prompt_lacks": "prompt", "teammate_prompt_has": "teammate_prompt",
@@ -219,6 +219,7 @@ def run(case, live_root=None):
         "bot": bot_ev.get("id"),
         "skill": bot_ev.get("skill"),
         "handoff_from": bot_ev.get("handoff_from"),
+        "picked": bot_ev.get("picked"),
         "tier": tiers.get(lead["model"], lead["model"]) if lead else None,
         "reason": recorded.get("meta", {}).get("reason") if lead else None,
         "web": bool(lead and lead["web"]),

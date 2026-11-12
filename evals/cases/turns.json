@@ -22,7 +22,7 @@
    "expect": {"bot": "cmo", "skill": "positioning", "tier": "fast", "reason": "explicit-read"}},
   {"id": "tagged-bot-without-match-answers-plainly", "category": "routing",
    "msg": "@research thoughts on this?",
-   "expect": {"bot": "research", "skill": null, "tier": "fast"}},
+   "expect": {"bot": "research", "skill": null, "picked": null, "tier": "fast"}},
   {"id": "tagged-bot-write-uses-default-skill", "category": "routing",
    "msg": "@product draft something for next sprint",
    "expect": {"bot": "product", "skill": "product-build", "tier": "strong", "reason": "explicit-skill", "gate": false}},
@@ -154,10 +154,8 @@
 
   {"id": "untagged-price-question-reaches-pricing-owner", "category": "routing",
    "msg": "how much should we charge for the pro tier?",
-   "gap": "Phase 4 routing: an untagged message that clearly matches another bot's skill goes to that bot",
-   "expect": {"bot": "cmo", "skill": null, "tier": "fast"}},
+   "expect": {"bot": "cmo", "skill": null, "picked": "pricing-strategy", "tier": "fast"}},
   {"id": "untagged-icp-question-reaches-research", "category": "routing",
    "msg": "who is our ideal customer?",
-   "gap": "Phase 4 routing: an untagged message that clearly matches another bot's skill goes to that bot",
-   "expect": {"bot": "research", "skill": null, "tier": "fast"}}
+   "expect": {"bot": "research", "skill": null, "picked": "icp-research", "tier": "fast"}}
 ]
