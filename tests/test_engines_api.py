@@ -172,7 +172,7 @@ class Anthropic(Base):
         list(self.session(session_id=s.session_id).ask("two"))
         msgs = self.fake.requests[1]["body"]["messages"]
         self.assertEqual([m["role"] for m in msgs], ["user", "assistant", "user"])
-        self.assertEqual(msgs[0]["content"], "one")
+        self.assertEqual(msgs[0]["content"], [{"type": "text", "text": "one"}])
         from dashboard import chat_store
         with mock.patch.object(chat_store, "CHATS_DIR", self.root / "chats"):
             chat_store.delete(s.session_id)
@@ -214,7 +214,7 @@ class Anthropic(Base):
         msgs = [{"role": "user", "content": "SNAPSHOT"}, {"role": "assistant", "content": big},
                 {"role": "user", "content": big}, {"role": "assistant", "content": [{"type": "thinking", "thinking": "t"}, {"type": "tool_use"}]},
                 {"role": "user", "content": [{"type": "tool_result"}]}, {"role": "user", "content": "now"}]
-        out = self.engine._trim(msgs)
+        out = self.engine._trim(msgs, {})
         self.assertEqual(out[0]["content"], "SNAPSHOT")
         self.assertEqual(out[-1]["content"], "now")
         self.assertEqual(out[2]["role"], "user")
@@ -763,6 +763,48 @@ class OpenAICache(Base):
         body = self.fake.requests[0]["body"]
         self.assertEqual(_marks(body), 0)
         self.assertEqual(body["messages"][0], {"role": "system", "content": "RAIL"})
+
+
+class StableTrim(Base):
+    """The resent history is cut at a point kept in the engine state, so the cached prefix
+    stays the same turn after turn."""
+
+    def turn(self, s, text):
+        self.fake.replies = [anthropic_text("r" * 20)]
+        list(s.ask(text))
+        return self.fake.requests[-1]["body"]["messages"]
+
+    def test_trim_cut_is_stable_between_turns(self):
+        s = self.session()
+        sent, cuts = [], []
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "300"}):  # 1200 characters
+            for i in range(16):
+                sent.append(self.turn(s, f"question {i}"))
+                cuts.append(s.engine_state[self.engine.id].get("cut", 0))
+        moved = next(i for i in range(1, len(cuts)) if cuts[i] != cuts[i - 1])
+        self.assertEqual(cuts[moved + 1], cuts[moved])  # just moved: room for more turns
+        self.assertEqual(sent[moved][1]["content"][0]["text"], api.ApiEngine._bridge()["content"])
+        before, after = _strip_marks(sent[moved]), _strip_marks(sent[moved + 1])
+        self.assertEqual(after[:len(before)], before)  # the next turn's prefix is this whole request
+
+    def test_trim_cut_starts_a_turn(self):
+        tool = [{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "osctl", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "x" * 150}]}]
+        msgs = ([{"role": "user", "content": "SNAP"}, {"role": "assistant", "content": "a" * 150}]
+                + tool + [{"role": "assistant", "content": "b"}, {"role": "user", "content": "now"}])
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "100"}):
+            state = {}
+            out = self.engine._trim(msgs, state)
+        self.assertEqual(out[0]["content"], "SNAP")
+        self.assertEqual(out[1], api.ApiEngine._bridge())
+        self.assertTrue(api.ApiEngine._starts_turn(out[2]))
+        self.assertTrue(api.ApiEngine._starts_turn(msgs[state["cut"]]))
+
+    def test_trim_off_keeps_history_chars(self):
+        msgs = [{"role": "user", "content": "SNAP"}] + [
+            {"role": r, "content": "x" * 50_000} for r in ("assistant", "user") * 3]
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "0"}):
+            self.assertEqual(self.engine._trim(msgs, {}), msgs)
 
 
 if __name__ == "__main__":
