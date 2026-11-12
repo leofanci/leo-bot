@@ -50,7 +50,9 @@ def parse_event(obj):
         tokens = sum(int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens"))
         cached = int(usage.get("cached_input_tokens") or 0)
         parts = prices.usage(int(usage.get("input_tokens") or 0) - cached, 0, cached, usage.get("output_tokens"))
-        return [("done", {"result": None, "subtype": "success", "tokens": tokens, "cost": None, "usage": parts})]
+        # Codex reports the turn's input, not each call's: an upper bound on the context.
+        return [("done", {"result": None, "subtype": "success", "tokens": tokens, "cost": None, "usage": parts,
+                          "context": int(usage.get("input_tokens") or 0)})]
     elif t == "error":
         return [("error", str(obj.get("message") or "Codex failed"))]
     elif t == "turn.failed":

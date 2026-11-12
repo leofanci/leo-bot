@@ -42,6 +42,10 @@ def parse_event(obj):
             block = ev.get("content_block", {})
             if block.get("type") == "tool_use":
                 return ("tool", block.get("name", ""))
+        elif et == "message_start":  # one model call: its whole prompt, for compaction
+            usage = (ev.get("message") or {}).get("usage") or {}
+            return ("context", sum(int(usage.get(k) or 0) for k in (
+                "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")))
     elif t == "result":
         usage = obj.get("usage") or {}
         tokens = sum(int(usage.get(k) or 0) for k in (
@@ -354,7 +358,7 @@ class ClaudeCodeEngine(Engine):
             return
         session._started = True
         session._proc = proc
-        said = ""
+        said, context = "", None
         stderr = drain(proc.stderr)
         try:
             proc.stdin.write(text + "\n")
@@ -371,8 +375,12 @@ class ClaudeCodeEngine(Engine):
                 except json.JSONDecodeError:
                     continue
                 kind, payload = parse_event(obj)
+                if kind == "context":  # the last call's size rides on the done event
+                    context = payload
+                    continue
                 if kind == "done":
                     said = payload.get("result") or said
+                    payload["context"] = context
                 if kind:
                     yield (kind, payload)
             proc.wait()

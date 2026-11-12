@@ -720,6 +720,16 @@ class CacheBreakpoints(Base):
         self.assertEqual(_marks(msgs[:-1]), 0)
         self.assertEqual(_marks(self.fake.requests[1]["body"]), 2)
 
+
+    def test_done_context_is_last_request(self):
+        first = anthropic_tool("osctl", {"args": ["x"]})
+        first[0] = {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}
+        second = anthropic_text("done")
+        second[0] = {"type": "message_start", "message": {"usage": {"input_tokens": 40, "cache_read_input_tokens": 500}}}
+        self.fake.replies = [first, second]
+        ev = list(self.session().ask("hi"))
+        self.assertEqual(ev[-1][1]["context"], 540)
+
     def test_cached_prefix_is_stable_across_turns(self):
         self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done"), anthropic_text("two")]
         s = self.session()

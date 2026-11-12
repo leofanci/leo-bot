@@ -47,6 +47,22 @@ class EngineUsage(unittest.TestCase):
         self.assertEqual(p["usage"], {"in": 1_000_000, "cache_write": 0, "cache_read": 0, "out": 0})
         self.assertAlmostEqual(p["cost"], 0.10)
 
+    def test_claude_code_message_start_is_context(self):
+        self.assertEqual(claude_code.parse_event({"type": "stream_event", "event": {
+            "type": "message_start", "message": {"usage": {
+                "input_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 1000}}}}),
+            ("context", 1105))
+
+    def test_codex_done_context_is_turn_input(self):
+        (_, p), = codex.parse_event({"type": "turn.completed", "usage": {
+            "input_tokens": 900, "cached_input_tokens": 600, "output_tokens": 5}})
+        self.assertEqual(p["context"], 900)
+
+    def test_api_done_takes_context(self):
+        eng = api.ApiEngine.__new__(api.ApiEngine)
+        _, p = eng._done(["x"], {"input_tokens": 1, "output_tokens": 1}, "m", context=77)
+        self.assertEqual(p["context"], 77)
+
     def test_estimate(self):
         u = {"in": 1_000_000, "cache_write": 0, "cache_read": 0, "out": 0}
         self.assertAlmostEqual(prices.estimate("claude-haiku-5-5", u), 0.10)
@@ -163,6 +179,11 @@ class LedgerFields(AskHarness):
         last = rec["messages"][-1]
         self.assertAlmostEqual(last["cost"], 0.10)
         self.assertTrue(last["metered"])
+
+    def test_reply_saves_context(self):
+        _, rec = self.ask("@cmo positioning for acme", "ok",
+                          done={"tokens": 1300, "cost": 0.01, "usage": USAGE, "context": 1234})
+        self.assertEqual(rec["messages"][-1]["context"], 1234)
 
     def test_unpriced_reply_is_unmetered(self):
         _, rec = self.ask("@cmo positioning for acme", "ok", done={"tokens": 50, "cost": None, "usage": None})

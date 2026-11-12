@@ -1,4 +1,5 @@
 """The engine layer: interface rules and the claude-code driver behind ChatSession."""
+import json
 import os
 import stat
 import tempfile
@@ -99,6 +100,18 @@ class ClaudeDriver(unittest.TestCase):
         with self.assertRaises(SessionLost):
             list(sess.engine.turn(sess, "hi", sess._policy(), "haiku", cs.TurnTokens()))
         self.assertFalse(sess._started)
+
+    def test_claude_code_done_carries_last_context(self):
+        def start(n):
+            return json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {
+                "usage": {"input_tokens": n, "cache_read_input_tokens": 0}}}})
+        result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "usage": {}})
+        bin_ = self.stub(f"cat <<'X'\n{start(1000)}\n{start(3000)}\n{result}\nX\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        ev = list(sess.ask("hi"))
+        self.assertNotIn("context", [k for k, _ in ev])
+        self.assertEqual(ev[-1][0], "done")
+        self.assertEqual(ev[-1][1]["context"], 3000)
 
     def test_other_failures_stay_errors(self):
         bin_ = self.stub('echo "boom" >&2\nexit 1\n')

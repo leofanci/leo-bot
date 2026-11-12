@@ -298,7 +298,7 @@ class ApiEngine(Engine):
         finally:
             session._proc = None
 
-    def _done(self, parts, usage, model):
+    def _done(self, parts, usage, model, context=None):
         tokens = sum(int(usage.get(k) or 0) for k in (
             "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
             "prompt_tokens", "completion_tokens"))
@@ -313,7 +313,7 @@ class ApiEngine(Engine):
         if cost is None:
             cost = prices.estimate(model, split)
         return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost,
-                         "usage": split})
+                         "usage": split, "context": context})
 
     # ---- Anthropic Messages ------------------------------------------- #
     @staticmethod
@@ -352,7 +352,7 @@ class ApiEngine(Engine):
         self._append(session, pending)
         messages = self._trim(self._repair(self._load(session)))
         tools = self._anthropic_tools(box, policy, model)
-        parts, usage, calls = [], {}, 0
+        parts, usage, calls, context = [], {}, 0, None
         while True:
             if cancel.stopped:
                 return
@@ -369,9 +369,12 @@ class ApiEngine(Engine):
                 for ev in _sse(resp):
                     et = ev.get("type")
                     if et == "message_start":
-                        for k, v in ((ev.get("message") or {}).get("usage") or {}).items():
+                        start = (ev.get("message") or {}).get("usage") or {}
+                        for k, v in start.items():
                             if isinstance(v, int) and k != "output_tokens":  # message_delta has the real count
                                 usage[k] = usage.get(k, 0) + v
+                        context = sum(v for k, v in start.items() if isinstance(v, int) and k in (
+                            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                     elif et == "content_block_start":
                         block = dict(ev.get("content_block") or {})
                         content.append(block)
@@ -441,7 +444,7 @@ class ApiEngine(Engine):
             self._append(session, [user])
             if calls > MAX_TOOL_CALLS + 1:
                 break
-        yield self._done(parts, usage, model)
+        yield self._done(parts, usage, model, context)
 
     # ---- OpenAI-compatible Chat Completions ---------------------------- #
     def _openai_tools(self, box):
@@ -454,7 +457,7 @@ class ApiEngine(Engine):
         self._append(session, pending)
         messages = self._trim(self._repair(self._load(session)))
         tools = self._openai_tools(box)
-        parts, usage, calls = [], {}, 0
+        parts, usage, calls, context = [], {}, 0, None
         while True:
             if cancel.stopped:
                 return
@@ -475,6 +478,7 @@ class ApiEngine(Engine):
                     if isinstance(u, dict):
                         for k in ("prompt_tokens", "completion_tokens"):
                             usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
+                        context = int(u.get("prompt_tokens") or 0)  # this request's whole prompt
                         details = u.get("prompt_tokens_details")
                         if isinstance(details, dict):
                             usage["cached_tokens"] = (usage.get("cached_tokens", 0)
@@ -527,7 +531,7 @@ class ApiEngine(Engine):
             self._append(session, results)
             if calls > MAX_TOOL_CALLS + 1:
                 break
-        yield self._done(parts, usage, model)
+        yield self._done(parts, usage, model, context)
 
     # ---- one-shot jobs ------------------------------------------------- #
     def _one_shot(self, prompt, stdin_text, model):

@@ -2767,7 +2767,9 @@ class Handler(BaseHTTPRequestHandler):
             runner = bool(eng and eng.kind == "runner")
             if cost is None and not runner:
                 cost = prices.estimate(model_, usage)
-            msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage,
+            context = fin.get("context")  # a runner's comes from another Mac: a plain int or nothing
+            context = context if type(context) is int and 0 <= context < 10**8 else None
+            msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage, context=context,
                        skill=skill_, reason=reason_, job=job["id"] if job else None,
                        engine=eng.id if eng else None, engine_label=eng.label if eng else None,
                        account=(person["id"] if person and eng and eng.kind == "runner"
