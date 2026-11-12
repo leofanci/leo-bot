@@ -332,6 +332,8 @@ class ClaudeCodeEngine(Engine):
                          + (["mcp__os"] if shared and (os_port or os_url) else []))
         mcp = (apps_mcp_config(apps_port) if apps_port
                else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
+        # Claude Code matches these across letter case, dot-dot and NFC/NFD spellings of the path
+        # (probed live with the real binary, 2.1.322): one spelling per rule is enough.
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(session.repo_dir)
         for d in read_dirs:

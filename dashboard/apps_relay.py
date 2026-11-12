@@ -125,7 +125,7 @@ def _text(rid, lines, is_error=False):
             "result": {"content": [{"type": "text", "text": t} for t in lines], "isError": is_error}}
 
 
-def _gate(frame, ctx, sid, upstream, root, catalog):
+def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
     rid = frame.get("id")
     params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
     name = params.get("name")
@@ -141,8 +141,9 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
     picks = integrations.accounts_for(ctx["ws"], root)  # and so do a workspace's accounts
     cat = list(catalog if catalog is not None else [a["slug"] for a in composio.catalog(root)])
     reads, notes = [], []
+    read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
     for c in calls:
-        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"])
+        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only)
         if verdict == "refuse":
             notes.append(REFUSED.format(slug=c["tool_slug"]))
             continue
@@ -170,8 +171,9 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
     return reply, sid
 
 
-def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None):
-    """One JSON-RPC frame from a bot -> (reply or None, mcp-session-id)."""
+def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None, read_only=None):
+    """One JSON-RPC frame from a bot -> (reply or None, mcp-session-id). `catalog` and
+    `read_only` stand in for Composio's toolkit list and tool tags (tests)."""
     if not isinstance(frame, dict):
         return _error(None, -32600, "invalid request"), mcp_session_id
     method = frame.get("method") or ""
@@ -180,7 +182,7 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None):
     if method not in METHODS:
         return _error(frame.get("id"), -32601, "method not available"), mcp_session_id
     if method == "tools/call":
-        return _gate(frame, ctx, mcp_session_id, upstream, root, catalog)
+        return _gate(frame, ctx, mcp_session_id, upstream, root, catalog, read_only)
     reply, sid = upstream.forward(frame, mcp_session_id)
     if method == "tools/list" and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         tools = reply["result"].get("tools") or []

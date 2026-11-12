@@ -229,6 +229,34 @@ def catalog(root=bots.ROOT):
     return items
 
 
+_TOOL_SLUG_RE = re.compile(r"[A-Z0-9][A-Z0-9_]{0,127}")
+_READ_ONLY = {}  # tool slug -> (checked at, bool); failures are not kept
+READ_ONLY_CACHE_MAX = 2000
+
+
+def _parse_tool_read_only(data):
+    tags = data.get("tags") if isinstance(data, dict) else None
+    return isinstance(tags, list) and "readOnlyHint" in tags
+
+
+def tool_read_only(slug, root=bots.ROOT):
+    """True when Composio tags this tool readOnlyHint, False when it does not, None when
+    it could not be asked (the call then waits for approval like a write). Cached an hour."""
+    if not isinstance(slug, str) or not _TOOL_SLUG_RE.fullmatch(slug):
+        return None
+    hit = _READ_ONLY.get(slug)
+    if hit and time.time() - hit[0] < CATALOG_TTL:
+        return hit[1]
+    try:
+        value = _parse_tool_read_only(_json("GET", "/tools/" + urllib.parse.quote(slug), None, root))
+    except ComposioError:
+        return None
+    if len(_READ_ONLY) >= READ_ONLY_CACHE_MAX:
+        _READ_ONLY.clear()
+    _READ_ONLY[slug] = (time.time(), value)
+    return value
+
+
 def own_auth_config(toolkit, root=bots.ROOT):
     """The id of this project's own enabled auth config for an app, or None."""
     q = urllib.parse.urlencode({"toolkit_slug": toolkit, "is_composio_managed": "false", "limit": "50"})

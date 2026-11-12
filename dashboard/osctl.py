@@ -45,8 +45,25 @@ _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-cata
                    "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
                    "get-brief-spec", "get-voice", "research-signal"}
 # Commands that send text off the machine: off in a thread that read an app,
-# like WebSearch (chat_session.APPS_USED_ENV).
-_NETWORK_CMDS = {"research-signal"}
+# like WebSearch (chat_session.APPS_USED_ENV). That thread runs an ALLOWLIST: a new command
+# is refused there until it is added to _LOCAL_CMDS (tests/test_jobs.py fails on any
+# command in neither set).
+_NETWORK_CMDS = frozenset({"research-signal"})
+_LOCAL_CMDS = frozenset({
+    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
+    "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
+    "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
+    "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
+    "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
+    "revise-post", "set-status", "tree", "update-brief", "update-brief-spec", "update-channel",
+    "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
+    "update-phase", "update-post", "update-profile", "update-project", "update-roadmap",
+    "update-strategy", "update-subsections", "update-technical", "update-validation-tab",
+    "update-voice",
+})
 # Repo areas that hold every workspace's data at once (calendar via get-busy),
 # or the owner's own machine state (session notes, indexes, logs).
 _PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "private/", "database/", "os.db", ".remember/",
@@ -58,13 +75,27 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
                    "propose-job", "list-jobs"}
-# An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself. What removes work
-# still waits for an APPROVAL line: every delete-* command, and the commands that replace a whole
+# An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself: an ALLOWLIST
+# (_AUTO_ALLOWED), so a new command waits for an APPROVAL line until it is added. What removes
+# work waits (_AUTO_WAITS): every delete-* command, and the commands that replace a whole
 # document or a section list (text a job read must not wipe a doc). It never writes memory and
-# never proposes jobs.
-_AUTO_REPLACES = {"update-intake", "update-technical", "update-roadmap", "update-subsections",
-                  "update-validation-tab", "update-brief-spec", "update-voice"}
-_AUTO_BLOCKED = {"remember", "propose-job", *_AUTO_REPLACES}
+# never proposes jobs. tests/test_jobs.py fails on any command in neither set.
+_AUTO_REPLACES = frozenset({"update-intake", "update-technical", "update-roadmap", "update-subsections",
+                            "update-validation-tab", "update-brief-spec", "update-voice"})
+_AUTO_WAITS = frozenset({"remember", "propose-job", *_AUTO_REPLACES,
+                         "delete-brief-spec", "delete-experiment", "delete-feature", "delete-memo",
+                         "delete-phase", "delete-strategy", "delete-voice"})
+_AUTO_ALLOWED = frozenset({
+    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
+    "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
+    "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
+    "get-brief-spec", "get-busy", "get-id-catalog", "get-memory", "get-posts", "get-project",
+    "get-subsections", "get-voice", "list-jobs", "mark-done", "read-file", "recall",
+    "research-signal", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
+    "update-channel", "update-experiment", "update-feature", "update-memo", "update-milestone",
+    "update-phase", "update-post", "update-profile", "update-project", "update-strategy",
+})
 READONLY_TEXT = {
     None: "read-only here: you can look things up but not save. Say what should be saved: "
           "the lead saves it.",
@@ -1017,7 +1048,7 @@ def main(argv=None):
         in_job = bool((os.environ.get("LEOBOT_JOB") or "").strip())
         if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
             raise fileops.ActionError(READONLY_TEXT.get(job_mode if in_job else None, READONLY_TEXT["approval"]))
-        if in_job and (args.cmd in _AUTO_BLOCKED or args.cmd.startswith("delete-")):
+        if in_job and (args.cmd not in _AUTO_ALLOWED or args.cmd.startswith("delete-")):
             raise fileops.ActionError(
                 "a scheduled job never proposes jobs." if args.cmd == "propose-job" else
                 f"{args.cmd} waits for the owner even in an Auto job"
@@ -1027,7 +1058,7 @@ def main(argv=None):
             # A linked folder becomes --add-dir on that company's turns: only the
             # user links one, in the dashboard. Any bot (HQ too) is refused.
             raise fileops.ActionError("only you can link a local folder, from the dashboard")
-        if os.environ.get(chat_session.APPS_USED_ENV) and args.cmd in _NETWORK_CMDS:
+        if os.environ.get(chat_session.APPS_USED_ENV) and args.cmd not in _LOCAL_CMDS:
             raise fileops.ActionError(f"{args.cmd} is off here: this thread read a connected app")
         ws = _workspace()
         if os.environ.get("LEOBOT_SHARED"):

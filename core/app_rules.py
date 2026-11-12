@@ -1,8 +1,11 @@
 """app_rules.py — what a bot's Composio tool call may do (connected apps).
 
 A call is read (runs now), hold (waits on an Approve click), or refuse. A read
-is narrow on purpose: the first action word is a read verb and no word is a
-write verb, or the slug is a known noun-first read. Everything else is a write.
+is narrow on purpose, and two checks must agree: Composio tags the tool
+readOnlyHint (an allowlist from its own metadata), and the name reads (the first
+action word is a read verb and no word is a write verb, or the slug is a known
+noun-first read). Neither is enough alone: Composio tags some writes read-only
+(setting a user active, managing secrets). An untagged or unknown tool is a write.
 """
 import re
 
@@ -137,14 +140,16 @@ def _size(value, _depth=0):
     return 0
 
 
-def decide(slug, grant, catalog, arguments=None):
-    """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant."""
+def decide(slug, grant, catalog, arguments=None, read_only=None):
+    """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant.
+    `read_only(slug)` says whether Composio tags the tool readOnlyHint (True, False, or None
+    when unknown); asked only when everything else allows a read. Without it, nothing reads."""
     tk = toolkit_of(slug, catalog)
     if tk is None:
         return "refuse", None
     if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
         return "refuse", tk
     if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS) \
-            and _size(arguments) <= MAX_READ_ARG_CHARS:
+            and _size(arguments) <= MAX_READ_ARG_CHARS and read_only is not None and read_only(slug) is True:
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk
