@@ -129,6 +129,7 @@ Copy that folder off the server yourself. `team/` holds your API keys, so keep t
 
 - The service runs as its own `leobot` user, which holds only Leo Bot, so a bot's reach
   on the server ends at that user's files.
-- The login token stays the same across restarts on a server. To change it, delete
-  `~leobot/.leobot/data/team/owner-token` and restart: `leobot stop && leobot start` as the `leobot` user.
+- The login token stays the same across restarts on a server. To change it (and sign every
+  owner browser out), run `leobot rotate-token --yes` as the `leobot` user. Do it after the
+  login link may have leaked, for example after opening it on a shared computer.
 - Logs: `~leobot/.leobot/logs/server.log`, or `journalctl --user -u leobot -f` as the `leobot` user.

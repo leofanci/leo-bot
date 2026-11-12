@@ -928,6 +928,11 @@ def _build_parser():
         name = target.name.lower()
         if any(fnmatch.fnmatchcase(name, g.lower()) for g in chat_session.SECRET_FILE_GLOBS):
             raise fileops.ActionError("secret files are not readable")
+        if not _code_file(a.path):  # HQ too (a workspace's _guard says the same): stores and machine state
+            rel = target.relative_to(data_root.resolve()).as_posix().lower()
+            if rel.startswith(_PRIVATE_PREFIXES) or rel.endswith(_PRIVATE_SUFFIXES):
+                raise fileops.ActionError("that file holds every workspace's data or this machine's state; "
+                                          "use the commands (get-memory, recall, get-busy) instead")
         if not target.exists():
             raise fileops.ActionError(f"file not found: {a.path}")
         return {"path": a.path, "content": target.read_text(encoding="utf-8")}

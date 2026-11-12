@@ -22,12 +22,13 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from core import folders, paths
 from dashboard.engines import prices
-from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, stop_child, turn_vars
+from dashboard.engines.base import TURN_ENV, Engine, EngineRefused, SessionLost, drain, stop_child, turn_vars
 
 
 def parse_event(obj):
@@ -182,8 +183,13 @@ def never_write_rules(folder):
     names = [*folders.NEVER_WRITE_DIRS, *folders.NEVER_WRITE_FILES, *SECRET_FILE_GLOBS]
     return ([f"{t}(/{folder}/**/{d}/**)" for d in folders.NEVER_WRITE_DIRS for t in EDIT_TOOLS]
             + [f"{t}(/{folder}/**/{n})" for n in names for t in EDIT_TOOLS]
-            + [f"{t}(/{h}/**)" for h in folders.hook_dirs(folder) if not folders.has_glob_chars(h)
-               for t in EDIT_TOOLS])
+            + [f"{t}(/{h}/**)" for h in folders.hook_dirs(folder) for t in EDIT_TOOLS])
+
+
+def _hooks_expressible(folder):
+    """False when the folder's core.hooksPath holds glob characters: its deny rule could not
+    match it, so the folder gets no edit access at all (it stays readable)."""
+    return not any(folders.has_glob_chars(h) for h in folders.hook_dirs(folder))
 # WebSearch/WebFetch are added only on turns whose request needs live research
 # (server._needs_web) — their schemas are small but off by default per the
 # token-lean policy.
@@ -212,12 +218,103 @@ _BOT_TMPDIR = None
 _BOT_TMPDIR_LOCK = threading.Lock()  # chat requests run on server threads
 
 
-def bot_tmpdir():
+TMP_PREFIXES = ("leobot-bots-", "leobot-uploads-", "leobot-runner-")
+_PID_FILE = ".leobot-pid"
+
+
+def private_tmpdir(prefix):
+    """A new owner-only temp folder that names the process that made it, so a later start
+    can sweep it once that process is gone (a crash or SIGKILL skips the cleanup)."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    try:
+        with open(os.path.join(path, _PID_FILE), "w") as f:
+            f.write(str(os.getpid()))
+    except OSError:
+        pass
+    return path
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # it exists, owned by someone else
+        return True
+    return True
+
+
+def sweep_stale_tmpdirs(base=None, now=None):
+    """Remove leftover Leo Bot temp folders of processes that are gone: pasted images and bot
+    task output must not outlive a crash. A folder with no pid note is swept after a day."""
+    base = base or tempfile.gettempdir()
+    now = now or time.time()
+    removed = []
+    try:
+        entries = list(os.scandir(base))
+    except OSError:
+        return removed
+    for e in entries:
+        if not e.name.startswith(TMP_PREFIXES):
+            continue
+        try:
+            if not e.is_dir(follow_symlinks=False) or e.stat(follow_symlinks=False).st_uid != os.getuid():
+                continue
+            try:
+                with open(os.path.join(e.path, _PID_FILE)) as f:
+                    stale = not _alive(int(f.read().strip() or 0))
+            except (OSError, ValueError):
+                stale = now - e.stat(follow_symlinks=False).st_mtime > 86400
+        except OSError:
+            continue
+        if stale:
+            shutil.rmtree(e.path, ignore_errors=True)
+            removed.append(e.path)
+    return removed
+
+
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def forget_transcripts(rec):
+    """A deleted thread's Claude Code transcripts go too (each session id the thread used,
+    in Claude's own config folder): a delete leaves no copy of the conversation behind."""
+    engines = (rec or {}).get("engines") if isinstance(rec, dict) else None
+    sids = {str(st.get("session")) for st in (engines or {}).values() if isinstance(st, dict) and st.get("session")}
+    sids.add(str((rec or {}).get("id") or ""))  # older threads used the thread id as the session id
+    sids = {sid for sid in sids if _SESSION_ID_RE.match(sid)}
+    if not sids:
+        return 0
+    cfg = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+    n = 0
+    for sid in sids:
+        for f in (cfg / "projects").glob(f"*/{sid}.jsonl"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def tmp_name(ws):
+    """A workspace's subfolder name under a per-run temp root (uploads, bot task output)."""
+    return re.sub(r"[^a-z0-9-]", "_", str(ws or "hq").lower()) or "hq"
+
+
+def bot_tmpdir(ws=None):
+    """The per-run root, or `ws`'s own subfolder of it: each workspace's turns keep their task
+    output apart, and a company turn is denied every other workspace's subfolder."""
     global _BOT_TMPDIR
     with _BOT_TMPDIR_LOCK:
         if _BOT_TMPDIR is None:
-            _BOT_TMPDIR = tempfile.mkdtemp(prefix="leobot-bots-")
-        return _BOT_TMPDIR
+            _BOT_TMPDIR = private_tmpdir("leobot-bots-")
+        root = _BOT_TMPDIR
+    if ws is None:
+        return root
+    sub = os.path.join(root, tmp_name(ws))
+    os.makedirs(sub, mode=0o700, exist_ok=True)
+    return sub
 
 
 def remove_bot_tmpdir():
@@ -317,7 +414,11 @@ class ClaudeCodeEngine(Engine):
         # A rule is a glob: a path holding glob characters could not be matched by its own
         # deny rules, so it never reaches one (core.folders refuses to link it, too).
         read_dirs = tuple(d for d in policy.read_dirs if not folders.has_glob_chars(d))
-        edit_dirs = tuple(d for d in policy.edit_dirs if d in read_dirs)
+        edit_dirs = tuple(d for d in policy.edit_dirs if d in read_dirs and _hooks_expressible(d))
+        walls = [*policy.deny_dirs, *policy.deny_files]
+        if any(folders.has_glob_chars(w) for w in walls):  # a deny rule could not match it: never run
+            raise EngineRefused("Leo Bot's data folder path holds * ? [ or ] characters, so bots "
+                                "could read past their walls. Move the folder to a plain path.")
         if shared:  # no file, shell or app tools: the osctl relay only
             read_dirs = edit_dirs = ()
             apps_port = None
@@ -348,7 +449,7 @@ class ClaudeCodeEngine(Engine):
             if d not in edit_dirs and any(Path(e) in Path(d).parents for e in edit_dirs):
                 denied += [f"{t}(/{d}/**)" for t in EDIT_TOOLS]
         denied += [f"{t}(/{d}/**)" for d in policy.deny_dirs for t in ("Read", *EDIT_TOOLS)]
-        denied += [f"Read(/{f})" for f in policy.deny_files]
+        denied += [f"{t}(/{f})" for f in policy.deny_files for t in ("Read", *EDIT_TOOLS)]
         cmd = [self.claude_bin, "-p",
                "--output-format", "stream-json",
                "--include-partial-messages",
@@ -374,7 +475,7 @@ class ClaudeCodeEngine(Engine):
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
-                "CLAUDE_CODE_TMPDIR": bot_tmpdir(),
+                "CLAUDE_CODE_TMPDIR": bot_tmpdir(policy.workspace or "hq"),
                 ENGINE_ENV: self.id,
                 **turn_vars(policy),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),

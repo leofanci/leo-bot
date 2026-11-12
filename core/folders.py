@@ -39,7 +39,10 @@ NEVER_WRITE_FILES = (".mcp.json", ".envrc", ".pre-commit-config.yaml",
                      "lefthook-local.yml", "lefthook-local.yaml", ".lefthook-local.yml", ".lefthook-local.yaml",
                      "HEAD", "opencode.json", "opencode.jsonc", "mise.toml", ".mise.toml", ".lintstagedrc",
                      ".lintstagedrc.json", ".lintstagedrc.js", "lint-staged.config.js", "devcontainer.json",
-                     ".devcontainer.json")
+                     ".devcontainer.json",
+                     # package managers that load code from config on install or run
+                     ".yarnrc", ".yarnrc.yml", ".pnpmfile.cjs", ".pnpmfile.mjs", ".pnpmfile.js",
+                     "bunfig.toml", ".bunfig.toml")
 # Secret-looking files stay unreadable even inside the repo or a linked folder
 # (Grep/Glob honor Read deny rules too). Verified against claude 2.x:
 # "**/x" covers the repo; a linked --add-dir needs its own "//abs/**/x" rule.
@@ -377,10 +380,35 @@ def add(ws, path, access=EDIT, root=bots.ROOT) -> dict:
     for row in data["folders"]:
         if row["path"] == resolved:
             return dict(row)
+    _need_no_overlap(ws, resolved, [r["path"] for r in data["folders"]], root)
     row = {"id": _next_id(data), "path": resolved, "name": PurePath(resolved).name, "access": access}
     data["folders"].append(row)
     save(ws, data, root)
     return dict(row)
+
+
+def _need_no_overlap(ws, resolved, own_paths, root):
+    """Refuse a folder inside, or holding, another linked folder (this workspace's or
+    another's). Deny rules cannot split nested folders: a channel or bot limit, or another
+    workspace's wall, would leave the outer one readable. The exact same folder in two
+    workspaces is a deliberate share and stays allowed."""
+    others = []
+    projects = Path(root) / "projects"
+    slugs = [d.name for d in projects.iterdir() if d.is_dir() and not d.name.startswith(".")] \
+        if projects.is_dir() else []
+    for other in [bots.HQ, *slugs]:
+        if other == ws:
+            continue
+        try:
+            others += [(p, other) for p in all_paths(other, root)]
+        except ValueError:
+            continue
+    for p, owner in [(q, ws) for q in own_paths] + others:
+        p = str(p)
+        if p != resolved and (_inside(p, resolved) or _inside(resolved, p)):
+            where = "this workspace" if owner == ws else "another workspace"
+            raise FolderError(f"this folder overlaps {PurePath(p).name}, already linked to {where}: "
+                              "link folders that do not sit inside each other")
 
 
 def remove(ws, folder_id, root=bots.ROOT) -> None:

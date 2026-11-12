@@ -182,11 +182,21 @@ def _confined_dir(base: Path, component: str, label: str) -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# generate.py ends itself at its own JOB_DEADLINE; these outer limits catch a child that cannot.
+GENERATE_TIMEOUT = 1600
+REINDEX_TIMEOUT = 300
+
+
+def _run(cmd, timeout, **kw):
+    """subprocess.run with captured text output and a hard time limit (ActionError past it)."""
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired:
+        raise ActionError(f"stopped after {timeout // 60} minutes: it did not finish") from None
+
+
 def reindex():
-    res = subprocess.run(
-        [sys.executable, str(_INDEX_SCRIPT), str(ROOT)],
-        capture_output=True, text=True,
-    )
+    res = _run([sys.executable, str(_INDEX_SCRIPT), str(ROOT)], REINDEX_TIMEOUT)
     if res.returncode != 0:
         raise ActionError(f"re-index failed: {res.stderr.strip()[:600]}")
     # Guard: the SQLite index upserts by id, so two posts sharing one id
@@ -398,7 +408,7 @@ def generate_brief(post_id, instruction=None, profile_slug=None, brief_id=None, 
         cmd += [f"--spec={brief_id}"]
     if voice_id:
         cmd += [f"--voice={voice_id}"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = _run(cmd, GENERATE_TIMEOUT)
     if res.returncode != 0:
         raise ActionError(f"brief job failed: {(res.stderr or res.stdout).strip()[:800]}")
     return {"id": post_id, "status": "briefed", "stdout": res.stdout.strip()}
@@ -438,7 +448,7 @@ def revise_post(post_id, instruction, profile_slug=None, brief_id=None, voice_id
         cmd += [f"--spec={brief_id}"]
     if voice_id:
         cmd += [f"--voice={voice_id}"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = _run(cmd, GENERATE_TIMEOUT)
     if res.returncode != 0:
         raise ActionError(f"revise job failed: {(res.stderr or res.stdout).strip()[:800]}")
 
@@ -595,11 +605,8 @@ def write_channel_guidelines(slug, text):
 def refine_guidelines(slug, raw_text):
     """AI-polish rough guideline notes via generate.py; returns text, does NOT save."""
     _channel_dir(slug)
-    res = subprocess.run(
-        [sys.executable, str(_GENERATE_SCRIPT),
-         "--workspace", str(ROOT), "refine-guidelines", slug],
-        input=raw_text or "", capture_output=True, text=True,
-    )
+    res = _run([sys.executable, str(_GENERATE_SCRIPT), "--workspace", str(ROOT), "refine-guidelines", slug],
+               GENERATE_TIMEOUT, input=raw_text or "")
     if res.returncode != 0:
         raise ActionError(f"refine failed: {(res.stderr or res.stdout).strip()[:800]}")
     return {"refined": res.stdout}
@@ -948,6 +955,17 @@ def _need_known_entity(slug: str) -> None:
         raise ActionError(f"no project, profile, channel or product called '{slug}'")
 
 
+def _forget_leftovers(slug: str) -> None:
+    """A new workspace starts empty even when a delete of the same slug stopped half way
+    (people, invites, approvals, app grants and engine picks are kept outside its folder)."""
+    from core import approvals, integrations, people
+    from dashboard.engines import config as engine_config
+    approvals.forget_workspace(slug, ROOT)
+    integrations.forget_workspace(slug, ROOT)
+    people.forget_workspace(ROOT, slug)
+    engine_config.forget_workspace(slug, ROOT)
+
+
 def create_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     projects_dir = ROOT / "projects"
@@ -956,6 +974,7 @@ def create_project(slug: str, fields: dict) -> dict:
     if project_dir != Path(os.path.realpath(projects_dir)) / slug or project_dir.exists():
         raise ActionError(f"project '{slug}' already exists")
     _need_free_slug(slug)
+    _forget_leftovers(slug)
     name = _one_line(fields.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or "venture", "kind")
     priority = _priority(fields.get("priority") or "primary")
@@ -2184,7 +2203,7 @@ def _plan_args(profile_slug, params):
 def run_plan(profile_slug, params):
     """Generate a content calendar for a profile via claude -p, then re-index."""
     _profile_dir(profile_slug)
-    res = subprocess.run(_plan_args(profile_slug, params), capture_output=True, text=True)
+    res = _run(_plan_args(profile_slug, params), GENERATE_TIMEOUT)
     if res.returncode != 0:
         raise ActionError(f"plan job failed: {(res.stderr or res.stdout).strip()[:800]}")
     reindex()

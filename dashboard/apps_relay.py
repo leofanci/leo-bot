@@ -139,11 +139,15 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         return _text(rid, [UNREADABLE], True), sid
     grant = integrations.grant(ctx["ws"], ctx["bot"], root)  # re-read: grants change mid-turn
     picks = integrations.accounts_for(ctx["ws"], root)  # and so do a workspace's accounts
-    cat = list(catalog if catalog is not None else [a["slug"] for a in composio.catalog(root)])
+    if catalog is not None:
+        cat, paid = list(catalog), frozenset()
+    else:
+        items = composio.catalog(root)
+        cat, paid = [a["slug"] for a in items], composio.paid_read_toolkits(items)
     reads, notes = [], []
     read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
     for c in calls:
-        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only)
+        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid)
         if verdict == "refuse":
             notes.append(REFUSED.format(slug=c["tool_slug"]))
             continue
@@ -165,9 +169,19 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         return _text(rid, notes, not any(n.startswith("Held") for n in notes)), sid
     rebuilt = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                "params": {"name": app_rules.MULTI_EXECUTE, "arguments": {"tools": reads}}}
-    reply, sid = upstream.forward(rebuilt, sid)
-    if notes and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
+    if not notes:
+        return upstream.forward(rebuilt, sid)
+    # What was held or refused is told even when the reads fail: a bot that never hears its
+    # write was held asks again, and a second card queues the same action twice.
+    try:
+        reply, sid = upstream.forward(rebuilt, sid)
+    except composio.ComposioError as e:
+        return _text(rid, [f"The reads did not run ({e})."] + notes, True), sid
+    if isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         reply["result"].setdefault("content", []).extend({"type": "text", "text": n} for n in notes)
+    elif isinstance(reply, dict):
+        failed = (reply.get("error") or {}).get("message") if isinstance(reply.get("error"), dict) else None
+        return _text(rid, [f"The reads did not run ({str(failed or 'no reply')[:200]})."] + notes, True), sid
     return reply, sid
 
 

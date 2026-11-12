@@ -206,11 +206,24 @@ def _auth_kind(item):
     return "own_app"
 
 
+def _categories(item):
+    raw = (item.get("meta") or {}).get("categories") if isinstance(item.get("meta"), dict) else None
+    names = ((c.get("name") if isinstance(c, dict) else c) for c in (raw if isinstance(raw, list) else []))
+    return {str(n).strip().lower() for n in names if isinstance(n, str)}
+
+
 def _parse_catalog_page(data):
     items = [{"slug": i["slug"], "name": i.get("name") or i["slug"],
-              "logo": (i.get("meta") or {}).get("logo"), "auth": _auth_kind(i)}
+              "logo": (i.get("meta") or {}).get("logo"), "auth": _auth_kind(i),
+              "paid_reads": bool(_categories(i) & app_rules.PAID_READ_CATEGORIES)}
              for i in data.get("items") or [] if isinstance(i, dict) and i.get("slug")]
     return items, data.get("next_cursor")
+
+
+def paid_read_toolkits(items):
+    """Toolkits in `items` (a catalog) whose reads wait like writes: Composio files them
+    under a category that spends credits or fetches arbitrary pages."""
+    return frozenset(i["slug"] for i in items if i.get("paid_reads"))
 
 
 def catalog(root=bots.ROOT):

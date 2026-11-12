@@ -672,7 +672,13 @@ class TurnFolders(unittest.TestCase):
     def test_layer_removed_nested_folder_denied(self):
         inner = self.a / "vendor"
         inner.mkdir()
-        row = _folders.add("acme", str(inner), _folders.EDIT, self.root)
+        with self.assertRaises(_folders.FolderError):  # linking one inside another is refused now
+            _folders.add("acme", str(inner), _folders.EDIT, self.root)
+        # An older store may still hold such a pair: the inner one stays walled off.
+        data = _folders.load("acme", self.root)
+        data["folders"].append({"id": "f3", "path": str(inner), "name": "vendor", "access": "edit"})
+        _folders.save("acme", data, self.root)
+        row = data["folders"][-1]
         _folders.set_limit("acme", "bots", "cto", {"f1": "edit"}, self.root)
         lead = self.turn("@cto fix the login")["lead"]
         self.assertEqual(lead["read_dirs"], (str(self.a),))
@@ -722,11 +728,13 @@ class TurnFolders(unittest.TestCase):
             self.assertEqual(seen["ctx"][0]["folder"], str(self.b))
             self.assertTrue(seen["ctx"][0]["include_code"])
             self.assertIn("graph", seen["lead"]["text"])
-            # A shared thread keeps the outline with no source code, and no paths.
+            # A shared thread gets no outline at all: an invited person's words never steer a
+            # read of the owner's code.
             seen = self.turn("/tokensave how does login work", shared=True)
-            self.assertEqual(seen["ctx"][0]["folder"], str(self.b))
-            self.assertFalse(seen["ctx"][0]["include_code"])
-            self.assertNotIn(str(self.b), seen["lead"]["text"])
+            self.assertEqual(seen["ctx"], [])
+            self.assertEqual(seen["runs"], [])
+            self.assertIn("not available in a thread invited people can see", seen["out"])
+            self.assertNotIn(str(self.b), seen["out"])
 
     def test_fix_wording_never_pulls_another_bots_mention_to_cto(self):
         team = server.bots.team(self.root, "acme", self.tree()[0])
@@ -745,7 +753,7 @@ class TurnFolders(unittest.TestCase):
         (self.b / ".tokensave" / "tokensave.db").write_text("")
         with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
             seen = self.turn("/tokensave how does login work", runner=True)
-            self.assertFalse(seen["ctx"][0]["include_code"])
+            self.assertEqual(seen["ctx"], [])  # a person's own Mac reads none of the owner's code
             seen = self.turn("/tokensave how does login work", runner=True,
                              ctx_error=server.tokensave_bridge.BridgeError(f"bad index at {self.b}"))
         self.assertNotIn(str(self.b), seen["out"])
