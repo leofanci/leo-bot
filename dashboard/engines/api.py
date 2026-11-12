@@ -196,17 +196,19 @@ class ApiEngine(Engine):
             for m in messages:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
-    def _trim(self, messages, state=None):
+    def _trim(self, messages, state=None, rail=""):
         """The first message (the snapshot), then the stored history from a cut on.
 
         The cut is an index into the stored history, kept in this thread's engine `state`, so
         what is resent starts the same way turn after turn and stays in the prompt cache. It
         moves only when the part after it passes the budget (LEOBOT_COMPACT_TOKENS, or
-        HISTORY_CHARS when that is off), and then on to half the budget, at a message that
-        starts a turn: never between a tool call and its result."""
+        HISTORY_CHARS when that is off, less the system prompt `rail`, which is sent too), and
+        then on to half the budget, at a message that starts a turn: never between a tool call
+        and its result."""
         state = {} if state is None else state
         limit = compaction.threshold()
         budget = limit * compaction.CHARS_PER_TOKEN if limit else HISTORY_CHARS
+        budget = max(budget - len(rail or ""), budget // 2)  # a huge rail never empties the history
         sizes = [len(json.dumps(m)) for m in messages]
         cut = state.get("cut")
         cut = cut if type(cut) is int and 0 < cut < len(messages) else 0
@@ -347,9 +349,13 @@ class ApiEngine(Engine):
         out = [{**m, "content": [{"type": "text", "text": m["content"]}]}
                if isinstance(m.get("content"), str) and m["content"] else m for m in messages]
         last = out[-1].get("content") if out else None
-        if isinstance(last, list) and last and isinstance(last[-1], dict):
+        # A paused turn resends the assistant message last; a thinking block takes no breakpoint.
+        at = next((i for i in range(len(last) - 1, -1, -1) if isinstance(last[i], dict)
+                   and last[i].get("type") not in ("thinking", "redacted_thinking")),
+                  None) if isinstance(last, list) else None
+        if at is not None:
             blocks = [dict(b) if isinstance(b, dict) else b for b in last]
-            blocks[-1]["cache_control"] = mark
+            blocks[at]["cache_control"] = mark
             out[-1] = {**out[-1], "content": blocks}
         return system, out
 
@@ -366,7 +372,7 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id]))
+        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id], session.rail))
         tools = self._anthropic_tools(box, policy, model)
         parts, usage, calls, context = [], {}, 0, None
         while True:
@@ -471,7 +477,7 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id]))
+        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id], session.rail))
         tools = self._openai_tools(box)
         parts, usage, calls, context = [], {}, 0, None
         while True:
@@ -494,7 +500,8 @@ class ApiEngine(Engine):
                     if isinstance(u, dict):
                         for k in ("prompt_tokens", "completion_tokens"):
                             usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
-                        context = int(u.get("prompt_tokens") or 0)  # this request's whole prompt
+                        if u.get("prompt_tokens") is not None:  # this request's whole prompt
+                            context = int(u["prompt_tokens"])
                         details = u.get("prompt_tokens_details")
                         if isinstance(details, dict):
                             usage["cached_tokens"] = (usage.get("cached_tokens", 0)
