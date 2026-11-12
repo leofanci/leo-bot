@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import compaction, costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_cards, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1803,6 +1803,84 @@ def _catalog_search(q):
     return {"apps": hits[:CATALOG_LIMIT]}
 
 
+def _jobs_view(ws):
+    """The Team screen's jobs: every one from HQ, a workspace's own elsewhere."""
+    out = []
+    for j in jobs.load(ROOT):
+        jws = j.get("workspace") or bots.HQ
+        if ws != bots.HQ and jws != ws:
+            continue
+        try:
+            due = jobs.next_due(j) if j.get("enabled") else None
+        except ValueError:
+            due = None
+        out.append({**j, "mode": jobs.mode_of(j), "next_due": due, "room": f"{jws}/dm-{j.get('bot')}"})
+    return {"ws": ws, "jobs": out}
+
+
+def _job_cards_for_turn(chat, ws, room, bot_id, allowed, notice):
+    """Take this thread's job proposals; when `allowed`, hold each that still checks out as a
+    card (the turn's own workspace, room and bot, never the proposal's), else drop them."""
+    if not isinstance(chat, str) or not chat:
+        return []
+    try:
+        proposed = jobs.take_proposals(ROOT, chat)
+    except (OSError, ValueError):
+        traceback.print_exc()
+        return []
+    if not proposed or not allowed:
+        return []
+    cards, projects = [], db.tree()
+    for prop in proposed:
+        try:
+            ok = job_cards.proposal(ROOT, thread_ws=ws, op=prop.get("op"), job_id=prop.get("job_id"),
+                                    fields=prop.get("fields") if isinstance(prop.get("fields"), dict) else {},
+                                    projects=projects)
+        except ValueError as e:
+            notice(f"Job proposal dropped: {e}")
+            continue
+        cards.append(approvals.add_job(ROOT, ws=ws, room=(room or {}).get("id"), chat=chat, bot=bot_id,
+                                       job={k: ok[k] for k in ("op", "job_id", "fields")},
+                                       summary=ok["summary"], preview=ok["preview"]))
+    return cards
+
+
+def _approve_job_card(aid, fields=None):
+    """Apply one job card, exactly once, after checking it again. `fields` (the card's Edit)
+    replace the proposal's fields and are checked like the bot's were."""
+    rec = approvals.get(aid, ROOT)
+    if not rec or rec.get("kind") != approvals.JOB:
+        raise LookupError("no such card")
+    if rec.get("status") != "pending":
+        raise _AppRefused(f"already {rec.get('status')}")
+    projects = db.tree()
+    stored = rec.get("job") or {}
+    try:  # still savable? A refusal leaves the card pending (switch the bot back on, approve again)
+        ok = job_cards.proposal(ROOT, thread_ws=rec.get("ws") or bots.HQ, op=stored.get("op"),
+                                job_id=stored.get("job_id"),
+                                fields=fields if fields is not None else stored.get("fields"), projects=projects)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    if fields is not None:
+        rec = approvals.edit_job(aid, {k: ok[k] for k in ("op", "job_id", "fields")}, ok["summary"],
+                                 ok["preview"], ROOT)
+    try:
+        claimed = approvals.claim(aid, ROOT)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    # Apply what was claimed, not the copy read before: a second edit in between must not slip through.
+    if claimed.get("job") != rec.get("job"):
+        return approvals.finish(aid, "failed", "Changed while it was being approved; nothing was saved.", ROOT)
+    try:
+        status, line = "done", job_cards.apply(ROOT, claimed, projects)
+    except ValueError as e:
+        status, line = "failed", f"Not saved: {e}"
+    out = approvals.finish(aid, status, line, ROOT)
+    if out.get("chat"):
+        chat_store.append_note(out["chat"], out["bot"], line)
+    return out
+
+
 def _approve_app_action(aid, arguments=None):
     """Run one held app action, exactly once, after re-checking it may still run."""
     rec = approvals.get(aid, ROOT)
@@ -2477,6 +2555,31 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": "internal error"})
         return self._send(403, {"error": "forbidden"})
 
+    def _jobs_post(self, path, body):
+        """Owner only: a job's mode, on/off and delete, from the Team screen. Everything else
+        about a job changes through a bot's proposal and its card."""
+        jid, _, verb = path[len("/api/jobs/"):].partition("/")
+        ws = _strict_ws(body.get("ws"))
+        job = jobs.get(ROOT, jid)
+        if job is None or (ws != bots.HQ and (job.get("workspace") or bots.HQ) != ws):
+            return self._send(404, {"error": "no such job"})
+        if verb == "mode":
+            jobs.update(ROOT, jid, mode=body.get("mode"))
+        elif verb == "enabled":
+            on = body.get("enabled") is True
+            if on:  # it must still be able to run
+                try:
+                    job_cards.check_target(ROOT, job.get("workspace") or bots.HQ, job.get("bot"),
+                                           job.get("skill"), db.tree())
+                except ValueError as e:
+                    return self._send(409, {"error": str(e)})
+            jobs.update(ROOT, jid, enabled=on)
+        elif verb == "delete":
+            jobs.delete(ROOT, jid)
+        else:
+            return self._send(404, {"error": "unknown endpoint"})
+        return self._send(200, _jobs_view(ws))
+
     def _react_post(self, chat_id, body, by, by_name=None):
         """Toggle one emoji on message `i` of a thread the caller may read."""
         rows = chat_store.toggle_reaction(chat_id, body.get("i"), body.get("emoji"), by=by, by_name=by_name)
@@ -2965,6 +3068,12 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"app_actions": held, "msg": last})
                     if job:
                         live["status"] = "waiting"
+            # Jobs this turn proposed (osctl propose-job): checked again from this thread's
+            # workspace, then held as cards. Never from a shared thread or a job's own turn.
+            cards = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
+                                        allowed=not job and not shared and not person, notice=notice)
+            if cards:
+                emit({"app_actions": cards, "msg": last})
             if files_before is not None:
                 handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
                 if handed:
@@ -3279,6 +3388,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send_logo(path[len("/api/integrations/logo/"):])
             if path.startswith("/api/workspace-logo/"):
                 return self._send_ws_logo(path[len("/api/workspace-logo/"):])
+            if path == "/api/jobs":
+                ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                return self._send(200, _jobs_view(ws))
             if path in ("/api/approvals", "/api/costs", "/api/memory"):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
@@ -3678,6 +3790,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._folders_post(path, body)
+            if path.startswith("/api/jobs/"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._jobs_post(path, body)
             if path in ("/api/runners", "/api/runners/revoke"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
@@ -3749,6 +3865,10 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
+                        held = approvals.get(aid, ROOT) or {}
+                        if held.get("kind") == approvals.JOB:
+                            fields = body.get("fields")
+                            return self._send(200, _approve_job_card(aid, fields if isinstance(fields, dict) else None))
                         args = body.get("arguments")
                         return self._send(200, _approve_app_action(aid, args if isinstance(args, dict) else None))
                     except LookupError as e:
