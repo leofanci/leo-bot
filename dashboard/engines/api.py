@@ -165,6 +165,9 @@ class ApiEngine(Engine):
             out.append(m)
         return out
 
+    def compact(self, session):
+        return False  # _trim cuts the resent history at the same threshold
+
     def _history_path(self, session):
         return self.root / "chats" / f"{session.session_id}.{self.provider['id']}.jsonl"
 

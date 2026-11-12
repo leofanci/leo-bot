@@ -145,6 +145,13 @@
               "cos": ["- 2026-07-01 [fact] Board meeting moved to Thursday"]},
    "expect": {"teammate_prompt_has": "buyer count estimate is 40k", "teammate_prompt_lacks": "Board meeting"}},
 
+  {"id": "long-thread-compacts-with-recap", "category": "context",
+   "msg": "what did we decide earlier?", "thread": {"bot": "cos"}, "context": 80000,
+   "expect": {"bot": "cos", "prompt_has": ["Earlier in this thread", "earlier answer"]}},
+  {"id": "short-thread-keeps-its-session", "category": "context",
+   "msg": "what did we decide earlier?", "thread": {"bot": "cos"}, "context": 2000,
+   "expect": {"bot": "cos", "prompt_lacks": "Earlier in this thread"}},
+
   {"id": "untagged-price-question-reaches-pricing-owner", "category": "routing",
    "msg": "how much should we charge for the pro tier?",
    "gap": "Phase 4 routing: an untagged message that clearly matches another bot's skill goes to that bot",

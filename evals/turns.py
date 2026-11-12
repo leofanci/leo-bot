@@ -11,6 +11,8 @@ A case (cases/turns.json):
   apps                         {"gmail": "read"}: the lead bot's connected-app grant
   folder                       "edit" or "read": one linked folder in the workspace
   memory                       {"cmo": [file lines], "shared:cmo": [...]}: memory files
+  context                      the thread's last reply had this context size (tokens): past
+                               LEOBOT_COMPACT_TOKENS the turn compacts (needs `thread`)
   reply / teammate_reply / followup_reply   what the scripted engine says (default "ok")
   expect                       keys of the outcome to compare; *_has / *_lacks take substrings
   gap                          a known gap: the case states the wanted behavior and fails today.
@@ -25,7 +27,7 @@ from unittest import mock
 
 CASES = Path(__file__).parent / "cases" / "turns.json"
 WS = "acme"
-THREAD_ID = "eval-thread"
+THREAD_ID = "e7a10000-0000-4000-8000-000000000000"  # chat_store takes UUID-shaped ids only
 _EQUAL = ("bot", "skill", "handoff_from", "tier", "reason", "web", "gate", "approval",
           "teammates", "followup", "reactions", "edit", "runs")
 _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
@@ -34,7 +36,7 @@ _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
 GATE_TEXT = "tag who should do it"
 
 
-_CASE_KEYS = {"id", "category", "msg", "room", "thread", "shared", "apps", "folder", "memory",
+_CASE_KEYS = {"id", "category", "msg", "room", "thread", "shared", "apps", "folder", "memory", "context",
               "reply", "teammate_reply", "followup_reply", "expect", "gap"}
 
 
@@ -65,6 +67,11 @@ class _Engine:
 
     def __init__(self, supports):
         self.id, self.supports = "claude-code", frozenset(supports)
+        self.compacted = False
+
+    def compact(self, session):
+        self.compacted = True
+        return True
 
     def resolve_model(self, model):
         return model
@@ -124,8 +131,11 @@ def run(case, live_root=None):
     if live:
         sess = server.chat_session.ChatSession(repo_dir=str(server.paths.CODE), rail=server.RAIL)
     else:
+        engine = _Engine(ClaudeCodeEngine.supports)
+
         class Sess:
             _started = bool(thread)
+            engine_state = {}
             _turn_count = 1 if thread else 0
             _last_skill = thread.get("skill")
             _skill_explicit = bool(thread.get("explicit"))
@@ -133,7 +143,7 @@ def run(case, live_root=None):
             session_id = THREAD_ID
 
             def is_fresh(self):
-                return not thread
+                return not thread or engine.compacted
 
             def note_skill(self, skill, explicit=False):
                 pass
@@ -147,6 +157,14 @@ def run(case, live_root=None):
     apps = case.get("apps") or {}
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as ext:
         root = _data_root(live_root if live else tmp, ext, case)
+        if case.get("context") and not live:  # the thread's last reply, saved with its size
+            from dashboard import chat_store
+            with mock.patch.object(chat_store, "CHATS_DIR", root / "chats"):
+                chat_store.save({"id": THREAD_ID, "title": "eval", "created": 0, "messages": [
+                    {"role": "user", "content": "earlier question"},
+                    {"role": "assistant", "bot": thread.get("bot"), "content": "earlier answer",
+                     "engine": "claude-code", "context": case["context"]}],
+                    "engines": {"claude-code": {"seen": 2}}})
         if live:  # osctl in the real turn reads the index
             import contextlib
             import index
@@ -169,8 +187,7 @@ def run(case, live_root=None):
             mock.patch.object(server.chat_session.ChatSession, "ask", ask),
         ]
         if not live:
-            patches.append(mock.patch.object(server.engine_registry, "pick",
-                                             return_value=_Engine(ClaudeCodeEngine.supports)))
+            patches.append(mock.patch.object(server.engine_registry, "pick", return_value=engine))
         patches += [
             mock.patch.object(server.chat_store, "CHATS_DIR", root / "chats"),
             mock.patch.object(server.chat_store, "record_turn", record_turn),

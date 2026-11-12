@@ -96,6 +96,13 @@ class Engine:
         """True when this thread has no session on this engine yet."""
         return self.id not in session.engine_state
 
+    def compact(self, session):
+        """Drop this thread's session on this engine, so the next turn starts fresh (the server
+        sends the recap of visible messages instead). False: this engine keeps its own size
+        down, or its session is not on this machine."""
+        session.engine_state.pop(self.id, None)
+        return True
+
     def check(self, policy):
         """Hard lockdown flags: refuse rather than run with more than the policy allows."""
         if policy.shared and not self.shared_safe:

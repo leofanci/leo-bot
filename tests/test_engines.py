@@ -113,6 +113,47 @@ class ClaudeDriver(unittest.TestCase):
         self.assertEqual(ev[-1][0], "done")
         self.assertEqual(ev[-1][1]["context"], 3000)
 
+    def test_claude_code_compact_starts_new_session_id(self):
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess._started = True
+        self.assertIn(sess.session_id, sess._base_cmd())
+        self.assertTrue(sess.engine.compact(sess))
+        cmd = sess._base_cmd()
+        new = sess.engine_state["claude-code"]["session"]
+        self.assertNotEqual(new, sess.session_id)
+        self.assertEqual(cmd[cmd.index("--session-id") + 1], new)
+        self.assertNotIn("--resume", cmd)
+        self.assertNotIn(sess.session_id, cmd)
+        sess._started = True
+        cmd = sess._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], new)
+
+    def test_claude_session_id_must_look_like_one(self):
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess._started = True
+        sess.engine_state["claude-code"] = {"session": "--dangerously-skip-permissions"}
+        cmd = sess._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], sess.session_id)
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+
+    def test_runner_and_api_never_compact(self):
+        from dashboard.engines.api import ApiEngine
+        from dashboard.engines.runner import RunnerEngine
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        for eng in (RunnerEngine("owner", hub=object()),
+                    ApiEngine({"id": "demo", "format": "anthropic", "base_url": "http://127.0.0.1:9"}, self.tmp.name)):
+            sess.engine_state = {eng.id: {"cut": 3}}
+            self.assertFalse(eng.compact(sess))
+            self.assertEqual(sess.engine_state, {eng.id: {"cut": 3}})
+
+    def test_base_compact_drops_the_engines_state(self):
+        class Plain(Engine):
+            id = "plain"
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess.engine_state = {"plain": {"session": "s1"}, "other": {"session": "s2"}}
+        self.assertTrue(Plain().compact(sess))
+        self.assertEqual(sess.engine_state, {"other": {"session": "s2"}})
+
     def test_other_failures_stay_errors(self):
         bin_ = self.stub('echo "boom" >&2\nexit 1\n')
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)

@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -2664,6 +2664,17 @@ class Handler(BaseHTTPRequestHandler):
             workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
         if job:
             workspace = "\n\n".join(x for x in (workspace, JOB_NOTE.format(name=job["name"])) if x)
+        saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
+        # A thread whose last call on this engine passed LEOBOT_COMPACT_TOKENS starts a fresh
+        # session here: the snapshot, the bot card and the recap of its visible messages go in
+        # again, the long transcript does not. A job turn is fresh already.
+        compacted = False
+        if not job and compaction.due(saved_rec, engine.id) and callable(getattr(engine, "compact", None)):
+            compacted = engine.compact(sess)
+            if compacted:
+                sess.pending_recap = chat_store.recap(saved_rec) or None
+                self.log_message("chat compact engine=%s context=%d", engine.id,
+                                 compaction.last_context(saved_rec, engine.id))
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -2680,9 +2691,8 @@ class Handler(BaseHTTPRequestHandler):
             suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
         )
         # What crosses between engines: the thread's visible messages, never a transcript.
-        saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
         sess.recap = chat_store.recap(saved_rec)
-        missed = chat_store.recap(saved_rec, engine.id)
+        missed = "" if compacted else chat_store.recap(saved_rec, engine.id)  # the recap has it all
         if missed:
             text = f"{missed}\n\n{text}"
         reacted = chat_store.reaction_note(saved_rec)  # emoji people added since the last reply
