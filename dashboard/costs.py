@@ -43,7 +43,7 @@ def summarize(ws, records, spaces, days=30, now=None):
     now = time.time() if now is None else now
     since = now - days * 86_400
     per_bot, total = {}, {"cost": 0.0, "tokens": 0, "turns": 0}
-    by = {"by_engine": {}, "by_model": {}, "by_skill": {}, "by_day": {}, "by_job": {}}
+    by = {"by_engine": {}, "by_model": {}, "by_skill": {}, "by_reason": {}, "by_day": {}, "by_job": {}}
     cached = fed = 0
     unmetered = 0
     for rec in records:
@@ -71,6 +71,8 @@ def summarize(ws, records, spaces, days=30, now=None):
             _add(by["by_model"], model, cost, tokens, NOT_RECORDED if model == NONE else None)
             skill = _key(m.get("skill"))
             _add(by["by_skill"], skill, cost, tokens, "no skill" if skill == NONE else None)
+            reason = _key(m.get("reason"))  # why the model was picked (server._pick_model_reason)
+            _add(by["by_reason"], reason, cost, tokens, NOT_RECORDED if reason == NONE else None)
             _add(by["by_day"], time.strftime("%Y-%m-%d", time.localtime(ts)), cost, tokens)
             job = m.get("job")
             if isinstance(job, str) and job:
@@ -78,9 +80,17 @@ def summarize(ws, records, spaces, days=30, now=None):
                 _add(by["by_job"], job, cost, tokens, JOB_LABELS.get(job) or own)
             usage = m.get("usage")
             if isinstance(usage, dict):
-                cached += _num(usage.get("cache_read"), int)
-                fed += sum(_num(usage.get(k), int) for k in ("in", "cache_write", "cache_read"))
+                read = _num(usage.get("cache_read"), int)
+                fed_here = sum(_num(usage.get(k), int) for k in ("in", "cache_write", "cache_read"))
+                cached += read
+                fed += fed_here
+                row = by["by_engine"][engine]
+                row["_cached"] = row.get("_cached", 0) + read
+                row["_fed"] = row.get("_fed", 0) + fed_here
             if m.get("metered") is False:
                 unmetered += 1
+    for row in by["by_engine"].values():  # how much of each engine's input came from cache
+        cached_here, fed_here = row.pop("_cached", 0), row.pop("_fed", 0)
+        row["cache_read_share"] = (cached_here / fed_here) if fed_here else None
     return {"days": days, "bots": per_bot, "total": total, **by,
             "cache_read_share": (cached / fed) if fed else None, "unmetered": unmetered}

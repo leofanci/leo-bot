@@ -414,6 +414,28 @@ class Report(unittest.TestCase):
         hq = costs.summarize("hq", recs, {"acme", "demo"})
         self.assertEqual(hq["total"]["turns"], 3)
 
+    def test_by_reason_groups_replies(self):
+        def r(reason):
+            m = reply("cmo", engine="claude-code", model="haiku", skill=None, cost=0.01, tokens=10, usage=None)
+            return {**m, "reason": reason} if reason else m
+        out = costs.summarize("acme", [thread("acme", [r("default"), r("default"), r("explicit-skill"), r(None)])],
+                              {"acme"})
+        self.assertEqual({k: v["turns"] for k, v in out["by_reason"].items()},
+                         {"default": 2, "explicit-skill": 1, "-": 1})
+        self.assertEqual(out["by_reason"]["-"]["label"], "not recorded")
+
+    def test_engine_rows_carry_cache_share(self):
+        recs = [thread("acme", [
+            reply("cmo", engine="api:demo", model="m", skill=None, cost=0.01, tokens=1000,
+                  usage={"in": 100, "cache_write": 0, "cache_read": 900, "out": 0}),
+            reply("cmo", engine="codex", model="m", skill=None, cost=None, tokens=5, usage=None)])]
+        out = costs.summarize("acme", recs, {"acme"})
+        self.assertAlmostEqual(out["by_engine"]["api:demo"]["cache_read_share"], 0.9)
+        self.assertIsNone(out["by_engine"]["codex"]["cache_read_share"])
+        self.assertNotIn("_fed", out["by_engine"]["api:demo"])
+        self.assertIn("Model picks", JS)
+        self.assertIn("cache_read_share", JS)
+
     def test_old_reply_without_new_fields(self):
         from dashboard import costs
         recs = [thread("acme", [{"role": "assistant", "bot": "cmo", "ts": time.time(), "tokens": 1500, "cost": 0.02}])]

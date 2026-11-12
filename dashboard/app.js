@@ -1228,7 +1228,8 @@ async function renderTeam(){
     const top = (groups, label, unit) => {
       const rows = Object.entries(groups || {}).sort((a, b) => b[1].cost - a[1].cost || b[1].turns - a[1].turns).slice(0, 5);
       return rows.length ? `<div class="ts-group"><h4>${label}</h4>${rows.map(([k, v]) =>
-        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v, unit)}</span></div>`).join("")}</div>` : "";
+        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v, unit)}${typeof v.cache_read_share === "number"
+          ? ` · ${Math.round(v.cache_read_share * 100)}% cached` : ""}</span></div>`).join("")}</div>` : "";
     };
     const days = Object.entries(c.by_day || {}).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 7);
     const lines = [
@@ -1236,7 +1237,7 @@ async function renderTeam(){
       c.unmetered ? `${c.unmetered} ${c.unmetered === 1 ? "reply" : "replies"} on engines that report no cost` : "",
     ].filter(Boolean).map(x => `<small>${x}</small>`).join("");
     return `<details class="team-spend"><summary>Where it went (est.)</summary>
-      ${top(c.by_model, "Models")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}${top(c.by_job, "Background jobs", ["run", "runs"])}
+      ${top(c.by_model, "Models")}${top(c.by_reason, "Model picks")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}${top(c.by_job, "Background jobs", ["run", "runs"])}
       ${days.length ? `<div class="ts-group"><h4>Last 7 days</h4>${days.map(([d, v]) =>
         `<div class="ts-row"><span>${esc(d)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : ""}
       ${lines}</details>`;
