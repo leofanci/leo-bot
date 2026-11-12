@@ -186,7 +186,8 @@ change through a bot's card.
   can search the web, not fetch a page.
 - Every job has its own cap in dollars per 24 hours, and also counts against your
   workspace and owner caps. Generation an Auto job runs (`generate-*`, `revise-post`)
-  counts against it too. A job runs only on an engine that reports cost, and consults
+  counts against it too, and is checked against what the job's run has spent up to that
+  moment. A job runs only on an engine that reports cost, and consults
   only teammates whose engine does too. At most 20 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
   starts again, never once per missed slot. A run stops after 30 minutes, teammates included.

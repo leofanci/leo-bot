@@ -49,15 +49,6 @@ class Tokens(unittest.TestCase):
         with mock.patch("dashboard.apps_relay.time.time", return_value=apps_relay.time.time() + apps_relay.MAX_AGE + 1):
             self.assertIsNone(toks.lookup(t2))
 
-    def test_update_changes_a_live_token_only(self):
-        toks = apps_relay.Tokens()
-        t = toks.mint(dict(CTX))
-        toks.update(t, job_spent=0.4)
-        self.assertEqual((toks.lookup(t)["job_spent"], toks.lookup(t)["bot"]), (0.4, "cos"))
-        toks.revoke(t)
-        toks.update(t, job_spent=1.0)  # a revoked token stays gone
-        self.assertIsNone(toks.lookup(t))
-
 
 class Gate(unittest.TestCase):
     def setUp(self):

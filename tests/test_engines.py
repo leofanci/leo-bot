@@ -114,6 +114,18 @@ class ClaudeDriver(unittest.TestCase):
         self.assertEqual(ev[-1][0], "done")
         self.assertEqual(ev[-1][1]["context"], 3000)
 
+    def test_claude_code_reports_spend_after_each_call(self):
+        def start(n):
+            return json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {
+                "usage": {"input_tokens": n, "cache_read_input_tokens": 100}}}})
+        delta = json.dumps({"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 20}}})
+        result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "usage": {}})
+        bin_ = self.stub(f"cat <<'X'\n{start(1000)}\n{delta}\n{start(3000)}\n{delta}\n{result}\nX\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        spent = [p["usage"] for k, p in sess.ask("hi") if k == "spent"]
+        self.assertEqual([(u["in"], u["cache_read"], u["out"]) for u in spent],
+                         [(1000, 100, 20), (4000, 200, 40)])  # this run so far, call by call
+
     def test_claude_code_compact_starts_new_session_id(self):
         sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
         sess._started = True
@@ -188,13 +200,10 @@ class ClaudeDriver(unittest.TestCase):
         self.assertEqual(env["LEOBOT_ENGINE"], "claude-code")
 
     def test_turn_env_carries_the_thread_and_job(self):
-        with mock.patch.dict(os.environ, {"LEOBOT_JOB": "leak", "LEOBOT_READONLY": "1", "LEOBOT_JOB_SPENT": "9"}):
-            env = ClaudeCodeEngine().turn_env(TurnPolicy(chat="c1", job="j1", job_mode="auto", job_spent=0.25),
-                                              cs.TurnTokens())
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": "leak", "LEOBOT_READONLY": "1"}):
+            env = ClaudeCodeEngine().turn_env(TurnPolicy(chat="c1", job="j1", job_mode="auto"), cs.TurnTokens())
             plain = ClaudeCodeEngine().turn_env(TurnPolicy(chat="c2"), cs.TurnTokens())
         self.assertEqual((env["LEOBOT_CHAT"], env["LEOBOT_JOB"], env["LEOBOT_JOB_MODE"]), ("c1", "j1", "auto"))
-        self.assertEqual(float(env["LEOBOT_JOB_SPENT"]), 0.25)
-        self.assertNotIn("LEOBOT_JOB_SPENT", plain)
         self.assertNotIn("LEOBOT_READONLY", env)
         self.assertEqual(plain["LEOBOT_CHAT"], "c2")
         self.assertNotIn("LEOBOT_JOB", plain)

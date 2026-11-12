@@ -318,10 +318,9 @@ class ApiEngine(Engine):
         finally:
             session._proc = None
 
-    def _done(self, parts, usage, model, context=None):
-        tokens = sum(int(usage.get(k) or 0) for k in (
-            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
-            "prompt_tokens", "completion_tokens"))
+    @staticmethod
+    def _split(usage, model):
+        """(usage split for prices, cost) from this run's raw usage so far."""
         if "prompt_tokens" in usage or "completion_tokens" in usage:  # OpenAI-compatible: cached is inside prompt
             cached = int(usage.get("cached_tokens") or 0)
             split = prices.usage(int(usage.get("prompt_tokens") or 0) - cached, 0, cached,
@@ -330,8 +329,18 @@ class ApiEngine(Engine):
             split = prices.usage(usage.get("input_tokens"), usage.get("cache_creation_input_tokens"),
                                  usage.get("cache_read_input_tokens"), usage.get("output_tokens"))
         cost = usage.get("cost")
-        if cost is None:
-            cost = prices.estimate(model, split)
+        return split, (prices.estimate(model, split) if cost is None else cost)
+
+    def _spent(self, usage, model):
+        """This run's spend so far, before its tools run (a job's cap counts it)."""
+        split, cost = self._split(usage, model)
+        return ("spent", {"usage": split, "cost": cost})
+
+    def _done(self, parts, usage, model, context=None):
+        tokens = sum(int(usage.get(k) or 0) for k in (
+            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
+            "prompt_tokens", "completion_tokens"))
+        split, cost = self._split(usage, model)
         return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost,
                          "usage": split, "context": context})
 
@@ -448,6 +457,7 @@ class ApiEngine(Engine):
                 continue
             if stop != "tool_use":
                 break
+            yield self._spent(usage, model)
             results = []
             for i, block in enumerate(content):
                 if block.get("type") != "tool_use":
@@ -535,6 +545,7 @@ class ApiEngine(Engine):
             self._append(session, [assistant])
             if not tool_calls or finish == "length":
                 break
+            yield self._spent(usage, model)
             results = []
             for i, c in sorted(tool_calls.items()):
                 calls += 1

@@ -139,6 +139,18 @@ class Anthropic(Base):
         self.assertEqual(second[2]["content"][0]["tool_use_id"], "tu_1")
         self.assertEqual(second[2]["content"][0]["content"], "osctl says ok")
 
+    def test_spend_so_far_is_reported_before_the_tools_run(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["get-project"]}), anthropic_text("done")]
+        spent = []
+        for kind, payload in self.session().ask("hi", model="haiku"):
+            if kind == "spent":
+                spent.append((payload, len(self.osctl_calls)))
+        self.assertEqual(len(spent), 1)  # only before a tool round, not after the last call
+        payload, ran = spent[0]
+        self.assertEqual(ran, 0)  # osctl (and any generate run it starts) runs after it
+        self.assertEqual((payload["usage"]["in"], payload["usage"]["out"]), (10, 5))
+        self.assertIn("cost", payload)  # None on this unpriced test model: the server estimates
+
     def test_shared_turn_is_offered_only_osctl(self):
         self.fake.replies = [anthropic_text("x")]
         list(self.session(shared=True, deny_dirs=("/x",)).ask("hi", read_dirs=("/tmp",), edit_dirs=("/tmp",)))
@@ -270,6 +282,15 @@ class OpenAI(Base):
         self.assertEqual(msgs[0], {"role": "system", "content": "RAIL"})
         self.assertEqual(msgs[2]["tool_calls"][0]["function"]["name"], "osctl")
         self.assertEqual(msgs[3], {"role": "tool", "tool_call_id": "c1", "content": "osctl says ok"})
+
+    def test_spend_so_far_before_tools(self):
+        first = openai_tool("osctl", {"args": ["get-project"]}) + [
+            {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}]
+        self.fake.replies = [first, openai_text("done")]
+        spent = [(p, len(self.osctl_calls)) for k, p in self.session().ask("hi", model="haiku") if k == "spent"]
+        self.assertEqual(len(spent), 1)
+        self.assertEqual(spent[0][1], 0)
+        self.assertEqual((spent[0][0]["usage"]["in"], spent[0][0]["usage"]["out"]), (7, 3))
 
     def test_bad_tool_json_goes_back_to_the_model(self):
         bad = openai_tool("osctl", {})

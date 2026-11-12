@@ -72,6 +72,22 @@ class JobTurn(unittest.TestCase):
     def run_job(self, **kw):
         return server.run_job(self.job(**kw), self.srv)
 
+    def test_running_job_spend_is_live_for_its_cap(self):
+        test, seen = self, []
+
+        def ask(sess, text, **kw):
+            seen.append(jobs.live_spent(test.root, "j1"))  # before any call ends
+            yield ("spent", {"usage": None, "cost": 0.3})  # a call ended: a generate run would see it
+            seen.append(jobs.live_spent(test.root, "j1"))
+            yield ("delta", "Updated the draft list.")
+            yield ("done", {"cost": 0.4})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job(mode="auto")
+        self.assertEqual(seen, [0.0, 0.3])
+        self.assertAlmostEqual(out["cost"], 0.4)
+        self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)  # saved with the turn, no longer live
+        self.assertFalse((self.root / jobs.LIVE_RELPATH).exists())
+
     def test_job_turn_is_read_only_and_proposes(self):
         out = self.run_job()
         self.assertEqual(out["status"], "waiting", out)

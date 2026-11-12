@@ -86,16 +86,16 @@ class Metered(unittest.TestCase):
 
     def test_job_cap_counts_the_turn_spent_so_far(self):
         job = self.auto_job(cap=1.0)
-        env = {"LEOBOT_JOB": job["id"], "LEOBOT_JOB_SPENT": "0.95"}
         job_ledger.append(self.root, {"ts": time.time(), "ws": "acme", "by": "owner", "job": "generate",
                                       "for_job": job["id"], "cost": 0.06})
-        with mock.patch.dict(os.environ, env), self.assertRaises(generate.JobError):
+        jobs.set_live(self.root, job["id"], 0.95)  # the job's turn, its run in flight included
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": job["id"]}), self.assertRaises(generate.JobError):
             generate.run_claude("prompt", "text")  # 0.06 saved + 0.95 not saved yet
         self.assertEqual(self.engine.calls, [])
-        for junk in ("abc", "-5"):  # a bad value never lifts the cap check or breaks the run
-            with mock.patch.dict(os.environ, {"LEOBOT_JOB": job["id"], "LEOBOT_JOB_SPENT": junk}):
-                generate.run_claude("prompt", "text")
-        self.assertEqual(len(self.engine.calls), 2)
+        jobs.set_live(self.root, "other123", 0.95)  # another job's turn never counts here
+        with mock.patch.dict(os.environ, {"LEOBOT_JOB": job["id"]}):
+            generate.run_claude("prompt", "text")
+        self.assertEqual(len(self.engine.calls), 1)
 
     def test_unknown_job_id_is_not_a_cap(self):
         with mock.patch.dict(os.environ, {"LEOBOT_JOB": "missing1"}):

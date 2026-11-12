@@ -96,9 +96,6 @@ def env_for(ctx):
             env[var] = ctx[key]
     if env.get("LEOBOT_JOB") and isinstance(ctx.get("job_mode"), str):
         env["LEOBOT_JOB_MODE"] = ctx["job_mode"]
-    spent = ctx.get("job_spent")
-    if env.get("LEOBOT_JOB") and type(spent) in (int, float) and spent > 0:
-        env["LEOBOT_JOB_SPENT"] = f"{spent:.6f}"
     return env
 
 

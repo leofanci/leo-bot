@@ -48,7 +48,6 @@ class ChatSession:
         # Set by the server on a scheduled job's turn: osctl runs that job's mode.
         self.job_id = None
         self.job_mode = None
-        self.job_spent = 0.0  # what this job's turn spent before the next run (its cap counts it)
         # Once a thread has read an app, its context holds that data: web tools
         # stay off for good there (no "read mail, leak it via a search" path).
         self.apps_used = False
@@ -93,8 +92,7 @@ class ChatSession:
                           workspace=self.workspace or "hq", read_dirs=read_dirs, edit_dirs=edit_dirs,
                           deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used),
-                          chat=self.session_id, job=self.job_id, job_mode=self.job_mode,
-                          job_spent=float(self.job_spent or 0))
+                          chat=self.session_id, job=self.job_id, job_mode=self.job_mode)
 
     def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
                   web_domains=(), apps_port=None, os_port=None):
