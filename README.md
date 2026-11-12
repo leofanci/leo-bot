@@ -158,6 +158,23 @@ under the bot's Memory, or let a bot save one with `osctl remember --type ...`.
   runs from a thread invited people can see, and counts against your caps. Its cost
   shows on the Team screen under "Background jobs".
 
+### Scheduled jobs
+
+A job is one bot's recurring work: a skill plus a message, on a schedule such as
+`every 6h`, `daily 09:00` or `mon,thu 09:00` (local time). Ask a bot for one: it proposes
+the job with an approval line, and on your yes saves it with `osctl create-job`
+(`update-job`, `delete-job` and `list-jobs` change or list them).
+
+- Each run is its own thread in the bot's DM, titled `Job: <name>`. It can read and look
+  things up but not save: a save it wants comes back as an approval in that thread, and
+  approving it there saves it as a normal turn.
+- Every job has its own cap in dollars per 24 hours, and also counts against your
+  workspace and owner caps. A job runs only on an engine that reports cost.
+- One job runs at a time. A run that was missed while Leo Bot was off runs once when it
+  starts again, never once per missed slot. A run stops after 30 minutes.
+- Each morning from 08:00 a digest thread in HQ's #general lists what ran, what it cost,
+  which memory lists were tidied and what waits for your approval. It costs nothing.
+
 ### Spending caps
 
 Every reply records its tokens, model, skill and estimated cost; the Team screen shows
@@ -173,6 +190,8 @@ message never starts the engine and says when room frees up. At 80% of a cap you
 one heads-up a day. Costs are estimates from list prices when an engine reports none;
 engines that report neither cost nor a known model are counted on the Team screen but
 not toward caps. Turns on your own Mac (runners) never count. `0` turns a cap off.
+Generation runs (plans, briefs, revisions) and memory tidy-ups count too, and show on the
+Team screen under "Background jobs".
 
 ### Dashboard (macOS app)
 

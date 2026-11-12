@@ -11,8 +11,9 @@ from core import bots, rooms
 
 NONE = "-"
 NOT_RECORDED = "not recorded"
-# Background runs with no thread (job_ledger.py), by job id.
-JOB_LABELS = {"memory-consolidate": "Memory tidy-up"}
+# Background runs with no thread (job_ledger.py), by job id. A scheduled job's runs are
+# threads of their own (core/jobs.py): their label is the thread title, "Job: <name>".
+JOB_LABELS = {"memory-consolidate": "Memory tidy-up", "generate": "Generation"}
 
 
 def _num(value, kind=float):
@@ -73,7 +74,8 @@ def summarize(ws, records, spaces, days=30, now=None):
             _add(by["by_day"], time.strftime("%Y-%m-%d", time.localtime(ts)), cost, tokens)
             job = m.get("job")
             if isinstance(job, str) and job:
-                _add(by["by_job"], job, cost, tokens, JOB_LABELS.get(job))
+                own = rec.get("title") if rec.get("job") == job else None
+                _add(by["by_job"], job, cost, tokens, JOB_LABELS.get(job) or own)
             usage = m.get("usage")
             if isinstance(usage, dict):
                 cached += _num(usage.get("cache_read"), int)

@@ -7,6 +7,8 @@ A cap is dollars per rolling 24 hours, read from the environment on every check:
 - LEOBOT_WORKSPACE_DAILY_CAP: every turn in one workspace. Off unless set.
 - LEOBOT_OWNER_DAILY_CAP: the owner's own turns. Off unless set.
 For the last two, unset, empty, 0, negative or not a number means no cap.
+A scheduled job also has its own cap (core/jobs.py), passed as `job=(job_id, dollars)`:
+it counts the spend rows that job wrote.
 """
 import json
 import math
@@ -47,6 +49,8 @@ def cap_value(kind):
 def _counts(kind, key, row):
     if kind == "workspace":
         return bool(key) and row.get("ws") == key
+    if kind == "job":
+        return bool(key) and row.get("job") == key
     return row.get("by") == key  # owner and person caps: whose turn it was
 
 
@@ -85,10 +89,10 @@ def _money(value):
     return f"${value:.2f}" if value >= 0.01 else f"${value:.4f}".rstrip("0")
 
 
-def _caps(ws, by):
-    """(kind, key, cap) for each cap set for this turn: the person's allowance, then the
-    workspace, then the owner."""
-    out = []
+def _caps(ws, by, job=None):
+    """(kind, key, cap) for each cap set for this turn: the job's own, the person's
+    allowance, then the workspace, then the owner."""
+    out = [("job", job[0], float(job[1]))] if job else []
     if by and by != OWNER and cap_value("person"):
         out.append(("person", by, cap_value("person")))
     if ws and cap_value("workspace"):
@@ -98,16 +102,20 @@ def _caps(ws, by):
     return out
 
 
-def refusal(ws, by, now=None, pending=0.0, records=None):
+def refusal(ws, by, now=None, pending=0.0, records=None, job=None):
     """Text that stops a run when a cap is reached, else None. `pending` is what this
-    message already spent but has not saved yet (the turn is saved when it ends)."""
+    message already spent but has not saved yet (the turn is saved when it ends).
+    `job` = (job id, dollars per 24 hours) for a scheduled job's turn."""
     now = time.time() if now is None else now
-    caps = _caps(ws, by)
+    caps = _caps(ws, by, job)
     for (kind, key, cap), (total, oldest) in zip(caps, _spent_many(caps, now, records)):
         if total + (pending or 0) < cap:
             continue
         if kind == "person":
             return PERSON_TEXT
+        if kind == "job":
+            return (f"Paused: this job reached its cap ({_money(cap)} per 24 hours). "
+                    "It runs again once there is room.")
         at = time.localtime((oldest if oldest is not None else now) + WINDOW)
         frees = ("from " if at[:3] == time.localtime(now)[:3] else "tomorrow at ") + time.strftime("%H:%M", at)
         who = "this workspace reached its" if kind == "workspace" else "you reached your"
@@ -128,12 +136,12 @@ def _load_notices(root):
     return data if isinstance(data, dict) else {}
 
 
-def near_notice(ws, by, root, now=None, pending=0.0, records=None):
+def near_notice(ws, by, root, now=None, pending=0.0, records=None, job=None):
     """A heads-up when a cap is at 80% or more, at most once per cap per 24 hours.
     The last notice time is kept in team/cap_notices.json, so a restart does not repeat it.
     `pending` = this message's spend, not saved yet."""
     now = time.time() if now is None else now
-    caps = _caps(ws, by)
+    caps = _caps(ws, by, job)
     for (kind, key, cap), (total, _) in zip(caps, _spent_many(caps, now, records)):
         share = (total + (pending or 0)) / cap
         if share < NEAR:
@@ -153,6 +161,6 @@ def near_notice(ws, by, root, now=None, pending=0.0, records=None):
             bots._atomic_write(_notices_path(root), json.dumps(seen, indent=2) + "\n")
         pct = min(100, int(share * 100))
         what = {"workspace": "this workspace's daily cap", "owner": "your daily cap",
-                "person": "your daily allowance"}[kind]
+                "person": "your daily allowance", "job": "this job's daily cap"}[kind]
         return f"Heads up: {pct}% of {what} is used."
     return None

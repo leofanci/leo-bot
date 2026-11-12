@@ -16,6 +16,7 @@ import binascii
 import fcntl
 import hmac
 import html
+import io
 import json
 import itertools
 import os
@@ -57,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, job_ledger, memory_consolidate, spend  # noqa: E402
+from dashboard import costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1307,6 +1308,83 @@ def _spend_records():
     return itertools.chain(chat_store.records(), job_ledger.records(ROOT))
 
 
+JOB_NOTE = (
+    "## Scheduled job\n"
+    "This turn is the scheduled job \"{name}\". Nobody is watching it live. You can read and look "
+    "things up; every osctl write is refused. If something should be saved, say what and where, and end "
+    "with one APPROVAL: line. The owner approves it in this thread.")
+JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
+                 "Pick another engine for @{bot} in Settings, Engines.")
+_JOB_RUN = {"live": None}  # the job turn in flight (one at a time): stop_job reaches it
+
+
+def _job_problem(job, projects):
+    """Why `job` cannot run any more (its workspace, bot or skill went away), else None."""
+    ws = job.get("workspace") or bots.HQ
+    project = None
+    if ws != bots.HQ:
+        project = next((p for p in projects if p.get("slug") == ws), None)
+        if project is None:
+            return f"the workspace {ws} is gone"
+    team = bots.team(ROOT, ws, project)
+    b = team.get(job.get("bot"))
+    if not b or not b.active:
+        return f"@{job.get('bot')} is not active in {ws}"
+    if job.get("skill") not in team.skills_of(b.id):
+        return f"/{job.get('skill')} is not one of @{b.id}'s skills"
+    return None
+
+
+def run_job(job, srv):
+    """One run of a scheduled job (core/jobs.py) through the normal ask path, on a handler
+    with no socket: `@bot /skill message` in the bot's DM, a fresh read-only thread.
+    Returns {"status", "chat", "cost", "detail"}; job_runner.py writes the job's state."""
+    problem = _job_problem(job, db.tree())
+    if problem:
+        return {"status": "refused", "chat": None, "cost": 0.0, "detail": problem}
+    live = {}
+    _JOB_RUN["live"] = live
+    h = Handler.__new__(Handler)
+    h.wfile = io.BytesIO()  # the SSE stream nobody reads: the thread is saved as usual
+    h.client_address = ("job", 0)
+    h.server = srv
+    h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+    ws, bot = job.get("workspace") or bots.HQ, job["bot"]
+    body = {"messages": [{"role": "user", "content": f"@{bot} /{job['skill']} {job['message']}"}],
+            "room_id": f"{ws}/dm-{bot}"}
+    try:
+        h._handle_ask(body, viewer={"kind": "job", "job": job, "live": live})
+    finally:
+        _JOB_RUN["live"] = None
+    chat = live.get("chat")
+    rec = chat_store.load(chat) if chat else None
+    events = [ln[6:] for ln in h.wfile.getvalue().decode(errors="replace").splitlines()
+              if ln.startswith("data: {")]
+    detail = ""
+    for raw in events:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev.get("error"), str):
+            detail = ev["error"]
+        elif not rec and isinstance(ev.get("delta"), str):
+            detail += ev["delta"]  # a zero-model reply (cap, engine): why it did not run
+    return {"status": live.get("status") or "failed", "chat": chat if rec else None,
+            "cost": float((rec or {}).get("cost") or 0), "detail": detail[:300]}
+
+
+def stop_job():
+    """JOB_TURN_SECONDS passed: stop the job turn in flight (the lead and any teammate)."""
+    live = _JOB_RUN["live"]
+    for sess in ((live or {}).get("sess"), _EXTRA.get("job")):
+        if sess is not None:
+            try:
+                sess.close()
+            except Exception:  # noqa: BLE001
+                traceback.print_exc()
+
+
 def _costs(ws, projects, days=30):
     """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
     return costs.summarize(ws, _spend_records(), {w["id"] for w in _workspaces(projects)}, days)
@@ -2361,8 +2439,11 @@ class Handler(BaseHTTPRequestHandler):
     # -- AI chat (drives a persistent guard-railed ChatSession via SSE) --- #
     def _handle_ask(self, body, viewer=OWNER):
         """One chat turn. An invited person (`viewer`) may post only into a room
-        and thread they can see; a thread mid-reply refuses a second turn."""
-        if viewer.get("kind") != "owner":
+        and thread they can see; a thread mid-reply refuses a second turn. A scheduled job
+        (`run_job`) speaks as the owner in its own fresh thread."""
+        if viewer.get("kind") not in ("owner", "person", "job"):
+            return self._send(403, {"error": "forbidden"})
+        if viewer.get("kind") == "person":
             projects = db.tree()
             ws = _known_ws(rooms.split_id(body.get("room_id"))[0], projects)
             if not ws or ws not in viewer["ws"]:
@@ -2421,12 +2502,26 @@ class Handler(BaseHTTPRequestHandler):
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
+        # A scheduled job: its own fresh thread every run, read-only; `live` tells run_job
+        # how it went. The owner's open thread (_CHAT) is never touched.
+        job = viewer.get("job") if viewer.get("kind") == "job" else None
+        live = viewer.setdefault("live", {}) if job else {}
+        job_cap = (job["id"], job["cap"]) if job else None
+        if job:
+            chat_id = None
+            live["status"] = "refused"  # until the model turn starts: every early return
         # An invited person's allowance holds on every engine, their own Mac included.
         allowance = spend.refusal(None, person["id"], records=_spend_records) if person else None
         if allowance:
             return self._sse_message(allowance)
-        sess = (person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
-                if person else get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked))
+        if job:
+            sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+            sess.readonly = True  # osctl refuses every write: saves come back as an APPROVAL line
+            live["sess"] = sess
+        elif person:
+            sess = person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
+        else:
+            sess = get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked)
         if chat_id:
             answer = body.get("approval")
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
@@ -2446,7 +2541,7 @@ class Handler(BaseHTTPRequestHandler):
         may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
         # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
         # change files in its edit folders; an untagged one reads and searches only.
-        may_edit = _may_edit(explicit, room, user_msg, team, sess)
+        may_edit = False if job else _may_edit(explicit, room, user_msg, team, sess)
         # An app request is not a content write: decided before the write gate, and
         # its only approval path is the held app action (no skill, no APPROVAL line).
         # A thread an invited person can see never reaches the owner's connected apps.
@@ -2463,11 +2558,13 @@ class Handler(BaseHTTPRequestHandler):
         sender = person["id"] if person else "owner"
         try:
             engine = (RunnerEngine(sender, person["name"] if person else None)
-                      if not app_turn and runners.HUB.online(sender)
+                      if not app_turn and not job and runners.HUB.online(sender)
                       else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared,
                                                 apps=bool(app_turn)))
         except EngineRefused as e:
             return self._sse_message(str(e))
+        if job and not engine_registry.metered(engine):
+            return self._sse_message(JOB_UNMETERED.format(label=engine.label, bot=bot_id))
         sess.engine = engine
         locked = shared or engine.kind == "runner"
         sess.shared = locked
@@ -2518,8 +2615,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._sse_message(message)
         # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
         if engine.kind != "runner":  # a person's own Mac is never capped
-            capped = spend.refusal(ws, sender, records=_spend_records)
+            capped = spend.refusal(ws, sender, records=_spend_records, job=job_cap)
             if capped:
+                live["status"] = "capped"
                 return self._sse_message(capped)
         tokensave_task = re.sub(
             r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
@@ -2564,6 +2662,8 @@ class Handler(BaseHTTPRequestHandler):
             workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
         elif engine.full_disk:
             workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
+        if job:
+            workspace = "\n\n".join(x for x in (workspace, JOB_NOTE.format(name=job["name"])) if x)
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -2637,7 +2737,7 @@ class Handler(BaseHTTPRequestHandler):
             if not metered_turn:
                 return True
             text = spend.refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs),
-                                 records=_spend_records)
+                                 records=_spend_records, job=job_cap)
             if text:
                 cap_hit.append(text)
                 notice(text)
@@ -2668,7 +2768,7 @@ class Handler(BaseHTTPRequestHandler):
             if cost is None and not runner:
                 cost = prices.estimate(model_, usage)
             msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage,
-                       skill=skill_, reason=reason_,
+                       skill=skill_, reason=reason_, job=job["id"] if job else None,
                        engine=eng.id if eng else None, engine_label=eng.label if eng else None,
                        account=(person["id"] if person and eng and eng.kind == "runner"
                                 else "workspace" if person else "owner"))
@@ -2710,7 +2810,7 @@ class Handler(BaseHTTPRequestHandler):
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, c_skill, shared=shared,
                                       folders_block=linked_workspace_prompt(project_slug, c_rows))
-            slot = person["id"] if person else "sess"
+            slot = person["id"] if person else ("job" if job else "sess")
             _EXTRA[slot] = c
             c_kw = {"read_dirs": c_read, "edit_dirs": ()}
             if locked or c.engine.full_disk:  # its own read-only token, revoked when it answers
@@ -2737,10 +2837,13 @@ class Handler(BaseHTTPRequestHandler):
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": False, "apps_used": apps_used,
+            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(job), "apps_used": apps_used,
                                                          "engine": engine.id, "runner_owner": sender,
                                                          "shared": shared}),
                        "os_port": self.server.server_address[1]}
+        if job:
+            live["status"] = "done"
+            live["chat"] = getattr(sess, "session_id", None)
         try:
             # Tell the client which saved chat this turn belongs to (a scope
             # change or first turn may have started a new one).
@@ -2804,6 +2907,8 @@ class Handler(BaseHTTPRequestHandler):
                                     bot=bot_id, summary=summary)
                 msgs[i]["approval"] = rec["id"]
                 emit({"approval": rec, "msg": i})
+                if job:
+                    live["status"] = "waiting"
             for i, m in enumerate(msgs):  # every bot of the turn may react to the message
                 clean, got = _extract_reacts(m["content"])
                 if got:
@@ -2817,11 +2922,14 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # client stopped/closed; still save what streamed so far
         except _RunFailed:
-            pass  # the error is already on screen; save what streamed so far
+            live["status"] = "failed"  # the error is already on screen; save what streamed so far
         except Exception:  # noqa: BLE001
+            live["status"] = "failed"
             traceback.print_exc()
             emit({"error": "internal error"})
         finally:
+            if job and cap_hit and live.get("status") == "done":
+                live["status"] = "capped"
             if apps_kw.get("apps_token"):
                 apps_relay.TOKENS.revoke(apps_kw["apps_token"])
                 _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)
@@ -2830,7 +2938,7 @@ class Handler(BaseHTTPRequestHandler):
             if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
                 try:
                     near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
-                                             records=_spend_records)
+                                             records=_spend_records, job=job_cap)
                     if near:
                         notice(near)
                 except (BrokenPipeError, ConnectionResetError):
@@ -2850,7 +2958,9 @@ class Handler(BaseHTTPRequestHandler):
                         extra=msgs[1:],  # record_turn drops the empty ones
                         asked_at=turn_started,
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
-                        shared=shared, reactions=reacts, ws=ws)
+                        shared=shared, reactions=reacts, ws=ws,
+                        job=job["id"] if job else None,
+                        title=f"Job: {job['name']}" if job else None)
                 except (OSError, ValueError):
                     traceback.print_exc()
                 else:
@@ -3723,6 +3833,9 @@ def main():
         raise
     write_token_file()
     _start_update_checker()
+    # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
+    job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
+                      threads=chat_store.records, post=chat_store.post_note).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

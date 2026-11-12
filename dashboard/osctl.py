@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 from dashboard import chat_session, db, fileops  # noqa: E402
-from core import bots, memory, paths  # noqa: E402
+from core import bots, jobs, memory, paths  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -55,7 +55,9 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # A shared thread (os_relay: an invited person can see it). It reads the team memory,
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
-_SHARED_BLOCKED = {"remember", "research-signal"}  # research-signal sends text off the machine
+_SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
+                   # Scheduled jobs: the owner's own threads only, never a job turn (read-only).
+                   "create-job", "update-job", "delete-job", "list-jobs"}
 # A thread invited people can see runs an ALLOWLIST: a new command is refused there until
 # someone adds it here (tests/test_case_variants.py fails on any command in neither set).
 _SHARED_ALLOWED = frozenset({
@@ -138,7 +140,7 @@ def _guard(args, ws):
     """Refuse anything that reaches outside workspace `ws`."""
     if args.cmd in _BLOCKED_IN_WORKSPACE:
         raise fileops.ActionError(f"{args.cmd} is only available in HQ")
-    if args.cmd in ("remember", "get-memory") and not args.project:
+    if args.cmd in ("remember", "get-memory", "create-job") and not args.project:
         args.project = ws  # a company's bot keeps memory in its company, never in HQ
     if args.cmd in ("create-milestone", "mark-done") and not args.entity:
         args.entity = ws  # same for its milestones and activities
@@ -359,6 +361,92 @@ def _build_parser():
         return {"entries": memory.recall(a.bot, a.query, _workspace(), root=bots.ROOT,
                                          shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
     p.set_defaults(_run=_recall)
+
+    # -- scheduled jobs (core/jobs.py): the owner's threads only ------------ #
+    def _job_target(ws, bot, skill):
+        """Refuse a job its workspace, bot, skill or engine could not run."""
+        project = None
+        if ws != bots.HQ:
+            project = next((p for p in db.tree() if p.get("slug") == ws), None)
+            if project is None:
+                raise fileops.ActionError(f"no workspace {ws}")
+        team = bots.team(bots.ROOT, ws, project)
+        b = team.get(bot)
+        if not b or not b.active:
+            raise fileops.ActionError(f"@{bot} is not an active bot in this workspace")
+        if skill not in team.skills_of(bot):
+            raise fileops.ActionError(f"/{skill} is not one of @{bot}'s skills")
+        from dashboard.engines import registry
+        from dashboard.engines.base import EngineRefused
+        try:
+            engine = registry.pick(bots.ROOT, ws, bot)
+        except EngineRefused as e:
+            raise fileops.ActionError(str(e)) from None
+        if not registry.metered(engine):
+            raise fileops.ActionError(f"Jobs need an engine that reports cost; {engine.label} does not. "
+                                      "Pick another engine for this bot in Settings, Engines.")
+
+    def _own_job(job_id):
+        job = jobs.get(bots.ROOT, job_id)
+        ws = _workspace()
+        if job is None or (ws and job.get("workspace") != ws):
+            raise fileops.ActionError(f"no job {job_id}")
+        return job
+
+    def _job_out(job):
+        try:
+            due = jobs.next_due(job) if job.get("enabled") else None
+        except ValueError:
+            due = None
+        return {**job, "next_due": due}
+
+    p = sub.add_parser("create-job", help="Schedule a bot's skill (read-only runs, writes wait for approval)")
+    p.add_argument("--bot", required=True)
+    p.add_argument("--skill", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--message", required=True)
+    p.add_argument("--schedule", required=True, help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
+    p.add_argument("--cap", required=True, help="dollars per 24 hours for this job, above 0")
+    p.add_argument("--project", help="workspace slug; omit for HQ")
+
+    def _create_job(a):
+        ws = a.project or bots.HQ
+        _job_target(ws, a.bot, a.skill)
+        try:
+            return {"job": _job_out(jobs.create(bots.ROOT, ws=ws, bot=a.bot, skill=a.skill, name=a.name,
+                                                message=a.message, schedule=a.schedule, cap=a.cap))}
+        except ValueError as e:
+            raise fileops.ActionError(str(e)) from None
+    p.set_defaults(_run=_create_job)
+
+    p = sub.add_parser("update-job", help="Change a scheduled job")
+    p.add_argument("--job", required=True)
+    p.add_argument("--name")
+    p.add_argument("--message")
+    p.add_argument("--schedule")
+    p.add_argument("--cap")
+    p.add_argument("--skill")
+    p.add_argument("--enabled", choices=("true", "false"))
+
+    def _update_job(a):
+        job = _own_job(a.job)
+        if a.skill or a.enabled == "true":
+            _job_target(job["workspace"], job["bot"], a.skill or job["skill"])
+        fields = {"name": a.name, "message": a.message, "schedule": a.schedule, "cap": a.cap,
+                  "skill": a.skill, "enabled": None if a.enabled is None else a.enabled == "true"}
+        try:
+            return {"job": _job_out(jobs.update(bots.ROOT, job["id"], **fields))}
+        except (ValueError, LookupError) as e:
+            raise fileops.ActionError(str(e)) from None
+    p.set_defaults(_run=_update_job)
+
+    p = sub.add_parser("delete-job", help="Remove a scheduled job (its threads stay)")
+    p.add_argument("--job", required=True)
+    p.set_defaults(_run=lambda a: {"deleted": jobs.delete(bots.ROOT, _own_job(a.job)["id"])})
+
+    p = sub.add_parser("list-jobs", help="Scheduled jobs (this workspace's, or every one from HQ)")
+    p.set_defaults(_run=lambda a: {"jobs": [_job_out(j) for j in jobs.load(bots.ROOT)
+                                            if not _workspace() or j.get("workspace") == _workspace()]})
 
     p = sub.add_parser("create-experiment", help="Create strategy/experiments/<stem>.json")
     p.add_argument("--project", required=True)
@@ -953,8 +1041,9 @@ def main(argv=None):
     _owners.cache_clear()
     try:
         if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
-            raise fileops.ActionError("read-only: you were consulted. Tell your teammate "
-                                      "what to save; they will do it.")
+            raise fileops.ActionError("read-only here: you can look things up but not save. Say what "
+                                      "should be saved: a teammate saves it, or, in a scheduled job, end "
+                                      "with one APPROVAL: line.")
         if os.environ.get("LEOBOT_WORKSPACE") and getattr(args, "local_folder", None) is not None:
             # A linked folder becomes --add-dir on that company's turns: only the
             # user links one, in the dashboard. Any bot (HQ too) is refused.

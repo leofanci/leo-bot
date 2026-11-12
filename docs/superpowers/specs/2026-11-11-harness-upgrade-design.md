@@ -169,6 +169,26 @@ record with `trigger` in place of `schedule`. Out of scope until the schedule pa
 restart, stops at its cap, refuses a non-read osctl command, and leaves writes as pending
 approvals.
 
+**As built** (plan `docs/superpowers/plans/2026-11-11-scheduled-jobs.md`):
+
+- Schedule text is `every <N>m|h|d` (at least an hour) or `<days> HH:MM`, days `daily` or a
+  list of `mon`..`sun`. A daily time is a weekly time on every day.
+- The job cap is dollars per rolling 24 hours for that job, like the other caps, checked before
+  each run of a job turn. The record also has a `name`; the thread is titled `Job: <name>`.
+- `skill` is required and must be one of the bot's skills: the run is the tagged message
+  `@<bot> /<skill> <message>` in the bot's DM, so its `APPROVAL:` line gets buttons and an
+  approval in the thread continues as a normal owner turn.
+- A job turn runs in its own fresh session, never the owner's open thread. A job whose bot,
+  skill or workspace went away, or whose engine stopped reporting cost, is `refused` with no
+  engine call and stays enabled.
+- Statuses: `running`, `done`, `waiting` (an approval is pending), `capped`, `failed`,
+  `timeout`, `refused`, `interrupted` (a stop cut the run off; it waits for its next due time).
+- The digest posts once a day from 08:00 local, covering the time since the last one (at most
+  7 days), as a thread in HQ's #general. Nothing to report means no thread.
+- `generate.py` runs on `complete_metered`, checks the owner and workspace caps first and
+  writes a ledger row with `job: "generate"`. osctl does not know who asked, so a run from a
+  shared thread counts as the owner's.
+
 ## Phase 4: leaner, more accurate turns
 
 Each item ships only if the Phase 1 data shows it matters.

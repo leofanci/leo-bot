@@ -39,6 +39,25 @@ class SpendCap(unittest.TestCase):
             self.assertEqual(spend.cap_value("person"), 0.0)
 
 
+class JobCap(unittest.TestCase):
+    def test_job_cap_counts_only_that_job(self):
+        from dashboard import spend
+        now = time.time()
+        rows = [{"ts": now, "by": "owner", "cost": 0.6, "ws": "acme", "job": "j1"},
+                {"ts": now, "by": "owner", "cost": 0.9, "ws": "acme", "job": "j2"},
+                {"ts": now - 200_000, "by": "owner", "cost": 9.0, "ws": "acme", "job": "j3"}]
+        records = lambda: iter([{"spend": rows}])  # noqa: E731
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("this job reached its cap", spend.refusal("acme", "owner", records=records, job=("j1", 0.5)))
+            self.assertIsNone(spend.refusal("acme", "owner", records=records, job=("j3", 0.5)))
+            self.assertIsNone(spend.refusal("acme", "owner", records=records, job=("j1", 1.0)))
+            self.assertIn("this job", spend.refusal("acme", "owner", records=records, pending=0.5, job=("j3", 0.5)))
+            self.assertIsNone(spend.refusal("acme", "owner", records=records))
+            with tempfile.TemporaryDirectory() as d:
+                self.assertIn("this job's daily cap",
+                              spend.near_notice("acme", "owner", d, records=records, job=("j1", 0.7)))
+
+
 if __name__ == "__main__":
     unittest.main()
 

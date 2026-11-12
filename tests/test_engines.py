@@ -126,5 +126,19 @@ class ClaudeDriver(unittest.TestCase):
         self.assertFalse(row["ok"])
 
 
+class Metered(unittest.TestCase):
+    def test_metered(self):
+        from dashboard.engines import registry
+        from dashboard.engines.api import ApiEngine
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        from dashboard.engines.codex import CodexEngine
+        self.assertTrue(registry.metered(ClaudeCodeEngine()))
+        priced = {"id": "x", "models": {"fast": "claude-haiku-5-5", "strong": "claude-sonnet-5-5"}}
+        self.assertTrue(registry.metered(ApiEngine(priced, "/nonexistent")))
+        half = {"id": "y", "models": {"fast": "claude-haiku-5-5", "strong": "some-other-model"}}
+        self.assertFalse(registry.metered(ApiEngine(half, "/nonexistent")))
+        self.assertFalse(registry.metered(CodexEngine()))
+
+
 if __name__ == "__main__":
     unittest.main()
