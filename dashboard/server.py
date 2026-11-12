@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -622,16 +622,46 @@ def _route_dm(team, user_msg, session, bot):
     return bot, None, False, None
 
 
-def _route_bot(team, user_msg, session, default_bot=bots.ROOT_BOT, dm=None):
-    """Pick (bot, skill, explicit, handoff_from) for one turn.
+class Route(tuple):
+    """(bot, skill, explicit, handoff_from), plus `picked`: the skill whose wording moved an
+    untagged turn to its owner (None otherwise). Compares equal to the plain 4-tuple."""
+
+    def __new__(cls, items, picked=None):
+        self = super().__new__(cls, items)
+        self.picked = picked
+        return self
+
+
+def _picked_by_wording(team, user_msg, candidate, members=None):
+    """An untagged message that clearly matches another bot's skill goes to that bot: its
+    owner, when active and (in a topic room) a member. The skill stays inactive, so the write
+    gate and the cheap-model rule apply as for any untagged turn."""
+    hit = _suggest_skill(user_msg)
+    owner = team.owner(hit) if hit else None
+    b = team.get(owner) if owner else None
+    if (not b or owner == candidate or not b.active
+            or (members is not None and owner not in members)):
+        return None
+    return Route((owner, None, False, None), picked=hit)
+
+
+def _route_bot(team, user_msg, session, default_bot=bots.ROOT_BOT, dm=None, members=None):
+    """Pick a Route (bot, skill, explicit, handoff_from; .picked) for one turn.
 
     explicit /skill → its owner bot. @bot → that bot; the skill its wording
     matches (if another bot owns it, hand off to that owner); a write with no
     match uses the bot's default skill; a single-skill bot always uses it.
     Untagged → whoever spoke last in this chat, else the room's
-    lead (`default_bot`); no skill: the write gate and Haiku policy stay
-    exactly as before. A DM passes `dm` (its bot) and is routed by _route_dm.
+    lead (`default_bot`), unless the wording clearly matches another bot's skill
+    (that bot answers, `picked` names the skill; `members` limits it in a topic room);
+    no skill: the write gate and Haiku policy stay exactly as before. A DM passes
+    `dm` (its bot) and is routed by _route_dm.
     """
+    route = _route_bot_plain(team, user_msg, session, default_bot, dm, members)
+    return route if isinstance(route, Route) else Route(route)
+
+
+def _route_bot_plain(team, user_msg, session, default_bot, dm, members):
     if dm:
         return _route_dm(team, user_msg, session, dm)
     tagged_skill = _explicit_skill(user_msg)
@@ -656,9 +686,9 @@ def _route_bot(team, user_msg, session, default_bot=bots.ROOT_BOT, dm=None):
     if _continuation_allowed(session, user_msg):
         return team.owner(session._last_skill), None, False, None
     last_bot = team.get(getattr(session, "_last_bot", None) or "")
-    if last_bot and last_bot.active:
-        return last_bot.id, None, False, None
-    return team.resolve(default_bot), None, False, None
+    candidate = last_bot.id if last_bot and last_bot.active else team.resolve(default_bot)
+    return (_picked_by_wording(team, user_msg, candidate, members)
+            or (candidate, None, False, None))
 
 
 def _route_skill(text):
@@ -2531,10 +2561,12 @@ class Handler(BaseHTTPRequestHandler):
         # An invited person speaks, or one can read this thread: osctl relay only.
         shared = bool(person) or _shared_room(ws, room)
         sess.shared = shared
-        bot_id, skill, routed, handoff_from = _route_bot(
+        route = _route_bot(
             team, user_msg, sess,
             default_bot=(room or {}).get("lead") or bots.ROOT_BOT,
-            dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None)
+            dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None,
+            members=list(room.get("members") or ()) if room and room.get("kind") == "topic" else None)
+        bot_id, skill, routed, handoff_from = route
         explicit = skill if routed else None
         suggest = _suggest_skill(user_msg) if not explicit else None
         # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
@@ -2664,6 +2696,17 @@ class Handler(BaseHTTPRequestHandler):
             workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
         if job:
             workspace = "\n\n".join(x for x in (workspace, JOB_NOTE.format(name=job["name"])) if x)
+        saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
+        # A thread whose last call on this engine passed LEOBOT_COMPACT_TOKENS starts a fresh
+        # session here: the snapshot, the bot card and the recap of its visible messages go in
+        # again, the long transcript does not. A job turn is fresh already.
+        compacted = False
+        if not job and compaction.due(saved_rec, engine.id) and callable(getattr(engine, "compact", None)):
+            compacted = engine.compact(sess)
+            if compacted:
+                sess.pending_recap = chat_store.recap(saved_rec) or None
+                self.log_message("chat compact engine=%s context=%d", engine.id,
+                                 compaction.last_context(saved_rec, engine.id))
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -2680,9 +2723,8 @@ class Handler(BaseHTTPRequestHandler):
             suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
         )
         # What crosses between engines: the thread's visible messages, never a transcript.
-        saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
         sess.recap = chat_store.recap(saved_rec)
-        missed = chat_store.recap(saved_rec, engine.id)
+        missed = "" if compacted else chat_store.recap(saved_rec, engine.id)  # the recap has it all
         if missed:
             text = f"{missed}\n\n{text}"
         reacted = chat_store.reaction_note(saved_rec)  # emoji people added since the last reply
@@ -2718,7 +2760,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # This turn's replies in order: the lead, then any teammates it pulled in
         # (or that were co-tagged), then the lead's follow-up.
-        msgs = [{"bot": bot_id, "content": ""}]
+        msgs = [{"bot": bot_id, "content": "", **({"picked": route.picked} if route.picked else {})}]
         reacts = []  # (bot_id, emoji) the bots of this turn put on the user's message
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
@@ -2767,7 +2809,9 @@ class Handler(BaseHTTPRequestHandler):
             runner = bool(eng and eng.kind == "runner")
             if cost is None and not runner:
                 cost = prices.estimate(model_, usage)
-            msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage,
+            context = fin.get("context")  # a runner's comes from another Mac: a plain int or nothing
+            context = context if type(context) is int and 0 <= context < 10**8 else None
+            msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage, context=context,
                        skill=skill_, reason=reason_, job=job["id"] if job else None,
                        engine=eng.id if eng else None, engine_label=eng.label if eng else None,
                        account=(person["id"] if person and eng and eng.kind == "runner"
@@ -2852,7 +2896,8 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"chat_id": sess.session_id,
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
-            emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
+            emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from,
+                          "picked": route.picked}})
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_kw = {"skill_": skill, "reason_": reason}
             lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)

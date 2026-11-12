@@ -1,9 +1,11 @@
 """The engine layer: interface rules and the claude-code driver behind ChatSession."""
+import json
 import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import dashboard.chat_session as cs
 from dashboard.engines.base import Engine, EngineRefused, SessionLost, TurnPolicy
@@ -99,6 +101,71 @@ class ClaudeDriver(unittest.TestCase):
         with self.assertRaises(SessionLost):
             list(sess.engine.turn(sess, "hi", sess._policy(), "haiku", cs.TurnTokens()))
         self.assertFalse(sess._started)
+
+    def test_claude_code_done_carries_last_context(self):
+        def start(n):
+            return json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {
+                "usage": {"input_tokens": n, "cache_read_input_tokens": 0}}}})
+        result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "usage": {}})
+        bin_ = self.stub(f"cat <<'X'\n{start(1000)}\n{start(3000)}\n{result}\nX\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        ev = list(sess.ask("hi"))
+        self.assertNotIn("context", [k for k, _ in ev])
+        self.assertEqual(ev[-1][0], "done")
+        self.assertEqual(ev[-1][1]["context"], 3000)
+
+    def test_claude_code_compact_starts_new_session_id(self):
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess._started = True
+        self.assertIn(sess.session_id, sess._base_cmd())
+        self.assertTrue(sess.engine.compact(sess))
+        cmd = sess._base_cmd()
+        new = sess.engine_state["claude-code"]["session"]
+        self.assertNotEqual(new, sess.session_id)
+        self.assertEqual(cmd[cmd.index("--session-id") + 1], new)
+        self.assertNotIn("--resume", cmd)
+        self.assertNotIn(sess.session_id, cmd)
+        sess._started = True
+        cmd = sess._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], new)
+
+    def test_reopened_chat_resumes_the_compacted_session(self):
+        from dashboard import chat_store
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess.engine.compact(sess)
+        new = sess.engine_state["claude-code"]["session"]
+        sess._started = True
+        with mock.patch.object(chat_store, "CHATS_DIR", Path(self.tmp.name) / "chats"):
+            chat_store.record_turn(sess, None, "hi", "ok", bot="cos")
+            back = cs.ChatSession.restore(self.tmp.name, "R", chat_store.load(sess.session_id))
+        cmd = back._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], new)
+
+    def test_claude_session_id_must_look_like_one(self):
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess._started = True
+        sess.engine_state["claude-code"] = {"session": "--dangerously-skip-permissions"}
+        cmd = sess._base_cmd()
+        self.assertEqual(cmd[cmd.index("--resume") + 1], sess.session_id)
+        self.assertNotIn("--dangerously-skip-permissions", cmd)
+
+    def test_runner_and_api_never_compact(self):
+        from dashboard.engines.api import ApiEngine
+        from dashboard.engines.runner import RunnerEngine
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        for eng in (RunnerEngine("owner", hub=object()),
+                    ApiEngine({"id": "demo", "format": "anthropic", "base_url": "http://127.0.0.1:9"}, self.tmp.name)):
+            sess.engine_state = {eng.id: {"cut": 3}}
+            self.assertFalse(eng.compact(sess))
+            self.assertEqual(sess.engine_state, {eng.id: {"cut": 3}})
+
+    def test_base_compact_drops_the_engines_state(self):
+        class Plain(Engine):
+            id = "plain"
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R")
+        sess.engine_state = {"plain": {"session": "s1"}, "other": {"session": "s2"}}
+        self.assertTrue(Plain().compact(sess))
+        self.assertEqual(sess.engine_state, {"other": {"session": "s2"}})
 
     def test_other_failures_stay_errors(self):
         bin_ = self.stub('echo "boom" >&2\nexit 1\n')

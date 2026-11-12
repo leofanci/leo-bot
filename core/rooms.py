@@ -17,7 +17,8 @@ workspace. DM threads belong to the person who started them (chat `by`).
 A thread an invited person can see is "shared": its bot turns get no file,
 shell or app tools, only the osctl relay (dashboard/os_relay.py).
 
-A room costs nothing by itself: untagged messages go to ONE bot (the lead),
+A room costs nothing by itself: untagged messages go to ONE bot (the one that spoke
+last, else the lead; or a member whose skill the wording clearly matches), other
 members answer only when tagged, and the persona's team list shrinks to them.
 """
 import json

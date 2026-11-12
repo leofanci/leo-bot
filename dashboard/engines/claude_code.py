@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 from core import folders, paths
@@ -42,6 +43,10 @@ def parse_event(obj):
             block = ev.get("content_block", {})
             if block.get("type") == "tool_use":
                 return ("tool", block.get("name", ""))
+        elif et == "message_start":  # one model call: its whole prompt, for compaction
+            usage = (ev.get("message") or {}).get("usage") or {}
+            return ("context", sum(int(usage.get(k) or 0) for k in (
+                "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")))
     elif t == "result":
         usage = obj.get("usage") or {}
         tokens = sum(int(usage.get(k) or 0) for k in (
@@ -225,6 +230,7 @@ ESCALATED_MODEL = "sonnet"
 
 ENGINE_ID = "claude-code"
 _LOST_RE = re.compile(r"no conversation found", re.I)
+_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _failure_text(text):
@@ -248,6 +254,17 @@ class ClaudeCodeEngine(Engine):
 
     def is_fresh(self, session):
         return not session._started
+
+    def session_of(self, session):
+        """Claude Code's own session id for this thread: the chat id, until a compaction gave
+        it a new one. Only a UUID ever reaches the command line."""
+        sid = (session.engine_state.get(self.id) or {}).get("session")
+        return sid if isinstance(sid, str) and _UUID_RE.fullmatch(sid) else session.session_id
+
+    def compact(self, session):
+        session._started = False
+        session.engine_state[self.id] = {"session": str(uuid.uuid4())}
+        return True
 
     def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
@@ -318,10 +335,8 @@ class ClaudeCodeEngine(Engine):
                "--permission-mode", "default"]
         for d in read_dirs:
             cmd += ["--add-dir", str(d)]
-        if session._started:
-            cmd += ["--resume", session.session_id]
-        else:
-            cmd += ["--session-id", session.session_id]
+        sid = self.session_of(session)
+        cmd += ["--resume", sid] if session._started else ["--session-id", sid]
         return cmd
 
     def turn_env(self, policy, tokens):
@@ -354,7 +369,7 @@ class ClaudeCodeEngine(Engine):
             return
         session._started = True
         session._proc = proc
-        said = ""
+        said, context = "", None
         stderr = drain(proc.stderr)
         try:
             proc.stdin.write(text + "\n")
@@ -371,8 +386,12 @@ class ClaudeCodeEngine(Engine):
                 except json.JSONDecodeError:
                     continue
                 kind, payload = parse_event(obj)
+                if kind == "context":  # the last call's size rides on the done event
+                    context = payload
+                    continue
                 if kind == "done":
                     said = payload.get("result") or said
+                    payload["context"] = context
                 if kind:
                     yield (kind, payload)
             proc.wait()

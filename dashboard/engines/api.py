@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from dashboard import compaction
 from dashboard.engines import prices
 from dashboard.engines.api_tools import ToolBox
 from dashboard.engines.base import Engine
@@ -164,6 +165,9 @@ class ApiEngine(Engine):
             out.append(m)
         return out
 
+    def compact(self, session):
+        return False  # _trim cuts the resent history at the same threshold
+
     def _history_path(self, session):
         return self.root / "chats" / f"{session.session_id}.{self.provider['id']}.jsonl"
 
@@ -192,21 +196,35 @@ class ApiEngine(Engine):
             for m in messages:
                 f.write(json.dumps(m, ensure_ascii=False) + "\n")
 
-    def _trim(self, messages):
-        """Keep the first message (the snapshot) and the newest ones that fit, at a turn start."""
-        if sum(len(json.dumps(m)) for m in messages) <= HISTORY_CHARS or len(messages) < 3:
+    def _trim(self, messages, state=None):
+        """The first message (the snapshot), then the stored history from a cut on.
+
+        The cut is an index into the stored history, kept in this thread's engine `state`, so
+        what is resent starts the same way turn after turn and stays in the prompt cache. It
+        moves only when the part after it passes the budget (LEOBOT_COMPACT_TOKENS, or
+        HISTORY_CHARS when that is off), and then on to half the budget, at a message that
+        starts a turn: never between a tool call and its result."""
+        state = {} if state is None else state
+        limit = compaction.threshold()
+        budget = limit * compaction.CHARS_PER_TOKEN if limit else HISTORY_CHARS
+        sizes = [len(json.dumps(m)) for m in messages]
+        cut = state.get("cut")
+        cut = cut if type(cut) is int and 0 < cut < len(messages) else 0
+
+        def size_from(i):
+            return sizes[0] + sum(sizes[max(i, 1):])
+
+        if len(messages) >= 3 and size_from(cut) > budget:
+            cut, size = len(messages) - 1, size_from(len(messages) - 1)
+            while cut > 1 and size + sizes[cut - 1] <= budget // 2:
+                cut -= 1
+                size += sizes[cut]
+            while cut < len(messages) - 1 and not self._starts_turn(messages[cut]):
+                cut += 1
+            state["cut"] = cut
+        if not cut:
             return messages
-        kept, size = [], len(json.dumps(messages[0]))
-        for m in reversed(messages[1:]):
-            size += len(json.dumps(m))
-            if size > HISTORY_CHARS:
-                break
-            kept.append(m)
-        kept.reverse()
-        kept = kept or [messages[-1]]  # the message being answered always goes
-        while len(kept) > 1 and not self._starts_turn(kept[0]):  # never split a tool call from its result
-            kept.pop(0)
-        trimmed = [self._no_thinking(m) for m in [messages[0], self._bridge()] + kept]
+        trimmed = [self._no_thinking(m) for m in [messages[0], self._bridge()] + messages[cut:]]
         return [m for m in trimmed if m.get("content") != []]
 
     @staticmethod
@@ -298,7 +316,7 @@ class ApiEngine(Engine):
         finally:
             session._proc = None
 
-    def _done(self, parts, usage, model):
+    def _done(self, parts, usage, model, context=None):
         tokens = sum(int(usage.get(k) or 0) for k in (
             "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
             "prompt_tokens", "completion_tokens"))
@@ -313,9 +331,28 @@ class ApiEngine(Engine):
         if cost is None:
             cost = prices.estimate(model, split)
         return ("done", {"result": "".join(parts), "subtype": "success", "tokens": tokens, "cost": cost,
-                         "usage": split})
+                         "usage": split, "context": context})
 
     # ---- Anthropic Messages ------------------------------------------- #
+    @staticmethod
+    def _cached(rail, messages):
+        """(system, messages) for one request, with two prompt-cache breakpoints: the system
+        prompt (the same in every thread) and the newest message, so the next request in this
+        turn, or the next turn, reads everything before it from cache. A copy: the stored
+        history never carries a breakpoint."""
+        mark = {"type": "ephemeral"}
+        system = [{"type": "text", "text": rail, "cache_control": mark}]
+        # Text is sent as blocks everywhere, so a message reads the same in the request that
+        # marks it and in every later one (the cache matches the prefix exactly).
+        out = [{**m, "content": [{"type": "text", "text": m["content"]}]}
+               if isinstance(m.get("content"), str) and m["content"] else m for m in messages]
+        last = out[-1].get("content") if out else None
+        if isinstance(last, list) and last and isinstance(last[-1], dict):
+            blocks = [dict(b) if isinstance(b, dict) else b for b in last]
+            blocks[-1]["cache_control"] = mark
+            out[-1] = {**out[-1], "content": blocks}
+        return system, out
+
     def _anthropic_tools(self, box, policy, model):
         tools = [{"name": s["name"], "description": s["description"], "input_schema": s["input_schema"]}
                  for s in box.specs]
@@ -329,27 +366,31 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._trim(self._repair(self._load(session)))
+        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id]))
         tools = self._anthropic_tools(box, policy, model)
-        parts, usage, calls = [], {}, 0
+        parts, usage, calls, context = [], {}, 0, None
         while True:
             if cancel.stopped:
                 return
             if time.time() - started > TURN_TIMEOUT:
                 yield ("error", f"This turn on {self.label} took too long, so it was stopped.")
                 return
+            system, request = self._cached(session.rail, messages)
             resp = self._open("/v1/messages", {
-                "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": session.rail,
-                "messages": messages, **({"tools": tools} if tools else {})}, cancel)
+                "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": system,
+                "messages": request, **({"tools": tools} if tools else {})}, cancel)
             cancel.resp = resp
             content, stop = [], None
             with resp:
                 for ev in _sse(resp):
                     et = ev.get("type")
                     if et == "message_start":
-                        for k, v in ((ev.get("message") or {}).get("usage") or {}).items():
+                        start = (ev.get("message") or {}).get("usage") or {}
+                        for k, v in start.items():
                             if isinstance(v, int) and k != "output_tokens":  # message_delta has the real count
                                 usage[k] = usage.get(k, 0) + v
+                        context = sum(v for k, v in start.items() if isinstance(v, int) and k in (
+                            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                     elif et == "content_block_start":
                         block = dict(ev.get("content_block") or {})
                         content.append(block)
@@ -419,7 +460,7 @@ class ApiEngine(Engine):
             self._append(session, [user])
             if calls > MAX_TOOL_CALLS + 1:
                 break
-        yield self._done(parts, usage, model)
+        yield self._done(parts, usage, model, context)
 
     # ---- OpenAI-compatible Chat Completions ---------------------------- #
     def _openai_tools(self, box):
@@ -430,9 +471,9 @@ class ApiEngine(Engine):
         started = time.time()
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
-        messages = self._trim(self._repair(self._load(session)))
+        messages = self._repair(self._trim(self._load(session), session.engine_state[self.id]))
         tools = self._openai_tools(box)
-        parts, usage, calls = [], {}, 0
+        parts, usage, calls, context = [], {}, 0, None
         while True:
             if cancel.stopped:
                 return
@@ -453,6 +494,7 @@ class ApiEngine(Engine):
                     if isinstance(u, dict):
                         for k in ("prompt_tokens", "completion_tokens"):
                             usage[k] = usage.get(k, 0) + int(u.get(k) or 0)
+                        context = int(u.get("prompt_tokens") or 0)  # this request's whole prompt
                         details = u.get("prompt_tokens_details")
                         if isinstance(details, dict):
                             usage["cached_tokens"] = (usage.get("cached_tokens", 0)
@@ -505,7 +547,7 @@ class ApiEngine(Engine):
             self._append(session, results)
             if calls > MAX_TOOL_CALLS + 1:
                 break
-        yield self._done(parts, usage, model)
+        yield self._done(parts, usage, model, context)
 
     # ---- one-shot jobs ------------------------------------------------- #
     def _one_shot(self, prompt, stdin_text, model):

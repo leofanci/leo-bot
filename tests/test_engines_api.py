@@ -123,7 +123,7 @@ class Anthropic(Base):
         req = self.fake.requests[0]
         self.assertEqual(req["path"], "/v1/messages")
         self.assertEqual(req["body"]["model"], "m-strong")
-        self.assertEqual(req["body"]["system"], "RAIL")
+        self.assertEqual(req["body"]["system"][0]["text"], "RAIL")
         self.assertEqual(req["headers"]["x-api-key"], "sk-secret-1234")
 
     def test_tool_loop_runs_osctl_bound_to_the_workspace_and_keeps_thinking_blocks(self):
@@ -172,7 +172,7 @@ class Anthropic(Base):
         list(self.session(session_id=s.session_id).ask("two"))
         msgs = self.fake.requests[1]["body"]["messages"]
         self.assertEqual([m["role"] for m in msgs], ["user", "assistant", "user"])
-        self.assertEqual(msgs[0]["content"], "one")
+        self.assertEqual(msgs[0]["content"], [{"type": "text", "text": "one"}])
         from dashboard import chat_store
         with mock.patch.object(chat_store, "CHATS_DIR", self.root / "chats"):
             chat_store.delete(s.session_id)
@@ -214,7 +214,7 @@ class Anthropic(Base):
         msgs = [{"role": "user", "content": "SNAPSHOT"}, {"role": "assistant", "content": big},
                 {"role": "user", "content": big}, {"role": "assistant", "content": [{"type": "thinking", "thinking": "t"}, {"type": "tool_use"}]},
                 {"role": "user", "content": [{"type": "tool_result"}]}, {"role": "user", "content": "now"}]
-        out = self.engine._trim(msgs)
+        out = self.engine._trim(msgs, {})
         self.assertEqual(out[0]["content"], "SNAPSHOT")
         self.assertEqual(out[-1]["content"], "now")
         self.assertEqual(out[2]["role"], "user")
@@ -226,6 +226,7 @@ class Anthropic(Base):
         self.assertNotIn("tools", body)
         self.assertEqual(body["system"], "PROMPT")
         self.assertEqual(body["messages"][0]["content"], "INPUT")
+
 
     def test_complete_metered_reads_usage(self):
         self.fake.replies = [anthropic_text("tidy")]
@@ -676,6 +677,134 @@ class Recap(unittest.TestCase):
     def test_lost_session_gets_everything(self):
         rec = {"engines": {"claude-code": {"seen": 1}}, "messages": [{"role": "user", "content": "a"}]}
         self.assertIn("a", self.store.recap(rec))
+
+
+
+
+EPHEMERAL = {"type": "ephemeral"}
+
+
+def _strip_marks(value):
+    """A request body without its cache_control keys (what the cache compares is the rest)."""
+    if isinstance(value, dict):
+        return {k: _strip_marks(v) for k, v in value.items() if k != "cache_control"}
+    if isinstance(value, list):
+        return [_strip_marks(v) for v in value]
+    return value
+
+
+def _marks(value):
+    if isinstance(value, dict):
+        return ("cache_control" in value) + sum(_marks(v) for v in value.values())
+    if isinstance(value, list):
+        return sum(_marks(v) for v in value)
+    return 0
+
+
+class CacheBreakpoints(Base):
+    def test_anthropic_request_marks_system_and_last_message(self):
+        self.fake.replies = [anthropic_text("hello")]
+        list(self.session().ask("hi"))
+        body = self.fake.requests[0]["body"]
+        self.assertEqual(body["system"], [{"type": "text", "text": "RAIL", "cache_control": EPHEMERAL}])
+        self.assertEqual(body["messages"][-1]["content"][-1],
+                         {"type": "text", "text": "hi", "cache_control": EPHEMERAL})
+        self.assertEqual(_marks(body), 2)
+
+    def test_tool_loop_moves_breakpoint_to_tool_result(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done")]
+        list(self.session().ask("hi"))
+        msgs = self.fake.requests[1]["body"]["messages"]
+        self.assertEqual(msgs[-1]["content"][-1]["type"], "tool_result")
+        self.assertEqual(msgs[-1]["content"][-1]["cache_control"], EPHEMERAL)
+        self.assertEqual(_marks(msgs[:-1]), 0)
+        self.assertEqual(_marks(self.fake.requests[1]["body"]), 2)
+
+
+    def test_done_context_is_last_request(self):
+        first = anthropic_tool("osctl", {"args": ["x"]})
+        first[0] = {"type": "message_start", "message": {"usage": {"input_tokens": 10}}}
+        second = anthropic_text("done")
+        second[0] = {"type": "message_start", "message": {"usage": {"input_tokens": 40, "cache_read_input_tokens": 500}}}
+        self.fake.replies = [first, second]
+        ev = list(self.session().ask("hi"))
+        self.assertEqual(ev[-1][1]["context"], 540)
+
+    def test_cached_prefix_is_stable_across_turns(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done"), anthropic_text("two")]
+        s = self.session()
+        list(s.ask("one"))
+        list(s.ask("again"))
+        last_of_first = _strip_marks(self.fake.requests[1]["body"]["messages"])
+        first_of_second = _strip_marks(self.fake.requests[2]["body"]["messages"])
+        self.assertEqual(first_of_second[:len(last_of_first)], last_of_first)
+        self.assertEqual(self.fake.requests[2]["body"]["system"], self.fake.requests[1]["body"]["system"])
+
+    def test_history_file_never_stores_cache_control(self):
+        self.fake.replies = [anthropic_tool("osctl", {"args": ["x"]}), anthropic_text("done")]
+        list(self.session().ask("hi"))
+        stored = "".join(p.read_text() for p in (self.root / "chats").glob("*.jsonl"))
+        self.assertIn("tool_result", stored)
+        self.assertNotIn("cache_control", stored)
+
+    def test_cached_does_not_change_its_input(self):
+        msgs = [{"role": "user", "content": [{"type": "text", "text": "a"}]}]
+        before = json.dumps(msgs)
+        api.ApiEngine._cached("R", msgs)
+        self.assertEqual(json.dumps(msgs), before)
+
+
+class OpenAICache(Base):
+    fmt = "openai"
+
+    def test_openai_request_unchanged(self):
+        self.fake.replies = [openai_text("x")]
+        list(self.session().ask("hi"))
+        body = self.fake.requests[0]["body"]
+        self.assertEqual(_marks(body), 0)
+        self.assertEqual(body["messages"][0], {"role": "system", "content": "RAIL"})
+
+
+class StableTrim(Base):
+    """The resent history is cut at a point kept in the engine state, so the cached prefix
+    stays the same turn after turn."""
+
+    def turn(self, s, text):
+        self.fake.replies = [anthropic_text("r" * 20)]
+        list(s.ask(text))
+        return self.fake.requests[-1]["body"]["messages"]
+
+    def test_trim_cut_is_stable_between_turns(self):
+        s = self.session()
+        sent, cuts = [], []
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "300"}):  # 1200 characters
+            for i in range(16):
+                sent.append(self.turn(s, f"question {i}"))
+                cuts.append(s.engine_state[self.engine.id].get("cut", 0))
+        moved = next(i for i in range(1, len(cuts)) if cuts[i] != cuts[i - 1])
+        self.assertEqual(cuts[moved + 1], cuts[moved])  # just moved: room for more turns
+        self.assertEqual(sent[moved][1]["content"][0]["text"], api.ApiEngine._bridge()["content"])
+        before, after = _strip_marks(sent[moved]), _strip_marks(sent[moved + 1])
+        self.assertEqual(after[:len(before)], before)  # the next turn's prefix is this whole request
+
+    def test_trim_cut_starts_a_turn(self):
+        tool = [{"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "osctl", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "x" * 150}]}]
+        msgs = ([{"role": "user", "content": "SNAP"}, {"role": "assistant", "content": "a" * 150}]
+                + tool + [{"role": "assistant", "content": "b"}, {"role": "user", "content": "now"}])
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "100"}):
+            state = {}
+            out = self.engine._trim(msgs, state)
+        self.assertEqual(out[0]["content"], "SNAP")
+        self.assertEqual(out[1], api.ApiEngine._bridge())
+        self.assertTrue(api.ApiEngine._starts_turn(out[2]))
+        self.assertTrue(api.ApiEngine._starts_turn(msgs[state["cut"]]))
+
+    def test_trim_off_keeps_history_chars(self):
+        msgs = [{"role": "user", "content": "SNAP"}] + [
+            {"role": r, "content": "x" * 50_000} for r in ("assistant", "user") * 3]
+        with mock.patch.dict(os.environ, {"LEOBOT_COMPACT_TOKENS": "0"}):
+            self.assertEqual(self.engine._trim(msgs, {}), msgs)
 
 
 if __name__ == "__main__":

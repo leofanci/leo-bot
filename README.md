@@ -191,7 +191,22 @@ one heads-up a day. Costs are estimates from list prices when an engine reports 
 engines that report neither cost nor a known model are counted on the Team screen but
 not toward caps. Turns on your own Mac (runners) never count. `0` turns a cap off.
 Generation runs (plans, briefs, revisions) and memory tidy-ups count too, and show on the
-Team screen under "Background jobs".
+Team screen under "Background jobs". The same view shows why each model was picked and how
+much of each engine's input was read from cache.
+
+### Long threads
+
+A thread does not grow without limit. Each reply records how large its prompt was. Once
+a reply passes `LEOBOT_COMPACT_TOKENS` (default 60000; `0` turns it off), the next turn
+starts a fresh session that gets the thread's visible messages as a recap, plus the
+project snapshot and the bot's card, instead of the whole transcript. On an API engine the
+same limit trims the history it sends, at a point that stays put across turns so the
+provider's prompt cache keeps working. Anthropic API calls mark the system prompt and the
+newest message for caching.
+
+An untagged message goes to the bot that spoke last, unless its wording clearly matches
+another bot's skill (for example a pricing question): then that bot answers, marked
+"picked for" that skill. The skill is not switched on, so a write still needs a tag.
 
 ### Dashboard (macOS app)
 

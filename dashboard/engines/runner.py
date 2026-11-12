@@ -31,6 +31,9 @@ class RunnerEngine(Engine):
         self.label = f"{name}'s Mac" if name else "your Mac"
         self.hub = hub or runners.HUB
 
+    def compact(self, session):
+        return False  # the session lives on that Mac, keyed by the chat id
+
     def turn(self, session, text, policy, model, tokens):
         session.engine_state.setdefault(self.id, {})
         job = {"chat": session.session_id, "rail": session.rail, "text": text, "model": model,

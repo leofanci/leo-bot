@@ -1228,7 +1228,8 @@ async function renderTeam(){
     const top = (groups, label, unit) => {
       const rows = Object.entries(groups || {}).sort((a, b) => b[1].cost - a[1].cost || b[1].turns - a[1].turns).slice(0, 5);
       return rows.length ? `<div class="ts-group"><h4>${label}</h4>${rows.map(([k, v]) =>
-        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v, unit)}</span></div>`).join("")}</div>` : "";
+        `<div class="ts-row"><span>${esc(v.label || k)}</span><span>${tsLine(v, unit)}${typeof v.cache_read_share === "number"
+          ? ` · ${Math.round(v.cache_read_share * 100)}% cached` : ""}</span></div>`).join("")}</div>` : "";
     };
     const days = Object.entries(c.by_day || {}).sort((a, b) => a[0] < b[0] ? 1 : -1).slice(0, 7);
     const lines = [
@@ -1236,7 +1237,7 @@ async function renderTeam(){
       c.unmetered ? `${c.unmetered} ${c.unmetered === 1 ? "reply" : "replies"} on engines that report no cost` : "",
     ].filter(Boolean).map(x => `<small>${x}</small>`).join("");
     return `<details class="team-spend"><summary>Where it went (est.)</summary>
-      ${top(c.by_model, "Models")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}${top(c.by_job, "Background jobs", ["run", "runs"])}
+      ${top(c.by_model, "Models")}${top(c.by_reason, "Model picks")}${top(c.by_skill, "Skills")}${top(c.by_engine, "Engines")}${top(c.by_job, "Background jobs", ["run", "runs"])}
       ${days.length ? `<div class="ts-group"><h4>Last 7 days</h4>${days.map(([d, v]) =>
         `<div class="ts-row"><span>${esc(d)}</span><span>${tsLine(v)}</span></div>`).join("")}</div>` : ""}
       ${lines}</details>`;
@@ -4350,7 +4351,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach((m, i) => {
       history.push(m);
-      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name).closest(".msg");
+      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name, m.picked).closest(".msg");
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
       // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
@@ -4740,13 +4741,15 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function clock(ts){ return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""; }
 
   // askedBy: a teammate pulled this bot in ("asked by @cmo"); "user" = co-tagged.
-  function botLabel(div, bot, handoffFrom, askedBy){
+  // picked: an untagged message went to this bot because its wording matched one of its skills.
+  function botLabel(div, bot, handoffFrom, askedBy, picked){
     const b = typeof bot === "string" ? botById(bot) : bot;
     if (!b) return;
     const from = handoffFrom ? botById(handoffFrom) : null;
     const asker = askedBy && askedBy !== "user" ? botById(askedBy) : null;
     paintSender(div, { avatar: botAvatar(b), name: b.name,
-      note: asker ? `asked by @${asker.handle}` : from ? `from @${from.handle}` : "" });
+      note: asker ? `asked by @${asker.handle}` : from ? `from @${from.handle}`
+        : typeof picked === "string" && picked ? `picked for ${picked}` : "" });
     div.classList.toggle("consulted", !!asker);
   }
 
@@ -4818,7 +4821,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const name = who === "ceo" ? "Owner" : (byName || "Teammate");
     return { initial: name[0].toUpperCase(), name };
   }
-  function addMsg(role, text, bot, askedBy, ts, by, byName){
+  function addMsg(role, text, bot, askedBy, ts, by, byName, picked){
     const div = document.createElement("div");
     div.className = "msg " + (role === "user" ? "me" : "ai");
     div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>
@@ -4828,7 +4831,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const who = senderOf(by, byName);
       paintSender(div, { avatar: `<span class="av">${esc(who.initial)}</span>`, name: who.name });
     }
-    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", null, askedBy);
+    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", null, askedBy, picked);
     const bubble = div.querySelector(".b");
     setMsgContent(bubble, role, text);
     stream.appendChild(div);
@@ -5295,7 +5298,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
               setActiveChat(obj.chat_id, obj.title, obj.project);
               stored = true;
             }
-            if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from); turnMeta.bot = obj.bot.id; }
+            if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from, null, obj.bot.picked); turnMeta.bot = obj.bot.id; }
             if (obj.msg_start) { startReply(obj.msg_start); pendingBreak = false; }
             if (obj.deliverables) { const r = replyAt(obj.msg); r.meta.deliverables = obj.deliverables; r.bubble.closest(".msg").hidden = false; }
             if (obj.usage) {
