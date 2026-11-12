@@ -79,6 +79,22 @@ class Tick(Base):
         self.assertEqual(self.runner(run_turn).tick(), [early["id"], late["id"]])
         self.assertEqual(order, [early["id"], late["id"]])
 
+    def test_job_changed_during_an_earlier_run_uses_its_latest_state(self):
+        first = self.make(name="first", ago=9 * 3600)
+        off = self.make(name="off")
+        edited = self.make(name="edited", ago=8 * 3600)
+        seen = []
+
+        def run_turn(j):
+            seen.append((j["name"], j["message"]))
+            if j["id"] == first["id"]:  # the owner changes the others while this one runs
+                jobs.update(self.root, off["id"], enabled=False)
+                jobs.update(self.root, edited["id"], message="new words")
+            return {"status": "done"}
+        self.assertEqual(self.runner(run_turn).tick(), [first["id"], edited["id"]])
+        self.assertEqual(seen, [("first", "review"), ("edited", "new words")])
+        self.assertIsNone(jobs.get(self.root, off["id"])["last_run"])
+
     def test_restart_marks_interrupted_and_does_not_rerun(self):
         job = self.make()
         jobs.mark_start(self.root, job["id"], self.clock() - 600)

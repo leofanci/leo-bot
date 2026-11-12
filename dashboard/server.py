@@ -1345,6 +1345,8 @@ JOB_NOTE = (
     "with one APPROVAL: line. The owner approves it in this thread.")
 JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
                  "Pick another engine for @{bot} in Settings, Engines.")
+JOB_MATE_UNMETERED = ("@{bot}'s engine ({label}) does not report cost, so a scheduled job "
+                      "cannot consult it. Pick another engine for @{bot} in Settings, Engines.")
 _JOB_RUN = {"live": None}  # the job turn in flight (one at a time): stop_job reaches it
 
 
@@ -1405,8 +1407,11 @@ def run_job(job, srv):
 
 
 def stop_job():
-    """JOB_TURN_SECONDS passed: stop the job turn in flight (the lead and any teammate)."""
+    """JOB_TURN_SECONDS passed: stop the job turn in flight (the lead and any teammate). No
+    teammate or follow-up run starts after it."""
     live = _JOB_RUN["live"]
+    if live is not None:
+        live["stopped"] = True
     for sess in ((live or {}).get("sess"), _EXTRA.get("job")):
         if sess is not None:
             try:
@@ -2764,7 +2769,9 @@ class Handler(BaseHTTPRequestHandler):
         reacts = []  # (bot_id, emoji) the bots of this turn put on the user's message
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
-        web_domains = chat_session.user_web_domains(user_msg)
+        # Only hosts the owner or a person typed become fetch grants. A job's message was
+        # written by a bot (osctl create-job), so it grants none: WebSearch only.
+        web_domains = () if job else chat_session.user_web_domains(user_msg)
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
 
@@ -2775,7 +2782,10 @@ class Handler(BaseHTTPRequestHandler):
             emit({"notice": text, "msg": i})
 
         def may_run():
-            """Before a teammate or follow-up run: the caps, counting what ran so far."""
+            """Before a teammate or follow-up run: the caps, counting what ran so far. A job
+            turn its timeout stopped runs nothing more."""
+            if live.get("stopped"):
+                return False
             if not metered_turn:
                 return True
             text = spend.refusal(ws, sender, pending=sum(m.get("cost") or 0 for m in msgs),
@@ -2837,6 +2847,9 @@ class Handler(BaseHTTPRequestHandler):
             except EngineRefused as e:  # this teammate's own engine can't run here
                 emit({"error": str(e)})
                 raise _RunFailed from None
+            if job and not engine_registry.metered(c.engine):  # its spend would escape the job's cap
+                emit({"error": JOB_MATE_UNMETERED.format(bot=b2, label=c.engine.label)})
+                raise _RunFailed
             c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
             # Consulted: its own layered folders, read-only, and its own walls.
             c_rows, c_read, _ = _turn_folders(ws, room, b2, locked=locked, may_edit=False,
@@ -2929,6 +2942,8 @@ class Handler(BaseHTTPRequestHandler):
                         and (r.get("created") or 0) >= turn_started]
                 if held:
                     emit({"app_actions": held, "msg": last})
+                    if job:
+                        live["status"] = "waiting"
             if files_before is not None:
                 handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
                 if handed:

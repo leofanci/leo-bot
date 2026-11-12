@@ -226,7 +226,7 @@ def _connect(root):
         row = conn.execute("SELECT sql FROM sqlite_master WHERE name = 'entries'").fetchone()
         if row and _TOKENIZE not in (row[0] or ""):  # an index from an older tokenizer: rebuilt
             with conn:
-                conn.execute("DROP TABLE entries")
+                conn.execute("DROP TABLE IF EXISTS entries")  # another process may have rebuilt it
                 conn.execute("DROP TABLE IF EXISTS files")
         for stmt in _SCHEMA:
             conn.execute(stmt)

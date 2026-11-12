@@ -25,6 +25,7 @@ from core import bots, memory
 
 RELPATH = Path("team") / "jobs.json"
 MIN_EVERY = 3600
+MAX_JOBS = 20  # across workspaces: a runaway bot cannot pile up recurring spend
 NAME_MAX = 60
 MESSAGE_MAX = 2000
 STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted"}
@@ -161,7 +162,12 @@ def create(root, *, ws, bot, skill, name, message, schedule, cap, now=None):
            "schedule": _clean("schedule", schedule), "cap": _clean("cap", cap), "enabled": True,
            "created": time.time() if now is None else now, "last_run": None, "last_status": None,
            "last_chat": None}
-    _change(root, lambda data: data["jobs"].append(job))
+
+    def fn(data):
+        if len(data["jobs"]) >= MAX_JOBS:
+            raise ValueError(f"at most {MAX_JOBS} jobs: delete one first")
+        data["jobs"].append(job)
+    _change(root, fn)
     return dict(job)
 
 
@@ -194,11 +200,16 @@ def delete(root, job_id):
 
 
 def mark_start(root, job_id, now):
-    """Written before the run: a restart then waits for the next due time."""
+    """Written before the run: a restart then waits for the next due time. Returns the job as
+    saved now (an edit made since the tick read the file counts), or None when it was turned
+    off meanwhile (not marked). LookupError when it was deleted."""
     def fn(data):
         job = _find(data, job_id)
+        if not job.get("enabled"):
+            return None
         job.update(last_run=now, last_status="running")
-    _change(root, fn)
+        return dict(job)
+    return _change(root, fn)
 
 
 def mark_end(root, job_id, status, chat=None):

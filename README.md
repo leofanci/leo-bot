@@ -168,10 +168,13 @@ the job with an approval line, and on your yes saves it with `osctl create-job`
 - Each run is its own thread in the bot's DM, titled `Job: <name>`. It can read and look
   things up but not save: a save it wants comes back as an approval in that thread, and
   approving it there saves it as a normal turn.
+- A job's message was written by a bot, so a site named in it is never opened: a job
+  can search the web, not fetch a page.
 - Every job has its own cap in dollars per 24 hours, and also counts against your
-  workspace and owner caps. A job runs only on an engine that reports cost.
+  workspace and owner caps. A job runs only on an engine that reports cost, and consults
+  only teammates whose engine does too. At most 20 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
-  starts again, never once per missed slot. A run stops after 30 minutes.
+  starts again, never once per missed slot. A run stops after 30 minutes, teammates included.
 - Each morning from 08:00 a digest thread in HQ's #general lists what ran, what it cost,
   which memory lists were tidied and what waits for your approval. It costs nothing.
 

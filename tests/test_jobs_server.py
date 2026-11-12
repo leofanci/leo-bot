@@ -150,6 +150,61 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(len(closed), 1)
         self.assertIsNone(server._JOB_RUN["live"])
 
+    def test_stopped_job_starts_no_teammate_or_followup(self):
+        runs = []
+
+        def ask(sess, text, **kw):
+            runs.append(text)
+            if len(runs) == 1:
+                server.stop_job()  # the timeout fires during the lead's run
+            yield ("delta", "Lead.\nCONSULT @research: rivals?" if len(runs) == 1 else "more")
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            self.run_job()
+        self.assertEqual(len(runs), 1)
+
+    def test_teammate_on_unmetered_engine_is_not_consulted(self):
+        mate = _Engine()
+        mate.id = "api:mate"
+        self.pick.side_effect = lambda root, ws, bot, **kw: mate if bot == "research" else _Engine()
+        self.metered = None
+        runs = []
+
+        def ask(sess, text, **kw):
+            runs.append(sess.engine.id)
+            yield ("delta", "Lead.\nCONSULT @research: rivals?")
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.engine_registry, "metered", side_effect=lambda e: e.id != "api:mate"), \
+                mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job()
+        self.assertEqual(runs, ["api:test"])
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("does not report cost", out["detail"])
+
+    def test_job_message_grants_no_web_host(self):
+        # A job's message was written by a bot (osctl create-job), not typed by the owner:
+        # a host in it must not become a fetch grant.
+        out = self.run_job(message="search the web and check https://example.com/pricing")
+        self.assertEqual(out["status"], "waiting")
+        self.assertEqual(tuple(self.asks[0]["kw"].get("web_domains") or ()), ())
+
+    def test_held_app_action_is_waiting(self):
+        self.reply = "Drafted the email."
+        test = self
+
+        def ask(sess, text, **kw):
+            approvals.add_app_action(test.root, ws=WS, room=f"{WS}/dm-cmo", chat=sess.session_id, bot="cmo",
+                                     person=bots.CEO, toolkit="gmail", slug="GMAIL_SEND_EMAIL",
+                                     arguments={"to": "a@example.com"})
+            yield ("delta", test.reply)
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}), \
+                mock.patch.object(server, "_needs_apps", return_value=True), \
+                mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job(message="draft the weekly email")
+        self.assertEqual(out["status"], "waiting")
+
 
 if __name__ == "__main__":
     unittest.main()

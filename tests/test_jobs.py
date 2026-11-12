@@ -101,6 +101,7 @@ class Store(unittest.TestCase):
             jobs.update(self.root, job["id"], cap=0)
         with self.assertRaises(LookupError):
             jobs.update(self.root, "missing1", cap=1)
+        jobs.update(self.root, job["id"], enabled=True)
         jobs.mark_start(self.root, job["id"], 100.0)
         self.assertEqual(jobs.get(self.root, job["id"])["last_status"], "running")
         self.assertEqual(jobs.recover(self.root), 1)
@@ -111,6 +112,22 @@ class Store(unittest.TestCase):
         self.assertTrue(jobs.delete(self.root, job["id"]))
         self.assertFalse(jobs.delete(self.root, job["id"]))
         self.assertEqual(jobs.load(self.root), [])
+
+    def test_job_count_is_limited(self):
+        with mock.patch.object(jobs, "MAX_JOBS", 2):
+            self.make()
+            self.make()
+            with self.assertRaises(ValueError):
+                self.make()
+        self.assertEqual(len(jobs.load(self.root)), 2)
+
+    def test_mark_start_returns_the_latest_job_or_none(self):
+        job = self.make()
+        jobs.update(self.root, job["id"], message="new words")
+        self.assertEqual(jobs.mark_start(self.root, job["id"], 100.0)["message"], "new words")
+        jobs.update(self.root, job["id"], enabled=False)
+        self.assertIsNone(jobs.mark_start(self.root, job["id"], 200.0))
+        self.assertEqual(jobs.get(self.root, job["id"])["last_run"], 100.0)  # a disabled job is not marked
 
     def test_corrupt_file_reads_empty(self):
         path = self.root / jobs.RELPATH
