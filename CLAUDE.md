@@ -47,6 +47,7 @@ Never write content files directly. All mutations go through osctl:
 | Roadmap (full replace) | `update-roadmap --product <prod-slug>` (--text or stdin) |
 | Experiment patch/delete | `update-experiment --project <slug> --stem <stem> [--success-criteria] [--kill-criteria]` · `delete-experiment --project <slug> --stem <stem>` |
 | Experiment metric (owner) | `set-metric --project <slug> --stem <stem> --app <app> --action <READ_SLUG> --path <a.b> [--args JSON] [--window-days N] [--clear]` |
+| Evidence entry (append-only) | `add-evidence --project <slug> --text "..." [--ref <experiment-id>] [--date YYYY-MM-DD]` |
 | Post slide row | `add-slide --id <post-id> --overlay "<text>"` |
 | Profile name/topic | `update-profile --slug <slug> [--name] [--topic]` |
 | Brief spec (one of several) | `create-brief-spec` / `update-brief-spec --profile <slug> [--id br2] [--platforms ...] --text "..."` |

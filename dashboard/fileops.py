@@ -47,11 +47,12 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
-from core import app_rules, folders, paths
+from core import app_rules, evidence, folders, paths
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
     find_duplicate_post_ids,
+    lk_evidence,
     lk_experiment,
     lk_feature,
     lk_fld_brief,
@@ -1607,6 +1608,37 @@ def write_intake(project_slug: str, text: str) -> dict:
     _write_project_doc(project_slug, "intake", text, path=intake)
     reindex()
     return {"path": str(intake.relative_to(ROOT)), "project": project_slug}
+
+
+def _evidence_ref(project_slug: str, ref: str) -> str:
+    """Composed id an evidence entry may point at: an experiment of this same project."""
+    db = _db_module()
+    ent = build_id_registry(db.tree(), db.posts(), root=ROOT).resolve(ref)
+    if not ent or ent["kind"] != "exp" or (ent.get("ref") or {}).get("project") != project_slug:
+        raise ActionError(f"ref '{ref}' is not an experiment of {project_slug}")
+    return ent["id"]
+
+
+def add_evidence(project_slug: str, fields: dict) -> dict:
+    """Append one dated entry to the intake's Evidence log. Entries are never edited or removed."""
+    text = evidence.clean(fields.get("text") or "")
+    if not text:
+        raise ActionError("evidence text required")
+    ref = (fields.get("ref") or "").strip() or None
+    if ref:
+        ref = _evidence_ref(project_slug, ref)
+    date = (fields.get("date") or "").strip() or datetime.date.today().isoformat()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ActionError("date must be YYYY-MM-DD")
+    intake = _project_doc_path(project_slug, "intake")
+    if "Evidence log" not in subsections_for_doc(load_config(ROOT, project_slug), "intake"):
+        raise ActionError("this project's intake has no Evidence log section")
+    old = intake.read_text(encoding="utf-8") if intake.exists() else \
+        starter_text(ensure_config(ROOT, project_slug), "intake")
+    new, n = evidence.append(old, text, ref, date)
+    _write_project_doc(project_slug, "intake", new, path=intake)
+    reindex()
+    return {"id": _composed_id(lk_evidence(project_slug, n)), "n": n, "project": project_slug}
 
 
 def create_technical(project_slug: str) -> dict:
