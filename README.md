@@ -250,6 +250,11 @@ the channel's lead, and that bot decides what it needs:
   Once a conversation holds any, nothing a bot does goes out on its own: its app actions wait
   for one Approve all, and an Auto job saves only through an approval card. A bot acts alone
   only on what you wrote.
+- **Saved from outside content.** Whatever a bot saves after reading outside content (a memo,
+  a memory, a doc) keeps that label, so it cannot pass someone else's words to a later, clean
+  conversation. While a workspace holds a labeled file you have not trusted, its bots do not
+  act on their own. Approvals lists each one: read the whole file, then Trust it, or delete it.
+  Trust covers the version you read; a later change is labeled again.
 - **Apps.** Each bot gets each app per workspace as Read, Read + write (anything that is not
   a read waits for your click), or Acts on its own (it sends, posts and messages without
   asking while the conversation holds only your words; deletes, payments, ads, databases,

@@ -895,3 +895,5 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 /* end update notice */
 
 .metric-chip{font-size:12px;color:var(--ui-color-text-muted);margin-top:4px}
+.sec-h{margin:var(--ui-space-4) 0 var(--ui-space-1-5)}
+.outside-text{white-space:pre-wrap;max-height:320px;overflow:auto;margin-top:var(--ui-space-1-5);padding:var(--ui-space-1-5);border-radius:var(--ui-radius-small);background:var(--ui-color-neutral-soft);font-size:var(--ui-type-label)}

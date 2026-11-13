@@ -636,3 +636,32 @@ class Gate(Base):
         self.assertEqual(self.ask("WebSearch", host="evil.example")[0], 403)
         self.assertEqual(request("POST", self.PATH, {"tool": "WebSearch"})[0], 403)  # a cookie is not a token
         self.assertFalse(self.turn.outside)
+
+
+class OutsideContent(Base):
+    def setUp(self):
+        super().setUp()
+        from core import provenance
+        self.prov = provenance
+        before = provenance.scan(self.root, "hq")
+        (self.root / "team" / "memory").mkdir(parents=True)
+        (self.root / "team" / "memory" / "cos.md").write_text("- from a mail\n")
+        provenance.mark(self.root, before, provenance.scan(self.root, "hq"))
+
+    def test_owner_reads_then_trusts(self):
+        code, data, _, _ = request("GET", "/api/outside-content?ws=hq")
+        self.assertEqual((code, [i["path"] for i in data["items"]]), (200, ["team/memory/cos.md"]))
+        code, seen, _, _ = request("GET", "/api/outside-content/preview?path=team/memory/cos.md")
+        self.assertEqual((code, seen["text"]), (200, "- from a mail\n"))
+        body = {"path": "team/memory/cos.md", "sig": seen["sig"]}
+        self.assertEqual(request("POST", "/api/outside-content/trust", body, origin=False)[0], 403)
+        self.assertEqual(request("POST", "/api/outside-content/trust", body)[0], 200)
+        self.assertEqual(self.prov.pending(self.root, "hq"), [])
+
+    def test_no_cookie_no_list(self):
+        self.assertEqual(request("GET", "/api/outside-content?ws=hq", cookie=False)[0], 403)
+        self.assertEqual(request("POST", "/api/outside-content/trust", {"path": "team/memory/cos.md", "sig": "x"},
+                                 cookie=False)[0], 403)
+
+    def test_an_unlisted_path_is_not_served(self):
+        self.assertEqual(request("GET", "/api/outside-content/preview?path=team/integrations.json")[0], 404)

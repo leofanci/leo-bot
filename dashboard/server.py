@@ -56,7 +56,8 @@ import os_relay          # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
-from dashboard import taint  # noqa: E402  (one registry: the API engine imports it by this name)
+from dashboard import taint  # noqa: E402
+from core import provenance  # noqa: E402  (one registry: the API engine imports it by this name)
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
@@ -3186,8 +3187,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # What outside content this request's conversation holds (dashboard/taint.py), shared by
         # every run in it. A guest's message or a thread invited people can see is outside content.
+        # Saved files that came from outside content and the owner has not trusted yet count too
+        # (core/provenance.py): a clean thread that reads them reads outside words.
         turn = taint.Turn(app_data=getattr(sess, "app_data", False),
-                          outside=getattr(sess, "outside", False) or bool(person) or bool(shared))
+                          outside=getattr(sess, "outside", False) or bool(person) or bool(shared)
+                          or bool(provenance.pending(ROOT, ws)))
+        files_scan = provenance.scan(ROOT, ws)  # what this request changes is labeled if it is tainted
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
             return self._sse_message(st)
@@ -3647,6 +3652,15 @@ class Handler(BaseHTTPRequestHandler):
                     _API_APP_SESSIONS.pop(kw_["apps_token"], None)
                 if kw_.get("os_token"):
                     os_relay.TOKENS.revoke(kw_["os_token"])
+            if turn.outside:  # what it saved may carry the outside words: labeled until the owner trusts it
+                try:
+                    labeled = provenance.mark(ROOT, files_scan, provenance.scan(ROOT, ws),
+                                              chat=getattr(sess, "session_id", None))
+                    if labeled:
+                        _quiet(notice, f"{len(labeled)} saved file(s) came from outside content: until you "
+                                       "trust them in Approvals, bots here do not act on their own.")
+                except OSError:
+                    traceback.print_exc()
             if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
                 try:
                     near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
@@ -3891,6 +3905,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, _skills_index())
             if path == "/api/workspaces":
                 return self._send(200, {"workspaces": _workspaces(db.tree())})
+            if path in ("/api/outside-content", "/api/outside-content/preview"):  # owner only (checked above)
+                q = parse_qs(urlparse(self.path).query)
+                if path.endswith("/preview"):
+                    try:
+                        return self._send(200, provenance.preview(ROOT, (q.get("path") or [""])[0]))
+                    except LookupError as e:
+                        return self._send(404, {"error": str(e)})
+                ws = (q.get("ws") or [bots.HQ])[0]
+                return self._send(200, {"items": provenance.pending(ROOT, ws if isinstance(ws, str) else bots.HQ)})
             if path == "/api/files":
                 ws, record = _resolve_workspace(
                     (parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
@@ -4424,6 +4447,16 @@ class Handler(BaseHTTPRequestHandler):
                     except (_AppRefused, ValueError) as e:
                         return self._send(409, {"ok": False, "error": str(e)})
                 return self._send(404, {"error": "unknown endpoint"})
+            if path == "/api/outside-content/trust":  # owner only: the label goes after a full read
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                try:
+                    provenance.trust(ROOT, str(body.get("path") or ""), str(body.get("sig") or ""))
+                except LookupError as e:
+                    return self._send(404, {"ok": False, "error": str(e)})
+                except ValueError as e:
+                    return self._send(409, {"ok": False, "error": str(e)})
+                return self._send(200, {"ok": True})
             if path == "/api/approvals/dismiss":
                 approvals.resolve_chat(str(body.get("chat") or ""), "rejected", ROOT)
                 return self._send(200, {"ok": True})

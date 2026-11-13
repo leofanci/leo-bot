@@ -1431,9 +1431,36 @@ async function renderApprovals(){
       <button class="more" data-ap-no="${esc(a.id)}">Dismiss</button>
     </div>`;
   }).join("") : `<div class="empty">Nothing waiting on you.</div>`;
+  let outside = [];
+  try { outside = (await api(`/api/outside-content?ws=${encodeURIComponent(_WS || "hq")}`)).items || []; } catch {}
   $("#main").innerHTML = `
     <div class="topbar"><div><div class="crumbs">${esc(_WS === "hq" ? "Every workspace" : wsById(_WS)?.name || "")}</div><h1 class="title">Approvals</h1></div></div>
-    <div class="scroll"><div class="help">Saves your bots proposed and are waiting on. Approve sends "yes" in that thread; the bot then writes it. App actions (an email, a post, an event) and scheduled jobs run only when you approve them here or in the thread.</div><div class="rowc">${rows}</div></div>`;
+    <div class="scroll"><div class="help">Saves your bots proposed and are waiting on. Approve sends "yes" in that thread; the bot then writes it. App actions (an email, a post, an event) and scheduled jobs run only when you approve them here or in the thread.</div><div class="rowc">${rows}</div>
+    ${outside.length ? `<h4 class="sec-h">Saved from outside content</h4>
+    <div class="help">A bot saved these after reading mail, pages or app data, so they may carry someone else's words. Until you read and trust each one, bots in that workspace do not act on their own: their actions wait for one Approve all. Delete a file where it lives if you do not want it.</div>
+    <div class="rowc">${outside.map(o => `<div class="post approval-row outside-row" data-out="${esc(o.path)}">
+      <div class="t"><code>${esc(o.path)}</code><small>${esc(wsById(o.ws)?.name || o.ws)} · ${relAge(o.at)}</small>
+        <pre class="outside-text" hidden></pre></div>
+      <button class="go" data-out-read>Read</button>
+      <button class="go primary-go" data-out-trust hidden>Trust</button>
+    </div>`).join("")}</div>` : ""}</div>`;
+  $("#main").querySelectorAll(".outside-row").forEach(row => {
+    const pre = row.querySelector(".outside-text"), trust = row.querySelector("[data-out-trust]");
+    let sig = null;
+    row.querySelector("[data-out-read]").onclick = async () => {
+      try {
+        const p = await api(`/api/outside-content/preview?path=${encodeURIComponent(row.dataset.out)}`);
+        pre.textContent = p.text + (p.cut ? "\n\n[cut: too long to read here, open the file]" : "");
+        pre.hidden = false;
+        sig = p.sig;
+        trust.hidden = !!p.cut;
+      } catch (e) { toast("✗ " + e.message); }
+    };
+    trust.onclick = async () => {
+      try { await jpost("/api/outside-content/trust", { path: row.dataset.out, sig }); row.remove(); toast("Trusted"); }
+      catch (e) { toast("✗ " + e.message); }
+    };
+  });
   const find = id => items.find(a => a.id === id);
   $("#main").querySelectorAll("[data-ap-go]").forEach(b => b.onclick = () => window.ChatRooms?.openThread(find(b.dataset.apGo)));
   $("#main").querySelectorAll("[data-ap-ok]").forEach(b => b.onclick = () => window.ChatRooms?.openThread(find(b.dataset.apOk), "approved"));
