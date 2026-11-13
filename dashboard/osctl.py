@@ -456,7 +456,7 @@ def _build_parser():
     p.add_argument("--name")
     p.add_argument("--message")
     p.add_argument("--schedule", help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
-    p.add_argument("--cap", help="dollars per 24 hours for this job, above 0")
+    p.add_argument("--cap", help="dollars per 24 hours for this job; 0 or omit for no cap")
     p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
     p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
 
@@ -1144,6 +1144,14 @@ def _brief_field_value(brief: dict, field: str):
     return brief.get(field)
 
 
+def _auto_reached_past_its_skill():
+    """This Auto job run loaded (osctl get-skill) a skill other than its job's own. The record
+    is per run (each run is a fresh chat): the next run starts clean."""
+    job = jobs.get(bots.ROOT, (os.environ.get("LEOBOT_JOB") or "").strip())
+    own = (job or {}).get("skill")
+    return any(s != own for s in skill_loads.loaded(bots.ROOT, os.environ.get("LEOBOT_CHAT") or ""))
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1153,6 +1161,9 @@ def main(argv=None):
         in_job = bool((os.environ.get("LEOBOT_JOB") or "").strip())
         if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
             raise fileops.ActionError(READONLY_TEXT.get(job_mode if in_job else None, READONLY_TEXT["approval"]))
+        if in_job and job_mode == "auto" and args.cmd not in _READ_ONLY_CMDS and _auto_reached_past_its_skill():
+            # An Auto run that loaded a skill other than its job's own saves nothing more by itself.
+            raise fileops.ActionError(READONLY_TEXT["approval"])
         if in_job and (args.cmd not in _AUTO_ALLOWED or args.cmd.startswith("delete-")):
             raise fileops.ActionError(
                 "a scheduled job never proposes jobs." if args.cmd == "propose-job" else

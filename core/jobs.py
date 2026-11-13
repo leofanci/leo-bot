@@ -177,14 +177,16 @@ def clean(field, value):
         v = " ".join(str(value or "").lower().split())
         parse_schedule(v)
         return v
-    if field == "cap":
+    if field == "cap":  # optional: None, empty or 0 means no cap
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
         try:
             v = float(value)
         except (TypeError, ValueError):
-            raise ValueError("cap: dollars per day, above 0") from None
-        if not math.isfinite(v) or v <= 0:
-            raise ValueError("cap: dollars per day, above 0")
-        return v
+            raise ValueError("cap: dollars per day, 0 or empty for no cap") from None
+        if not math.isfinite(v) or v < 0:
+            raise ValueError("cap: dollars per day, 0 or empty for no cap")
+        return v or None
     if field in ("skill", "bot", "workspace"):
         v = str(value or "").strip()
         if not v:
@@ -227,7 +229,8 @@ def update(root, job_id, **fields):
     unknown = set(fields) - _EDITABLE
     if unknown:
         raise ValueError(f"not editable: {', '.join(sorted(unknown))}")
-    changes = {k: clean(k, v) for k, v in fields.items() if v is not None}
+    # None leaves a field as it is, except the cap: None, "" or 0 there means no cap.
+    changes = {k: clean(k, v) for k, v in fields.items() if v is not None or k == "cap"}
 
     def fn(data):
         job = _find(data, job_id)

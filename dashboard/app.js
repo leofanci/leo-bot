@@ -1330,12 +1330,13 @@ async function renderTeam(){
     const row = j => `<div class="post team-row job-row${j.enabled ? "" : " off"}" data-job="${esc(j.id)}">
         <div class="t"><b>${esc(j.name)}</b>
           <small class="team-meta">${esc(jobMetaText(j, wsById(j.workspace)?.name || j.workspace, now))}${j.last_chat ? ` · <a href="#" data-job-open>Open</a>` : ""}</small></div>
+        <input data-job-cap type="number" min="0" step="0.5" inputmode="decimal" placeholder="No cap" value="${j.cap ? esc(String(j.cap)) : ""}" aria-label="Cap, dollars per 24 hours (empty: no cap)" title="Dollars per 24 hours; empty for no cap">
         <select data-job-mode aria-label="Mode">${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${j.mode === m ? " selected" : ""}>${label}</option>`).join("")}</select>
         <button class="more" data-job-on="${j.enabled ? "0" : "1"}">${j.enabled ? "Turn off" : "Turn on"}</button>
         <button class="more" data-job-rm>Delete</button>
       </div>`;
     return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
-      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. To change the schedule, message, cap or skill, ask the bot in chat.</div>
+      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. Cap: dollars per 24 hours, empty for no cap. To change the schedule, message or skill, ask the bot in chat.</div>
       <div class="rowc">${jobList.map(row).join("")}</div>`;
   };
   const wireJobs = () => {
@@ -1347,6 +1348,7 @@ async function renderTeam(){
       draw();
     };
     box.querySelectorAll("[data-job-mode]").forEach(sel => sel.onchange = () => change(jobOf(sel), "mode", { mode: sel.value }));
+    box.querySelectorAll("[data-job-cap]").forEach(inp => inp.onchange = () => change(jobOf(inp), "cap", { cap: inp.value.trim() }));
     box.querySelectorAll("[data-job-on]").forEach(b => b.onclick = () => change(jobOf(b), "enabled", { enabled: b.dataset.jobOn === "1" }));
     box.querySelectorAll("[data-job-rm]").forEach(b => b.onclick = () => {
       if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to delete"; return; }
@@ -1452,7 +1454,8 @@ function jobMetaText(j, wsName, now){
   const when = ts => new Date(ts * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const next = !j.enabled ? "off" : j.next_due ? (j.next_due <= now ? "runs at the next check" : `next ${when(j.next_due)}`) : "";
   const last = j.last_run ? `last ${when(j.last_run)}${j.last_status ? `: ${j.last_status}` : ""}` : "not run yet";
-  return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, next, last].filter(Boolean).join(" · ");
+  const cap = j.cap ? `$${j.cap} per 24h` : "no cap";
+  return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, cap, next, last].filter(Boolean).join(" · ");
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
 function isHeld(a){

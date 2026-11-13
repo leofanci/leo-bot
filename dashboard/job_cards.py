@@ -14,7 +14,7 @@ import time
 from core import bots, jobs
 
 OPS = ("create", "update", "delete")
-_CREATE_NEEDS = ("bot", "skill", "name", "message", "schedule", "cap")
+_CREATE_NEEDS = ("bot", "skill", "name", "message", "schedule")
 _UPDATABLE = ("name", "message", "schedule", "cap", "skill", "mode")
 _LABELS = {"name": "Name", "message": "Message", "schedule": "Schedule", "cap": "Cap",
            "skill": "Skill", "mode": "Mode"}
@@ -57,7 +57,7 @@ def _when(ts):
 
 def _show(field, value):
     if field == "cap":
-        return f"${value:g} per 24 hours"
+        return f"${value:g} per 24 hours" if value else "no cap"
     if field == "mode":
         return MODE_TEXT[value]
     if field == "skill":
@@ -92,7 +92,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
         ws = str(fields.get("workspace") or thread_ws).strip()
         if thread_ws != bots.HQ and ws != thread_ws:
             raise ValueError("a workspace thread proposes jobs for its own workspace only")
-        clean = {k: jobs.clean(k, fields[k]) for k in ("bot", "skill", "name", "message", "schedule", "cap")}
+        clean = {k: jobs.clean(k, fields.get(k)) for k in ("bot", "skill", "name", "message", "schedule", "cap")}
         clean["mode"] = jobs.clean("mode", fields.get("mode") or "approval")
         clean["workspace"] = ws
         check_target(root, ws, clean["bot"], clean["skill"], projects)
@@ -118,7 +118,8 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
     unknown = sorted(k for k in fields if k not in _UPDATABLE)
     if unknown:
         raise ValueError(f"not changeable here: {', '.join(unknown)}")
-    clean = {k: jobs.clean(k, v) for k, v in fields.items() if v not in (None, "")}
+    # An empty field is no change, except the cap: "" or 0 there means no cap.
+    clean = {k: jobs.clean(k, v) for k, v in fields.items() if v is not None and (v != "" or k == "cap")}
     if not clean:
         raise ValueError("say what changes: name, message, schedule, cap, skill or mode")
     if "name" in clean:

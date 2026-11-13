@@ -388,6 +388,15 @@ class JobTurn(unittest.TestCase):
         for bad in ({"ws": WS}, {"ws": WS, "mode": None}, {"ws": WS, "mode": "free"}):
             self.assertEqual(self.post(f"/api/jobs/{mine['id']}/mode", bad)[0], 400, bad)
         self.assertEqual(self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": "no"})[0], 400)
+        # The owner sets or clears the cap here: empty or 0 is no cap.
+        code, body = self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": "2.5"})
+        self.assertEqual((code, body["jobs"][0]["cap"]), (200, 2.5))
+        for none in ("", 0, None):
+            self.assertEqual(self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": none})[0], 200)
+            self.assertIsNone(jobs.get(self.root, mine["id"])["cap"])
+        self.assertEqual(self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": "-1"})[0], 400)
+        self.assertEqual(self.post(f"/api/jobs/{other['id']}/cap", {"ws": WS, "cap": "1"})[0], 404)
+        jobs.update(self.root, mine["id"], cap=1)
         self.assertEqual(jobs.get(self.root, mine["id"])["mode"], "report")
         self.assertTrue(jobs.get(self.root, mine["id"])["enabled"])
         self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": False})

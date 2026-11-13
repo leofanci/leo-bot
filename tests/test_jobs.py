@@ -77,7 +77,7 @@ class Store(unittest.TestCase):
         return jobs.create(self.root, **args)
 
     def test_create_validates(self):
-        for bad in ({"cap": 0}, {"cap": -1}, {"cap": float("nan")}, {"cap": "x"},
+        for bad in ({"cap": -1}, {"cap": float("nan")}, {"cap": "x"},
                     {"schedule": "whenever"}, {"name": ""}, {"name": "x" * 61},
                     {"message": " "}, {"message": "x" * 2001}, {"bot": ""}, {"skill": ""}):
             with self.assertRaises(ValueError, msg=bad):
@@ -91,6 +91,22 @@ class Store(unittest.TestCase):
         self.assertIsNone(got[0]["last_run"])
         self.assertEqual(got[0]["cap"], 0.5)
 
+    def test_cap_is_optional(self):
+        for none in (None, "", 0, "0", " "):
+            self.assertIsNone(jobs.clean("cap", none), none)
+        self.assertEqual(jobs.clean("cap", "2"), 2.0)
+        with self.assertRaises(ValueError) as e:
+            jobs.clean("cap", "-1")
+        self.assertIn("0 or empty for no cap", str(e.exception))
+        job = self.make(cap=None)
+        self.assertIsNone(jobs.get(self.root, job["id"])["cap"])
+        jobs.update(self.root, job["id"], cap=2)
+        self.assertEqual(jobs.get(self.root, job["id"])["cap"], 2.0)
+        jobs.update(self.root, job["id"], cap="")  # cleared: no cap again
+        self.assertIsNone(jobs.get(self.root, job["id"])["cap"])
+        jobs.update(self.root, job["id"], name="kept")  # a change without cap keeps it
+        self.assertIsNone(jobs.get(self.root, job["id"])["cap"])
+
     def test_update_delete_and_recover(self):
         job = self.make()
         jobs.update(self.root, job["id"], enabled=False, cap=1.5, name="renamed")
@@ -98,7 +114,7 @@ class Store(unittest.TestCase):
         self.assertEqual((got["enabled"], got["cap"], got["name"]), (False, 1.5, "renamed"))
         self.assertFalse(jobs.is_due(got, time.time() + 86400))
         with self.assertRaises(ValueError):
-            jobs.update(self.root, job["id"], cap=0)
+            jobs.update(self.root, job["id"], cap=-1)
         with self.assertRaises(LookupError):
             jobs.update(self.root, "missing1", cap=1)
         jobs.update(self.root, job["id"], enabled=True)
@@ -311,6 +327,23 @@ class Osctl(unittest.TestCase):
             self.assertFalse(self.propose(env=env)["ok"], env)
         self.assertFalse(self.run_osctl("list-jobs", env={"LEOBOT_WORKSPACE": "acme", "LEOBOT_SHARED": "1"})["ok"])
         self.assertEqual(jobs.take_proposals(self.root, "c1"), [])
+
+    def test_auto_job_that_loads_another_skill_waits_for_approval(self):
+        from core import skill_loads
+        jid = jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=None, mode="auto")["id"]
+        auto = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_JOB": jid, "LEOBOT_JOB_MODE": "auto", "LEOBOT_CHAT": "run1"}
+        memo = ["create-memo", "--project", "acme", "--type", "positioning", "--summary", "s"]
+        self.assertTrue(self.run_osctl("get-skill", "--name", "positioning", env=auto)["ok"])
+        self.assertTrue(self.run_osctl(*memo, env=auto)["ok"])  # its own skill: still saves
+        self.assertTrue(self.run_osctl("get-skill", "--name", "pricing-strategy", env=auto)["ok"])
+        r = self.run_osctl(*memo, env=auto)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], osctl.READONLY_TEXT["approval"])
+        self.assertTrue(self.run_osctl("get-project", "--slug", "acme", env=auto)["ok"])  # reads still work
+        # The next run is a fresh chat: it starts clean.
+        self.assertTrue(self.run_osctl(*memo, env={**auto, "LEOBOT_CHAT": "run2"})["ok"])
+        self.assertEqual(skill_loads.loaded(self.root, "run1"), ["positioning", "pricing-strategy"])
 
     def test_auto_job_refuses_deletes_and_memory(self):
         auto = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_JOB": "j1", "LEOBOT_JOB_MODE": "auto"}

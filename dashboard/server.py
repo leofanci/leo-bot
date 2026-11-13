@@ -2796,7 +2796,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(403, {"error": "forbidden"})
 
     def _jobs_post(self, path, body):
-        """Owner only: a job's mode, on/off and delete, from the Team screen. Everything else
+        """Owner only: a job's mode, cap, on/off and delete, from the Team screen. Everything else
         about a job changes through a bot's proposal and its card."""
         jid, _, verb = path[len("/api/jobs/"):].partition("/")
         ws = _strict_ws(body.get("ws"))
@@ -2807,6 +2807,11 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("mode") not in jobs.MODES:
                 return self._send(400, {"error": f"mode: one of {', '.join(jobs.MODES)}"})
             jobs.update(ROOT, jid, mode=body["mode"])
+        elif verb == "cap":  # empty, 0 or null: no cap
+            try:
+                jobs.update(ROOT, jid, cap=body.get("cap") if body.get("cap") is not None else "")
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
         elif verb == "enabled":
             on = body.get("enabled")
             if not isinstance(on, bool):
@@ -2901,7 +2906,7 @@ class Handler(BaseHTTPRequestHandler):
         # how it went. The owner's open thread (_CHAT) is never touched.
         job = viewer.get("job") if viewer.get("kind") == "job" else None
         live = viewer.setdefault("live", {}) if job else {}
-        job_cap = (job["id"], job["cap"]) if job else None
+        job_cap = (job["id"], job["cap"]) if job and job.get("cap") else None  # a cap is optional
         job_mode = jobs.mode_of(job) if job else None
         if job:
             chat_id = None

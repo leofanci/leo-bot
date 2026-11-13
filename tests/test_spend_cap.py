@@ -58,6 +58,9 @@ class JobCap(unittest.TestCase):
             self.assertIsNone(spend.refusal("acme", "owner", records=records, job=("j1", 1.0)))
             self.assertIn("this job", spend.refusal("acme", "owner", records=records, pending=0.5, job=("j3", 0.5)))
             self.assertIsNone(spend.refusal("acme", "owner", records=records))
+            # A job without a cap is never refused by it.
+            self.assertIsNone(spend.refusal("acme", "owner", records=records, job=("j1", None)))
+            self.assertIsNone(spend.refusal("acme", "owner", records=records, pending=99, job=("j1", 0)))
             with tempfile.TemporaryDirectory() as d:
                 self.assertIn("this job's daily cap",
                               spend.near_notice("acme", "owner", d, records=records, job=("j1", 0.7)))
