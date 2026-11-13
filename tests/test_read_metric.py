@@ -39,6 +39,13 @@ class ReadMetric(unittest.TestCase):
         with self.assertRaises(composio.ComposioError):
             read(*ARGS, accounts={})
 
+    def test_real_shape_error_field_raises_and_clean_result_reads(self):
+        with self.assertRaises(composio.ComposioError):
+            read(*ARGS, run=lambda *x: {"data": None, "error": "OAuthException", "result_type": "success"})
+        ok = read(*ARGS, run=lambda *x: {"data": {"followers_count": 3}, "error": None, "log_id": "l",
+                                         "result_type": "success"})
+        self.assertEqual(ok["data"]["followers_count"], 3)
+
     def test_failed_result_raises(self):
         with self.assertRaises(composio.ComposioError) as cm:
             read(*ARGS, run=lambda *x: {"successful": False, "error": "rate limited"})

@@ -400,7 +400,9 @@ def read_metric(app, action, args, ws, bot, root=bots.ROOT, person=bots.CEO, cat
     if not ids:
         raise ComposioError(f"no {tk} account is connected for {ws}")
     out = (run or execute)(person, ws, action, args, ids[0], root)
-    if isinstance(out, dict) and (out.get("successful") is False or out.get("result_type") in ("failed", "blocked")):
+    # A real result has no `successful` key: a failure is a non-null `error` or a failed result_type.
+    if isinstance(out, dict) and (out.get("successful") is False or out.get("error")
+                                  or out.get("result_type") in ("failed", "blocked")):
         raise ComposioError(str(out.get("error") or "the app refused the read")[:200])
     return out
 
