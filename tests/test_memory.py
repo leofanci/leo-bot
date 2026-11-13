@@ -233,6 +233,16 @@ class Card(TempRoot):
         self.assertIn("recall --bot cmo", text)
         self.assertIn("--type decision|preference|fact", text)
 
+    def test_bot_block_names_the_workspace_by_its_display_name(self):
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root), \
+                mock.patch.object(server.db, "tree", return_value=[{"slug": "acme", "name": "Acme Inc"}]):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True)
+        self.assertIn("Workspace: Acme Inc (folder and id: acme).", text)
+        with mock.patch.object(server, "ROOT", self.root), \
+                mock.patch.object(server.db, "tree", return_value=[{"slug": "acme", "name": "acme"}]):
+            self.assertIn("Workspace: acme.", server._bot_block(team, "cmo", None, "acme", fresh=True))
+
     def test_shared_card_reads_team_memory_only(self):
         self.fixture()
         memory.remember("cmo", "team pricing rule", "acme", self.root, shared=True, type="decision")
