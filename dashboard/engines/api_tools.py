@@ -29,6 +29,7 @@ import urllib.request
 from pathlib import Path
 
 from core import folders
+from dashboard import taint
 from dashboard.engines.claude_code import SECRET_FILE_GLOBS
 
 MAX_OUT_CHARS = 120_000
@@ -510,6 +511,8 @@ class ToolBox:
     def __init__(self, policy, root, tokens, engine_id, backends):
         self.policy, self.root, self.tokens = policy, root, tokens
         self.engine_id, self.backends = engine_id, backends
+        # This request's taint (dashboard/taint.py). Without one, web and apps never share a turn.
+        self.turn = taint.GATES.lookup(tokens.gate_token) if getattr(tokens, "gate_token", None) else None
         self.specs, self._apps = [OSCTL_SPEC], set()
         if not policy.shared:
             self.specs.append(READ_SPEC)
@@ -525,11 +528,23 @@ class ToolBox:
                                    "input_schema": tool.get("inputSchema") or {"type": "object", "properties": {}}})
                 self._apps.add(tool["name"])
 
+    def web_open(self):
+        """May web search or fetch be offered now? Not once app data is in the conversation."""
+        if self.turn is not None:
+            return not self.turn.app_data
+        return not self._apps
+
+    def saw_web(self):
+        if self.turn is not None:
+            self.turn.saw_outside()
+
     def osctl_ctx(self):
         p = self.policy
+        t = self.tokens
         return {"ws": p.workspace or "hq", "readonly": p.readonly, "apps_used": p.apps_used,
                 "shared": p.shared, "engine": self.engine_id,
-                "chat": p.chat, "job": p.job, "job_mode": p.job_mode, "code_folder": p.code_folder}
+                "chat": p.chat, "job": p.job, "job_mode": p.job_mode, "code_folder": p.code_folder,
+                "gate_token": getattr(t, "gate_token", None), "gate_port": getattr(t, "gate_port", None)}
 
     def run(self, name, arguments):
         """(text, is_error) for one tool call. Never raises for the model's own mistakes."""
@@ -554,6 +569,10 @@ class ToolBox:
                 return edit_file(args.get("path"), args.get("old_text"), args.get("new_text"),
                                  self.root, self.policy), False
             if name == "web_fetch" and self.policy.web:
+                if not self.web_open():
+                    return taint.WEB_OFF, True
+                if self.turn is not None:
+                    self.turn.web()  # a page is outside content
                 return web_fetch(args.get("url"), self.policy), False
             if name in self._apps:
                 return self.backends["apps_call"](self.tokens.apps_token, name, args)

@@ -39,7 +39,16 @@ class TurnPolicy:
 
 
 # osctl reads these from its environment; a child never inherits the server's own copy.
-TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE", "LEOBOT_CODE_FOLDER")
+TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE", "LEOBOT_CODE_FOLDER",
+            "LEOBOT_GATE_TOKEN", "LEOBOT_GATE_URL")
+
+
+def gate_vars(tokens):
+    """The gate's token and address for osctl and the web hook, when this run has one."""
+    token, port = getattr(tokens, "gate_token", None), getattr(tokens, "gate_port", None)
+    if not (isinstance(token, str) and token and isinstance(port, int)):
+        return {}
+    return {"LEOBOT_GATE_TOKEN": token, "LEOBOT_GATE_URL": f"http://127.0.0.1:{port}/api/internal/gate"}
 
 
 def turn_vars(policy):
@@ -59,6 +68,8 @@ class TurnTokens:
     os_port: int = None
     os_url: str = None        # a runner: osctl is on the server, over HTTPS
     runner_token: str = None
+    gate_token: str = None    # this run's taint gate (dashboard/taint.py): web and Auto saves ask it
+    gate_port: int = None
 
 
 def drain(stream):

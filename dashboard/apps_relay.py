@@ -44,6 +44,8 @@ READ_GRANT = ('"{slug}": you have read-only access to {toolkit}. If the job need
 LIMIT = ("You reached today's limit of {n} actions on your own, so the rest wait in Approvals like any "
          "held action (daily limit). Tell the user.")
 NOT_SENT = "Did not go out: {title} ({why})."
+OUTSIDE = ("This conversation holds outside content (mail, pages or app data someone else wrote), so "
+           "your actions wait for one approval instead of running on their own. Tell the user.")
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
 REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
@@ -168,6 +170,9 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
     reads, notes, hold, runs = [], [], [], []
     read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
     room = None  # how many more calls this bot may run on its own today (read once, when needed)
+    # dashboard/taint.py: after outside content, nothing runs on its own. No taint record: the same.
+    turn = ctx.get("taint")
+    outside = turn is None or turn.outside
     for c in calls:
         verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid, holds)
         if verdict == "refuse":
@@ -178,6 +183,10 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
                          REFUSED.format(slug=c["tool_slug"]))
             continue
         account, refusal = pick_account(c, tk, picks, root)
+        if verdict == "run" and not refusal and not ctx.get("report") and outside:
+            verdict = "hold"
+            if OUTSIDE not in notes:
+                notes.append(OUTSIDE)
         if verdict == "run" and not refusal and not ctx.get("report"):
             if room is None:
                 room = MAX_AUTO_RUNS - approvals.auto_runs(ctx["ws"], ctx["bot"], time.time() - 86400, root)
@@ -209,6 +218,8 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         notes += [HELD.format(id=r["id"], title=r["preview"]["title"]) for r in held]
     if not reads:
         return _text(rid, notes, not held), sid
+    if turn is not None and len(reads) > len(runs):  # a read's result is app data from here on
+        turn.saw_app_data()
     rebuilt = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                "params": {"name": app_rules.MULTI_EXECUTE, "arguments": {"tools": reads}}}
     if runs:

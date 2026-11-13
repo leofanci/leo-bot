@@ -355,6 +355,9 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
         "skill_loaded": bool(getattr(sess, "_skill_loaded", False)),
         "last_bot": getattr(sess, "_last_bot", None),
         "apps_used": bool(getattr(sess, "apps_used", False)),
+        # Taint only ever grows: a saved flag stays even if this session object lost it.
+        "app_data": bool(getattr(sess, "app_data", False)) or bool(rec.get("app_data")),
+        "outside": bool(getattr(sess, "outside", False)) or bool(rec.get("outside")),
         "folder_paths": sorted(_paths(getattr(sess, "folder_paths", None)) | _paths(rec.get("folder_paths"))),
         "shared": bool(rec.get("shared")) and bool(shared),
     })

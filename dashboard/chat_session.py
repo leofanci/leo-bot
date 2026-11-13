@@ -56,6 +56,10 @@ class ChatSession:
         # Once a thread has read an app, its context holds that data: web tools
         # stay off for good there (no "read mail, leak it via a search" path).
         self.apps_used = False
+        # What outside content this thread's context holds (dashboard/taint.py): app data turns
+        # web off; any outside content makes app actions wait for one approval. Never cleared.
+        self.app_data = False
+        self.outside = False
         # Set by the server per turn: an invited person can see this thread, so
         # the turn gets only the osctl relay (+ web as usual). See OS_MCP_PATH.
         self.shared = False
@@ -76,6 +80,9 @@ class ChatSession:
         sess._skill_loaded = bool(rec.get("skill_loaded"))
         sess._last_bot = rec.get("last_bot")
         sess.apps_used = bool(rec.get("apps_used"))
+        # A thread saved before taint was tracked: one that used apps may hold their data.
+        sess.app_data = bool(rec.get("app_data")) if "app_data" in rec else bool(rec.get("apps_used"))
+        sess.outside = bool(rec.get("outside")) or sess.app_data
         sess.folder_paths = {p for p in rec.get("folder_paths") or () if isinstance(p, str)}
         return sess
 
@@ -108,7 +115,8 @@ class ChatSession:
         return ClaudeCodeEngine(self.claude_bin).build_cmd(self, policy, model, apps_port, os_port)
 
     def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
-            web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None):
+            web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None,
+            gate_token=None, gate_port=None):
         """Run one turn on self.engine; yield (kind, payload) events.
         `with_web` adds web tools for this turn; `read_dirs` are the linked folders
         it may read and search, `edit_dirs` (a subset) the ones it may change; `model` overrides
@@ -119,7 +127,7 @@ class ChatSession:
         policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token))
         if not policy.shared:
             self.folder_paths |= set(policy.read_dirs)
-        tokens = TurnTokens(apps_token, apps_port, os_token, os_port)
+        tokens = TurnTokens(apps_token, apps_port, os_token, os_port, gate_token=gate_token, gate_port=gate_port)
         failed = False
         try:
             for ev in self.engine.turn(self, text, policy, model, tokens):

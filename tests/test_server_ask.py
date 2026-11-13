@@ -1082,3 +1082,60 @@ class SkillLoadTests(unittest.TestCase):
         sess = FakeSession()
         self.assertIsNone(server._adopt_loaded_skill(sess))
         self.assertIsNone(sess._last_skill)
+
+
+class Taint(unittest.TestCase):
+    """dashboard/taint.py through a real turn: the run gets a gate, and the thread keeps its taint."""
+
+    def _turn(self, sess, msg="what changed this week?"):
+        h = _bare_handler(io.BytesIO())
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(server, "get_chat_session", return_value=sess), \
+             mock.patch.object(server, "ROOT", Path(tmp)), \
+             mock.patch.object(server.db, "tree", return_value=[]):
+            h._handle_ask({"messages": [{"role": "user", "content": msg}]})
+
+    def _session(self, on_ask):
+        class Sess:
+            _started = False
+            _turn_count = 0
+            _last_skill = None
+            _skill_explicit = False
+            app_data = outside = False
+            seen = []
+
+            def is_fresh(self):
+                return not self._started
+
+            def note_skill(self, skill, explicit=False):
+                pass
+
+            def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(), web_domains=(), **kw):
+                self.seen.append({"with_web": with_web, **kw})
+                on_ask(kw)
+                yield ("done", {"result": "ok"})
+        return Sess()
+
+    def test_a_local_run_gets_a_gate_and_the_thread_keeps_what_it_read(self):
+        from dashboard import taint
+        live = []
+
+        def read_mail(kw):
+            gate = taint.GATES.lookup(kw.get("gate_token"))
+            live.append(gate)
+            gate.saw_app_data()  # the run read an app
+        sess = self._session(read_mail)
+        self._turn(sess)
+        self.assertIsNotNone(live[0])
+        self.assertEqual(sess.seen[0]["gate_port"], 8765)
+        self.assertIsNone(taint.GATES.lookup(sess.seen[0]["gate_token"]))  # revoked when the run ends
+        self.assertTrue(sess.app_data and sess.outside)
+        self._turn(sess)  # the next turn: app data in the context, so no web at all
+        self.assertFalse(sess.seen[1]["with_web"])
+
+    def test_a_clean_thread_keeps_its_web(self):
+        sess = self._session(lambda kw: None)
+        self._turn(sess)
+        self.assertTrue(sess.seen[0]["with_web"])
+        self.assertFalse(sess.app_data)

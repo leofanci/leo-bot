@@ -96,6 +96,10 @@ def env_for(ctx):
             env[var] = ctx[key]
     if env.get("LEOBOT_JOB") and isinstance(ctx.get("job_mode"), str):
         env["LEOBOT_JOB_MODE"] = ctx["job_mode"]
+    # The run's taint gate (an Auto job's saves ask it): its token and this server's address.
+    if isinstance(ctx.get("gate_token"), str) and ctx["gate_token"] and isinstance(ctx.get("gate_port"), int):
+        env["LEOBOT_GATE_TOKEN"] = ctx["gate_token"]
+        env["LEOBOT_GATE_URL"] = f"http://127.0.0.1:{ctx['gate_port']}/api/internal/gate"
     # The turn's indexed folder (osctl code-context): never in a thread invited people can see.
     if not env.get(SHARED_ENV) and isinstance(ctx.get("code_folder"), str) and ctx["code_folder"]:
         env["LEOBOT_CODE_FOLDER"] = ctx["code_folder"]
