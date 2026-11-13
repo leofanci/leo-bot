@@ -11,6 +11,8 @@ import json
 import re
 from typing import Any
 
+from core import assumptions
+
 MEMO_TYPES = frozenset({
     "problem-validation", "assessment", "channels", "icp",
     "positioning", "competitors", "pricing", "launch", "market-sizing",
@@ -363,7 +365,7 @@ def _coerce_evidence(val: Any) -> list:
 
 def _allowed_memo_keys(mtype: str) -> frozenset[str]:
     starter = memo_starter(mtype, 1)
-    return frozenset(starter.keys()) | frozenset({"superseded_memo"})
+    return frozenset(starter.keys()) | frozenset({"superseded_memo", "assumptions"})
 
 
 def normalize_memo_body(mtype: str, body: dict | None, *, version: int | None = None) -> dict:
@@ -386,6 +388,8 @@ def normalize_memo_body(mtype: str, body: dict | None, *, version: int | None = 
         val = src[key]
         if key == "evidence":
             out[key] = _coerce_evidence(val)
+        elif key == "assumptions":
+            out[key] = assumptions.normalize(val)
         elif key == "version":
             out[key] = int(val)
         elif key == "severity" and str(val).strip().lower() in SEVERITY_VALUES:
