@@ -767,6 +767,8 @@ summary.pf-head::-webkit-details-marker{display:none}
 
 /* Connected apps: held app action cards, per-bot grants, Integrations panel */
 .approval-bar.app-card{flex-direction:column;align-items:stretch}
+/* In the thread a held card lines up with the message text above it, not the window edge. */
+.stream>.approval-bar.app-card{margin:var(--ui-space-2) var(--ui-space-5) var(--ui-space-3) calc(var(--ui-space-5) + var(--ui-avatar) + var(--ui-space-2-5))}
 .app-card-h small{display:block;color:var(--ui-color-text-muted);font-size:var(--ui-type-caption)}
 .app-fields{display:grid;grid-template-columns:max-content 1fr;gap:var(--ui-space-1) var(--ui-space-3);margin:0;font-size:var(--ui-type-control)}
 .app-fields dt{color:var(--ui-color-text-muted)}

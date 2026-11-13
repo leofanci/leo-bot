@@ -506,9 +506,21 @@ class Turn(Base):
         self.assertNotIn("apps_token", seen[0])
         self.assertFalse(lead.apps_used)
 
-    def test_ordinary_turn_unchanged(self):
-        seen, _, _ = self.run_turn("what is on the roadmap?")
-        self.assertNotIn("apps_token", seen[0])
+    def test_ordinary_turn_has_apps_on_but_nothing_else_changes(self):
+        # A granted bot always has its apps on a private turn: no wording needed. The turn
+        # itself stays an ordinary one (fast model, no escalation) and does not taint the thread.
+        seen, lead, _ = self.run_turn("what is on the roadmap?")
+        self.assertIn("apps_token", seen[0])
+        self.assertEqual(seen[0]["model"], "haiku")
+        self.assertFalse(lead.apps_used)
+
+    def test_first_app_call_marks_the_thread(self):
+        calls = []
+        ctx = {"on_call": lambda: calls.append(1), "ws": "acme", "bot": "cmo"}
+        server.apps_relay.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                  "params": {"name": server.app_rules.MULTI_EXECUTE, "arguments": {}}}, ctx, None, mock.Mock(),
+                                 root=self.root, catalog=[])
+        self.assertEqual(calls, [1])
 
     def test_token_revoked_after_request(self):
         seen, _, _ = self.run_turn("summarize my inbox")
@@ -534,7 +546,6 @@ class Turn(Base):
     def test_apps_used_keeps_web_off(self):
         seen, _, _ = self.run_turn("@web find competitor pricing", apps_used=True)
         self.assertIs(seen[0]["with_web"], False)
-        self.assertNotIn("apps_token", seen[0])
 
 
 if __name__ == "__main__":
