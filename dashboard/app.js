@@ -1779,7 +1779,7 @@ async function renderIntegrations(){
   const stillOn = routeGuard();
   $("#main").innerHTML = `
     ${settingsTop("integrations")}
-    <div class="scroll"><div class="help">Connect your own apps through your Composio account. Bots read freely; anything else waits for your Approve. Switch apps on per bot in Team.</div><div id="integ"></div></div>`;
+    <div class="scroll"><div class="help">Connect your own apps through your Composio account. Bots read freely; anything else waits for your Approve. Tick which workspaces may use an account below, then give each bot access in <a href="#/team">Team</a>: open a bot's Details, Apps (Off, Read, Read + write). The Team screen shows the workspace you are in.</div><div id="integ"></div></div>`;
   let polls = 0, replacing = false;
   // A logo that fails to load leaves its letter showing (error events do not bubble).
   $("#integ").addEventListener("error", e => { if (e.target.matches?.(".integ-logo img")) e.target.remove(); }, true);
