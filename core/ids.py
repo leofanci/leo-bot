@@ -55,6 +55,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from core import assumptions
 from core.brief_spec_util import list_brief_ids
 from core.project_schemas import MEMO_SECTION, MEMO_TYPES, canonical_memo_types_by_section
 from core.subsections import DOC_KEYS, load_config, subsections_for_doc
@@ -244,6 +245,10 @@ def lk_evidence(project: str, n: int) -> str:
     return f"ev:proj:{project}:{n}"
 
 
+def lk_assumption(project: str, mtype: str, asm_id: str) -> str:
+    return f"asm:proj:{project}:{mtype}:{asm_id}"
+
+
 def lk_phase(project: str, phase_id: str) -> str:
     return f"phase:proj:{project}:{phase_id}"
 
@@ -396,6 +401,7 @@ class IdRegistry:
         # Every segment number below comes from the persisted registry, not
         # live position — see the "persisted numbering" block above.
         registry = load_id_registry(root) if root else {}
+        latest_asm: dict[tuple[str, str], int] = {}
 
         for vkey, vnum in GLOBAL_VIEW_NUM.items():
             cid = f"vw{vnum}"
@@ -467,6 +473,19 @@ class IdRegistry:
                                  ref={"project": pslug, "section": sec_key,
                                       "memo_type": mtype, "version": ver})
                         reg._bind(lk_memo(pslug, mtype, ver), cid)
+                        try:
+                            items = assumptions.normalize(
+                                json.loads(f.read_text(encoding="utf-8")).get("assumptions"))
+                        except (OSError, ValueError, AttributeError):
+                            items = []
+                        for it in items:
+                            acid = f"{cid}.as{it['id'][2:]}"
+                            reg._add(acid, it["text"], kind="assumption", parent=cid, meta=it["status"],
+                                     ref={"project": pslug, "section": sec_key, "memo_type": mtype,
+                                          "version": ver, "assumption": it["id"]})
+                            if ver >= latest_asm.get((pslug, mtype), 0):  # the key names the newest version's
+                                latest_asm[(pslug, mtype)] = ver
+                                reg._bind(lk_assumption(pslug, mtype, it["id"]), acid)
                 exp_dir = proj_dir / "strategy" / "experiments"
                 if exp_dir.is_dir():
                     for f in sorted(exp_dir.glob("*.json")):

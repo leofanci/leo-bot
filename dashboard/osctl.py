@@ -43,7 +43,7 @@ _BLOCKED_IN_WORKSPACE = {"create-project"}
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
                    "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
-                   "get-brief-spec", "get-voice", "research-signal"}
+                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions"}
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV). That thread runs an ALLOWLIST: a new command
 # is refused there until it is added to _LOCAL_CMDS (tests/test_jobs.py fails on any
@@ -57,7 +57,7 @@ _LOCAL_CMDS = frozenset({
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
     "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
-    "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
+    "extract-assumptions", "list-assumptions", "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
     "revise-post", "set-metric", "set-status", "tree", "update-brief", "update-brief-spec",
     "update-channel", "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-roadmap",
@@ -72,7 +72,7 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # A shared thread (os_relay: an invited person can see it). It reads the team memory,
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
-_SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
+_SHARED_BLOCKED = {"remember", "research-signal", "extract-assumptions",  # research-signal sends text off the machine
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
                    "propose-job", "list-jobs",
                    # Picks which connected app a scoring job reads: the owner's call, not a guest's.
@@ -82,7 +82,7 @@ _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text 
 # work waits (_AUTO_WAITS): every delete-* command, and the commands that replace a whole
 # document or a section list (text a job read must not wipe a doc). It never writes memory and
 # never proposes jobs. tests/test_jobs.py fails on any command in neither set.
-_AUTO_REPLACES = frozenset({"update-intake", "update-technical", "update-roadmap", "update-subsections",
+_AUTO_REPLACES = frozenset({"extract-assumptions", "update-intake", "update-technical", "update-roadmap", "update-subsections",
                             "update-validation-tab", "update-brief-spec", "update-voice"})
 _AUTO_WAITS = frozenset({"remember", "propose-job", "set-metric", *_AUTO_REPLACES,
                          "delete-brief-spec", "delete-experiment", "delete-feature", "delete-memo",
@@ -93,7 +93,7 @@ _AUTO_ALLOWED = frozenset({
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
     "get-brief-spec", "get-busy", "get-id-catalog", "get-memory", "get-posts", "get-project",
-    "get-subsections", "get-voice", "list-jobs", "mark-done", "read-file", "recall",
+    "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
     "research-signal", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-channel", "update-experiment", "update-feature", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-strategy",
@@ -115,7 +115,7 @@ _SHARED_ALLOWED = frozenset({
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
     "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
-    "mark-done", "read-file", "recall", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
+    "list-assumptions", "mark-done", "read-file", "recall", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-brief-spec", "update-channel", "update-experiment", "update-feature",
     "update-intake", "update-memo", "update-milestone", "update-phase", "update-post",
     "update-profile", "update-project", "update-roadmap", "update-strategy",
@@ -480,6 +480,27 @@ def _build_parser():
     p.add_argument("--ref", help="composed id of an experiment of this project")
     p.add_argument("--date", help="YYYY-MM-DD (default today)")
     p.set_defaults(_run=lambda a: fileops.add_evidence(a.project, _fields(a, ["text", "ref", "date"])))
+
+    p = sub.add_parser("list-assumptions", help="Tracked assumptions of a project's memos")
+    p.add_argument("--project", required=True)
+    p.add_argument("--type", dest="memo_type")
+    p.set_defaults(_run=lambda a: {"assumptions": fileops.list_assumptions(a.project, a.memo_type)})
+
+    p = sub.add_parser("extract-assumptions", help="Propose assumptions from a memo, or save them (--items-json)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--type", required=True, dest="memo_type")
+    p.add_argument("--version", required=True, type=int)
+    p.add_argument("--items-json", dest="items_json", help="JSON list of assumption texts; omit to only propose")
+
+    def _extract(a):
+        items = None
+        if a.items_json is not None:
+            try:
+                items = json.loads(a.items_json)
+            except ValueError:
+                raise fileops.ActionError("--items-json must be a JSON list of texts")
+        return fileops.extract_assumptions(a.project, a.memo_type, a.version, items)
+    p.set_defaults(_run=_extract)
 
     p = sub.add_parser("set-metric", help="Set or clear an experiment's metric source (read-only app action)")
     p.add_argument("--project", required=True)

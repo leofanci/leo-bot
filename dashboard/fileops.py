@@ -47,7 +47,7 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
-from core import app_rules, evidence, folders, paths
+from core import app_rules, assumptions, evidence, folders, paths
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
@@ -1611,11 +1611,11 @@ def write_intake(project_slug: str, text: str) -> dict:
 
 
 def _evidence_ref(project_slug: str, ref: str) -> str:
-    """Composed id an evidence entry may point at: an experiment of this same project."""
+    """Composed id an evidence entry may point at: an experiment or memo assumption of this same project."""
     db = _db_module()
     ent = build_id_registry(db.tree(), db.posts(), root=ROOT).resolve(ref)
-    if not ent or ent["kind"] != "exp" or (ent.get("ref") or {}).get("project") != project_slug:
-        raise ActionError(f"ref '{ref}' is not an experiment of {project_slug}")
+    if not ent or ent["kind"] not in ("exp", "assumption") or (ent.get("ref") or {}).get("project") != project_slug:
+        raise ActionError(f"ref '{ref}' is not an experiment or assumption of {project_slug}")
     return ent["id"]
 
 
@@ -1677,6 +1677,12 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
         merged.update(body_extra)
     if fields:
         merged.update({k: v for k, v in fields.items() if v is not None})
+    # A new version keeps its predecessor's assumptions (same ids and statuses) until the owner
+    # re-extracts them: a contradicted one stays contradicted until its text is replaced.
+    merged.pop("assumptions", None)
+    versions = _memo_assumptions(project_slug, mtype)
+    if versions:
+        merged["assumptions"] = versions[max(versions)]
     body = normalize_memo_body(mtype, merged, version=version)
     fname = f"{mtype}-v{version}.json"
     path = memo_dir / fname
@@ -1685,6 +1691,66 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
     key = lk_memo(project_slug, mtype, version)
     rel = str(path.relative_to(ROOT))
     return {"id": _composed_id(key), "type": mtype, "version": version, "path": rel, "project": project_slug}
+
+
+def _memo_assumptions(project_slug: str, mtype: str) -> dict[int, list[dict]]:
+    """{version: assumptions} for every saved version of a memo type."""
+    if mtype not in MEMO_TYPES:
+        raise ActionError(f"unknown memo type '{mtype}'")
+    _project_dir(project_slug)  # rejects an unknown or unsafe project
+    out: dict[int, list[dict]] = {}
+    # The index knows each saved memo file: read those, never a path built from the arguments.
+    for row in _db_module().memos():
+        if row["entity_slug"] != project_slug or row["type"] != mtype:
+            continue
+        try:
+            body = json.loads((ROOT / row["file_path"]).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        out[int(row["version"])] = assumptions.normalize(
+            body.get("assumptions") if isinstance(body, dict) else None)
+    return out
+
+
+def list_assumptions(project_slug: str, mtype: str | None = None) -> list[dict]:
+    """Every memo version's assumptions, with the memo's composed id and version."""
+    memo_dir = _project_dir(project_slug) / "strategy" / "memos"
+    if mtype is not None and mtype not in MEMO_TYPES:
+        raise ActionError(f"unknown memo type '{mtype}'")
+    out = []
+    for t in ([mtype] if mtype else sorted(MEMO_TYPES)):
+        for ver, items in sorted(_memo_assumptions(project_slug, t).items()):
+            memo = _composed_id(lk_memo(project_slug, t, ver))
+            out += [{**it, "memo": memo, "type": t, "version": ver,
+                     "id": f"{memo}.as{it['id'][2:]}", "asm": it["id"]} for it in items]
+    return out
+
+
+def extract_assumptions(project_slug: str, mtype: str, version: int, items: list[str] | None) -> dict:
+    """Without `items`: the candidates read from the memo's prose, nothing written. With `items`:
+    saved into that memo version, replacing its assumptions. A text already held keeps its id and
+    status; a new text gets a new id and status `unknown`."""
+    if mtype not in MEMO_TYPES:
+        raise ActionError(f"unknown memo type '{mtype}'")
+    memo_dir = _project_dir(project_slug) / "strategy" / "memos"
+    path = memo_dir / f"{mtype}-v{int(version)}.json"
+    if not path.exists():
+        raise ActionError(f"memo '{mtype}' v{version} not found")
+    body = json.loads(path.read_text(encoding="utf-8"))
+    if items is None:
+        return {"proposed": assumptions.proposed(body, mtype), "type": mtype, "version": int(version)}
+    if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
+        raise ActionError("items must be a list of texts")
+    versions = _memo_assumptions(project_slug, mtype)
+    prev = [v for k, v in sorted(versions.items()) if k < int(version)]
+    cur = versions.get(int(version), [])
+    pool = cur + [p for p in (prev[-1] if prev else []) if p["text"].strip().lower()
+                  not in {c["text"].strip().lower() for c in cur}]
+    body["assumptions"] = assumptions.carry(pool, items, used=list(versions.values()))
+    path.write_text(dumps_json(normalize_memo_body(mtype, body, version=int(version))), encoding="utf-8")
+    reindex()
+    return {"id": _composed_id(lk_memo(project_slug, mtype, int(version))), "type": mtype,
+            "version": int(version), "project": project_slug, "assumptions": body["assumptions"]}
 
 
 def update_memo(project_slug: str, memo_type: str, version: int, fields: dict) -> dict:
