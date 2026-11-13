@@ -280,6 +280,20 @@ Source: `core/subsections.py`. Chat and dashboard mutations go through `osctl` /
 
 ---
 
+## Results loop
+
+Experiments and memos stay honest against what actually happened.
+
+- **Metric source.** `osctl set-metric --project demo --stem will-pay --app acme --action ACME_GET_STATS --path data.followers` saves where an experiment's number comes from. Only a read-only app action is accepted; a write action, a URL argument or a paid or blocked app is refused with the reason. `path` is dotted keys, with digits for a list index. `update-experiment` cannot set it.
+- **Scoring job.** Create a scheduled job with the `score-experiments` skill (Team, Scheduled jobs). On each run the server reads every metric source (no click), takes the number, and asks the engine for a verdict against the success and kill criteria written in advance: on track, met, killed or inconclusive. What a source returns is quoted as data and never read by a bot. A failed read or bad path is `inconclusive` with the reason. Calls count against the job's cap.
+- **Verdict card.** Each verdict is a card in the job's thread with the number, window, date, criteria and reason. Approve saves the result on the experiment (status `done` for met or killed, `running` for on track) and adds one evidence entry. No saves nothing. A second click does nothing. A repeat run with the same number does not make a second card; a new number replaces the old pending one.
+- **Evidence log.** `osctl add-evidence --project demo --text "..." --ref <experiment or assumption id>` appends a dated, numbered entry (ids like `pr1.sec02.ev3`) under the intake's Evidence log. Entries are never edited.
+- **Assumptions.** `osctl extract-assumptions` proposes the assumptions a memo rests on from its prose; once you agree, `--items-json` saves them with stable ids (`pr1.sec04.mm1.as2`) that carry across memo versions. `list-assumptions` shows them with their status.
+- **Contradictions.** Evidence added against an assumption is judged once; only a contradiction raises a card, and only Approve marks the assumption `contradicted`.
+- **Stale memos.** A memo holding a contradicted assumption shows a Stale flag naming the assumption and its evidence, and the state index tells the bots. Stale is worked out on every read, never stored. It clears when a new version replaces that assumption's text.
+
+---
+
 ## Typical session
 
 1. `python3 dashboard/server.py` → open the URL

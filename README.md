@@ -263,6 +263,7 @@ Without the app, run `leobot` (or `python3 dashboard/server.py` from a clone) an
 | `channel-strategy` | Channel comparison, entry strategy, social mandate |
 | `experiment-design` | Cheapest test, success/kill criteria |
 | `experiment-review` | Log results, persist/pivot/kill |
+| `score-experiments` | Scheduled job: reads each experiment metric source, judges it, holds a verdict card to approve |
 | `icp-research` | Segment memo, where to find 10 this week, interview guide |
 | `positioning` | Category framing, differentiation, messaging hierarchy |
 | `competitor-scan` | Landscape map, gaps, how to play it |
