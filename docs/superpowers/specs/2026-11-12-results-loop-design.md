@@ -67,6 +67,12 @@ New optional experiment field `metric`:
   The owner sees the arithmetic, not only the verdict.
 - A missing source, failed read or unparseable number yields `inconclusive` with the error, never
   a guess.
+- Checked against a real read-only result (an account-info read on a connected social app). The
+  result is an object `{"data": {...}, "error": null, "log_id": "...", "result_type": "..."}`; it
+  has no `successful` key, so a failure shows as a non-null `error` or a `result_type` of failed
+  or blocked. Counts are plain numbers under `data` (for example `data.followers_count`), so a
+  dotted path works. Some list reads nest one level deeper (`data.data.0.values.0.value`), which
+  the digit segments already address.
 
 ### Scoring job
 
