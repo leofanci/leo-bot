@@ -1680,7 +1680,7 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
     # A new version keeps its predecessor's assumptions (same ids and statuses) until the owner
     # re-extracts them: a contradicted one stays contradicted until its text is replaced.
     merged.pop("assumptions", None)
-    versions = _memo_assumptions(memo_dir, mtype)
+    versions = _memo_assumptions(project_slug, mtype)
     if versions:
         merged["assumptions"] = versions[max(versions)]
     body = normalize_memo_body(mtype, merged, version=version)
@@ -1693,10 +1693,11 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
     return {"id": _composed_id(key), "type": mtype, "version": version, "path": rel, "project": project_slug}
 
 
-def _memo_assumptions(memo_dir: Path, mtype: str) -> dict[int, list[dict]]:
+def _memo_assumptions(project_slug: str, mtype: str) -> dict[int, list[dict]]:
     """{version: assumptions} for every saved version of a memo type."""
     if mtype not in MEMO_TYPES:
         raise ActionError(f"unknown memo type '{mtype}'")
+    memo_dir = _project_dir(project_slug) / "strategy" / "memos"
     out: dict[int, list[dict]] = {}
     for ver in range(1, next_memo_version(memo_dir, mtype)):
         path = memo_dir / f"{mtype}-v{ver}.json"
@@ -1717,7 +1718,7 @@ def list_assumptions(project_slug: str, mtype: str | None = None) -> list[dict]:
         raise ActionError(f"unknown memo type '{mtype}'")
     out = []
     for t in ([mtype] if mtype else sorted(MEMO_TYPES)):
-        for ver, items in sorted(_memo_assumptions(memo_dir, t).items()):
+        for ver, items in sorted(_memo_assumptions(project_slug, t).items()):
             memo = _composed_id(lk_memo(project_slug, t, ver))
             out += [{**it, "memo": memo, "type": t, "version": ver,
                      "id": f"{memo}.as{it['id'][2:]}", "asm": it["id"]} for it in items]
@@ -1739,7 +1740,7 @@ def extract_assumptions(project_slug: str, mtype: str, version: int, items: list
         return {"proposed": assumptions.proposed(body, mtype), "type": mtype, "version": int(version)}
     if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
         raise ActionError("items must be a list of texts")
-    versions = _memo_assumptions(memo_dir, mtype)
+    versions = _memo_assumptions(project_slug, mtype)
     prev = [v for k, v in sorted(versions.items()) if k < int(version)]
     cur = versions.get(int(version), [])
     pool = cur + [p for p in (prev[-1] if prev else []) if p["text"].strip().lower()
