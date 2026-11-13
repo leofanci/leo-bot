@@ -514,7 +514,8 @@ def state_snapshot(projects, only=None):
         if only and slug != only:
             continue
         pr_id = reg.get(f"proj:{slug}") or slug
-        head = f"\n### {slug} id={pr_id} ({p.get('kind') or p.get('type')}"
+        label = slug if (p.get("name") or slug) == slug else f"{p['name']} [{slug}]"
+        head = f"\n### {label} id={pr_id} ({p.get('kind') or p.get('type')}"
         if p.get("priority"):
             head += f", {p['priority']}"
         head += ")"
@@ -983,7 +984,7 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
             except Exception:  # noqa: BLE001 - the line is still told with the slug
                 name = None
             if name and name != ws:
-                shown = f"{name} (slug {ws}). This is {name}: \"{name}\", \"this project\" and \"here\" all mean this workspace"
+                shown = f"{name}. You are inside {name}: \"{name}\", \"this project\" and \"here\" all mean this workspace"
         lines.append("Workspace: HQ, the holding's CEO office (sees every company)." if ws == bots.HQ
                      else f"Workspace: {shown}. You work only for this company; other workspaces "
                           "are invisible except as busy time in the shared calendar.")
@@ -2946,9 +2947,14 @@ class Handler(BaseHTTPRequestHandler):
         locked = shared or engine.kind == "runner"
         sess.shared = locked
         apps_used = bool(getattr(sess, "apps_used", False))
+        # A bot with a connected-app grant always has its apps on a private turn (the engine can use
+        # them), so the owner never has to word a message for them: the bot decides. Reading app data
+        # still costs the turn its folder edits, and the thread its web search once it has read any.
+        mount = bool(app_grant) and not app_turn and not job and not locked \
+            and "apps" in engine.supports and not engine.full_disk
         folder_rows, read_dirs, edit_dirs = _turn_folders(
             ws, room, bot_id, locked=locked, may_edit=may_edit,
-            drop_edit=bool(app_turn or apps_used), engine=engine)
+            drop_edit=bool(app_turn or mount or apps_used), engine=engine)
         sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
         if (_WRITE_TURN_RE.search(user_msg or "")
@@ -3032,7 +3038,7 @@ class Handler(BaseHTTPRequestHandler):
             workspace = ("## App workspace unavailable\n" + why
                          + " Do not inspect the Leo Bot source tree as a substitute.")
 
-        if app_turn:  # which accounts the bot may name this turn (a workspace's own picks)
+        if app_turn or mount:  # which accounts the bot may name this turn (a workspace's own picks)
             workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
         if locked:
             workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
@@ -3252,11 +3258,13 @@ class Handler(BaseHTTPRequestHandler):
         # get it, a consulted teammate never does; revoked in the finally below.
         apps_kw = {}
         turn_started = time.time()
-        if app_turn:
+        if app_turn or mount:
             apps_kw = {"apps_token": apps_relay.TOKENS.mint(
                            {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
                             "room": (room or {}).get("id"), "person": bots.CEO,
-                            "report": job_mode == "report"}),
+                            "report": job_mode == "report",
+                            # the first app call marks the thread: no web search after app data
+                            "on_call": lambda: setattr(sess, "apps_used", True)}),
                        "apps_port": self.server.server_address[1]}
         if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
             if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
