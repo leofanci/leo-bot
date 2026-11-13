@@ -1,7 +1,7 @@
 [
   {"id": "untagged-question-goes-to-lead", "category": "routing",
    "msg": "what should I look at today?",
-   "expect": {"bot": "cos", "skill": null, "tier": "fast", "reason": "default", "web": false, "gate": false, "runs": 1}},
+   "expect": {"bot": "cos", "skill": null, "tier": "fast", "reason": "default", "web": true, "gate": false, "runs": 1}},
   {"id": "untagged-question-stays-with-last-speaker", "category": "routing",
    "msg": "and what about next week?", "thread": {"bot": "cmo"},
    "expect": {"bot": "cmo", "skill": null, "tier": "fast", "reason": "default"}},
@@ -78,8 +78,11 @@
   {"id": "research-skill-turns-web-on", "category": "model",
    "msg": "/competitor-scan who else does this?",
    "expect": {"bot": "research", "skill": "competitor-scan", "web": true, "tier": "strong"}},
-  {"id": "plain-question-has-no-web", "category": "model",
+  {"id": "private-question-has-web-on-the-fast-model", "category": "model",
    "msg": "who are our competitors?",
+   "expect": {"web": true, "tier": "fast", "reason": "default"}},
+  {"id": "shared-question-has-no-web", "category": "model",
+   "msg": "who are our competitors?", "shared": true,
    "expect": {"web": false, "tier": "fast"}},
 
   {"id": "inbox-question-is-an-app-turn", "category": "apps",

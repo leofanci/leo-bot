@@ -225,7 +225,6 @@ class RouteSkill(unittest.TestCase):
         self.assertFalse(server._needs_web(ctx))
         seen = _captured({"messages": [{"role": "user", "content": "hi"}],
                           "context": ctx})
-        self.assertFalse(seen["with_web"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
 
     def test_workspace_classifier_is_local_and_specific(self):
@@ -236,12 +235,8 @@ class RouteSkill(unittest.TestCase):
         self.assertTrue(server._needs_workspace("anything", skill="tokensave"))
         self.assertFalse(server._needs_workspace("what positioning memos do we have?"))
 
-    def test_app_context_classifier_covers_gtm_but_skips_admin(self):
-        self.assertTrue(server._needs_app_context("what should our brand emphasize?"))
-        self.assertTrue(server._needs_app_context("draft launch copy", suggest="launch-plan"))
-        self.assertTrue(server._needs_app_context("where is auth handled?"))
-        self.assertFalse(server._needs_app_context("rename this project"))
-        self.assertFalse(server._needs_app_context("thanks"))
+    def test_no_app_context_classifier(self):
+        self.assertFalse(hasattr(server, "_needs_app_context"))
 
 
 class NeedsWebAndModel(unittest.TestCase):
@@ -250,6 +245,16 @@ class NeedsWebAndModel(unittest.TestCase):
         self.assertFalse(server._needs_web("what's the latest on this"))
         self.assertTrue(server._needs_web("look this up /web"))
         self.assertFalse(server._needs_web("rename the project"))
+
+    def test_private_turn_always_has_web(self):
+        self.assertTrue(server._needs_web("rename the project", private=True))
+        self.assertFalse(server._needs_web("rename the project", private=False))
+
+    def test_web_available_does_not_escalate(self):
+        self.assertEqual(server._pick_model_reason(None, False, "what is our plan?"),
+                         (server.chat_session.CHAT_MODEL, "default"))
+        self.assertEqual(server._pick_model_reason(None, True, "look it up /web"),
+                         (server.chat_session.ESCALATED_MODEL, "web"))
 
     def test_research_skill_forces_web(self):
         self.assertTrue(server._needs_web("anything", skill="competitor-scan"))
@@ -327,9 +332,9 @@ class ProjectScopedChatSession(unittest.TestCase):
 
 
 class SkillRouting(unittest.TestCase):
-    def test_cheap_turn_no_skill_no_web_cheap_model(self):
+    def test_cheap_private_turn_has_web_and_cheap_model(self):
         seen = _captured({"messages": [{"role": "user", "content": "what posts do I have?"}]})
-        self.assertFalse(seen["with_web"])
+        self.assertTrue(seen["with_web"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
         self.assertNotIn("## Active skill:", seen["text"])
 
@@ -566,6 +571,30 @@ class TurnFolders(unittest.TestCase):
         seen["out"] = h.wfile.getvalue().decode()
         seen["lead"] = seen["runs"][0] if seen["runs"] else None
         return seen
+
+    def test_code_words_get_no_injected_graph_but_the_command(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("where is auth handled in the product?")
+        self.assertEqual(seen["ctx"], [])
+        self.assertIn("code-context --query", seen["lead"]["text"])
+        self.assertEqual(seen["sess"].code_folder, str(self.b))
+        self.assertTrue(seen["lead"]["web"])
+
+    def test_no_index_no_command(self):
+        seen = self.turn("where is auth handled in the product?")
+        self.assertNotIn("code-context", seen["lead"]["text"])
+        self.assertIsNone(seen["sess"].code_folder)
+
+    def test_shared_thread_gets_no_web_and_no_code_folder(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("where is auth handled?", shared=True)
+        self.assertFalse(seen["lead"]["web"])
+        self.assertIsNone(seen["sess"].code_folder)
+        self.assertNotIn("code-context", seen["lead"]["text"])
 
     def test_untagged_turn_reads_all_folders_and_edits_none(self):
         lead = self.turn("where is auth handled?")["lead"]

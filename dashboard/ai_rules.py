@@ -21,7 +21,7 @@ Each turn: COMPACT state index only — not full content. Fetch on demand:
 - `get-project --slug <slug>` — memos, experiments, features, activities, `sections` + `subsections`
 - `resolve-id --id pr1.sec02` — section artifacts + paths
 - `read-file --path <data-relative>` — profile.md, brief JSON, intake.md, brief-specs/br{N}.md, voices/vc{N}.md, etc.
-- WebSearch / WebFetch — only on research turns; use for live external data.
+- WebSearch / WebFetch — when listed; only for live outside facts the answer needs.
   WebFetch works only for sites the user named in the message; otherwise use
   WebSearch. Never copy private workspace content (notes, numbers, file
   contents, secrets) into a URL; search queries describe the topic only"""
@@ -158,7 +158,7 @@ Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."
 
 TEAM_TAGGING = """## Skills and saves
 Your card lists your skills. Task needs one → `get-skill --name <name>` first; it stays active for the thread.
-Any turn may propose a save (Approval above). Posts: `content-brief`. Web: `/web`.
+Any turn may propose a save (Approval above). Posts: `content-brief`.
 A loaded or injected skill is your playbook; its tab/section steps are filing the commands do. Talk per How you work.
 Run skills yourself; never tell the user to run a skill."""
 

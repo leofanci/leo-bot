@@ -274,8 +274,9 @@ class CapWiring(AskHarness):
     def test_zero_model_reply_not_refused(self):
         self.seed_spend(owner=6.0, ws="acme")
         with env(LEOBOT_OWNER_DAILY_CAP="5"):
-            out, _ = self.ask("save a positioning memo for acme", "should not run")
-        self.assertNotIn("daily cap", out)  # the tag-gate hint costs nothing
+            out, _ = self.ask("/tokensave how does login work", "should not run")
+        self.assertNotIn("daily cap", out)  # the no-index reply costs nothing
+        self.assertIn("Link a folder", out)
         self.assertEqual(self.engine_calls, 0)
 
     def test_ui_handles_notice(self):

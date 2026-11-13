@@ -735,8 +735,12 @@ def _route_skill(text):
     return _explicit_skill(text)
 
 
-def _needs_web(text, skill=None):
-    """Web tools only on explicit `/web` or `@web`, or tagged research skills."""
+def _needs_web(text, skill=None, *, private=False):
+    """Web search on every private turn (the bot decides when to search). Otherwise, and for
+    the model choice (`private` False: did the user ask for web?), only an explicit `/web` or
+    `@web`, or a tagged research skill."""
+    if private:
+        return True
     if skill in _WEB_SKILLS:
         return True
     if text and ("web" in _MENTION_RE.findall(text.lower())):
@@ -809,31 +813,6 @@ _WORKSPACE_INTENT_RE = re.compile(
 def _needs_workspace(text, skill=None):
     """Pure string classifier: no model call and no filesystem scan."""
     return skill == "tokensave" or bool(_WORKSPACE_INTENT_RE.search(text or ""))
-
-
-_APP_CONTEXT_RE = re.compile(
-    r"\b(?:app|product|feature|roadmap|user|customer|audience|persona|icp|"
-    r"position(?:ing)?|brand(?:ing)?|messaging|value prop(?:osition)?|offer|"
-    r"social|content|campaign|channel strategy|copy|launch|pricing|market|"
-    r"competitor|acquisition|activation|retention|conversion|onboarding|ux|"
-    r"gtm|go.to.market|grow(?:th|ing)?|business model|strateg(?:y|ic))\b",
-    re.I,
-)
-
-
-def _needs_app_context(text, skill=None, suggest=None):
-    """Whether fresh facts from a linked app should enter this model turn.
-
-    This local classifier deliberately errs toward product evidence for routed
-    GTM work, while leaving greetings and Leo Bot administration graph-free.
-    """
-    return bool(
-        skill == "tokensave"
-        or _needs_workspace(text, skill)
-        or skill in SKILL_NAMES
-        or suggest in SKILL_NAMES
-        or _APP_CONTEXT_RE.search(text or "")
-    )
 
 
 _READ_TURN_RE = re.compile(
@@ -993,10 +972,11 @@ def _skill_menu(team, bot_id):
 
 
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
-               members=None, readonly=False, shared=False, query=""):
+               members=None, readonly=False, shared=False, query="", code_index=False):
     """Persona for the speaking bot. Full card (job, team, memory) when the
     session is fresh or the speaker changed; a one-line marker otherwise.
-    `query`: the message that opened the card, to pick the memory it carries."""
+    `query`: the message that opened the card, to pick the memory it carries. `code_index`:
+    this turn has an indexed linked folder (the card names `code-context`)."""
     b = team.get(bot_id) if team else None
     if not b:
         return ""
@@ -1018,6 +998,8 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         menu = _skill_menu(team, bot_id)
         if menu:
             lines.append(menu)
+        if code_index and not shared:
+            lines.append("Code questions: `osctl code-context --query \"...\"` reads the linked folder's code index.")
         if b.covering:
             names = ", ".join(team.get(c).name for c in b.covering)
             lines.append(f"Also covering for (switched off): {names}.")
@@ -2963,17 +2945,20 @@ class Handler(BaseHTTPRequestHandler):
             drop_edit=bool(app_turn or mount or apps_used), engine=engine)
         sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
-        with_web = _needs_web(user_msg, skill) and not apps_used
+        # Web search is on every private turn; only asking for it (/web) takes the stronger model.
+        web_asked = _needs_web(user_msg, skill) and not apps_used
+        with_web = _needs_web(user_msg, skill, private=not locked) and not apps_used
         model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
-                         else _pick_model_reason(skill, with_web, user_msg, sess, explicit=bool(explicit),
+                         else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                  editing=bool(may_edit and edit_dirs)))
 
         wants_file_search = _needs_workspace(user_msg, skill)
-        wants_app_context = _needs_app_context(user_msg, skill)
         # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
         # people can see: their question would steer a read of the owner's code (names, paths).
         layered = [] if locked else _layered_folders(ws, room, bot_id)
         graph_folder = folders.first_indexed(layered) if shutil.which("tokensave") else None
+        # osctl code-context reads this folder when the bot asks (never in a locked turn).
+        sess.code_folder = graph_folder
         if skill == "tokensave" and not graph_folder:
             # Deterministic zero-model response: do not inject a skill body or
             # spend a model turn when the requested graph has no safe target.
@@ -2999,7 +2984,7 @@ class Handler(BaseHTTPRequestHandler):
 
         graph_context = ""
         graph_error = None
-        if graph_folder and wants_app_context:
+        if graph_folder and skill == "tokensave":  # explicit /tokensave: up front, as before
             try:
                 # An invited person's question must not read the app's source out of this.
                 graph_context = tokensave_bridge.context(
@@ -3057,6 +3042,7 @@ class Handler(BaseHTTPRequestHandler):
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
                            handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
+                           code_index=bool(graph_folder),
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
         )
@@ -3216,7 +3202,7 @@ class Handler(BaseHTTPRequestHandler):
             # A teammate never gets web the user did not ask for: the lead's own turn decides it,
             # not a question the lead model wrote (it may echo text from a file or another person).
             c_web = bool(with_web) and not apps_used  # app data in this thread
-            c_model = (chat_session.ESCALATED_MODEL if (c_skill or c_web)
+            c_model = (chat_session.ESCALATED_MODEL if (c_skill or web_asked)
                        else chat_session.CHAT_MODEL)
             c_reason = "teammate-skill" if c_skill else "teammate"
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
