@@ -965,6 +965,31 @@ def _tag_gate_message(suggest, team=None):
     )
 
 
+_MENU_DESC_CHARS = 100
+
+
+def _one_line(text, limit):
+    """`text` on one line, cut at a word boundary to at most `limit` chars (… when cut)."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    return (cut or flat[:limit - 1]) + "…"
+
+
+def _skill_menu(team, bot_id):
+    """The speaker's own skills, one line each, and how to load one. '' when it has none."""
+    skills = team.skills_of(bot_id) if team else []
+    if not skills:
+        return ""
+    desc = {s["name"]: s["description"] for s in _skills_index()}
+    lines = ["Your skills (load one with `osctl get-skill --name <name>` when the task needs it):"]
+    for name in skills:
+        d = _one_line(desc.get(name, ""), _MENU_DESC_CHARS)
+        lines.append(f"- {name}: {d}" if d else f"- {name}")
+    return "\n".join(lines)
+
+
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
                members=None, readonly=False, shared=False, query=""):
     """Persona for the speaking bot. Full card (job, team, memory) when the
@@ -988,6 +1013,9 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         lines.append("Workspace: HQ, the holding's CEO office (sees every company)." if ws == bots.HQ
                      else f"Workspace: {shown}. You work only for this company; other workspaces "
                           "are invisible except as busy time in the shared calendar.")
+        menu = _skill_menu(team, bot_id)
+        if menu:
+            lines.append(menu)
         if b.covering:
             names = ", ".join(team.get(c).name for c in b.covering)
             lines.append(f"Also covering for (switched off): {names}.")
