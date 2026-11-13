@@ -82,6 +82,15 @@ class CodexDriver(Base):
         self.assertIsNone(call["leak"])
         self.assertEqual(call["stdin"].strip(), "hi")
 
+    def test_web_search_only_on_a_web_turn_and_from_the_index(self):
+        # "cached" answers from OpenAI's index: no live fetch of a host a page names.
+        list(self.session(self.engine).ask("hi", os_token="tok", os_port=8765))
+        list(self.session(self.engine).ask("hi", with_web=True, os_token="tok", os_port=8765))
+        off, on = (" ".join(c["argv"]) for c in self.calls())
+        self.assertIn('web_search="disabled"', off)
+        self.assertIn('web_search="cached"', on)
+        self.assertNotIn('web_search="live"', on)
+
     def test_app_role_replaces_builtin_coding_instructions_on_every_turn(self):
         s = self.session(self.engine)
         list(s.ask("one"))

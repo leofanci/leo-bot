@@ -307,6 +307,38 @@ class Approve(Base):
         notes = server.chat_store.load(self.chat)["messages"]
         self.assertEqual(notes[-1], {**notes[-1], "role": "assistant", "bot": "cos", "content": "Sent."})
 
+    def batch(self):
+        return [approvals.add_app_action(self.root, ws="hq", room="hq/general", chat=self.chat, bot="cos",
+                                         person="ceo", toolkit="gmail", slug="GMAIL_SEND_EMAIL",
+                                         arguments={"recipient_email": f"p{i}@example.com"}, batch="b1")
+                for i in range(3)]
+
+    def test_approve_all_runs_the_whole_batch_once(self):
+        recs = self.batch()
+        with mock.patch.object(server.composio, "execute", return_value={"successful": True, "data": {}}) as ex:
+            code, data, _, _ = request("POST", "/api/approvals/batch/b1/approve", {})
+            again = request("POST", "/api/approvals/batch/b1/approve", {})
+        self.assertEqual(code, 200)
+        self.assertEqual(sorted(r["id"] for r in data["results"]), sorted(r["id"] for r in recs))
+        self.assertEqual({r["status"] for r in data["results"]}, {"done"})
+        self.assertEqual(ex.call_count, 3)
+        self.assertEqual(again[0], 404)  # nothing of b1 is pending now
+        self.assertEqual(approvals.get(self.rec["id"], self.root)["status"], "pending")  # not in the batch
+
+    def test_reject_all_sends_nothing(self):
+        self.batch()
+        with mock.patch.object(server.composio, "execute") as ex:
+            code = request("POST", "/api/approvals/batch/b1/reject", {})[0]
+        self.assertEqual(code, 200)
+        ex.assert_not_called()
+        self.assertEqual([r for r in approvals.pending(self.root) if r.get("batch") == "b1"], [])
+
+    def test_approve_all_requires_origin(self):
+        self.batch()
+        with mock.patch.object(server.composio, "execute") as ex:
+            self.assertEqual(request("POST", "/api/approvals/batch/b1/approve", {}, origin=False)[0], 403)
+        ex.assert_not_called()
+
     def test_approve_requires_origin(self):
         with mock.patch.object(server.composio, "execute") as ex:
             self.assertEqual(request("POST", self.path + "/approve", {}, origin=False)[0], 403)
@@ -490,12 +522,23 @@ class Turn(Base):
         self.assertNotIn("ca_g2", note)
         self.assertEqual(server._apps_accounts_note("demo", {"gmail": "write"}), "")
 
+    def test_accounts_note_says_how_each_app_runs_and_what_to_connect(self):
+        integrations.set_grant("hq", "cos", {"gmail": "act", "instagram": "act"}, self.root)
+        note = server._apps_accounts_note("hq", {"gmail": "act"}, bot="cos")
+        self.assertIn("- gmail (acts on its own)", note)
+        self.assertIn("instagram: no account connected", note)
+        self.assertIn("connect", note)
+        integrations.set_grant("hq", "cos", {"gmail": "write"}, self.root)
+        self.assertIn("- gmail (waits for approval)", server._apps_accounts_note("hq", {"gmail": "write"}, bot="cos"))
+
     def test_app_turn_flags(self):
         seen, lead, out = self.run_turn("draft a reply to the thread in my inbox")
         self.assertNotIn("tag who should do it", out)
         kw = seen[0]
         self.assertEqual(kw["model"], server.chat_session.ESCALATED_MODEL)
-        self.assertIs(kw["with_web"], False)
+        # Web search beside apps: a query only reaches the search engine, and a fetch only
+        # reaches hosts the owner typed, so app data has no road to another host.
+        self.assertIs(kw["with_web"], True)
         self.assertEqual(kw["apps_port"], PORT)
         self.assertEqual(len(kw["apps_token"]), 64)
         self.assertTrue(lead.apps_used)
@@ -513,8 +556,8 @@ class Turn(Base):
         self.assertIn("apps_token", seen[0])
         self.assertEqual(seen[0]["model"], "haiku")
         self.assertFalse(lead.apps_used)
-        # Apps on, so no web search on that turn: app data never meets a search query.
-        self.assertIs(seen[0]["with_web"], False)
+        # Apps on and web on: a research job reads the owner's apps and searches the web in one run.
+        self.assertIs(seen[0]["with_web"], True)
 
     def test_asked_web_on_an_apps_turn_is_the_owners_call(self):
         seen, _, _ = self.run_turn("look up competitor pricing /web")
@@ -538,7 +581,7 @@ class Turn(Base):
         self.assertEqual([s["who"] for s in seen], ["lead", "mate", "lead"])
         self.assertEqual(seen[0]["apps_token"], seen[2]["apps_token"])
         self.assertNotIn("apps_token", seen[1])
-        self.assertIs(seen[1]["with_web"], False)
+        self.assertIs(seen[1]["with_web"], True)
         # Its prompt quotes the lead's reply (app data): osctl's online research stays off too.
         self.assertIs(seen[1]["apps_used"], True)
 
@@ -549,9 +592,9 @@ class Turn(Base):
         self.assertEqual(len(held), 1)
         self.assertEqual(held[0][0]["action"]["slug"], "GMAIL_SEND_EMAIL")
 
-    def test_apps_used_keeps_web_off(self):
-        seen, _, _ = self.run_turn("@web find competitor pricing", apps_used=True)
-        self.assertIs(seen[0]["with_web"], False)
+    def test_apps_used_keeps_web_on(self):
+        seen, _, _ = self.run_turn("find competitor pricing", apps_used=True)
+        self.assertIs(seen[0]["with_web"], True)
 
 
 if __name__ == "__main__":

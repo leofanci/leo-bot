@@ -1,6 +1,8 @@
 """app_rules.py — what a bot's Composio tool call may do (connected apps).
 
-A call is read (runs now), hold (waits on an Approve click), or refuse. A read
+A call is read (runs now), run (a write on an "act" grant: runs now, no card), hold
+(waits on an Approve click), or refuse. An "act" grant still holds deletes and anything
+that spends money: those always wait for the owner. A read
 is narrow on purpose, and two checks must agree: Composio tags the tool
 readOnlyHint (an allowlist from its own metadata), and the name reads (the first
 action word is a read verb and no word is a write verb, or the slug is a known
@@ -33,6 +35,8 @@ WRITE_VERBS = frozenset((
     "EXECUTE INVOKE CLICK NAVIGATE SCRAPE CRAWL PUBLISH SUBMIT CANCEL DISABLE ENABLE IMPORT RESET "
     "GENERATE ENRICH VERIFY VALIDATE TEST PING WEBHOOK EMIT FIRE DISPATCH BROADCAST NOTIFY POKE "
     "REVOKE AUTHORIZE SUBSCRIBE UNSUBSCRIBE RENAME REOPEN APPROVE REJECT ASSIGN TRANSFER").split())
+# A write naming one of these removes or takes away: it waits for a click even on an "act" grant.
+DESTRUCTIVE_VERBS = frozenset("DELETE REMOVE TRASH REVOKE CANCEL DISABLE ARCHIVE TRANSFER RESET UNSUBSCRIBE".split())
 # Words that are a verb OR the thing a read is about ("GET_POST", "LIST_SCHEDULE", "GET_CALL"). They
 # count as a write only when a joiner puts them in verb position ("SEARCH_AND_POST").
 NOUNISH_VERBS = frozenset("POST PUT CALL REQUEST SCHEDULE EXPORT START STOP PIN SYNC CLOSE DOWNLOAD RUN TRIGGER CONNECT".split())
@@ -147,8 +151,15 @@ def _size(value, _depth=0):
     return 0
 
 
+def is_destructive(slug, toolkit):
+    words = re.split(r"[^A-Z0-9]+", slug[len(toolkit) + 1:].upper())
+    return bool(DESTRUCTIVE_VERBS.intersection(words))
+
+
 def decide(slug, grant, catalog, arguments=None, read_only=None, paid=frozenset()):
-    """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant.
+    """("read" | "run" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant.
+    Grants: "read" (reads only), "write" (other calls wait for a click), "act" (other calls
+    run at once, except deletes and paid toolkits, which wait).
     `read_only(slug)` says whether Composio tags the tool readOnlyHint (True, False, or None
     when unknown); asked only when everything else allows a read. Without it, nothing reads.
     `paid`: more toolkits whose reads wait like writes (from Composio's categories)."""
@@ -157,13 +168,17 @@ def decide(slug, grant, catalog, arguments=None, read_only=None, paid=frozenset(
     tk = toolkit_of(slug, set(catalog) | BLOCKED_TOOLKITS)
     if tk is None:
         return "refuse", None
-    if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
+    if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write", "act"):
         return "refuse", tk
     if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and tk not in paid \
             and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS) \
             and _size(arguments) <= MAX_READ_ARG_CHARS and read_only is not None and read_only(slug) is True:
         return "read", tk
-    return ("hold" if grant[tk] == "write" else "refuse"), tk
+    if grant[tk] == "read":
+        return "refuse", tk
+    if grant[tk] == "act" and tk not in PAID_READ_TOOLKITS and tk not in paid and not is_destructive(slug, tk):
+        return "run", tk
+    return "hold", tk
 
 
 _SLUG = re.compile(r"[A-Z0-9][A-Z0-9_]{0,127}")

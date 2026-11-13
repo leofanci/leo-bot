@@ -24,6 +24,15 @@ class TestAiRules(unittest.TestCase):
         self.assertIn("APPROVAL:", CHAT_RAIL)
         self.assertIn("## How you work and talk", CHAT_RAIL)
 
+    def test_bots_do_the_job_and_ask_only_when_blocked(self):
+        from dashboard.ai_rules import CHAT_RAIL
+        self.assertIn("Given a job, do it end to end", CHAT_RAIL)
+        self.assertIn("Ask only when blocked", CHAT_RAIL)
+        self.assertIn("connect it in Apps", CHAT_RAIL)          # a missing app or account
+        self.assertIn("one multi-execute", CHAT_RAIL)           # a whole plan, one approval
+        self.assertIn("acts on its own", CHAT_RAIL)
+        self.assertNotIn("Need input? Ask ONE question.", CHAT_RAIL)
+
     def test_every_full_replace_doc_is_read_first_in_chat(self):
         from dashboard.ai_rules import CHAT_RAIL
         for cmd in ("update-intake", "update-technical", "update-roadmap"):

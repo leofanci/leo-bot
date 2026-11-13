@@ -1270,8 +1270,8 @@ async function renderTeam(){
           ${!person && integ.configured && wsApps.length ? `<div class="td-sec"><h4>Apps</h4><div class="app-grants">${wsApps.map(slug => {
             const scope = grantsOf(b)[slug];
             return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(appName(slug))} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
-              ${["", "read", "write"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
-          }).join("")}</div><small>Read + write still asks you before anything that isn't a read.</small></div>` : ""}
+              ${["", "read", "write", "act"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
+          }).join("")}</div><small>Read + write asks you before anything that isn't a read. Acts on its own sends, posts and messages without asking; deletes and paid lookups still ask.</small></div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;
@@ -1420,7 +1420,7 @@ async function renderApprovals(){
     if (isHeld(a)) return `<div class="post approval-row app-row" data-app-id="${esc(a.id)}">
       ${botAvatar(b)}
       <div class="t"><small>${esc(b.name)} · ${esc(where)} · ${relAge(a.created)}</small>
-        <div class="approval-bar app-card">${appCardHtml(a)}</div></div>
+        <div class="approval-bar app-card">${appCardHtml(a, batchSize(a, items))}</div></div>
       <button class="go" data-ap-go="${esc(a.id)}">Open</button>
     </div>`;
     return `<div class="post approval-row">
@@ -1466,7 +1466,7 @@ function heldEditable(a){
   return a?.kind === "job" ? { key: "fields", values: a.job?.fields || {} } : { key: "arguments", values: a?.action?.arguments || {} };
 }
 function grantLabel(scope){
-  return scope === "write" ? "Read + write" : scope === "read" ? "Read" : "Off";
+  return scope === "act" ? "Acts on its own" : scope === "write" ? "Read + write, asks first" : scope === "read" ? "Read" : "Off";
 }
 function appStatusLabel(app, connected){
   const n = connected === true ? 1 : +connected || 0;
@@ -1482,15 +1482,21 @@ function appLogoHtml(slug, meta){
 function acctPicked(picked, ws, slug, id){
   return ((picked?.[ws]?.[slug]) || []).includes(id);
 }
-function appCardHtml(a){
+// How many app actions wait under this card's batch (held together: one Approve all).
+function batchSize(a, list){
+  return a && a.batch ? (list || []).filter(x => x.batch === a.batch && (x.status || "pending") === "pending").length : 1;
+}
+function appCardHtml(a, n){
   const p = a.preview || { title: a.action?.slug || a.summary || "App action", fields: [] };
+  const all = a.batch && n > 1 ? `<button class="btn sm primary" data-app="approve-all">Approve all ${n}</button>
+      <button class="btn sm ghost" data-app="reject-all">No to all</button>` : "";
   const sub = a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
   const edit = a.kind === "contradiction" || a.kind === "verdict" ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
   return `<div class="app-card-h"><b>${esc(p.title)}</b><small>${sub}</small></div>
     <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
       ${edit}
-      <button class="btn sm ghost" data-app="reject">No</button></div>`;
+      <button class="btn sm ghost" data-app="reject">No</button>${all}</div>`;
 }
 function wireAppCard(el, a){
   if (!el || !a) return;
@@ -1504,6 +1510,21 @@ function wireAppCard(el, a){
       renderRail().catch(() => {});
     } catch (e) { toast("✗ " + e.message); lock(false); }
   };
+  if (a.batch) el.dataset.batch = a.batch;
+  const answerAll = async verb => {
+    lock(true);
+    try {
+      const r = await jpost(`/api/approvals/batch/${encodeURIComponent(a.batch)}/${verb}`, {});
+      const res = r.results || [];
+      _APPROVALS = _APPROVALS.filter(x => x.batch !== a.batch);
+      document.querySelectorAll(`.app-card[data-batch="${CSS.escape(a.batch)}"]`).forEach(x => { if (x !== el) (x.closest(".app-row") || x).remove(); });
+      const ok = res.filter(x => x.status === "done").length;
+      el.innerHTML = `<div class="app-result">${esc(verb === "reject" ? "None sent." : `${ok} of ${res.length} done.${ok < res.length ? " Check the others in the thread." : ""}`)}</div>`;
+      renderRail().catch(() => {});
+    } catch (e) { toast("✗ " + e.message); lock(false); }
+  };
+  el.querySelector('[data-app="approve-all"]')?.addEventListener("click", () => answerAll("approve"));
+  el.querySelector('[data-app="reject-all"]')?.addEventListener("click", () => answerAll("reject"));
   el.querySelector('[data-app="approve"]').onclick = () => answer("approve");
   el.querySelector('[data-app="reject"]').onclick = () => answer("reject");
   const editBtn = el.querySelector('[data-app="edit"]');
@@ -4448,7 +4469,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     _APPROVALS.filter(a => isHeld(a) && a.chat && a.chat === activeChatId).forEach(a => {
       const el = document.createElement("div");
       el.className = "approval-bar app-card";
-      el.innerHTML = appCardHtml(a);
+      el.innerHTML = appCardHtml(a, batchSize(a, _APPROVALS));
       wireAppCard(el, a);
       stream.appendChild(el);
     });

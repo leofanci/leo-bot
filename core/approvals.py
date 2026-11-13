@@ -183,19 +183,46 @@ def _housekeep(rows):
     return changed
 
 
-def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments, account=None):
-    """Hold one app tool call for an Approve click, on the account it will run as."""
+def _app_record(root, *, ws, room, chat, bot, person, toolkit, slug, arguments, account):
     label = (integrations.known(root).get(account) or {}).get("label") if account else None
-    rec = {"id": uuid.uuid4().hex[:12], "kind": APP, "ws": ws, "room": room, "chat": chat,
-           "bot": bot, "person": person, "status": "pending", "created": time.time(),
-           "action": {"toolkit": toolkit, "slug": slug, "arguments": arguments,
-                      "account": account, "account_label": label or account},
-           "preview": app_preview.build(slug, arguments, toolkit, account=label or account)}
+    return {"id": uuid.uuid4().hex[:12], "kind": APP, "ws": ws, "room": room, "chat": chat,
+            "bot": bot, "person": person, "status": "pending", "created": time.time(),
+            "action": {"toolkit": toolkit, "slug": slug, "arguments": arguments,
+                       "account": account, "account_label": label or account},
+            "preview": app_preview.build(slug, arguments, toolkit, account=label or account)}
+
+
+def add_app_action(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments, account=None,
+                   batch=None):
+    """Hold one app tool call for an Approve click, on the account it will run as. Calls held
+    together share a `batch` id: one Approve all runs them (each still re-checked)."""
+    rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=toolkit,
+                      slug=slug, arguments=arguments, account=account)
+    if batch:
+        rec["batch"] = batch
     with LOCK:
         rows = load(root)
         rows.append(rec)
         _save(root, rows)
     return rec
+
+
+def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments, account, status, result):
+    """Record an app call a bot ran on its own (an "act" grant): never pending, so no card."""
+    rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=toolkit,
+                      slug=slug, arguments=arguments, account=account)
+    now = time.time()
+    rec.update(status=status, result=result, auto=True, resolved=now)
+    with LOCK:
+        rows = load(root)
+        rows.append(rec)
+        _save(root, rows)
+    return rec
+
+
+def batch_pending(batch, root=bots.ROOT):
+    """The pending app actions held together under one batch id."""
+    return [r for r in load(root) if r.get("kind") == APP and r.get("batch") == batch and r.get("status") == "pending"]
 
 
 def _job_target(job):

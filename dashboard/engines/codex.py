@@ -89,7 +89,9 @@ class CodexEngine(Engine):
         if not self.is_fresh(session):
             cmd += ["resume", state["session"]]
         cmd += ["--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-                "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+                "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"',
+                # Web turns search OpenAI's index ("cached"): no live fetch of a host a page names.
+                "-c", f'web_search="{"cached" if policy.web else "disabled"}"',
                 "-c", f"model_instructions_file={_toml(str(_INSTRUCTIONS_FILE))}",
                 "-c", "project_doc_max_bytes=0", "-c", "skills.include_instructions=false",
                 "-c", "skills.bundled.enabled=false",
