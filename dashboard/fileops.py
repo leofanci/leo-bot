@@ -1610,13 +1610,13 @@ def write_intake(project_slug: str, text: str) -> dict:
     return {"path": str(intake.relative_to(ROOT)), "project": project_slug}
 
 
-def _evidence_ref(project_slug: str, ref: str) -> str:
+def _evidence_ref(project_slug: str, ref: str) -> tuple[str, str]:
     """Composed id an evidence entry may point at: an experiment or memo assumption of this same project."""
     db = _db_module()
     ent = build_id_registry(db.tree(), db.posts(), root=ROOT).resolve(ref)
     if not ent or ent["kind"] not in ("exp", "assumption") or (ent.get("ref") or {}).get("project") != project_slug:
         raise ActionError(f"ref '{ref}' is not an experiment or assumption of {project_slug}")
-    return ent["id"]
+    return ent["id"], ent["kind"]
 
 
 def add_evidence(project_slug: str, fields: dict) -> dict:
@@ -1625,8 +1625,9 @@ def add_evidence(project_slug: str, fields: dict) -> dict:
     if not text:
         raise ActionError("evidence text required")
     ref = (fields.get("ref") or "").strip() or None
+    ref_kind = None
     if ref:
-        ref = _evidence_ref(project_slug, ref)
+        ref, ref_kind = _evidence_ref(project_slug, ref)
     date = (fields.get("date") or "").strip() or datetime.date.today().isoformat()
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         raise ActionError("date must be YYYY-MM-DD")
@@ -1638,7 +1639,8 @@ def add_evidence(project_slug: str, fields: dict) -> dict:
     new, n = evidence.append(old, text, ref, date)
     _write_project_doc(project_slug, "intake", new, path=intake)
     reindex()
-    return {"id": _composed_id(lk_evidence(project_slug, n)), "n": n, "project": project_slug}
+    return {"id": _composed_id(lk_evidence(project_slug, n)), "n": n, "project": project_slug,
+            "ref": ref, "ref_kind": ref_kind}
 
 
 def create_technical(project_slug: str) -> dict:
@@ -1751,6 +1753,29 @@ def extract_assumptions(project_slug: str, mtype: str, version: int, items: list
     reindex()
     return {"id": _composed_id(lk_memo(project_slug, mtype, int(version))), "type": mtype,
             "version": int(version), "project": project_slug, "assumptions": body["assumptions"]}
+
+
+def set_assumption_status(project_slug: str, mtype: str, version: int, asm_id: str, status: str) -> dict:
+    """Set one assumption's status in its memo version. Reached only from an Approve click on a
+    contradiction card (never from osctl): text a bot or a source wrote cannot flip it."""
+    if status not in assumptions.STATUSES:
+        raise ActionError(f"status: one of {', '.join(assumptions.STATUSES)}")
+    if mtype not in MEMO_TYPES:
+        raise ActionError(f"unknown memo type '{mtype}'")
+    path = _project_dir(project_slug) / "strategy" / "memos" / f"{mtype}-v{int(version)}.json"
+    if not path.exists():
+        raise ActionError(f"memo '{mtype}' v{version} not found")
+    body = json.loads(path.read_text(encoding="utf-8"))
+    items = assumptions.normalize(body.get("assumptions") if isinstance(body, dict) else None)
+    hit = next((i for i in items if i["id"] == asm_id), None)
+    if hit is None:
+        raise ActionError(f"assumption '{asm_id}' not found in {mtype} v{version}")
+    hit["status"] = status
+    body["assumptions"] = items
+    path.write_text(dumps_json(normalize_memo_body(mtype, body, version=int(version))), encoding="utf-8")
+    reindex()
+    return {"type": mtype, "version": int(version), "assumption": asm_id, "status": status,
+            "project": project_slug}
 
 
 def update_memo(project_slug: str, memo_type: str, version: int, fields: dict) -> dict:

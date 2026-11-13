@@ -479,7 +479,19 @@ def _build_parser():
     p.add_argument("--text", required=True)
     p.add_argument("--ref", help="composed id of an experiment of this project")
     p.add_argument("--date", help="YYYY-MM-DD (default today)")
-    p.set_defaults(_run=lambda a: fileops.add_evidence(a.project, _fields(a, ["text", "ref", "date"])))
+    def _add_evidence(a):
+        out = fileops.add_evidence(a.project, _fields(a, ["text", "ref", "date"]))
+        chat = (os.environ.get("LEOBOT_CHAT") or "").strip()
+        if out.get("ref_kind") == "assumption" and chat:
+            # The server judges it when the turn ends and holds a card only for a contradiction.
+            try:
+                jobs.add_check(bots.ROOT, {"chat": chat, "ws": _workspace() or bots.HQ,
+                                           "project": a.project, "assumption": out["ref"],
+                                           "evidence": out["id"]})
+            except ValueError:
+                pass  # over the per-thread limit: the entry is saved, the check is skipped
+        return out
+    p.set_defaults(_run=_add_evidence)
 
     p = sub.add_parser("list-assumptions", help="Tracked assumptions of a project's memos")
     p.add_argument("--project", required=True)

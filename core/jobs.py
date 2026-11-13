@@ -116,11 +116,13 @@ def _read(root, strict=False):
     if not isinstance(data, dict):
         if strict:
             raise ValueError(f"{RELPATH} cannot be read: fix or remove it")
-        return {"jobs": [], "digest": {}, "proposals": []}
+        return {"jobs": [], "digest": {}, "proposals": [], "checks": []}
     rows, digest, props = data.get("jobs"), data.get("digest"), data.get("proposals")
+    checks = data.get("checks")
     return {"jobs": [r for r in rows if isinstance(r, dict) and r.get("id")] if isinstance(rows, list) else [],
             "digest": digest if isinstance(digest, dict) else {},
-            "proposals": [r for r in props if isinstance(r, dict)] if isinstance(props, list) else []}
+            "proposals": [r for r in props if isinstance(r, dict)] if isinstance(props, list) else [],
+            "checks": [r for r in checks if isinstance(r, dict)] if isinstance(checks, list) else []}
 
 
 def _write(root, data):
@@ -319,6 +321,40 @@ def take_proposals(root, chat, now=None):
         return mine
     # Every chat turn ends here: read first, and lock and rewrite only when this thread has some.
     if not any(p.get("chat") == chat for p in _read(root)["proposals"]):
+        return []
+    return _change(root, fn)
+
+
+CHECKS_PER_CHAT = 5
+
+
+def add_check(root, rec, now=None):
+    """Queue one evidence-contradiction check for its thread (`rec["chat"]`); the server collects it."""
+    chat = rec.get("chat")
+    if not isinstance(chat, str) or not chat:
+        raise ValueError("a contradiction check comes from a chat thread")
+    now = time.time() if now is None else now
+    row = {**rec, "created": now}
+
+    def fn(data):
+        data["checks"] = _fresh(data["checks"], now)
+        if sum(1 for p in data["checks"] if p.get("chat") == chat) >= CHECKS_PER_CHAT:
+            raise ValueError(f"at most {CHECKS_PER_CHAT} contradiction checks per thread")
+        data["checks"].append(row)
+    _change(root, fn)
+    return dict(row)
+
+
+def take_checks(root, chat, now=None):
+    """Remove and return this thread's queued checks; drop any older than PROPOSAL_TTL."""
+    now = time.time() if now is None else now
+
+    def fn(data):
+        fresh = _fresh(data["checks"], now)
+        mine = [p for p in fresh if p.get("chat") == chat]
+        data["checks"] = [p for p in fresh if p.get("chat") != chat]
+        return mine
+    if not any(p.get("chat") == chat for p in _read(root)["checks"]):
         return []
     return _change(root, fn)
 

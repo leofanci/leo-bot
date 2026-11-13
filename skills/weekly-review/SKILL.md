@@ -30,5 +30,6 @@ and channels.
    that's okay.
 4. End by asking which priority to start, and route to the right skill.
 
-Rules: be the honest chief of staff — stalled is stalled. Don't propose more
+Rules: if the state index shows a stale memo, say which assumption broke (and its evidence) and offer a new
+version; never write one unasked. Be the honest chief of staff — stalled is stalled. Don't propose more
 work than intake hours allow; cutting is part of the job.
