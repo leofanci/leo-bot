@@ -22,7 +22,7 @@ class ReadMetric(unittest.TestCase):
         seen = []
         out = read(*ARGS, run=lambda *x: seen.append(x) or {"data": {"n": 1}})
         self.assertEqual(out, {"data": {"n": 1}})
-        self.assertEqual(seen[0][3], "ca_1")
+        self.assertEqual(seen[0][4], "ca_1")
 
     def test_rechecks_the_metric_rules(self):
         for args in (("instagram", "INSTAGRAM_CREATE_POST", {}, "acme", "product"),
