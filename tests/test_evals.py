@@ -1,5 +1,7 @@
 """Behavior evals run in the suite: the offline turn cases, the recall set, and the live
 runner's grading and bookkeeping (never a real engine)."""
+import contextlib
+import io
 import json
 import sqlite3
 import tempfile
@@ -52,6 +54,8 @@ class Recall(unittest.TestCase):
         hits, total = found["by_kind"]["keyword"]
         if memory.HAS_FTS5:
             self.assertEqual(hits, total, "every keyword query should find its entry")
+        hits, total = found["by_kind"]["paraphrase"]
+        self.assertGreaterEqual(hits, total - 1, "a question in other words should find its entry")
 
     def test_scan_fallback_under_the_vector_gate(self):
         found = recall.run(self.data, fts=False)
@@ -149,6 +153,44 @@ class LiveGrading(unittest.TestCase):
                 (folder / f"live-2000{i:04d}.json").write_text(json.dumps(first))
             live.save_run(folder, now)
             self.assertEqual(len(list(folder.glob("live-*.json"))), live.KEEP_RUNS)
+
+    def test_last_run_is_the_same_engines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp)
+            (folder / "live-1.json").write_text(json.dumps({"when": "a", "engine": "codex", "results": []}))
+            (folder / "live-2.json").write_text(json.dumps({"when": "b", "engine": "claude-code", "results": []}))
+            self.assertEqual(live.last_run(folder, "codex")["when"], "a")
+            self.assertEqual(live.last_run(folder)["when"], "b")
+            self.assertIsNone(live.last_run(folder, "gemini"))
+
+    def test_engine_all_runs_every_ready_engine(self):
+        rows = [{"id": "claude-code", "ok": True}, {"id": "codex", "ok": True}, {"id": "gemini", "ok": False}]
+        ran = []
+
+        def fake_run(cmd, cwd, env):
+            home = Path(env["LEOBOT_HOME"])
+            ran.append(json.loads((home / "data" / "team" / "engines.json").read_text())["default"])
+            out = Path(cmd[cmd.index("--out") + 1])
+            out.write_text(json.dumps([{"id": "c1", "pass": ran[-1] == "claude-code", "fails": [],
+                                        "cost": 0.0, "seconds": 1}]))
+            return mock.Mock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(live, "_runs_dir", return_value=Path(tmp)), \
+                mock.patch("dashboard.engines.registry.statuses", return_value=rows), \
+                mock.patch.object(live.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = live.main(["--engine", "all", "--yes"])
+        self.assertEqual(ran, ["claude-code", "codex"])
+        self.assertEqual(code, 1)  # codex failed a case
+        self.assertIn("claude-code: 1/1", out.getvalue())
+        self.assertIn("codex: 0/1", out.getvalue())
+
+    def test_engine_all_with_none_ready_sends_nothing(self):
+        with mock.patch("dashboard.engines.registry.statuses", return_value=[{"id": "codex", "ok": False}]), \
+                mock.patch.object(live.subprocess, "run") as run, \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(live.main(["--engine", "all", "--yes"]), 2)
+        run.assert_not_called()
 
     def test_declined_live_run_sends_nothing(self):
         with mock.patch("builtins.input", return_value="n"), \

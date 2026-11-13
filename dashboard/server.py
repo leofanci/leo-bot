@@ -1061,6 +1061,12 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                          "--text \"...\"`. Never secrets.")
     else:
         lines.append(f"(speaking as @{b.handle})")
+        # The card opened on an earlier message; this one still gets the entries it matches,
+        # so no engine depends on its own search wording. Same scope rules as the card.
+        mem = ("" if shared and not project_slug
+               else memory.matching_block(bot_id, project_slug or None, ROOT, shared=shared, query=query))
+        if mem:
+            lines.append(f"Memory matching this message:\n{mem}")
     if handoff_from and team.get(handoff_from):
         h = team.get(handoff_from)
         why = (f"@{h.handle} passed this to you; it is yours now." if handed_by_bot

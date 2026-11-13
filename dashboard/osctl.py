@@ -408,8 +408,15 @@ def _build_parser():
         # reaches only the team memory and one company never reaches another's.
         if a.bot not in bots.load_defs():
             raise fileops.ActionError(f"unknown bot: {a.bot}")
-        return {"entries": memory.recall(a.bot, a.query, _workspace(), root=bots.ROOT,
-                                         shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
+        shared = bool(os.environ.get("LEOBOT_SHARED"))
+        hits = memory.recall(a.bot, a.query, _workspace(), root=bots.ROOT, shared=shared, limit=a.limit)
+        if hits:
+            return {"entries": hits}
+        # A search worded unlike the entries still shows what is there, so no engine stops at
+        # "nothing found" because of how it phrased the query.
+        latest = memory.newest(a.bot, _workspace(), root=bots.ROOT, shared=shared, limit=a.limit)
+        return {"entries": [], **({"newest": latest, "note": "nothing matched; newest entries shown"}
+                                  if latest else {})}
     p.set_defaults(_run=_recall)
 
     p = sub.add_parser("get-skill", help="Load one of the team's skills: prints its instructions")

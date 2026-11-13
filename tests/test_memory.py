@@ -161,6 +161,22 @@ class Recall(TempRoot):
             self.assertEqual(len(memory.recall("cmo", "Pricing?", "acme", self.root)), 1)
             self.assertIn("pricing anchor", memory.recall("cmo", "Pricing?", "acme", self.root)[0])
 
+    def test_a_question_in_other_words_finds_the_entry(self):
+        # The engine's own wording must not decide whether memory is found.
+        memory.remember("cmo", "Churn spiked in August after the onboarding email broke", "acme", self.root)
+        memory.remember("cmo", "Pro tier stays at 29 per month", "acme", self.root)
+        for fts in (True, False):
+            with mock.patch.object(memory, "HAS_FTS5", fts and memory.HAS_FTS5):
+                hits = memory.recall("cmo", "why did people leave over the summer?", "acme", self.root)
+                self.assertTrue(hits, fts)
+                self.assertIn("Churn spiked", hits[0], fts)
+
+    def test_related_words_never_crowd_out_the_exact_one(self):
+        memory.remember("cmo", "Customers cancel when onboarding is slow", "acme", self.root)
+        memory.remember("cmo", "Churn is 4 percent a month", "acme", self.root)
+        hits = memory.recall("cmo", "what is our churn?", "acme", self.root)
+        self.assertIn("Churn is 4 percent", hits[0])
+
     def test_busy_index_is_never_deleted(self):
         memory.remember("cmo", "pricing anchor", "acme", self.root)
         db_file = self.root / memory.INDEX_RELPATH
@@ -266,6 +282,32 @@ class Card(TempRoot):
         self.assertNotIn("remember --bot", text)
         self.assertIn("Your memory (HQ): nothing pinned or matching.", text)
 
+    def later_turn(self, query, **kw):
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        sess = mock.Mock(_last_bot="cmo")
+        with mock.patch.object(server, "ROOT", self.root):
+            return server._bot_block(team, "cmo", sess, "acme", fresh=False, query=query, **kw)
+
+    def test_later_turn_carries_memory_matching_the_new_message(self):
+        # The card opens once; a later message still gets the entries it matches, on every engine.
+        self.fixture()
+        text = self.later_turn("what was the pricing anchor again?")
+        self.assertTrue(text.startswith("(speaking as @cmo)"), text)
+        self.assertIn("49 euros", text)
+        self.assertNotIn("rule 11", text)  # pinned lines came with the card already
+        self.assertLessEqual(len(text.splitlines()), 2 + memory.HITS_IN_CARD)
+
+    def test_later_turn_without_a_match_adds_nothing(self):
+        self.fixture()
+        self.assertEqual(self.later_turn("zebra"), "(speaking as @cmo)")
+
+    def test_later_shared_turn_reads_team_memory_only(self):
+        self.fixture()
+        memory.remember("cmo", "team pricing rule", "acme", self.root, shared=True)
+        text = self.later_turn("pricing?", shared=True)
+        self.assertIn("team pricing rule", text)
+        self.assertNotIn("49 euros", text)
+
     def test_empty_card_still_names_recall(self):
         team = bots.team(self.root, "acme", {"slug": "acme"})
         with mock.patch.object(server, "ROOT", self.root):
@@ -347,6 +389,20 @@ class OsctlRecall(TempRoot):
         self.assertEqual(self.texts(r), ["OTHER pricing"])
         self.assertNotIn("PRIVATE", json.dumps(r))
         self.assertNotIn("HQ", json.dumps(r))
+
+    def test_no_match_shows_the_newest_entries(self):
+        # A search worded unlike the entries still shows the bot what it has, in the same scope.
+        memory.remember("cmo", "PRIVATE second", "acme", self.root)
+        r = self.run_recall({"LEOBOT_WORKSPACE": "acme"}, "--query", "zebra")
+        self.assertEqual(r["entries"], [])
+        self.assertEqual([e.split("] ", 1)[1] for e in r["newest"]], ["PRIVATE second", "PRIVATE pricing"])
+        self.assertIn("nothing matched", r["note"])
+        shared = self.run_recall({"LEOBOT_WORKSPACE": "acme", "LEOBOT_SHARED": "1"}, "--query", "zebra")
+        self.assertEqual([e.split("] ", 1)[1] for e in shared["newest"]], ["TEAM pricing"])
+
+    def test_a_match_has_no_newest_list(self):
+        r = self.run_recall({"LEOBOT_WORKSPACE": "acme"}, "--query", "pricing")
+        self.assertNotIn("newest", r)
 
     def test_no_project_argument(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

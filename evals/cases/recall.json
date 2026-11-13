@@ -64,6 +64,10 @@
     {"q": "who are we building this for?", "want": ["Positioning: project tracker for small agencies"], "kind": "paraphrase"},
     {"q": "how should I bring you choices?", "want": ["prefers options with a recommendation"], "kind": "paraphrase"},
     {"q": "what feature is requested the most?", "want": ["Customers ask most for a Gantt view"], "kind": "paraphrase"},
-    {"q": "which countries are our users from?", "want": ["Most customers are in the US and UK"], "kind": "paraphrase"}
+    {"q": "which countries are our users from?", "want": ["Most customers are in the US and UK"], "kind": "paraphrase"},
+    {"q": "what did our rival change lately?", "want": ["Main competitor dropped"], "kind": "paraphrase"},
+    {"q": "when does the new version ship?", "want": ["Launch date for v2"], "kind": "paraphrase"},
+    {"q": "where are our clients based?", "want": ["Most customers are in the US and UK"], "kind": "paraphrase"},
+    {"q": "how many people quit after onboarding broke?", "want": ["Churn spiked in August"], "kind": "paraphrase"}
   ]
 }

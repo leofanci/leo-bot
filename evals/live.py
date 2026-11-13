@@ -5,7 +5,7 @@ a bot saves reaches your data. The engine settings are copied there for the run 
 it. Each run is saved to <home>/evals/ and compared with the one before: which cases changed
 and what the run cost.
 
-    python -m evals --live [--engine ID] [--case ID ...] [--yes]
+    python -m evals --live [--engine ID|all] [--case ID ...] [--yes]
 """
 import argparse
 import json
@@ -104,20 +104,23 @@ def _runs_dir():
     return paths.HOME / "evals"
 
 
-def last_run(folder):
-    files = sorted(Path(folder).glob("live-*.json"))
-    if not files:
-        return None
-    try:
-        return json.loads(files[-1].read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+def last_run(folder, engine=None):
+    """The newest saved run, of `engine` when given (a run is compared with its own engine's)."""
+    for f in reversed(sorted(Path(folder).glob("live-*.json"))):
+        try:
+            run = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if engine is None or run.get("engine") == engine:
+            return run
+    return None
 
 
 def save_run(folder, run):
     folder = Path(folder)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = folder / f"live-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    tag = re.sub(r"[^a-z0-9-]", "", str(run.get("engine") or "").lower())
+    path = folder / f"live-{time.strftime('%Y%m%d-%H%M%S')}{'-' + tag if tag else ''}.json"
     path.write_text(json.dumps(run, indent=1), encoding="utf-8")
     path.chmod(0o600)
     for old in sorted(folder.glob("live-*.json"))[:-KEEP_RUNS]:
@@ -127,7 +130,7 @@ def save_run(folder, run):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m evals --live", description="Run live evals on a real engine.")
-    ap.add_argument("--engine", help="engine id to use (default: your default engine)")
+    ap.add_argument("--engine", help="engine id to use, or all: every ready engine (default: your default engine)")
     ap.add_argument("--case", action="append", help="run only this case id (repeatable)")
     ap.add_argument("--yes", action="store_true", help="do not ask before spending")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
@@ -143,14 +146,35 @@ def main(argv=None):
     if unknown or not cases:
         print(f"Unknown case: {', '.join(sorted(unknown)) or '(none selected)'}", file=sys.stderr)
         return 2
-    settings = config.load(paths.DATA)
-    engine = args.engine or registry.default_id(settings)
+    if args.engine == "all":  # the same cases on every engine that is ready, so they stay alike
+        engines = [r["id"] for r in registry.statuses(paths.DATA) if r.get("ok")]
+        if not engines:
+            print("No engine is ready to run live evals.", file=sys.stderr)
+            return 2
+    else:
+        engines = [args.engine or registry.default_id(config.load(paths.DATA))]
     if not args.yes:
-        answer = input(f"Live evals send {len(cases)} prompts (plus any teammate turns) to {engine}, "
-                       "billed to your account. Continue? [y/N] ")
+        answer = input(f"Live evals send {len(cases)} prompts (plus any teammate turns) to "
+                       f"{', '.join(engines)}, billed to your account. Continue? [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             print("Nothing was sent.")
             return 1
+    runs = []
+    for engine in engines:
+        run = _run_engine(engine, args)
+        if run is None:
+            return 1
+        runs.append(run)
+    if len(runs) > 1:
+        print("\n".join(f"{r['engine']}: {sum(x['pass'] for x in r['results'])}/{len(r['results'])} passed"
+                        for r in runs))
+    return 0 if all(x["pass"] for r in runs for x in r["results"]) else 1
+
+
+def _run_engine(engine, args):
+    """One engine's live run in a throwaway home: saved, compared with that engine's last run
+    and printed. None when the run stopped before it finished."""
+    from core import paths
     with tempfile.TemporaryDirectory(prefix="leobot-eval-home-") as home:
         team = Path(home) / "data" / "team"
         team.mkdir(parents=True)
@@ -167,16 +191,17 @@ def main(argv=None):
             cmd += ["--case", c]
         proc = subprocess.run(cmd, cwd=str(paths.CODE), env={**os.environ, "LEOBOT_HOME": home})
         if proc.returncode != 0 or not out.exists():
-            print("The live run stopped before it finished; see the error above.", file=sys.stderr)
-            return 1
+            print(f"The live run on {engine} stopped before it finished; see the error above.",
+                  file=sys.stderr)
+            return None
         results = json.loads(out.read_text(encoding="utf-8"))
         shutil.rmtree(team, ignore_errors=True)  # the key copy goes first, before the folder
     run = {"when": time.strftime("%Y-%m-%d %H:%M"), "engine": engine, "results": results}
     folder = _runs_dir()
-    last = last_run(folder)
+    last = last_run(folder, engine)
     save_run(folder, run)
     print(compare(run, last))
-    return 0 if all(r["pass"] for r in results) else 1
+    return run
 
 
 if __name__ == "__main__":
