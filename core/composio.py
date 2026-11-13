@@ -379,6 +379,36 @@ def execute(pid, ws, slug, arguments, account=None, root=bots.ROOT):
     return _json("POST", f"/tool_router/session/{urllib.parse.quote(sid)}/execute", body, root)
 
 
+def read_metric(app, action, args, ws, bot, root=bots.ROOT, person=bots.CEO, catalog=None,
+                read_only=None, paid=frozenset(), run=None):
+    """One scheduled read of an experiment's metric source, with no click. It holds to the same
+    bar as a bot's own read: the metric is checked again here (so one saved before a rule change
+    is re-checked), and the bot must still hold at least a read grant for the app. Raises
+    ComposioError with the reason when it cannot run. `catalog`, `read_only`, `paid`, `run` stand
+    in for Composio's answers (tests)."""
+    if catalog is None:
+        items = _catalog_items(root)
+        catalog, paid = [a["slug"] for a in items], paid_read_toolkits(items)
+    read_only = read_only or (lambda slug: tool_read_only(slug, root))
+    why = app_rules.metric_problem(app, action, catalog, args, read_only, paid)
+    if why:
+        raise ComposioError(why)
+    verdict, tk = app_rules.decide(action, integrations.grant(ws, bot, root), catalog, args, read_only, paid)
+    if verdict != "read":
+        raise ComposioError(f"@{bot} may not read {app} in {ws}")
+    ids = integrations.accounts_for(ws, root).get(tk) or []
+    if not ids:
+        raise ComposioError(f"no {tk} account is connected for {ws}")
+    out = (run or execute)(person, ws, action, args, ids[0], root)
+    if isinstance(out, dict) and (out.get("successful") is False or out.get("result_type") in ("failed", "blocked")):
+        raise ComposioError(str(out.get("error") or "the app refused the read")[:200])
+    return out
+
+
+def _catalog_items(root):
+    return catalog(root)
+
+
 def _public_host(host):
     """Every address the name resolves to is on the public internet."""
     try:

@@ -15,18 +15,24 @@ SYSTEM = ("You judge short pieces of quoted data and answer in exactly the forma
 
 
 def complete(root, ws, bot, job, prompt, records=None, engine=None):
+    return run(root, ws, bot, job, prompt, records=records, engine=engine)[0]
+
+
+def run(root, ws, bot, job, prompt, records=None, engine=None, for_job=None):
+    """(answer or None, cost). `for_job` (a scheduled job's id) makes the spend count toward
+    that job's cap."""
     if spend.refusal(ws, "owner", records=records):
-        return None
+        return None, 0.0
     try:
         eng = engine or registry.pick(root, ws, bot)
         if "complete" not in eng.supports:
-            return None
+            return None, 0.0
         out = eng.complete_metered(SYSTEM, prompt, MODEL)
     except EngineRefused:
-        return None
+        return None, 0.0
     except Exception:  # noqa: BLE001 - the engine's own failure: nothing judged
         traceback.print_exc()
-        return None
+        return None, 0.0
     usage, model, cost = out.get("usage"), out.get("model") or MODEL, out.get("cost")
     if cost is None:
         cost = prices.estimate(model, usage)
@@ -35,7 +41,8 @@ def complete(root, ws, bot, job, prompt, records=None, engine=None):
             "ts": time.time(), "ws": ws, "by": "owner", "bot": bot, "job": job,
             "engine": eng.id, "engine_label": eng.label, "model": model, "usage": usage,
             "cost": cost, "metered": cost is not None,
-            "tokens": sum(int(v or 0) for v in usage.values()) if isinstance(usage, dict) else 0})
+            "tokens": sum(int(v or 0) for v in usage.values()) if isinstance(usage, dict) else 0,
+            **({"for_job": for_job} if for_job else {})})
     except OSError:
         traceback.print_exc()
-    return None if out.get("truncated") else (out.get("text") or "")
+    return (None if out.get("truncated") else (out.get("text") or "")), float(cost or 0)
