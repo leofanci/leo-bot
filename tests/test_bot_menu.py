@@ -64,3 +64,54 @@ class SkillMenu(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RosterApps(unittest.TestCase):
+    """Who holds which connected app: the speaker's own line and a suffix per teammate."""
+
+    def setUp(self):
+        from core import integrations
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "projects" / "acme").mkdir(parents=True)
+        for p in (mock.patch.object(server, "ROOT", self.root),
+                  mock.patch.object(server.db, "tree", return_value=[]),
+                  mock.patch.object(server.integrations, "api_key", return_value="k")):
+            p.start()
+            self.addCleanup(p.stop)
+        integrations.note_known([{"id": "ca_g1", "toolkit": "gmail", "label": "work"},
+                                 {"id": "ca_i1", "toolkit": "instagram", "label": "brand"}], self.root)
+        integrations.set_account("acme", "ca_g1", True, self.root)
+        integrations.set_account("acme", "ca_i1", True, self.root)
+        integrations.set_grant("acme", "social", {"instagram": "write", "gmail": "read"}, self.root)
+        integrations.set_grant("acme", "cmo", {}, self.root)
+        integrations.set_grant("acme", "cos", {"gmail": "read"}, self.root)
+        bots.set_active("social", True, self.root, "acme")
+        self.team = bots.set_active("cmo", True, self.root, "acme")
+
+    def roster(self, text):
+        return {line.split(" ", 1)[0]: line for line in text.splitlines() if line.startswith("@")}
+
+    def test_peer_with_grant_shows_its_apps(self):
+        r = self.roster(server._bot_block(self.team, "cmo", None, "acme", fresh=True))
+        self.assertTrue(r["@social"].endswith(" · apps: gmail (read), instagram (read+write)"), r["@social"])
+
+    def test_peer_without_grant_shows_none(self):
+        r = self.roster(server._bot_block(self.team, "social", None, "acme", fresh=True))
+        self.assertNotIn("apps:", r["@cmo"])
+
+    def test_speaker_gets_its_own_line(self):
+        text = server._bot_block(self.team, "social", None, "acme", fresh=True)
+        self.assertIn("Your apps: gmail (read), instagram (read+write).", text)
+        self.assertNotIn("Your apps", server._bot_block(self.team, "cmo", None, "acme", fresh=True))
+
+    def test_shared_card_shows_no_apps(self):
+        text = server._bot_block(self.team, "social", None, "acme", fresh=True, shared=True)
+        self.assertNotIn("apps:", text)
+        self.assertNotIn("Your apps", text)
+
+    def test_no_api_key_shows_no_apps(self):
+        with mock.patch.object(server.integrations, "api_key", return_value=None):
+            text = server._bot_block(self.team, "cmo", None, "acme", fresh=True)
+        self.assertNotIn("apps:", text)

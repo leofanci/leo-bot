@@ -961,6 +961,11 @@ def _one_line(text, limit):
     return (cut or flat[:limit - 1]) + "…"
 
 
+def _apps_text(grant):
+    """'gmail (read), instagram (read+write)': a grant as one line, '' when empty."""
+    return ", ".join(f"{tk} ({'read+write' if scope == 'write' else 'read'})" for tk, scope in sorted(grant.items()))
+
+
 def _skill_menu(team, bot_id):
     """The speaker's own skills, one line each, and how to load one. '' when it has none."""
     skills = team.skills_of(bot_id) if team else []
@@ -1001,6 +1006,19 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         menu = _skill_menu(team, bot_id)
         if menu:
             lines.append(menu)
+        # Who holds which connected app (a write still waits for the owner's approval), so a bot
+        # hands app work to the teammate that has it. Never in a thread invited people can see.
+        ws_apps = getattr(team, "ws", bots.HQ)
+        show_apps = not shared and bool(integrations.api_key(ROOT))
+
+        def apps_of(bid):
+            try:
+                return _apps_text(integrations.effective_grant(ws_apps, bid, ROOT)) if show_apps else ""
+            except (OSError, ValueError):
+                return ""
+        mine = apps_of(bot_id)
+        if mine:
+            lines.append(f"Your apps: {mine}.")
         if code_index and not shared:
             lines.append("Code questions: `osctl code-context --query \"...\"` reads the linked folder's code index.")
         if b.covering:
@@ -1010,7 +1028,8 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                  and (members is None or o.id in members)]
         if peers:
             lines.append("In this channel (HANDOFF work outside your skills to its owner):\n"
-                         + "\n".join(team.roster_line(o.id) for o in peers))
+                         + "\n".join(team.roster_line(o.id) + (f" · apps: {a}" if (a := apps_of(o.id)) else "")
+                                     for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
         # HQ has no team memory (nobody joins HQ), so a shared thread there carries none.
         mem = ("" if shared and not project_slug
