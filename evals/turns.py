@@ -19,10 +19,12 @@ A case (cases/turns.json):
   gap                          a known gap: the case states the wanted behavior and fails today.
                                It is reported, not failed; once it passes, drop `gap`.
 """
+import contextlib
 import io
 import json
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from unittest import mock
 
@@ -79,6 +81,23 @@ class _Engine:
 
     def is_fresh(self, session):
         return True
+
+
+@contextlib.contextmanager
+def _relay_server():
+    """A real server on a free local port, for one live turn: engines that reach osctl or the
+    apps through the relay (Codex, ACP) call it with this run's tokens. Without it they would
+    call the owner's own server on 8765, which refuses tokens it never minted."""
+    from http.server import ThreadingHTTPServer
+    import dashboard.server as server
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield srv
+    finally:
+        srv.shutdown()
+        srv.server_close()
 
 
 def _data_root(tmp, ext, case):
@@ -167,7 +186,6 @@ def run(case, live_root=None):
                      "engine": "claude-code", "context": case["context"]}],
                     "engines": {"claude-code": {"seen": 2}}})
         if live:  # osctl in the real turn reads the index
-            import contextlib
             import index
             with contextlib.redirect_stdout(io.StringIO()):
                 index.build(root)
@@ -178,7 +196,8 @@ def run(case, live_root=None):
         h.wfile = io.BytesIO()
         h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
         h.log_message = lambda *a, **k: None
-        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        relay = _relay_server() if live else contextlib.nullcontext(mock.Mock(server_address=("127.0.0.1", 8765)))
+        h.server = relay.__enter__()
         patches = [
             mock.patch.object(server, "ROOT", root),
             mock.patch.object(server.fileops, "ROOT", root),
@@ -208,6 +227,7 @@ def run(case, live_root=None):
         finally:
             for p in reversed(patches):
                 p.stop()
+            relay.__exit__(None, None, None)
         out = h.wfile.getvalue().decode()
 
     events = [json.loads(ln[6:]) for ln in out.splitlines() if ln.startswith("data: {")]

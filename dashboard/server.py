@@ -1052,7 +1052,8 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         where = f"{project_slug}, team" if shared and project_slug else (project_slug or "HQ")
         lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
                      else f"Your memory ({where}): nothing pinned or matching.")
-        lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`.")
+        lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`. A question about the past "
+                     "(what happened, why, what we decided): recall first, then ask only if nothing matches.")
         scope = f" --project {project_slug}" if project_slug else ""
         if not readonly and not shared:
             lines.append("When the user states a lasting decision or preference, save one line: "
