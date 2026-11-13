@@ -1695,6 +1695,7 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
 
 def _memo_assumptions(memo_dir: Path, mtype: str) -> dict[int, list[dict]]:
     """{version: assumptions} for every saved version of a memo type."""
+    mtype = _safe_component(mtype, "memo type")
     out: dict[int, list[dict]] = {}
     for f in memo_dir.glob(f"{mtype}-v*.json"):
         m = re.fullmatch(re.escape(mtype) + r"-v(\d+)\.json", f.name)
