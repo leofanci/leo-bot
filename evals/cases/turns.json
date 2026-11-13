@@ -22,7 +22,7 @@
    "expect": {"bot": "cmo", "skill": "positioning", "tier": "fast", "reason": "explicit-read"}},
   {"id": "tagged-bot-without-match-answers-plainly", "category": "routing",
    "msg": "@research thoughts on this?",
-   "expect": {"bot": "research", "skill": null, "picked": null, "tier": "fast"}},
+   "expect": {"bot": "research", "skill": null, "handoff": null, "tier": "fast"}},
   {"id": "tagged-bot-write-uses-default-skill", "category": "routing",
    "msg": "@product draft something for next sprint",
    "expect": {"bot": "product", "skill": "product-build", "tier": "strong", "reason": "explicit-skill", "gate": false}},
@@ -156,10 +156,15 @@
    "msg": "what did we decide earlier?", "thread": {"bot": "cos"}, "context": 2000,
    "expect": {"bot": "cos", "prompt_lacks": "Earlier in this thread"}},
 
-  {"id": "untagged-price-question-reaches-pricing-owner", "category": "routing",
+  {"id": "untagged-price-question-stays-with-lead", "category": "routing",
    "msg": "how much should we charge for the pro tier?",
-   "expect": {"bot": "cmo", "skill": null, "picked": "pricing-strategy", "tier": "fast"}},
-  {"id": "untagged-icp-question-reaches-research", "category": "routing",
+   "expect": {"bot": "cos", "skill": null, "handoff": null, "tier": "fast", "runs": 1}},
+  {"id": "lead-hands-price-question-to-pricing-owner", "category": "routing",
+   "msg": "how much should we charge for the pro tier?",
+   "reply": "Pricing is the CMO's.\nHANDOFF @cmo: price the pro tier", "followup_reply": "Two options.",
+   "expect": {"bot": "cos", "handoff": "cmo", "teammates": [], "runs": 2, "reply_lacks": "HANDOFF"}},
+  {"id": "handoff-target-may-ask-approval", "category": "routing",
    "msg": "who is our ideal customer?",
-   "expect": {"bot": "research", "skill": null, "picked": "icp-research", "tier": "fast"}}
+   "reply": "HANDOFF @research: define the ICP", "followup_reply": "Small agencies.\nAPPROVAL: save the ICP memo",
+   "expect": {"bot": "cos", "handoff": "research", "approval": true, "runs": 2}}
 ]

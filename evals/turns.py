@@ -1,6 +1,6 @@
 """Offline turn evals: each case is one chat message through Handler._handle_ask on a throwaway
 data folder, with a scripted engine whose replies the case gives. They check what the server
-decided (bot, skill, model tier and reason, web, tag gate, approval card, consults, reactions,
+decided (bot, skill, handoff, model tier and reason, web, approval card, consults, reactions,
 the memory a bot card carries), never the wording of a reply. No model call, no tokens.
 
 A case (cases/turns.json):
@@ -13,7 +13,8 @@ A case (cases/turns.json):
   memory                       {"cmo": [file lines], "shared:cmo": [...]}: memory files
   context                      the thread's last reply had this context size (tokens): past
                                LEOBOT_COMPACT_TOKENS the turn compacts (needs `thread`)
-  reply / teammate_reply / followup_reply   what the scripted engine says (default "ok")
+  reply / teammate_reply / followup_reply   what the scripted engine says (default "ok"); a
+                               HANDOFF target's run is the lead session's second run: followup_reply
   expect                       keys of the outcome to compare; *_has / *_lacks take substrings
   gap                          a known gap: the case states the wanted behavior and fails today.
                                It is reported, not failed; once it passes, drop `gap`.
@@ -28,7 +29,7 @@ from unittest import mock
 CASES = Path(__file__).parent / "cases" / "turns.json"
 WS = "acme"
 THREAD_ID = "e7a10000-0000-4000-8000-000000000000"  # chat_store takes UUID-shaped ids only
-_EQUAL = ("bot", "skill", "handoff_from", "picked", "tier", "reason", "web", "gate", "approval",
+_EQUAL = ("bot", "skill", "handoff_from", "handoff", "tier", "reason", "web", "gate", "approval",
           "teammates", "followup", "reactions", "edit", "runs")
 _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
          "prompt_lacks": "prompt", "teammate_prompt_has": "teammate_prompt",
@@ -219,13 +220,13 @@ def run(case, live_root=None):
         "bot": bot_ev.get("id"),
         "skill": bot_ev.get("skill"),
         "handoff_from": bot_ev.get("handoff_from"),
-        "picked": bot_ev.get("picked"),
+        "handoff": next((s.get("id") for s in starts if s.get("handoff_from")), None),
         "tier": tiers.get(lead["model"], lead["model"]) if lead else None,
         "reason": recorded.get("meta", {}).get("reason") if lead else None,
         "web": bool(lead and lead["web"]),
         "gate": not runs and GATE_TEXT in deltas,
         "approval": any("approval" in e for e in events),
-        "teammates": [s.get("id") for s in starts if not s.get("followup")],
+        "teammates": [s.get("id") for s in starts if not s.get("followup") and not s.get("handoff_from")],
         "followup": any(s.get("followup") for s in starts),
         "reactions": [r.get("emoji") for e in events for r in e.get("reactions") or []],
         "edit": bool(lead and lead["edit_dirs"]),

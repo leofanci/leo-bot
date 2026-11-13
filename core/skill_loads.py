@@ -19,7 +19,7 @@ _CHAT_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 RAIL_STUBS: dict[str, str] = {
     "workspace": (
         "You route for the team (rules in system prompt). Work out what the user needs. "
-        "A teammate owns it → @mention them and say why in one line. Yours → do it. "
+        "A teammate owns it → one line why, then `HANDOFF @handle: <task>`. Yours → do it. "
         "\"Set everything up\" → list the deliverables to make (one line each), get approval, "
         "then save one per turn."
     ),

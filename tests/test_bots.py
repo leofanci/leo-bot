@@ -179,36 +179,15 @@ class Routing(unittest.TestCase):
         r = self.route("yes save it", last_bot="cos", last_skill="launch-plan", explicit=True)
         self.assertEqual(r, ("gtm", None, False, None))
 
-    def test_untagged_wording_moves_to_skill_owner(self):
+    def test_untagged_wording_stays_with_the_lead(self):
         r = self.route("how much should we charge for the pro tier?")
-        self.assertEqual(r, ("cmo", None, False, None))
-        self.assertEqual(r.picked, "pricing-strategy")
+        self.assertEqual(r, ("cos", None, False, None))
+        self.assertFalse(hasattr(server, "_picked_by_wording"))
+        self.assertFalse(hasattr(r, "picked"))
 
-    def test_untagged_wording_moves_from_last_bot(self):
-        r = self.route("who is our ideal customer?", last_bot="cmo")
-        self.assertEqual((r[0], r.picked), ("research", "icp-research"))
-
-    def test_wording_owner_already_speaking_stays(self):
-        r = self.route("how much should we charge for the premium tier?", last_bot="cmo")
-        self.assertEqual(r, ("cmo", None, False, None))
-        self.assertIsNone(r.picked)
-
-    def test_plain_untagged_has_no_pick(self):
-        self.assertIsNone(self.route("what should I do today?").picked)
-        self.assertIsNone(self.route("@cmo help with pricing").picked)
-
-    def test_wording_never_moves_to_inactive_or_non_member(self):
-        msg = "how much should we charge for the pro tier?"
-        r = server._route_bot(self.team, msg, self._sess(), members=["cos"])
-        self.assertEqual((r[0], r.picked), ("cos", None))
-        real = self.team.get
-
-        def get(bot_id):
-            b = real(bot_id)
-            return mock.Mock(wraps=b, active=False, id=b.id) if b and b.id == "cmo" else b
-        with mock.patch.object(self.team, "get", side_effect=get):
-            r = self.route(msg)
-        self.assertEqual((r[0], r.picked), ("cos", None))
+    def test_untagged_wording_stays_with_last_bot(self):
+        self.assertEqual(self.route("who is our ideal customer?", last_bot="cmo")[0], "cmo")
+        self.assertEqual(self.route("how much should we charge?", last_bot="cos")[0], "cos")
 
     def test_wording_never_moves_a_dm_or_a_continuation(self):
         msg = "how much should we charge for the pro tier?"
@@ -216,11 +195,11 @@ class Routing(unittest.TestCase):
         r = self.route("yes save it, " + msg, last_bot="cos", last_skill="launch-plan", explicit=True)
         self.assertEqual(r[0], "gtm")
 
-    def test_picked_shows_on_live_and_saved_replies(self):
+    def test_handoff_shows_on_live_and_saved_replies(self):
         js = (Path(server.__file__).parent / "app.js").read_text()
-        self.assertIn("picked for ${picked}", js)
-        self.assertIn("obj.bot.handoff_from, null, obj.bot.picked", js)
-        self.assertIn("m.by_name, m.picked)", js)
+        self.assertNotIn("picked for", js)
+        self.assertIn("info.handoff_from || null", js)
+        self.assertIn("m.by_name, m.handoff_from)", js)
 
     def dm(self, msg, bot="social", **kw):
         return server._route_bot(self.team, msg, self._sess(**kw), default_bot=bot, dm=bot)

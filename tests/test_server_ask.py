@@ -596,6 +596,15 @@ class TurnFolders(unittest.TestCase):
         self.assertIsNone(seen["sess"].code_folder)
         self.assertNotIn("code-context", seen["lead"]["text"])
 
+    def test_handoff_edits_only_when_the_message_allowed_edits(self):
+        self.reply = "That's code.\nHANDOFF @cto: fix the login redirect"
+        seen = self.turn("the login redirect is broken")
+        self.assertEqual(len(seen["runs"]), 2)
+        self.assertEqual(seen["runs"][1]["edit_dirs"], ())  # untagged message: no folder edits
+        self.reply = "That's code.\nHANDOFF @cto: fix the login redirect"
+        seen = self.turn("@cos the login redirect is broken")
+        self.assertEqual(seen["runs"][1]["edit_dirs"], (str(self.a),))  # tagged: the target edits
+
     def test_untagged_turn_reads_all_folders_and_edits_none(self):
         lead = self.turn("where is auth handled?")["lead"]
         self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
