@@ -981,3 +981,65 @@ class SavedThreadFolders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CHAT = "0123abcd-0000-4000-8000-0123456789ab"
+
+
+class SkillLoadTests(unittest.TestCase):
+    """A skill the bot loads with `osctl get-skill` stays active for the thread."""
+
+    def make_session(self, root, load=None):
+        from core import skill_loads
+
+        class LoadingSession(FakeSession):
+            session_id = CHAT
+            _last_bot = None
+
+            def note_bot(self, bot_id):
+                pass
+
+            def ask(self, text, **kw):
+                if load:  # what osctl get-skill does inside the run
+                    skill_loads.record(root, CHAT, load)
+                yield ("delta", "ok")
+                yield ("done", {"result": "ok"})
+        return LoadingSession()
+
+    def turn(self, sess, root, msg="what should our positioning be?"):
+        h = _bare_handler(io.BytesIO())
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        with mock.patch.object(server, "get_chat_session", return_value=sess), \
+             mock.patch.object(server, "ROOT", root), \
+             mock.patch.object(server.chat_store, "CHATS_DIR", root / "chats"), \
+             mock.patch.object(server.db, "tree", return_value=[]):
+            h._handle_ask({"messages": [{"role": "user", "content": msg}]})
+
+    def test_loaded_skill_becomes_active_and_marker_clears(self):
+        from core import skill_loads
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sess = self.make_session(root, load="positioning")
+            self.turn(sess, root)
+            self.assertEqual(sess._last_skill, "positioning")
+            self.assertTrue(sess._skill_explicit)
+            self.assertEqual(skill_loads.loaded(root, CHAT), [])
+            self.assertFalse((root / "team" / "skill_loads" / f"{CHAT}.json").exists())
+        model, reason = server._pick_model_reason(None, False, "draft it", sess)
+        self.assertEqual((model, reason), (server.chat_session.ESCALATED_MODEL, "skill-thread"))
+        model, _ = server._pick_model_reason(None, False, "what is X?", sess)
+        self.assertEqual(model, server.chat_session.CHAT_MODEL)
+
+    def test_no_load_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = self.make_session(Path(tmp))
+            self.turn(sess, Path(tmp))
+        self.assertIsNone(sess._last_skill)
+        self.assertFalse(sess._skill_explicit)
+        self.assertEqual(server._pick_model_reason(None, False, "draft it", sess)[0],
+                         server.chat_session.CHAT_MODEL)
+
+    def test_adopt_without_session_id_is_a_no_op(self):
+        sess = FakeSession()
+        self.assertIsNone(server._adopt_loaded_skill(sess))
+        self.assertIsNone(sess._last_skill)

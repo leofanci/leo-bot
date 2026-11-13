@@ -869,6 +869,22 @@ def _in_active_skill_thread(session):
                 and getattr(session, "_last_skill", None))
 
 
+def _adopt_loaded_skill(session):
+    """After a bot run: the last skill it loaded with `osctl get-skill` becomes the thread's
+    active skill (stronger model and the continuation rules on the next turn), and the load
+    record is cleared. An engine that never passed the chat id to osctl recorded nothing:
+    no escalation, no error. Returns the adopted skill or None."""
+    chat = getattr(session, "session_id", None)
+    if not isinstance(chat, str):
+        return None
+    got = skill_loads.loaded(ROOT, chat)
+    if not got:
+        return None
+    skill_loads.clear(ROOT, chat)
+    session._last_skill, session._skill_explicit = got[-1], True
+    return got[-1]
+
+
 # Words that ask for a change in a folder. Used only to pick the model on a turn that may
 # edit: they never reach the tag gate (_WRITE_TURN_RE), so "fix" alone still runs untagged.
 _EDIT_WORD_RE = re.compile(r"\b(fix|change|edit|refactor|rename|delete|remove|implement|patch)\b", re.I)
@@ -3305,6 +3321,8 @@ class Handler(BaseHTTPRequestHandler):
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_kw = {"skill_": skill, "reason_": reason}
             lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)
+            if not job:  # a job run keeps its record till the end: osctl reads it (Auto boundary)
+                _adopt_loaded_skill(sess)
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
@@ -3326,6 +3344,8 @@ class Handler(BaseHTTPRequestHandler):
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
                 run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
+                if not job:
+                    _adopt_loaded_skill(sess)
             last = len(msgs) - 1
             if apps_kw.get("apps_token"):  # what the relay held this turn: cards in the thread
                 held = [r for r in approvals.pending(ROOT, ws)
@@ -3386,6 +3406,8 @@ class Handler(BaseHTTPRequestHandler):
                     jobs.set_live(ROOT, None, 0)
                 except OSError:
                     traceback.print_exc()
+                if isinstance(getattr(sess, "session_id", None), str):
+                    skill_loads.clear(ROOT, sess.session_id)  # the run is over: the next starts clean
             # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
             # checked again from this thread's workspace, then held as cards. Never from a shared
             # thread or a job's own turn.
