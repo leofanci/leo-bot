@@ -4600,7 +4600,19 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   let attachedFiles = [];
 
   async function readFile(file){
-    if (file.type.startsWith("image/")) return `[image: ${file.name} — not sent to the model, referenced by name]`;
+    if (file.type.startsWith("image/")) {
+      // Saved in this workspace's private upload folder; the bot opens the file to see it.
+      try {
+        const b64 = await new Promise((res, rej) => {
+          const r = new FileReader(); r.onload = () => res(String(r.result).split(",")[1]); r.onerror = rej; r.readAsDataURL(file);
+        });
+        const { path } = await jpost("/api/upload-temp", { data: b64, ext: (file.type.split("/")[1] || "png").replace("jpeg", "jpg"), ws: _WS });
+        return `[image: ${file.name}, saved at ${path}. Open that file with your file-read tool to see it.]`;
+      } catch (e) {
+        toast("✗ Image not attached: " + (e.message || "upload failed"));
+        return `[image: ${file.name}, could not be attached]`;
+      }
+    }
     try {
       let t = await file.text();
       if (t.indexOf(String.fromCharCode(0)) !== -1) return `[binary: ${file.name}]`;  // NUL byte => not text
