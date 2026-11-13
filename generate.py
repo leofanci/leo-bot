@@ -131,7 +131,7 @@ def run_claude(prompt: str, stdin_text: str, model: str = DEFAULT_MODEL) -> str:
     job = jobs.get(root, (os.environ.get("LEOBOT_JOB") or "").strip()) if os.environ.get("LEOBOT_JOB") else None
     # What the job's own turn has spent so far, its run in flight included (saved when it ends).
     pending = jobs.live_spent(root, job["id"]) if job else 0.0
-    capped = spend.refusal(ws, "owner", job=(job["id"], job["cap"]) if job else None, pending=pending,
+    capped = spend.refusal(ws, "owner", job=(job["id"], job["cap"]) if job and job.get("cap") else None, pending=pending,
                            records=lambda: itertools.chain(chat_store.records(), job_ledger.records(root)))
     if capped:
         raise JobError(capped)

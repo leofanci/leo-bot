@@ -30,7 +30,9 @@ DEFAULTS = {"channel": "stable", "checked_at": None, "latest": None, "latest_com
             "failed_commit": None, "previous_ref": None,
             # The running server asks origin once a day whether a release is out (git ls-remote:
             # the origin host sees this machine's address, nothing else is sent). False: never.
-            "auto_check": True}
+            "auto_check": True,
+            # Chat replies in Leo Bot's short style (Settings, Bots). False: the bots' plain style.
+            "short_replies": True}
 HEALTH_TIMEOUT = 60  # seconds for the new server to answer with the target version
 POLL = 0.5
 GIT_TIMEOUT = 300
@@ -60,6 +62,8 @@ def settings() -> dict:
         d["channel"] = "stable"
     if not isinstance(d["auto_check"], bool):
         d["auto_check"] = True
+    if not isinstance(d["short_replies"], bool):
+        d["short_replies"] = True
     return d
 
 

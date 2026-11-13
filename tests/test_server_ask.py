@@ -225,7 +225,6 @@ class RouteSkill(unittest.TestCase):
         self.assertFalse(server._needs_web(ctx))
         seen = _captured({"messages": [{"role": "user", "content": "hi"}],
                           "context": ctx})
-        self.assertFalse(seen["with_web"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
 
     def test_workspace_classifier_is_local_and_specific(self):
@@ -236,12 +235,8 @@ class RouteSkill(unittest.TestCase):
         self.assertTrue(server._needs_workspace("anything", skill="tokensave"))
         self.assertFalse(server._needs_workspace("what positioning memos do we have?"))
 
-    def test_app_context_classifier_covers_gtm_but_skips_admin(self):
-        self.assertTrue(server._needs_app_context("what should our brand emphasize?"))
-        self.assertTrue(server._needs_app_context("draft launch copy", suggest="launch-plan"))
-        self.assertTrue(server._needs_app_context("where is auth handled?"))
-        self.assertFalse(server._needs_app_context("rename this project"))
-        self.assertFalse(server._needs_app_context("thanks"))
+    def test_no_app_context_classifier(self):
+        self.assertFalse(hasattr(server, "_needs_app_context"))
 
 
 class NeedsWebAndModel(unittest.TestCase):
@@ -250,6 +245,16 @@ class NeedsWebAndModel(unittest.TestCase):
         self.assertFalse(server._needs_web("what's the latest on this"))
         self.assertTrue(server._needs_web("look this up /web"))
         self.assertFalse(server._needs_web("rename the project"))
+
+    def test_private_turn_always_has_web(self):
+        self.assertTrue(server._needs_web("rename the project", private=True))
+        self.assertFalse(server._needs_web("rename the project", private=False))
+
+    def test_web_available_does_not_escalate(self):
+        self.assertEqual(server._pick_model_reason(None, False, "what is our plan?"),
+                         (server.chat_session.CHAT_MODEL, "default"))
+        self.assertEqual(server._pick_model_reason(None, True, "look it up /web"),
+                         (server.chat_session.ESCALATED_MODEL, "web"))
 
     def test_research_skill_forces_web(self):
         self.assertTrue(server._needs_web("anything", skill="competitor-scan"))
@@ -327,9 +332,9 @@ class ProjectScopedChatSession(unittest.TestCase):
 
 
 class SkillRouting(unittest.TestCase):
-    def test_cheap_turn_no_skill_no_web_cheap_model(self):
+    def test_cheap_private_turn_has_web_and_cheap_model(self):
         seen = _captured({"messages": [{"role": "user", "content": "what posts do I have?"}]})
-        self.assertFalse(seen["with_web"])
+        self.assertTrue(seen["with_web"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
         self.assertNotIn("## Active skill:", seen["text"])
 
@@ -338,34 +343,27 @@ class SkillRouting(unittest.TestCase):
         self.assertIn("## Active skill: problem-validation", seen["text"])
         self.assertEqual(seen["model"], server.chat_session.ESCALATED_MODEL)
 
-    def test_untagged_read_gets_hint_not_skill(self):
+    def test_untagged_read_gets_no_hint_and_no_skill(self):
         seen = _captured({"messages": [{"role": "user", "content": "help me with positioning"}]})
-        self.assertIn("Skill hint", seen["text"])
+        self.assertNotIn("Skill hint", seen["text"])
         self.assertNotIn("## Active skill:", seen["text"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
 
-    def test_untagged_write_blocked_at_gate(self):
+    def test_untagged_write_runs_the_model(self):
         sink = io.BytesIO()
         h = _bare_handler(sink)
 
-        class S:
+        class S(FakeSession):
             _started = True
             _turn_count = 1
-            _last_skill = None
-            _skill_explicit = False
-
-            def is_fresh(self):
-                return False
-
-            def note_skill(self, skill, explicit=False):
-                pass
 
         with mock.patch.object(server, "get_chat_session", return_value=S()):
             h._handle_ask({"messages": [{"role": "user", "content": "fill all the tabs"}]})
         out = sink.getvalue().decode()
-        self.assertIn("tag who should do it: @cos (Chief of Staff) or /workspace", out)
+        self.assertNotIn("tag who should do it", out)
+        self.assertIn('"delta": "Hi "', out)
         self.assertIn("[DONE]", out)
-        self.assertNotIn("Active skill", out)
+        self.assertFalse(hasattr(server, "_tag_gate_message"))
 
 
 class ComposeTurnPrompt(unittest.TestCase):
@@ -511,7 +509,7 @@ class TurnFolders(unittest.TestCase):
                  "folders": _folders.load(s, self.root)["folders"]} for s in ("acme", "demo")]
 
     def turn(self, msg, room="acme/general", engine=None, shared=False, explicit_thread=False,
-             runner=False, apps=False, session_id=None, ctx_error=None, recap=None):
+             runner=False, apps=False, session_id=None, ctx_error=None, recap=None, loaded_thread=False):
         seen = {"runs": [], "ctx": []}
         test = self
 
@@ -525,8 +523,9 @@ class TurnFolders(unittest.TestCase):
         class Sess:
             _started = False
             _turn_count = 0
-            _last_skill = "folder-work" if explicit_thread else None
+            _last_skill = "folder-work" if explicit_thread else ("positioning" if loaded_thread else None)
             _skill_explicit = explicit_thread
+            _skill_loaded = loaded_thread
             ask = record
 
             def is_fresh(self):
@@ -574,6 +573,45 @@ class TurnFolders(unittest.TestCase):
         seen["lead"] = seen["runs"][0] if seen["runs"] else None
         return seen
 
+    def test_code_words_get_no_injected_graph_but_the_command(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("where is auth handled in the product?")
+        self.assertEqual(seen["ctx"], [])
+        self.assertIn("code-context --query", seen["lead"]["text"])
+        self.assertEqual(seen["sess"].code_folder, str(self.b))
+        self.assertTrue(seen["lead"]["web"])
+
+    def test_no_index_no_command(self):
+        seen = self.turn("where is auth handled in the product?")
+        self.assertNotIn("code-context", seen["lead"]["text"])
+        self.assertIsNone(seen["sess"].code_folder)
+
+    def test_shared_thread_gets_no_web_and_no_code_folder(self):
+        (self.b / ".tokensave").mkdir()
+        (self.b / ".tokensave" / "tokensave.db").write_text("")
+        with mock.patch.object(server.shutil, "which", return_value="/bin/tokensave"):
+            seen = self.turn("where is auth handled?", shared=True)
+        self.assertFalse(seen["lead"]["web"])
+        self.assertIsNone(seen["sess"].code_folder)
+        self.assertNotIn("code-context", seen["lead"]["text"])
+
+    def test_a_loaded_skill_never_unlocks_edits_on_yes(self):
+        seen = self.turn("yes go ahead", loaded_thread=True)
+        self.assertEqual(seen["lead"]["edit_dirs"], ())
+        self.assertEqual(seen["lead"]["model"], server.chat_session.ESCALATED_MODEL)  # still the stronger model
+        self.assertFalse(server._continuation_allowed(seen["sess"], "yes go ahead"))
+
+    def test_handoff_edits_only_when_the_message_allowed_edits(self):
+        self.reply = "That's code.\nHANDOFF @cto: fix the login redirect"
+        seen = self.turn("the login redirect is broken")
+        self.assertEqual(len(seen["runs"]), 2)
+        self.assertEqual(seen["runs"][1]["edit_dirs"], ())  # untagged message: no folder edits
+        self.reply = "That's code.\nHANDOFF @cto: fix the login redirect"
+        seen = self.turn("@cos the login redirect is broken")
+        self.assertEqual(seen["runs"][1]["edit_dirs"], (str(self.a),))  # tagged: the target edits
+
     def test_untagged_turn_reads_all_folders_and_edits_none(self):
         lead = self.turn("where is auth handled?")["lead"]
         self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
@@ -590,10 +628,10 @@ class TurnFolders(unittest.TestCase):
                 self.assertEqual(lead["edit_dirs"], (str(self.a),))
                 self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
 
-    def test_untagged_save_word_still_hits_the_tag_gate(self):
+    def test_untagged_save_word_runs_but_edits_nothing(self):
         seen = self.turn("update the readme with the new steps")
-        self.assertEqual(seen["runs"], [])
-        self.assertIn("tag who should do it", seen["out"])
+        self.assertNotIn("tag who should do it", seen["out"])
+        self.assertEqual(seen["lead"]["edit_dirs"], ())
 
     def test_read_folder_never_in_edit_dirs(self):
         lead = self.turn("@cto refactor the docs folder")["lead"]
@@ -818,14 +856,14 @@ class TurnFolders(unittest.TestCase):
         self.assertEqual(pick("tokensave", False, "rename the handler", None, editing=True),
                          server.chat_session.ESCALATED_MODEL)
         self.assertEqual(pick(None, False, "how does it work", None, editing=True), server.chat_session.CHAT_MODEL)
-        # The edit words never reach the tag gate.
+        # Edit words alone never unlock folder edits.
         self.assertIsNone(server._WRITE_TURN_RE.search("fix the login"))
 
-    def test_may_write_and_approvals_unchanged(self):
+    def test_untagged_private_turn_may_ask_approval(self):
         self.reply = "Done.\nAPPROVAL: save it"
         seen = self.turn("tidy the readme please", room="acme/dm-cto", session_id="c1")
         self.assertEqual(seen["lead"]["edit_dirs"], (str(self.a),))  # a DM turn may edit
-        seen["approvals"].assert_not_called()  # but an untagged turn still asks no approval
+        seen["approvals"].assert_called_once()  # any private turn may propose a save
         seen = self.turn("/folder-work fix the readme", session_id="c1")
         seen["approvals"].assert_called_once()
 
@@ -981,3 +1019,66 @@ class SavedThreadFolders(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+CHAT = "0123abcd-0000-4000-8000-0123456789ab"
+
+
+class SkillLoadTests(unittest.TestCase):
+    """A skill the bot loads with `osctl get-skill` stays active for the thread."""
+
+    def make_session(self, root, load=None):
+        from core import skill_loads
+
+        class LoadingSession(FakeSession):
+            session_id = CHAT
+            _last_bot = None
+
+            def note_bot(self, bot_id):
+                pass
+
+            def ask(self, text, **kw):
+                if load:  # what osctl get-skill does inside the run
+                    skill_loads.record(root, CHAT, load)
+                yield ("delta", "ok")
+                yield ("done", {"result": "ok"})
+        return LoadingSession()
+
+    def turn(self, sess, root, msg="what should our positioning be?"):
+        h = _bare_handler(io.BytesIO())
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+        with mock.patch.object(server, "get_chat_session", return_value=sess), \
+             mock.patch.object(server, "ROOT", root), \
+             mock.patch.object(server.chat_store, "CHATS_DIR", root / "chats"), \
+             mock.patch.object(server.db, "tree", return_value=[]):
+            h._handle_ask({"messages": [{"role": "user", "content": msg}]})
+
+    def test_loaded_skill_becomes_active_and_marker_clears(self):
+        from core import skill_loads
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sess = self.make_session(root, load="positioning")
+            self.turn(sess, root)
+            self.assertEqual(sess._last_skill, "positioning")
+            self.assertTrue(sess._skill_loaded)
+            self.assertFalse(sess._skill_explicit)  # a load is not a tag: no continuation rights
+            self.assertEqual(skill_loads.loaded(root, CHAT), [])
+            self.assertFalse((root / "team" / "skill_loads" / f"{CHAT}.json").exists())
+        model, reason = server._pick_model_reason(None, False, "draft it", sess)
+        self.assertEqual((model, reason), (server.chat_session.ESCALATED_MODEL, "skill-thread"))
+        model, _ = server._pick_model_reason(None, False, "what is X?", sess)
+        self.assertEqual(model, server.chat_session.CHAT_MODEL)
+
+    def test_no_load_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = self.make_session(Path(tmp))
+            self.turn(sess, Path(tmp))
+        self.assertIsNone(sess._last_skill)
+        self.assertFalse(getattr(sess, "_skill_loaded", False))
+        self.assertEqual(server._pick_model_reason(None, False, "draft it", sess)[0],
+                         server.chat_session.CHAT_MODEL)
+
+    def test_adopt_without_session_id_is_a_no_op(self):
+        sess = FakeSession()
+        self.assertIsNone(server._adopt_loaded_skill(sess))
+        self.assertIsNone(sess._last_skill)

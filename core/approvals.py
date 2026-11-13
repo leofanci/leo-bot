@@ -104,6 +104,16 @@ def add(root=bots.ROOT, *, ws, room, chat, bot, summary):
         return rec
 
 
+def asking_bot(chat, root=bots.ROOT):
+    """The bot of the thread's open approval card (not a held app action or job), or None."""
+    if not chat:
+        return None
+    with LOCK:
+        rows = [r for r in load(root) if r.get("chat") == chat and r.get("status") == "pending" and not _is_held(r)]
+    rows.sort(key=lambda r: r.get("created") or 0)
+    return rows[-1].get("bot") if rows else None
+
+
 def resolve_chat(chat, status, root=bots.ROOT):
     """Close the thread's pending approval (the user answered it)."""
     if status not in STATUSES or not chat:

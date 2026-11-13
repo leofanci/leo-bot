@@ -70,7 +70,7 @@ class Proposal(JobCardsBase):
         bad = [dict(NEW, workspace="demo"),            # another workspace from a workspace thread
                dict(NEW, bot="nobody"), dict(NEW, bot="social"),  # unknown, switched off
                dict(NEW, skill="market-sizing"),     # not this bot's skill
-               dict(NEW, mode="free"), dict(NEW, cap="0"), {k: v for k, v in NEW.items() if k != "message"}]
+               dict(NEW, mode="free"), dict(NEW, cap="-1"), {k: v for k, v in NEW.items() if k != "message"}]
         for fields in bad:
             with self.assertRaises(ValueError, msg=fields):
                 self.propose(**fields)
@@ -79,6 +79,18 @@ class Proposal(JobCardsBase):
         self.engine = _Engine(metered=False)
         with self.assertRaises(ValueError):
             self.propose()
+
+    def test_cap_is_optional_on_a_card(self):
+        for cap in (None, "", "0"):
+            fields = {k: v for k, v in NEW.items() if k != "cap"} if cap is None else dict(NEW, cap=cap)
+            p = self.propose(**fields)
+            self.assertIsNone(p["fields"]["cap"])
+            self.assertIn(["Cap", "no cap"], p["preview"]["fields"])
+        job = jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="other",
+                          message="m", schedule="every 6h", cap=1)
+        p = self.propose(op="update", job_id=job["id"], cap="0")
+        self.assertEqual(p["fields"], {"cap": None})
+        self.assertIn(["Cap", "$1 per 24 hours → no cap"], p["preview"]["fields"])
 
     def test_hq_thread_may_target_a_workspace(self):
         self.assertEqual(self.propose(thread_ws="hq", **dict(NEW, workspace="acme"))["fields"]["workspace"], "acme")

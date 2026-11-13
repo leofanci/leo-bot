@@ -12,6 +12,7 @@ Run:  python3 dashboard/server.py [--port 8765]
 
 import argparse
 import base64
+import dataclasses
 import binascii
 import fcntl
 import hmac
@@ -48,7 +49,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
-from core import approvals, jobs  # noqa: E402
+from core import approvals, jobs, skill_loads  # noqa: E402
 from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -60,7 +61,7 @@ from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
 from dashboard import compaction, costs, job_cards, job_ledger, judge as judge_model, score_run, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
-from ai_rules import CHAT_RAIL  # noqa: E402
+from ai_rules import CHAT_RAIL, SHORT_REPLIES  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
 from core.ids import (  # noqa: E402
     PROJECT_SECTIONS,
@@ -116,7 +117,17 @@ UPLOAD_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
 VENDOR_TYPES = {".css": "text/css", ".js": "application/javascript",
                 ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 
-RAIL = CHAT_RAIL
+def rail() -> str:
+    """The chat system rail, read per new session: the Short replies setting adds the style."""
+    try:
+        short = updater.settings()["short_replies"]
+    except Exception:  # noqa: BLE001 - a broken settings file keeps the default
+        short = True
+    return CHAT_RAIL + ("\n\n## Reply style\n" + SHORT_REPLIES if short else "")
+
+
+def new_chat_session():
+    return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=rail())
 
 # The session token is handed out only to whoever proves they already know it:
 # the macOS app reads it from this owner-only file, a terminal user gets it in
@@ -620,8 +631,8 @@ def _explicit_skill(text):
 
 
 def _suggest_skill(text, among=None):
-    """Keyword hint for untagged turns — does not activate skill or Sonnet.
-    `among` checks those skills first (a tagged bot's own), then all."""
+    """The skill a tagged bot's (or a DM's) message matches by wording. Untagged messages
+    never use it: their bot loads a skill itself. `among` checks those skills first."""
     if not text:
         return None
     routes = _COMPILED_ROUTES
@@ -661,46 +672,17 @@ def _route_dm(team, user_msg, session, bot):
     return bot, None, False, None
 
 
-class Route(tuple):
-    """(bot, skill, explicit, handoff_from), plus `picked`: the skill whose wording moved an
-    untagged turn to its owner (None otherwise). Compares equal to the plain 4-tuple."""
-
-    def __new__(cls, items, picked=None):
-        self = super().__new__(cls, items)
-        self.picked = picked
-        return self
-
-
-def _picked_by_wording(team, user_msg, candidate, members=None):
-    """An untagged message that clearly matches another bot's skill goes to that bot: its
-    owner, when active and (in a topic room) a member. The skill stays inactive, so the write
-    gate and the cheap-model rule apply as for any untagged turn."""
-    hit = _suggest_skill(user_msg)
-    owner = team.owner(hit) if hit else None
-    b = team.get(owner) if owner else None
-    if (not b or owner == candidate or not b.active
-            or (members is not None and owner not in members)):
-        return None
-    return Route((owner, None, False, None), picked=hit)
-
-
 def _route_bot(team, user_msg, session, default_bot=bots.ROOT_BOT, dm=None, members=None):
-    """Pick a Route (bot, skill, explicit, handoff_from; .picked) for one turn.
+    """(bot, skill, explicit, handoff_from) for one turn.
 
     explicit /skill → its owner bot. @bot → that bot; the skill its wording
     matches (if another bot owns it, hand off to that owner); a write with no
     match uses the bot's default skill; a single-skill bot always uses it.
-    Untagged → whoever spoke last in this chat, else the room's
-    lead (`default_bot`), unless the wording clearly matches another bot's skill
-    (that bot answers, `picked` names the skill; `members` limits it in a topic room);
-    no skill: the write gate and Haiku policy stay exactly as before. A DM passes
-    `dm` (its bot) and is routed by _route_dm.
+    Untagged → whoever spoke last in this chat, else the room's lead (`default_bot`):
+    no skill; the bot loads one itself, or ends with `HANDOFF @handle:` when the work
+    is a teammate's. A DM passes `dm` (its bot) and is routed by _route_dm.
+    `members`: a topic room's members (kept for callers; untagged turns never move).
     """
-    route = _route_bot_plain(team, user_msg, session, default_bot, dm, members)
-    return route if isinstance(route, Route) else Route(route)
-
-
-def _route_bot_plain(team, user_msg, session, default_bot, dm, members):
     if dm:
         return _route_dm(team, user_msg, session, dm)
     tagged_skill = _explicit_skill(user_msg)
@@ -726,8 +708,7 @@ def _route_bot_plain(team, user_msg, session, default_bot, dm, members):
         return team.owner(session._last_skill), None, False, None
     last_bot = team.get(getattr(session, "_last_bot", None) or "")
     candidate = last_bot.id if last_bot and last_bot.active else team.resolve(default_bot)
-    return (_picked_by_wording(team, user_msg, candidate, members)
-            or (candidate, None, False, None))
+    return candidate, None, False, None
 
 
 def _route_skill(text):
@@ -735,8 +716,12 @@ def _route_skill(text):
     return _explicit_skill(text)
 
 
-def _needs_web(text, skill=None):
-    """Web tools only on explicit `/web` or `@web`, or tagged research skills."""
+def _needs_web(text, skill=None, *, private=False):
+    """Web search on every private turn (the bot decides when to search). Otherwise, and for
+    the model choice (`private` False: did the user ask for web?), only an explicit `/web` or
+    `@web`, or a tagged research skill."""
+    if private:
+        return True
     if skill in _WEB_SKILLS:
         return True
     if text and ("web" in _MENTION_RE.findall(text.lower())):
@@ -811,31 +796,6 @@ def _needs_workspace(text, skill=None):
     return skill == "tokensave" or bool(_WORKSPACE_INTENT_RE.search(text or ""))
 
 
-_APP_CONTEXT_RE = re.compile(
-    r"\b(?:app|product|feature|roadmap|user|customer|audience|persona|icp|"
-    r"position(?:ing)?|brand(?:ing)?|messaging|value prop(?:osition)?|offer|"
-    r"social|content|campaign|channel strategy|copy|launch|pricing|market|"
-    r"competitor|acquisition|activation|retention|conversion|onboarding|ux|"
-    r"gtm|go.to.market|grow(?:th|ing)?|business model|strateg(?:y|ic))\b",
-    re.I,
-)
-
-
-def _needs_app_context(text, skill=None, suggest=None):
-    """Whether fresh facts from a linked app should enter this model turn.
-
-    This local classifier deliberately errs toward product evidence for routed
-    GTM work, while leaving greetings and Leo Bot administration graph-free.
-    """
-    return bool(
-        skill == "tokensave"
-        or _needs_workspace(text, skill)
-        or skill in SKILL_NAMES
-        or suggest in SKILL_NAMES
-        or _APP_CONTEXT_RE.search(text or "")
-    )
-
-
 _READ_TURN_RE = re.compile(
     r"^\s*(what|which|how many|list|show|get|read|status|where|who)\b", re.I
 )
@@ -865,12 +825,62 @@ def _in_active_skill_thread(session):
     of _continuation_allowed's narrow phrase match (that one gates the write-gate
     and skill-body re-injection, which must stay strict; this one only affects
     model choice, so it can be broader)."""
-    return bool(session and getattr(session, "_skill_explicit", False)
+    return bool(session and (getattr(session, "_skill_explicit", False) or getattr(session, "_skill_loaded", False))
                 and getattr(session, "_last_skill", None))
 
 
+@dataclasses.dataclass
+class TurnSetup:
+    """One bot's run in a message (_ask_turn's _turn_setup)."""
+    bot_id: str
+    skill: str
+    explicit: str
+    handoff_from: str
+    may_write: bool
+    may_edit: bool
+    app_grant: dict
+    app_turn: bool
+    mount: bool
+    engine: object
+    locked: bool
+    apps_used: bool
+    folder_rows: list
+    read_dirs: tuple
+    edit_dirs: tuple
+    web_asked: bool
+    with_web: bool
+    model: str
+    reason: str
+    graph_folder: str
+    graph_context: str
+    workspace: str
+
+
+def astuple_shallow(dc):
+    """A dataclass's fields in order, without dataclasses.astuple's deep copy (an engine)."""
+    return tuple(getattr(dc, f.name) for f in dataclasses.fields(dc))
+
+
+def _adopt_loaded_skill(session):
+    """After a bot run: the last skill it loaded with `osctl get-skill` becomes the thread's
+    active skill for the model choice only (the stronger model on the next turn), and the load
+    record is cleared. It never gets a tag's rights: a "yes" after it does not unlock folder
+    edits, a shared thread's write path or continuation routing (_continuation_allowed reads
+    _skill_explicit, which a load never sets). An engine that never passed the chat id to osctl recorded nothing:
+    no escalation, no error. Returns the adopted skill or None."""
+    chat = getattr(session, "session_id", None)
+    if not isinstance(chat, str):
+        return None
+    got = skill_loads.loaded(ROOT, chat)
+    if not got:
+        return None
+    skill_loads.clear(ROOT, chat)
+    session._last_skill, session._skill_explicit, session._skill_loaded = got[-1], False, True
+    return got[-1]
+
+
 # Words that ask for a change in a folder. Used only to pick the model on a turn that may
-# edit: they never reach the tag gate (_WRITE_TURN_RE), so "fix" alone still runs untagged.
+# edit: "fix" alone still runs untagged (no write gate: the owner's approval is the gate).
 _EDIT_WORD_RE = re.compile(r"\b(fix|change|edit|refactor|rename|delete|remove|implement|patch)\b", re.I)
 
 
@@ -951,25 +961,45 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
     return chat_session.CHAT_MODEL, "default"
 
 
-def _tag_gate_message(suggest, team=None):
-    skill = f"/{suggest}" if suggest else "/workspace or the skill for your task"
-    who = ""
-    if suggest and team is not None:
-        owner = team.get(team.owner(suggest))
-        if owner:
-            who = f"@{owner.handle} ({owner.name}) or "
-    return (
-        f"That's a save, so tag who should do it: {who}{skill} (type @ or / in the box). "
-        "Untagged messages are for questions only; tagging puts the right teammate "
-        "and the stronger model on it."
-    )
+_MENU_DESC_CHARS = 100
+
+
+def _one_line(text, limit):
+    """`text` on one line, cut at a word boundary to at most `limit` chars (… when cut)."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    cut = flat[:limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:.")
+    return (cut or flat[:limit - 1]) + "…"
+
+
+def _apps_text(grant):
+    """'gmail (read), instagram (read+write)': a grant as one line, '' when empty."""
+    return ", ".join(f"{tk} ({'read+write' if scope == 'write' else 'read'})" for tk, scope in sorted(grant.items()))
+
+
+def _skill_menu(team, bot_id):
+    """The speaker's own skills, one line each, and how to load one. '' when it has none."""
+    skills = team.skills_of(bot_id) if team else []
+    if not skills:
+        return ""
+    desc = {s["name"]: s["description"] for s in _skills_index()}
+    lines = ["Your skills (load one with `osctl get-skill --name <name>` when the task needs it):"]
+    for name in skills:
+        d = _one_line(desc.get(name, ""), _MENU_DESC_CHARS)
+        lines.append(f"- {name}: {d}" if d else f"- {name}")
+    return "\n".join(lines)
 
 
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
-               members=None, readonly=False, shared=False, query=""):
+               members=None, readonly=False, shared=False, query="", code_index=False, apps_on=False,
+               handed_by_bot=False):
     """Persona for the speaking bot. Full card (job, team, memory) when the
     session is fresh or the speaker changed; a one-line marker otherwise.
-    `query`: the message that opened the card, to pick the memory it carries."""
+    `query`: the message that opened the card, to pick the memory it carries. `code_index`:
+    this turn has an indexed linked folder (the card names `code-context`). `apps_on`: this run
+    has the connected apps mounted (only then the card says "Your apps"). `handed_by_bot`: a
+    teammate's HANDOFF line, not a tag the user typed."""
     b = team.get(bot_id) if team else None
     if not b:
         return ""
@@ -988,14 +1018,33 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         lines.append("Workspace: HQ, the holding's CEO office (sees every company)." if ws == bots.HQ
                      else f"Workspace: {shown}. You work only for this company; other workspaces "
                           "are invisible except as busy time in the shared calendar.")
+        menu = _skill_menu(team, bot_id)
+        if menu:
+            lines.append(menu)
+        # Who holds which connected app (a write still waits for the owner's approval), so a bot
+        # hands app work to the teammate that has it. Never in a thread invited people can see.
+        ws_apps = getattr(team, "ws", bots.HQ)
+        show_apps = not shared and bool(integrations.api_key(ROOT))
+
+        def apps_of(bid):
+            try:
+                return _apps_text(integrations.effective_grant(ws_apps, bid, ROOT)) if show_apps else ""
+            except (OSError, ValueError):
+                return ""
+        mine = apps_of(bot_id) if apps_on else ""
+        if mine:
+            lines.append(f"Your apps: {mine}.")
+        if code_index and not shared:
+            lines.append("Code questions: `osctl code-context --query \"...\"` reads the linked folder's code index.")
         if b.covering:
             names = ", ".join(team.get(c).name for c in b.covering)
             lines.append(f"Also covering for (switched off): {names}.")
         peers = [o for o in team.ordered() if o.active and o.id != bot_id
                  and (members is None or o.id in members)]
         if peers:
-            lines.append("In this channel (tag the owner for work outside your skills):\n"
-                         + "\n".join(team.roster_line(o.id) for o in peers))
+            lines.append("In this channel (HANDOFF work outside your skills to its owner):\n"
+                         + "\n".join(team.roster_line(o.id) + (f" · apps: {a}" if (a := apps_of(o.id)) else "")
+                                     for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
         # HQ has no team memory (nobody joins HQ), so a shared thread there carries none.
         mem = ("" if shared and not project_slug
@@ -1013,8 +1062,9 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         lines.append(f"(speaking as @{b.handle})")
     if handoff_from and team.get(handoff_from):
         h = team.get(handoff_from)
-        lines.append(f"Handoff: user tagged @{h.handle}; this is your skill, so you own it. "
-                     f"Open with one short line that you are taking it from @{h.handle}.")
+        why = (f"@{h.handle} passed this to you; it is yours now." if handed_by_bot
+               else f"user tagged @{h.handle}; this is your skill, so you own it.")
+        lines.append(f"Handoff: {why} Open with one short line that you are taking it from @{h.handle}.")
     return "\n".join(lines)
 
 
@@ -1029,19 +1079,11 @@ _RESUME_NOTE = (
 
 
 # Skills fully covered by CHAT_RAIL — inject stub only (avoids ~1k+ duplicate tok/turn).
-_RAIL_COVERED_SKILL_STUBS: dict[str, str] = {
-    "workspace": (
-        "You route for the team (rules in system prompt). Work out what the user needs. "
-        "A teammate owns it → @mention them and say why in one line. Yours → do it. "
-        "\"Set everything up\" → list the deliverables to make (one line each), get approval, "
-        "then save one per turn."
-    ),
-}
+_RAIL_COVERED_SKILL_STUBS = skill_loads.RAIL_STUBS
 
 
-def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=None,
-                        explicit=False, workspace=None, bot=None, suggest_owner=None,
-                        only_project=None):
+def compose_turn_prompt(*, user_msg, context, skill, session, projects,
+                        explicit=False, workspace=None, bot=None, only_project=None):
     """Assemble one chat turn. Snapshot + full skill body only on fresh session.
     `bot` = the persona block from _bot_block (speaker, team, memory)."""
     parts = []
@@ -1071,14 +1113,6 @@ def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=
             parts.append(f"## Active skill: {skill}\n{_SKILL_CONTINUATION}")
     elif _continuation_allowed(session, user_msg):
         parts.append(f"## Active skill: {session._last_skill}\n{_SKILL_CONTINUATION}")
-    elif suggest and not explicit:
-        parts.append(
-            f"## Skill hint (not active)\n"
-            f"Wording suggests `{suggest}` — user did not tag. "
-            f"Before any osctl write: tell them to tag "
-            f"{'`@' + suggest_owner + '` or ' if suggest_owner else ''}`/{suggest}`. "
-            "Reads ok; no commits this turn unless they tagged or this is a continuation."
-        )
 
     if context:
         parts.append(context.strip())
@@ -1089,15 +1123,7 @@ def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=
 def _load_skill_body(name):
     """Read a routed skill's SKILL.md, returning its instruction body (frontmatter
     stripped). Returns '' if missing. Rail-covered skills return a short stub."""
-    stub = _RAIL_COVERED_SKILL_STUBS.get(name)
-    if stub:
-        return stub
-    f = SKILLS_DIR / name / "SKILL.md"
-    if not f.exists():
-        return ""
-    txt = f.read_text(encoding="utf-8")
-    # same frontmatter parser as _skills_index, so one malformed file reads one way
-    return fileops._parse_frontmatter(txt)[1] if txt.startswith("---") else txt.strip()
+    return skill_loads.body(name)
 
 
 def _skills_index():
@@ -1175,6 +1201,27 @@ def _extract_consults(text, team):
     return _CONSULT_RE.sub("", text or "").rstrip(), asks
 
 
+# A bot passes the work to a teammate with one line `HANDOFF @handle: <task>`: that teammate
+# runs next in the same message, with its own rights. One per message, no chains.
+_HANDOFF_RE = re.compile(r"^[ \t>*_-]*HANDOFF[*_ \t]+@([a-z][a-z0-9-]*)[*_ \t]*:[*_ \t]*(.+?)[ \t*_]*$",
+                         re.M | re.I)
+
+
+def _extract_handoff(text, team, *, speaker, members=None):
+    """(text without any HANDOFF line, (bot_id, task) or None): the first line naming an active
+    teammate other than `speaker` (in `members`, when given). Every HANDOFF line goes."""
+    handles = {b.handle: b.id for b in team.bots.values() if b.active}
+    pick = None
+    for h, task in _HANDOFF_RE.findall(text or ""):
+        bid = handles.get(h.lower())
+        task = task.strip()
+        if pick is None and bid and bid != speaker and task and (members is None or bid in members):
+            pick = (bid, task[:MAX_CONSULT_CHARS])
+    if not _HANDOFF_RE.search(text or ""):
+        return text or "", None
+    return _HANDOFF_RE.sub("", text or "").rstrip(), pick
+
+
 # A bot reacts to the message it answers with one line `REACT: 👀` (Slack-style).
 # Only a line that holds nothing but emoji is a marker; the rest stays prose.
 MAX_BOT_REACTS = 3
@@ -1212,7 +1259,7 @@ def _plan_teammates(team, lead, handoff_from, user_msg, asks):
     return out[:MAX_TEAMMATES]
 
 
-def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, project_slug, skill, shared=False,
+def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, project_slug, shared=False,
                      folders_block=""):
     parts = []
     try:
@@ -1223,10 +1270,6 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
                             query=question))
     if folders_block:
         parts.append(folders_block)
-    if skill:
-        body = _load_skill_body(skill)
-        if body:
-            parts.append(f"## Active skill: {skill}\n{body}")
     lead = team.get(asked_by) if asked_by else None
     ask = (f"## You were asked\n@{lead.handle} ({lead.name}) asks you: {question}\n" if lead
            else f"## You were tagged\nThe user asked the team: {question}\n")
@@ -1239,7 +1282,10 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
 
 
 def _followup_prompt(team, answers):
-    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {_extract_consults(approvals.extract(text)[0], team)[0].strip() or '(no answer)'}"
+    def clean(text):
+        text = _extract_consults(approvals.extract(text)[0], team)[0]
+        return _HANDOFF_RE.sub("", text).strip()
+    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {clean(text) or '(no answer)'}"
              for b, text in answers]
     return ("## Your teammates answered\n" + "\n".join(lines)
             + "\n\nContinue for the user in a few short lines. Don't consult again this turn.")
@@ -1613,7 +1659,7 @@ def _folder_gone(sess_or_rec, linked):
 
 
 def _fresh_with_recap(rec):
-    sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+    sess = new_chat_session()
     sess.pending_recap = chat_store.recap(rec) or None
     return sess
 
@@ -1625,10 +1671,10 @@ def _reopen(rec, scope, linked):
     rec_slug = _scope_slug(rec.get("scope")) if rec else None
     same = rec and (rec_slug == _scope_slug(scope) or (rec_slug is None and not _used_paths(rec)))
     if not same:
-        return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        return new_chat_session()
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(paths.CODE), RAIL, rec)
+    return chat_session.ChatSession.restore(str(paths.CODE), rail(), rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
@@ -1652,7 +1698,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if new:
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        _CHAT = new_chat_session()
         _CHAT_SCOPE = scope
         return _CHAT
     if chat_id and (_CHAT is None or getattr(_CHAT, "session_id", None) != chat_id):
@@ -1673,7 +1719,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if _CHAT is None or _scope_slug(_CHAT_SCOPE) != _scope_slug(scope):
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        _CHAT = new_chat_session()
     _CHAT_SCOPE = scope
     return _CHAT
 
@@ -1718,7 +1764,7 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
         if cur is not None:
             cur.close()
         rec = chat_store.load(chat_id) if (chat_id and not new) else None
-        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        sess = _reopen(rec, scope, linked) if rec else new_chat_session()
         _PERSON_CHATS[pid] = [sess, scope]
         return sess
 
@@ -2769,7 +2815,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(403, {"error": "forbidden"})
 
     def _jobs_post(self, path, body):
-        """Owner only: a job's mode, on/off and delete, from the Team screen. Everything else
+        """Owner only: a job's mode, cap, on/off and delete, from the Team screen. Everything else
         about a job changes through a bot's proposal and its card."""
         jid, _, verb = path[len("/api/jobs/"):].partition("/")
         ws = _strict_ws(body.get("ws"))
@@ -2780,6 +2826,11 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("mode") not in jobs.MODES:
                 return self._send(400, {"error": f"mode: one of {', '.join(jobs.MODES)}"})
             jobs.update(ROOT, jid, mode=body["mode"])
+        elif verb == "cap":  # empty, 0 or null: no cap
+            try:
+                jobs.update(ROOT, jid, cap=body.get("cap") if body.get("cap") is not None else "")
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
         elif verb == "enabled":
             on = body.get("enabled")
             if not isinstance(on, bool):
@@ -2849,7 +2900,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "no user message"})
         user_msg = messages[-1]["content"]
 
-        # Per-turn routing: explicit @bot or /skill tags only (keyword → hint, not Sonnet).
+        # Per-turn routing: explicit @bot or /skill tags; untagged turns load skills themselves.
         context = (body.get("context") or "").strip()
         projects = db.tree()
         ws, project_record = _resolve_workspace(
@@ -2874,7 +2925,7 @@ class Handler(BaseHTTPRequestHandler):
         # how it went. The owner's open thread (_CHAT) is never touched.
         job = viewer.get("job") if viewer.get("kind") == "job" else None
         live = viewer.setdefault("live", {}) if job else {}
-        job_cap = (job["id"], job["cap"]) if job else None
+        job_cap = (job["id"], job["cap"]) if job and job.get("cap") else None  # a cap is optional
         job_mode = jobs.mode_of(job) if job else None
         if job:
             chat_id = None
@@ -2884,7 +2935,7 @@ class Handler(BaseHTTPRequestHandler):
         if allowance:
             return self._sse_message(allowance)
         if job:
-            sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+            sess = new_chat_session()
             # Approval and Report only: osctl refuses every write. Auto: osctl creates and updates,
             # deletes and memory still wait (osctl reads LEOBOT_JOB and LEOBOT_JOB_MODE).
             sess.readonly = job_mode != "auto"
@@ -2894,8 +2945,11 @@ class Handler(BaseHTTPRequestHandler):
             sess = person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
         else:
             sess = get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked)
+        card_bot = None
         if chat_id:
             answer = body.get("approval")
+            if answer in ("approved", "rejected"):
+                card_bot = approvals.asking_bot(chat_id, ROOT)
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
         sess.workspace = ws
         sess.deny_dirs = _workspace_deny_dirs(ws, projects)
@@ -2903,151 +2957,170 @@ class Handler(BaseHTTPRequestHandler):
         # An invited person speaks, or one can read this thread: osctl relay only.
         shared = bool(person) or _shared_room(ws, room)
         sess.shared = shared
+        members = list(room.get("members") or ()) if room and room.get("kind") == "topic" else None
         route = _route_bot(
             team, user_msg, sess,
             default_bot=(room or {}).get("lead") or bots.ROOT_BOT,
             dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None,
-            members=list(room.get("members") or ()) if room and room.get("kind") == "topic" else None)
-        bot_id, skill, routed, handoff_from = route
-        explicit = skill if routed else None
-        suggest = _suggest_skill(user_msg) if not explicit else None
-        # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
-        may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
-        # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
-        # change files in its edit folders; an untagged one reads and searches only.
-        may_edit = False if job else _may_edit(explicit, room, user_msg, team, sess)
-        # An app request is not a content write: decided before the write gate, and
-        # its only approval path is the held app action (no skill, no APPROVAL line).
-        # A thread an invited person can see never reaches the owner's connected apps.
-        app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
-                     if integrations.api_key(ROOT) and not shared else {})
-        app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
-        # A short follow-up ("yes", "go ahead") in a thread that already used apps stays an app turn.
-        if (not app_turn and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
-                and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
-            app_turn = True
-        if app_turn:
-            skill = explicit = suggest = None
-            may_write = False
-            sess.apps_used = True
-
-        # The sender's own Mac when it is connected (apps stay on the server). A runner
-        # turn is locked down like a shared one: the Mac is not the workspace.
+            members=members)
+        # Approve or Reject on a card answers the bot that asked (a handed-off teammate too),
+        # not the thread's skill owner. A tag the user typed still wins; a DM keeps its bot.
+        cb = team.get(card_bot) if card_bot else None
+        if (cb and cb.active and (members is None or cb.id in members) and (room or {}).get("kind") != "dm"
+                and not _explicit_skill(user_msg) and not team.mentioned(user_msg)):
+            route = (cb.id, *route[1:])
+        # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
-        try:
-            engine = (RunnerEngine(sender, person["name"] if person else None)
-                      if not app_turn and not job and runners.HUB.online(sender)
-                      else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared,
-                                                apps=bool(app_turn)))
-        except EngineRefused as e:
-            return self._sse_message(str(e))
-        if job and not engine_registry.metered(engine):
-            return self._sse_message(JOB_UNMETERED.format(label=engine.label, bot=bot_id))
-        sess.engine = engine
-        locked = shared or engine.kind == "runner"
-        sess.shared = locked
-        apps_used = bool(getattr(sess, "apps_used", False))
-        # A bot with a connected-app grant always has its apps on a private turn (the engine can use
-        # them), so the owner never has to word a message for them: the bot decides. Reading app data
-        # still costs the turn its folder edits, and the thread its web search once it has read any.
-        mount = bool(app_grant) and not app_turn and not job and not locked \
-            and "apps" in engine.supports and not engine.full_disk
-        folder_rows, read_dirs, edit_dirs = _turn_folders(
-            ws, room, bot_id, locked=locked, may_edit=may_edit,
-            drop_edit=bool(app_turn or mount or apps_used), engine=engine)
-        sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
-        if (_WRITE_TURN_RE.search(user_msg or "")
-                and not app_turn
-                and not explicit
-                and not _continuation_allowed(sess, user_msg)):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            gate = _tag_gate_message(suggest, team)
-            self.wfile.write(f"data: {json.dumps({'delta': gate})}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.log_message(
-                "chat tag-gate suggest=%s turn=%d", suggest or "-", sess._turn_count,
-            )
-            return
-
-        with_web = _needs_web(user_msg, skill) and not apps_used
-        model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
-                         else _pick_model_reason(skill, with_web, user_msg, sess, explicit=bool(explicit),
-                                                 editing=bool(may_edit and edit_dirs)))
-
-        wants_file_search = _needs_workspace(user_msg, skill)
-        wants_app_context = _needs_app_context(user_msg, skill, suggest)
-        # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
-        # people can see: their question would steer a read of the owner's code (names, paths).
-        layered = [] if locked else _layered_folders(ws, room, bot_id)
-        graph_folder = folders.first_indexed(layered) if shutil.which("tokensave") else None
-        if skill == "tokensave" and not graph_folder:
-            # Deterministic zero-model response: do not inject a skill body or
-            # spend a model turn when the requested graph has no safe target.
-            message = (
-                "TokenSave is not available in a thread invited people can see." if locked else
-                "Link a folder to this workspace first (its settings, Folders), then use /tokensave again."
-                if not layered else
-                "None of this workspace's folders has a TokenSave index yet. Run `tokensave init` "
-                "once inside the folder, then use /tokensave again. No model turn was spent."
-            )
-            return self._sse_message(message)
-        # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
-        if engine.kind != "runner":  # a person's own Mac is never capped
+        def _lead_caps():
             capped = spend.refusal(ws, sender, records=_spend_records, job=job_cap)
             if capped:
                 live["status"] = "capped"
-                return self._sse_message(capped)
-        tokensave_task = re.sub(
-            r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
-        ).replace("\x00", "").strip()[:tokensave_bridge.MAX_QUERY_CHARS]
-        if not tokensave_task:
-            tokensave_task = "Summarize this folder's product, users, and main capabilities"
+            return capped
 
-        graph_context = ""
-        graph_error = None
-        if graph_folder and wants_app_context:
+        def _turn_setup(route_, *, caps=None, edit_ok=True):
+            """What one bot's run in this message gets: rights, engine, folders, web, model and the
+            workspace notes of its prompt. Sets the session's engine and walls for that run. A str
+            is a zero-model reply (refused engine, no index, a cap) and nothing runs. `edit_ok`
+            False: no folder edits whatever the route (a handoff from an untagged message)."""
+            bot_id, skill, routed, handoff_from = route_
+            explicit = skill if routed else None
+            # Any private turn may propose a save (one APPROVAL line; the owner's approval is the gate).
+            # A job, or a thread invited people can see, still needs a tagged skill or its continuation.
+            may_write = (not shared and not job) or bool(explicit) or _continuation_allowed(sess, user_msg)
+            # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
+            # change files in its edit folders; an untagged one reads and searches only.
+            may_edit = False if job or not edit_ok else (routed or _may_edit(explicit, room, user_msg, team, sess))
+            # An app request is not a content write: decided before may_write, and
+            # its only approval path is the held app action (no skill, no APPROVAL line).
+            # A thread an invited person can see never reaches the owner's connected apps.
+            app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
+                         if integrations.api_key(ROOT) and not shared else {})
+            app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
+            # A short follow-up ("yes", "go ahead") in a thread that already used apps stays an app turn.
+            if (not app_turn and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
+                    and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
+                app_turn = True
+            if app_turn:
+                skill = explicit = None
+                may_write = False
+                sess.apps_used = True
+
+            # The sender's own Mac when it is connected (apps stay on the server). A runner
+            # turn is locked down like a shared one: the Mac is not the workspace.
             try:
-                # An invited person's question must not read the app's source out of this.
-                graph_context = tokensave_bridge.context(
-                    ws, tokensave_task, active_project=ws,
-                    include_code=True, folder=graph_folder,
+                engine = (RunnerEngine(sender, person["name"] if person else None)
+                          if not app_turn and not job and runners.HUB.online(sender)
+                          else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared,
+                                                    apps=bool(app_turn)))
+            except EngineRefused as e:
+                return str(e)
+            if job and not engine_registry.metered(engine):
+                return JOB_UNMETERED.format(label=engine.label, bot=bot_id)
+            sess.engine = engine
+            locked = shared or engine.kind == "runner"
+            sess.shared = locked
+            apps_used = bool(getattr(sess, "apps_used", False))
+            # A bot with a connected-app grant always has its apps on a private turn (the engine can use
+            # them), so the owner never has to word a message for them: the bot decides. Reading app data
+            # still costs the turn its folder edits, and the thread its web search once it has read any.
+            mount = bool(app_grant) and not app_turn and not job and not locked \
+                and "apps" in engine.supports and not engine.full_disk
+            folder_rows, read_dirs, edit_dirs = _turn_folders(
+                ws, room, bot_id, locked=locked, may_edit=may_edit,
+                drop_edit=bool(app_turn or mount or apps_used), engine=engine)
+            sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
+
+            # Web search is on every private turn; only asking for it (/web) takes the stronger model.
+            web_asked = _needs_web(user_msg, skill) and not apps_used
+            # Never next to the apps (app data must not reach a search query) unless the user
+            # asked for web; a job (unattended, bot-written message) keeps the explicit rule.
+            with_web = (web_asked or _needs_web(user_msg, skill, private=not (locked or job or app_turn or mount))) \
+                and not apps_used
+            model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
+                             else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
+                                                     editing=bool(may_edit and edit_dirs)))
+
+            wants_file_search = _needs_workspace(user_msg, skill)
+            # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
+            # people can see: their question would steer a read of the owner's code (names, paths).
+            layered = [] if locked else _layered_folders(ws, room, bot_id)
+            graph_folder = folders.first_indexed(layered) if shutil.which("tokensave") else None
+            # osctl code-context reads this folder when the bot asks (never in a locked turn).
+            sess.code_folder = graph_folder
+            if skill == "tokensave" and not graph_folder:
+                # Deterministic zero-model response: do not inject a skill body or
+                # spend a model turn when the requested graph has no safe target.
+                message = (
+                    "TokenSave is not available in a thread invited people can see." if locked else
+                    "Link a folder to this workspace first (its settings, Folders), then use /tokensave again."
+                    if not layered else
+                    "None of this workspace's folders has a TokenSave index yet. Run `tokensave init` "
+                    "once inside the folder, then use /tokensave again. No model turn was spent."
                 )
-            except (tokensave_bridge.BridgeError, OSError) as exc:
-                # The detail can name the owner's folders: a locked turn gets none of it.
-                graph_error = "the code index could not refresh" if locked else str(exc)[:1200]
+                return message
+            # Caps: after the replies that cost nothing (no index), before anything runs.
+            if caps and engine.kind != "runner":  # a person's own Mac is never capped
+                capped = caps()
+                if capped:
+                    return capped
+            tokensave_task = re.sub(
+                r"(?i)(?:^|\s)[@/]tokensave\b", " ", user_msg,
+            ).replace("\x00", "").strip()[:tokensave_bridge.MAX_QUERY_CHARS]
+            if not tokensave_task:
+                tokensave_task = "Summarize this folder's product, users, and main capabilities"
 
-        if skill == "tokensave" and graph_error:
-            return self._sse_message(
-                f"TokenSave could not refresh the linked folder: {graph_error}. "
-                "No stale context was used and no model turn was spent.")
+            graph_context = ""
+            graph_error = None
+            if graph_folder and skill == "tokensave":  # explicit /tokensave: up front, as before
+                try:
+                    # An invited person's question must not read the app's source out of this.
+                    graph_context = tokensave_bridge.context(
+                        ws, tokensave_task, active_project=ws,
+                        include_code=True, folder=graph_folder,
+                    )
+                except (tokensave_bridge.BridgeError, OSError) as exc:
+                    # The detail can name the owner's folders: a locked turn gets none of it.
+                    graph_error = "the code index could not refresh" if locked else str(exc)[:1200]
 
-        workspace = linked_workspace_prompt(
-            project_slug, folder_rows, graph_context=graph_context, graph_error=graph_error)
-        if wants_file_search and not read_dirs and not locked:
-            why = ("Your folders are limited for this channel or for you, and none is open to you "
-                   "this turn: say so and ask the owner to change the limit on the Folders screen."
-                   if _layered_folders(ws, None, None) else
-                   "This workspace has no usable linked folder (missing, stale or not linked): ask "
-                   "the owner to link the folder in the workspace's settings, Folders.")
-            workspace = ("## App workspace unavailable\n" + why
-                         + " Do not inspect the Leo Bot source tree as a substitute.")
+            if skill == "tokensave" and graph_error:
+                return (f"TokenSave could not refresh the linked folder: {graph_error}. "
+                        "No stale context was used and no model turn was spent.")
 
-        if app_turn or mount:  # which accounts the bot may name this turn (a workspace's own picks)
-            workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
-        if locked:
-            workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
-        elif engine.kind == "api":
-            workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
-        elif engine.full_disk:
-            workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
-        if job:
-            workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"])) if x)
+            workspace = linked_workspace_prompt(
+                project_slug, folder_rows, graph_context=graph_context, graph_error=graph_error)
+            if wants_file_search and not read_dirs and not locked:
+                why = ("Your folders are limited for this channel or for you, and none is open to you "
+                       "this turn: say so and ask the owner to change the limit on the Folders screen."
+                       if _layered_folders(ws, None, None) else
+                       "This workspace has no usable linked folder (missing, stale or not linked): ask "
+                       "the owner to link the folder in the workspace's settings, Folders.")
+                workspace = ("## App workspace unavailable\n" + why
+                             + " Do not inspect the Leo Bot source tree as a substitute.")
+
+            if app_turn or mount:  # which accounts the bot may name this turn (a workspace's own picks)
+                workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
+            if locked:
+                workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
+            elif engine.kind == "api":
+                workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
+            elif engine.full_disk:
+                workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
+            if job:
+                workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"])) if x)
+            return TurnSetup(bot_id=bot_id, skill=skill, explicit=explicit, handoff_from=handoff_from,
+                             may_write=may_write, may_edit=may_edit, app_grant=app_grant, app_turn=app_turn,
+                             mount=mount, engine=engine, locked=locked, apps_used=apps_used,
+                             folder_rows=folder_rows, read_dirs=read_dirs, edit_dirs=edit_dirs,
+                             web_asked=web_asked, with_web=with_web, model=model, reason=reason,
+                             graph_folder=graph_folder, graph_context=graph_context, workspace=workspace)
+
+        st = _turn_setup(route, caps=_lead_caps)
+        if isinstance(st, str):
+            return self._sse_message(st)
+        (bot_id, skill, explicit, handoff_from, may_write, may_edit, app_grant, app_turn, mount, engine,
+         locked, apps_used, folder_rows, read_dirs, edit_dirs, web_asked, with_web, model, reason,
+         graph_folder, graph_context, workspace) = astuple_shallow(st)
         saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
         # A thread whose last call on this engine passed LEOBOT_COMPACT_TOKENS starts a fresh
         # session here: the snapshot, the bot card and the recap of its visible messages go in
@@ -3065,14 +3138,13 @@ class Handler(BaseHTTPRequestHandler):
             skill=skill,
             session=sess,
             projects=projects,
-            suggest=suggest,
             explicit=bool(explicit),
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
                            handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
+                           code_index=bool(graph_folder), apps_on=bool(app_turn or mount),
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
-            suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
         )
         # What crosses between engines: the thread's visible messages, never a transcript.
         sess.recap = chat_store.recap(saved_rec)
@@ -3112,7 +3184,7 @@ class Handler(BaseHTTPRequestHandler):
 
         # This turn's replies in order: the lead, then any teammates it pulled in
         # (or that were co-tagged), then the lead's follow-up.
-        msgs = [{"bot": bot_id, "content": "", **({"picked": route.picked} if route.picked else {})}]
+        msgs = [{"bot": bot_id, "content": ""}]
         reacts = []  # (bot_id, emoji) the bots of this turn put on the user's message
         # What the team hands over this turn = files of its company that change.
         files_before = deliverables.snapshot(ROOT, ws) if project_record else None
@@ -3121,6 +3193,8 @@ class Handler(BaseHTTPRequestHandler):
         web_domains = () if job else chat_session.user_web_domains(user_msg)
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
+
+        engines_seen = {engine.id: 0}  # engine id → this turn's replies it did not see
 
         def notice(text):
             """A line under the latest reply; saved on it, so a reload keeps it."""
@@ -3201,7 +3275,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
-            c = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+            c = new_chat_session()
             c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
@@ -3224,17 +3298,13 @@ class Handler(BaseHTTPRequestHandler):
             c_read = tuple(d for d in c_read if str(d) in lead_read)
             c_rows = [r for r in c_rows if str(r.get("path")) in lead_read]
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
-            own = team.skills_of(b2)
-            c_skill = _suggest_skill(question, among=own)
-            c_skill = c_skill if c_skill in own else None
             # A teammate never gets web the user did not ask for: the lead's own turn decides it,
             # not a question the lead model wrote (it may echo text from a file or another person).
             c_web = bool(with_web) and not apps_used  # app data in this thread
-            c_model = (chat_session.ESCALATED_MODEL if (c_skill or c_web)
-                       else chat_session.CHAT_MODEL)
-            c_reason = "teammate-skill" if c_skill else "teammate"
+            c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
+            c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
-                                      projects, project_slug or None, c_skill, shared=shared,
+                                      projects, project_slug or None, shared=shared,
                                       folders_block=linked_workspace_prompt(project_slug, c_rows))
             slot = person["id"] if person else ("job" if job else f"sess-{next(_EXTRA_SEQ)}")
             _EXTRA[slot] = c
@@ -3247,6 +3317,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return run(c, prompt, c_model, c_web, msg, skill_=c_skill, reason_=c_reason, **c_kw)
             finally:
+                if isinstance(getattr(c, "session_id", None), str):
+                    skill_loads.clear(ROOT, c.session_id)  # a consult's own loads never carry over
                 if slot.startswith("sess-"):
                     _EXTRA.pop(slot, None)  # one key per owner turn: never left behind
                 else:
@@ -3254,28 +3326,37 @@ class Handler(BaseHTTPRequestHandler):
                 if c_kw.get("os_token"):
                     os_relay.TOKENS.revoke(c_kw["os_token"])
 
+        def _mint(st_):
+            """The tokens one bot's run gets: the apps relay (its own grant) or, on a locked or
+            full-disk engine, the osctl relay. Revoked in the finally below."""
+            kw = {}
+            if st_.app_turn or st_.mount:
+                kw = {"apps_token": apps_relay.TOKENS.mint(
+                          {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
+                           "room": (room or {}).get("id"), "person": bots.CEO,
+                           "report": job_mode == "report",
+                           # the first app call marks the thread: no web search after app data
+                           "on_call": lambda: setattr(sess, "apps_used", True)}),
+                      "apps_port": self.server.server_address[1]}
+            if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
+                if kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
+                    apps_relay.TOKENS.revoke(kw["apps_token"])
+                kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
+                                                        "apps_used": st_.apps_used,
+                                                        "engine": st_.engine.id, "runner_owner": sender,
+                                                        "shared": shared, "chat": getattr(sess, "session_id", None),
+                                                        "job": job["id"] if job else None,
+                                                        "job_mode": job_mode,
+                                                        "code_folder": None if st_.locked else st_.graph_folder}),
+                      "os_port": self.server.server_address[1]}
+            minted.append(kw)
+            return kw
+
         # The turn token lives for this request: the lead and its follow-up run
         # get it, a consulted teammate never does; revoked in the finally below.
-        apps_kw = {}
+        minted = []
         turn_started = time.time()
-        if app_turn or mount:
-            apps_kw = {"apps_token": apps_relay.TOKENS.mint(
-                           {"ws": ws, "bot": bot_id, "chat": getattr(sess, "session_id", None),
-                            "room": (room or {}).get("id"), "person": bots.CEO,
-                            "report": job_mode == "report",
-                            # the first app call marks the thread: no web search after app data
-                            "on_call": lambda: setattr(sess, "apps_used", True)}),
-                       "apps_port": self.server.server_address[1]}
-        if locked or engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
-            if apps_kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
-                apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-            apps_kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
-                                                         "apps_used": apps_used,
-                                                         "engine": engine.id, "runner_owner": sender,
-                                                         "shared": shared, "chat": getattr(sess, "session_id", None),
-                                                         "job": job["id"] if job else None,
-                                                         "job_mode": job_mode}),
-                       "os_port": self.server.server_address[1]}
+        apps_kw = _mint(st)
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
@@ -3287,15 +3368,17 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"chat_id": sess.session_id,
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
-            emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from,
-                          "picked": route.picked}})
+            emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_kw = {"skill_": skill, "reason_": reason}
             lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)
+            if not job:  # a job run keeps its record till the end: osctl reads it (Auto boundary)
+                _adopt_loaded_skill(sess)
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
-            if asks or lead_reacts:
+            lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
+            if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
             answers = []
@@ -3313,8 +3396,63 @@ class Handler(BaseHTTPRequestHandler):
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
                 run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
+                if not job:
+                    _adopt_loaded_skill(sess)
+                clean3, h3 = _extract_handoff(m3["content"], team, speaker=bot_id, members=members)
+                if clean3 != m3["content"]:
+                    m3["content"] = clean3
+                    emit({"clean": clean3, "msg": len(msgs) - 1})
+                handoff = handoff or h3
+            writers = {0: may_write}  # message index → may that run's APPROVAL line make a card
+            if handoff and job:
+                # A job is one bot's work in its approved mode: it never passes the run to a teammate.
+                notice(f"A scheduled job does not hand off: ask @{team.get(handoff[0]).handle} "
+                       "in a thread of your own.")
+                handoff = None
+            if handoff and not cap_hit and may_run():
+                target, task = handoff
+                # Its own rights, as if tagged; folder edits only when the user's message allowed them.
+                hst = _turn_setup((target, None, True, bot_id), edit_ok=may_edit)
+                if isinstance(hst, str):
+                    notice(hst)
+                else:
+                    h_kw = _mint(hst)
+                    h_text = compose_turn_prompt(
+                        user_msg=(_speaker_note(person, ws) if person else "")
+                        + f"{task}\n\n(Original request: {user_msg})",
+                        context=context, skill=None, session=sess, projects=projects, workspace=hst.workspace,
+                        bot=_bot_block(team, target, sess, project_slug if project_record else None, bot_id,
+                                       fresh=True, shared=shared, query=task, code_index=bool(hst.graph_folder),
+                                       apps_on=bool(hst.app_turn or hst.mount), handed_by_bot=True,
+                                       members=members),
+                        only_project=(project_slug or None))
+                    if hst.engine.id != engine.id:
+                        # Another engine: what it missed of the thread, and what the lead just said.
+                        lead_said = (msgs[0]["content"] or "").strip()[:1500]
+                        h_text = "\n\n".join(x for x in (
+                            chat_store.recap(saved_rec, hst.engine.id),
+                            f"@{team.get(bot_id).handle} just replied: {lead_said}" if lead_said else "",
+                            h_text) if x)
+                    emit({"msg_start": {**_bot_info(team, target), "handoff_from": bot_id}})
+                    m4 = {"bot": target, "content": "", "handoff_from": bot_id}
+                    msgs.append(m4)
+                    writers[len(msgs) - 1] = hst.may_write
+                    if hasattr(sess, "note_bot"):
+                        sess.note_bot(target)  # the thread's next untagged message goes to it
+                    self.log_message("chat handoff from=%s to=%s model=%s", bot_id, target, hst.model)
+                    run(sess, h_text, hst.model, hst.with_web, m4, skill_=None, reason_=hst.reason,
+                        read_dirs=hst.read_dirs, edit_dirs=hst.edit_dirs, **h_kw)
+                    if hst.engine.id != engine.id:
+                        engines_seen = {engine.id: 1, hst.engine.id: 0}
+                    if not job:
+                        _adopt_loaded_skill(sess)
+                    # One handoff per message: its own HANDOFF and CONSULT lines go unanswered.
+                    clean4 = _extract_consults(_extract_handoff(m4["content"], team, speaker=target)[0], team)[0]
+                    if clean4 != m4["content"]:
+                        m4["content"] = clean4
+                        emit({"clean": clean4, "msg": len(msgs) - 1})
             last = len(msgs) - 1
-            if apps_kw.get("apps_token"):  # what the relay held this turn: cards in the thread
+            if any(k.get("apps_token") for k in minted):  # what the relay held this turn: cards in the thread
                 held = [r for r in approvals.pending(ROOT, ws)
                         if r.get("kind") == approvals.APP and r.get("chat") == getattr(sess, "session_id", None)
                         and (r.get("created") or 0) >= turn_started]
@@ -3327,24 +3465,30 @@ class Handler(BaseHTTPRequestHandler):
                 if handed:
                     msgs[last]["deliverables"] = handed
                     emit({"deliverables": handed, "msg": last})
-            # The lead may ask for approval in its first reply or its follow-up:
-            # every marker line goes, the last one asked counts.
-            asked = None
+            # The lead may ask for approval in its first reply or its follow-up, and a teammate
+            # it handed off to in its own reply: every marker line goes, the last one asked counts.
+            asked, dropped = None, []
             for i, m in enumerate(msgs):
-                if m["bot"] != bot_id or m.get("asked_by"):
+                if i not in writers and (m["bot"] != bot_id or m.get("asked_by")):
                     continue
                 clean, summary = approvals.extract(m["content"])
                 if summary:
                     m["content"] = clean
                     emit({"clean": clean, "msg": i})
-                    asked = (i, summary)
+                    if asked and asked[0] != i:
+                        dropped.append(asked[0])
+                    asked = (i, summary, writers.get(i, may_write))
             # A chat-only turn's stray marker gets no buttons; a Report only job saves nothing.
-            if asked and may_write and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
-                i, summary = asked
+            if asked and asked[2] and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
+                i, summary, _ = asked
                 rec = approvals.add(ROOT, ws=ws, room=(room or {}).get("id"), chat=sess.session_id,
-                                    bot=bot_id, summary=summary)
+                                    bot=msgs[i]["bot"], summary=summary)
                 msgs[i]["approval"] = rec["id"]
                 emit({"approval": rec, "msg": i})
+                for j in dict.fromkeys(dropped):  # one card per thread: an earlier ask is replaced
+                    note = f"This proposal was replaced by @{team.get(msgs[i]['bot']).handle}'s below."
+                    msgs[j].setdefault("notices", []).append(note)
+                    emit({"notice": note, "msg": j})
                 if job:
                     live["status"] = "waiting"
             for i, m in enumerate(msgs):  # every bot of the turn may react to the message
@@ -3357,6 +3501,7 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
             for m in msgs[1:]:  # a teammate never asks for approval or consults on its own
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
+                m["content"] = _HANDOFF_RE.sub("", m["content"]).rstrip() if _HANDOFF_RE.search(m["content"]) else m["content"]
         except (BrokenPipeError, ConnectionResetError):
             pass  # client stopped/closed; still save what streamed so far
         except _RunFailed:
@@ -3373,6 +3518,10 @@ class Handler(BaseHTTPRequestHandler):
                     jobs.set_live(ROOT, None, 0)
                 except OSError:
                     traceback.print_exc()
+                if isinstance(getattr(sess, "session_id", None), str):
+                    skill_loads.clear(ROOT, sess.session_id)  # the run is over: the next starts clean
+            elif isinstance(getattr(sess, "session_id", None), str):
+                skill_loads.clear(ROOT, sess.session_id)  # a stopped run: its loads never reach the next turn
             # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
             # checked again from this thread's workspace, then held as cards. Never from a shared
             # thread or a job's own turn.
@@ -3396,11 +3545,12 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
             if cards:
                 _quiet(emit, {"app_actions": cards, "msg": len(msgs) - 1})
-            if apps_kw.get("apps_token"):
-                apps_relay.TOKENS.revoke(apps_kw["apps_token"])
-                _API_APP_SESSIONS.pop(apps_kw["apps_token"], None)
-            if apps_kw.get("os_token"):
-                os_relay.TOKENS.revoke(apps_kw["os_token"])
+            for kw_ in minted:
+                if kw_.get("apps_token"):
+                    apps_relay.TOKENS.revoke(kw_["apps_token"])
+                    _API_APP_SESSIONS.pop(kw_["apps_token"], None)
+                if kw_.get("os_token"):
+                    os_relay.TOKENS.revoke(kw_["os_token"])
             if metered_turn and not cap_hit:  # the 80% heads-up, once a day per cap
                 try:
                     near = spend.near_notice(ws, sender, ROOT, pending=sum(m.get("cost") or 0 for m in msgs),
@@ -3426,7 +3576,8 @@ class Handler(BaseHTTPRequestHandler):
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
                         shared=shared, reactions=reacts, ws=ws,
                         job=job["id"] if job else None,
-                        title=f"Job: {job['name']}" if job else None)
+                        title=f"Job: {job['name']}" if job else None,
+                        engines_seen=engines_seen)
                 except (OSError, ValueError):
                     traceback.print_exc()
                 else:
@@ -3597,6 +3748,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         if path == "/api/update":  # owner only (checked above); needs no index
             return self._send(200, _update_view())
+        if path == "/api/settings/chat":  # owner only (checked above)
+            return self._send(200, {"short_replies": updater.settings()["short_replies"]})
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
@@ -3783,6 +3936,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._send(200, {"public_url": people.set_public_url(ROOT, body.get("url"))})
+            if path == "/api/settings/chat":  # Settings, Bots: Short replies (new threads pick it up)
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                if not isinstance(body.get("short_replies"), bool):
+                    return self._send(400, {"error": "short_replies: true or false"})
+                updater.save_settings({"short_replies": body["short_replies"]})
+                return self._send(200, {"short_replies": updater.settings()["short_replies"]})
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})

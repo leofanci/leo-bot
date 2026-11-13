@@ -35,10 +35,11 @@ class TurnPolicy:
     chat: str = None               # LEOBOT_CHAT: the thread (osctl propose-job keys its outbox on it)
     job: str = None                # LEOBOT_JOB: a scheduled job's turn (its id)
     job_mode: str = None           # LEOBOT_JOB_MODE: approval, auto or report
+    code_folder: str = None        # LEOBOT_CODE_FOLDER: this turn's indexed folder (osctl code-context)
 
 
 # osctl reads these from its environment; a child never inherits the server's own copy.
-TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE")
+TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE", "LEOBOT_CODE_FOLDER")
 
 
 def turn_vars(policy):
@@ -46,7 +47,8 @@ def turn_vars(policy):
     return {**({"LEOBOT_READONLY": "1"} if policy.readonly else {}),
             **({"LEOBOT_CHAT": policy.chat} if policy.chat else {}),
             **({"LEOBOT_JOB": policy.job} if policy.job else {}),
-            **({"LEOBOT_JOB_MODE": policy.job_mode} if policy.job and policy.job_mode else {})}
+            **({"LEOBOT_JOB_MODE": policy.job_mode} if policy.job and policy.job_mode else {}),
+            **({"LEOBOT_CODE_FOLDER": policy.code_folder} if policy.code_folder and not policy.shared else {})}
 
 
 @dataclass(frozen=True)

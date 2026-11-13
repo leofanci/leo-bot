@@ -43,8 +43,11 @@ class TestAiRules(unittest.TestCase):
 
     def test_chat_rail_has_skill_tagging(self):
         from dashboard.ai_rules import CHAT_RAIL
-        self.assertIn("Skill tags", CHAT_RAIL)
-        self.assertIn("/content-brief", CHAT_RAIL)
+        self.assertIn("## Skills and saves", CHAT_RAIL)
+        self.assertIn("get-skill --name", CHAT_RAIL)
+        self.assertIn("content-brief", CHAT_RAIL)
+        self.assertNotIn("Untagged write", CHAT_RAIL)
+        self.assertNotIn("Any turn may propose", CHAT_RAIL)  # shared threads and jobs get no card
 
     def test_chat_rail_has_artifact_schemas(self):
         from dashboard.ai_rules import CHAT_RAIL

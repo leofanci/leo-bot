@@ -7,7 +7,7 @@ A cap is dollars per rolling 24 hours, read from the environment on every check:
 - LEOBOT_WORKSPACE_DAILY_CAP: every turn in one workspace. Off unless set.
 - LEOBOT_OWNER_DAILY_CAP: the owner's own turns. Off unless set.
 For the last two, unset, empty, 0, negative or not a number means no cap.
-A scheduled job also has its own cap (core/jobs.py), passed as `job=(job_id, dollars)`:
+A scheduled job may have its own cap (core/jobs.py), passed as `job=(job_id, dollars)` (None: no cap):
 it counts the spend rows that job wrote.
 """
 import json
@@ -92,7 +92,7 @@ def _money(value):
 def _caps(ws, by, job=None):
     """(kind, key, cap) for each cap set for this turn: the job's own, the person's
     allowance, then the workspace, then the owner."""
-    out = [("job", job[0], float(job[1]))] if job else []
+    out = [("job", job[0], float(job[1]))] if job and job[1] else []  # a job without a cap: none
     if by and by != OWNER and cap_value("person"):
         out.append(("person", by, cap_value("person")))
     if ws and cap_value("workspace"):

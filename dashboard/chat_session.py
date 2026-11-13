@@ -36,6 +36,12 @@ class ChatSession:
         self._turn_count = 0
         self._last_skill = None  # last routed skill (server); skip re-injecting body
         self._skill_explicit = False  # True when user tagged @/skill (Sonnet gate)
+        # True when the bot loaded _last_skill itself (osctl get-skill): the stronger model on the
+        # next turn, never the rights of a tag (continuation, edits).
+        self._skill_loaded = False
+        # True when the bot loaded _last_skill itself (osctl get-skill): the stronger model on the
+        # next turn, never the rights of a tag (continuation, edits).
+        self._skill_loaded = False
         self._pending_skill = None
         self._pending_skill_explicit = False
         self._last_bot = None  # bot that spoke last (server routes untagged turns to it)
@@ -49,6 +55,7 @@ class ChatSession:
         # Set by the server on a scheduled job's turn: osctl runs that job's mode.
         self.job_id = None
         self.job_mode = None
+        self.code_folder = None  # the server sets it per turn: the folder osctl code-context reads
         # Once a thread has read an app, its context holds that data: web tools
         # stay off for good there (no "read mail, leak it via a search" path).
         self.apps_used = False
@@ -69,6 +76,8 @@ class ChatSession:
         sess._turn_count = int(rec.get("turn_count") or 0)
         sess._last_skill = rec.get("last_skill")
         sess._skill_explicit = bool(rec.get("skill_explicit"))
+        sess._skill_loaded = bool(rec.get("skill_loaded"))
+        sess._skill_loaded = bool(rec.get("skill_loaded"))
         sess._last_bot = rec.get("last_bot")
         sess.apps_used = bool(rec.get("apps_used"))
         sess.folder_paths = {p for p in rec.get("folder_paths") or () if isinstance(p, str)}
@@ -93,7 +102,8 @@ class ChatSession:
                           workspace=self.workspace or "hq", read_dirs=read_dirs, edit_dirs=edit_dirs,
                           deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used),
-                          chat=self.session_id, job=self.job_id, job_mode=self.job_mode)
+                          chat=self.session_id, job=self.job_id, job_mode=self.job_mode,
+                          code_folder=getattr(self, "code_folder", None))
 
     def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
                   web_domains=(), apps_port=None, os_port=None):
@@ -133,6 +143,8 @@ class ChatSession:
         if self._pending_skill:
             self._last_skill = self._pending_skill
             self._skill_explicit = self._pending_skill_explicit
+            self._skill_loaded = False
+            self._skill_loaded = False
         self._pending_skill = None
         self._pending_skill_explicit = False
         if self._pending_bot:

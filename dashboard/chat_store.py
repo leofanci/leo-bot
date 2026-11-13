@@ -284,7 +284,7 @@ def _paths(value):
 
 def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, extra=None,
                 by=None, by_name=None, shared=False, reactions=None, asked_at=None, ws=None,
-                job=None, title=None):
+                job=None, title=None, engines_seen=None):
     """Append one exchange to the chat backing `sess` and snapshot its resume state.
     `bot` = id of the teammate that answered (shown on the reply when reopened);
     `room` = channel/DM the thread started in (core.rooms; kept once set);
@@ -352,15 +352,24 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
         "turn_count": sess._turn_count,
         "last_skill": sess._last_skill,
         "skill_explicit": sess._skill_explicit,
+        "skill_loaded": bool(getattr(sess, "_skill_loaded", False)),
+        "skill_loaded": bool(getattr(sess, "_skill_loaded", False)),
         "last_bot": getattr(sess, "_last_bot", None),
         "apps_used": bool(getattr(sess, "apps_used", False)),
         "folder_paths": sorted(_paths(getattr(sess, "folder_paths", None)) | _paths(rec.get("folder_paths"))),
         "shared": bool(rec.get("shared")) and bool(shared),
     })
+    # Every engine the turn ran on (a HANDOFF may use a second one): its resume state, and how
+    # many of the thread's messages it has seen (one that missed this turn's last replies gets
+    # them in its next recap).
     engine = getattr(sess, "engine", None)
-    if engine is not None:
-        state = dict((getattr(sess, "engine_state", None) or {}).get(engine.id) or {})
-        rec["engines"][engine.id] = {**state, "seen": len(rec["messages"])}
+    seen = dict(engines_seen or ({engine.id: 0} if engine is not None else {}))
+    last = rec["messages"][-1] if rec["messages"] else {}
+    for eid, missed in seen.items():
+        if missed and not (last.get("role") == "assistant" and last.get("content")):
+            missed = 0  # the reply it missed was dropped (empty)
+        state = dict((getattr(sess, "engine_state", None) or {}).get(eid) or {})
+        rec["engines"][eid] = {**state, "seen": len(rec["messages"]) - missed}
     if room and not rec.get("room"):
         rec["room"] = room
     save(rec)

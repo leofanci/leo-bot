@@ -513,6 +513,12 @@ class Turn(Base):
         self.assertIn("apps_token", seen[0])
         self.assertEqual(seen[0]["model"], "haiku")
         self.assertFalse(lead.apps_used)
+        # Apps on, so no web search on that turn: app data never meets a search query.
+        self.assertIs(seen[0]["with_web"], False)
+
+    def test_asked_web_on_an_apps_turn_is_the_owners_call(self):
+        seen, _, _ = self.run_turn("look up competitor pricing /web")
+        self.assertIs(seen[0]["with_web"], True)
 
     def test_first_app_call_marks_the_thread(self):
         calls = []

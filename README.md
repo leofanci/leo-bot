@@ -125,7 +125,8 @@ Run Leo Bot on a small server and it stays on when your laptop is closed: [docs/
 Each workspace, HQ included, can link any number of folders on the machine running Leo Bot
 (the workspace's Folders screen). Each folder is **Edit** or **Read**, and a channel or a
 bot can be limited to some folders or to read access. Bots read and search them on your
-private threads. On Claude Code and API-key engines, a tagged message (@bot, /skill, a DM)
+private threads, and look up a folder's code index with `osctl code-context` when it has
+one. On Claude Code and API-key engines, a tagged message (@bot, /skill, a DM)
 can change files in Edit folders; an untagged one only reads. Bots never touch git, editor
 or secret files (`.git/`, `.claude/`, `.vscode/`, `.env` and the like), and they cannot run
 tests, builds or git: they name the files they changed and you review them in your own git.
@@ -163,7 +164,7 @@ under the bot's Memory, or let a bot save one with `osctl remember --type ...`.
 A job is one bot's recurring work: a skill plus a message, on a schedule such as
 `every 6h`, `daily 09:00` or `mon,thu 09:00` (local time). Ask a bot for one: it proposes
 the job (`osctl propose-job`) and you get a card in that thread with everything Approve
-will save: bot, skill, schedule, next run, mode, cap and message. Edit it, approve it or
+will save: bot, skill, schedule, next run, mode, cap (or no cap) and message. Edit it, approve it or
 say no. A change or a deletion a bot proposes comes as the same kind of card. No bot
 creates, changes or deletes a job by itself.
 
@@ -174,18 +175,20 @@ Each job has a mode:
 - **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans), for
   what the job's message asks. Deletes, replacing a whole document (intake, technical,
   roadmap, section lists, a brief spec or voice) and bot memory still wait for your click, and so does every app
-  action that is not a read (posting, sending email).
+  action that is not a read (posting, sending email). A run that loads a skill other than
+  the job's own (`osctl get-skill`) saves nothing more by itself: the rest of that run
+  waits for your click, and the next run starts clean.
 - **Report only**: reads and writes a summary. No cards, no saves, no app writes.
 
 The Team screen lists every job: where and when it runs, how the last run went (with a
-link to its thread), and its mode, on/off and delete. Schedule, message, cap and skill
+link to its thread), and its mode, cap, on/off and delete. Schedule, message and skill
 change through a bot's card.
 
 - Each run is its own thread in the bot's DM, titled `Job: <name>`.
 - A job's message was written by a bot, so a site named in it is never opened: a job
   can search the web, not fetch a page.
-- Every job has its own cap in dollars per 24 hours, and also counts against your
-  workspace and owner caps. Generation an Auto job runs (`generate-*`, `revise-post`)
+- A job may have its own cap in dollars per 24 hours (none by default: leave it empty
+  or set 0), and always counts against your workspace and owner caps. Generation an Auto job runs (`generate-*`, `revise-post`)
   counts against it too, and is checked against what the job's run has spent up to that
   moment. A job runs only on an engine that reports cost, and consults
   only teammates whose engine does too. At most 20 jobs exist at once.
@@ -223,9 +226,31 @@ same limit trims the history it sends, at a point that stays put across turns so
 provider's prompt cache keeps working. Anthropic API calls mark the system prompt and the
 newest message for caching.
 
-An untagged message goes to the bot that spoke last, unless its wording clearly matches
-another bot's skill (for example a pricing question): then that bot answers, marked
-"picked for" that skill. The skill is not switched on, so a write still needs a tag.
+### How bots pick up work
+
+Tags are optional. An untagged message goes to the bot that spoke last in the thread, else
+the channel's lead, and that bot decides what it needs:
+
+- **Skills.** Its card lists its own skills in one line each. When the task needs one it
+  loads it (`osctl get-skill --name <skill>`); the skill then stays active for the thread
+  and the next turn runs on the stronger model. A tagged `/skill` still gives it the skill
+  up front.
+- **Saves.** Any message in your private threads can lead to a save: the bot says what it
+  will make and where, and ends with one `APPROVAL:` line. Nothing is saved until you
+  approve the card, and Approve goes back to the bot that asked. A skill a bot loads by
+  itself never unlocks folder edits. A thread invited people can see still needs a tagged skill for that.
+  Folder edits still need a tagged message.
+- **Web.** Web search is on in your private threads, except on a turn where the bot has
+  its connected apps on, once the thread read an app, and in scheduled jobs: there only
+  `/web` (or a research skill) turns it on. Only `/web` takes the stronger model. A page is
+  fetched only from a site you typed.
+- **Teammates.** A bot ends its reply with `HANDOFF @handle: <task>` to pass the work on:
+  that teammate answers next in the same message with its own skills and apps, and the
+  thread's next message goes to it. One handoff per message. `CONSULT @handle: <question>`
+  still asks a teammate for a read-only view first. The card lists which teammate holds
+  which connected app.
+- **Short replies.** Bots answer first and skip filler in chat (Settings, Bots, Short
+  replies; on by default). Saved work (memos, posts, briefs, memory) stays in full prose.
 
 ### Dashboard (macOS app)
 

@@ -915,7 +915,7 @@ async function renderRoomForm(name){
       ${flabel("Members")}
       <div class="chan-checks">${active.map(b => `<label class="chan-check"><input type="checkbox" class="room-member" value="${esc(b.id)}"${members.has(b.id) ? " checked" : ""}> ${botAvatar(b)} ${esc(b.name)}</label>`).join("")}</div>
       ${flabel("Lead")}${fsel("lead", active.map(b => [b.id, b.name]), lead)}
-      <p class="field-help">Untagged messages go to the lead only. Members answer when you @tag them.</p>
+      <p class="field-help">An untagged message goes to the bot that spoke last, else the lead. Bots hand work to each other; @tag one to ask it directly.</p>
       ${_WS === "hq" ? "" : `<label class="chan-check"><input type="checkbox" id="room-private"${existing?.private ? " checked" : ""}> Private channel</label>
       <p class="field-help">Everyone in the workspace sees an open channel. A private one shows only to the owner and the people ticked below.</p>
       <div class="chan-checks" id="room-people"${existing?.private ? "" : " hidden"}>${folks.length ? folks.map(r => `<label class="chan-check"><input type="checkbox" class="room-person" value="${esc(r.id)}"${inRoom.has(r.id) || r.you ? " checked" : ""}${r.you ? " disabled" : ""}> ${esc(r.name)} <small>${esc(r.role)}</small></label>`).join("") : `<p class="field-help">Nobody invited yet. Invite people on the Team page.</p>`}</div>`}
@@ -1330,12 +1330,13 @@ async function renderTeam(){
     const row = j => `<div class="post team-row job-row${j.enabled ? "" : " off"}" data-job="${esc(j.id)}">
         <div class="t"><b>${esc(j.name)}</b>
           <small class="team-meta">${esc(jobMetaText(j, wsById(j.workspace)?.name || j.workspace, now))}${j.last_chat ? ` · <a href="#" data-job-open>Open</a>` : ""}</small></div>
+        <input data-job-cap type="number" min="0" step="0.5" inputmode="decimal" placeholder="No cap" value="${j.cap ? esc(String(j.cap)) : ""}" aria-label="Cap, dollars per 24 hours (empty: no cap)" title="Dollars per 24 hours; empty for no cap">
         <select data-job-mode aria-label="Mode">${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${j.mode === m ? " selected" : ""}>${label}</option>`).join("")}</select>
         <button class="more" data-job-on="${j.enabled ? "0" : "1"}">${j.enabled ? "Turn off" : "Turn on"}</button>
         <button class="more" data-job-rm>Delete</button>
       </div>`;
     return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
-      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. To change the schedule, message, cap or skill, ask the bot in chat.</div>
+      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. Cap: dollars per 24 hours, empty for no cap. To change the schedule, message or skill, ask the bot in chat.</div>
       <div class="rowc">${jobList.map(row).join("")}</div>`;
   };
   const wireJobs = () => {
@@ -1347,6 +1348,7 @@ async function renderTeam(){
       draw();
     };
     box.querySelectorAll("[data-job-mode]").forEach(sel => sel.onchange = () => change(jobOf(sel), "mode", { mode: sel.value }));
+    box.querySelectorAll("[data-job-cap]").forEach(inp => inp.onchange = () => change(jobOf(inp), "cap", { cap: inp.value.trim() }));
     box.querySelectorAll("[data-job-on]").forEach(b => b.onclick = () => change(jobOf(b), "enabled", { enabled: b.dataset.jobOn === "1" }));
     box.querySelectorAll("[data-job-rm]").forEach(b => b.onclick = () => {
       if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to delete"; return; }
@@ -1452,7 +1454,8 @@ function jobMetaText(j, wsName, now){
   const when = ts => new Date(ts * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const next = !j.enabled ? "off" : j.next_due ? (j.next_due <= now ? "runs at the next check" : `next ${when(j.next_due)}`) : "";
   const last = j.last_run ? `last ${when(j.last_run)}${j.last_status ? `: ${j.last_status}` : ""}` : "not run yet";
-  return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, next, last].filter(Boolean).join(" · ");
+  const cap = j.cap ? `$${j.cap} per 24h` : "no cap";
+  return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, cap, next, last].filter(Boolean).join(" · ");
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
 function isHeld(a){
@@ -1677,7 +1680,8 @@ async function renderEngines(tab = "engines"){
       : "Keys stay on this machine and no bot can read them."}</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   let adding = null;
   const draw = async () => {
-    const d = await api("/api/engines").catch(e => ({ error: e.message }));
+    const [d, chatCfg] = await Promise.all([api("/api/engines").catch(e => ({ error: e.message })),
+      tab === "bots" ? api("/api/settings/chat").catch(() => null) : null]);
     if (!stillOn()) return;
     const box = $("#eng");
     if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
@@ -1688,7 +1692,8 @@ async function renderEngines(tab = "engines"){
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
       const models = p ? `<span class="eng-chip">fast · ${esc(p.models?.fast || "-")}</span><span class="eng-chip">strong · ${esc(p.models?.strong || "-")}</span>` : "";
-      const note = e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "";
+      const note = (e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "")
+        + (e.own_context ? `<span class="eng-chip warm" title="${esc(e.own_context)}">Loads its own context files</span>` : "");
       return `<div class="eng-card">${engineLogo(e.id, 44)}
         <div class="eng-body"><div class="eng-name"><b>${esc(e.label)}</b><span class="eng-state ${e.ok ? "on" : "off"}">${e.ok ? "Ready" : "Not ready"}</span></div>
           ${e.detail ? `<div class="eng-detail">${esc(e.detail)}</div>` : ""}
@@ -1732,6 +1737,8 @@ async function renderEngines(tab = "engines"){
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
         <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
+        ${chatCfg ? `<div class="eng-choice"><label><input type="checkbox" data-short-replies${chatCfg.short_replies ? " checked" : ""}> <span>Short replies</span></label>
+          <small>Bots answer first and skip filler in chat. Saved work (memos, posts, briefs) stays in full prose. New threads pick it up.</small></div>` : ""}
       </section>
       <section class="integ-group"><h3>By workspace</h3><p class="eng-hint">Only bots switched on in that workspace. Switch them on or off in its Team.</p>${wsCards || `<div class="empty">No bots yet.</div>`}</section>`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
@@ -1755,6 +1762,11 @@ async function renderEngines(tab = "engines"){
       } catch (err) { toast("✗ " + err.message); }
       b.disabled = false; b.textContent = "Test";
     });
+    const shortBox = box.querySelector("[data-short-replies]");
+    if (shortBox) shortBox.onchange = async () => {
+      try { await jpost("/api/settings/chat", { short_replies: shortBox.checked }); toast(shortBox.checked ? "Short replies on ✓" : "Short replies off ✓"); }
+      catch (err) { toast("✗ " + err.message); draw(); }
+    };
     box.querySelectorAll("[data-choice]").forEach(sel => sel.onchange = async () => {
       try { await jpost("/api/engines/choice", { name: sel.dataset.choice, value: sel.value, scope: sel.dataset.scope || null }); }
       catch (err) { toast("✗ " + err.message); draw(); }
@@ -4341,7 +4353,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     roomEditBtn.hidden = room.kind !== "topic" || !["owner", "admin"].includes(myRole());
     input.placeholder = room.kind === "dm"
       ? `Message ${room.name}…`
-      : `Message #${room.name} (untagged → ${lead?.name || "lead"}, @ to tag)`;
+      : `Message #${room.name} (@ to tag a teammate)`;
   }
   roomEditBtn.onclick = () => { const r = roomById(activeRoomId); if (r) { showCanvas(); navigate(`#/room/${r.name}/edit`); } };
 
@@ -4420,7 +4432,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach((m, i) => {
       history.push(m);
-      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name, m.picked).closest(".msg");
+      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name, m.handoff_from).closest(".msg");
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
       // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
@@ -4822,15 +4834,14 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function clock(ts){ return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""; }
 
   // askedBy: a teammate pulled this bot in ("asked by @cmo"); "user" = co-tagged.
-  // picked: an untagged message went to this bot because its wording matched one of its skills.
-  function botLabel(div, bot, handoffFrom, askedBy, picked){
+  // handoffFrom: a teammate passed the work to this bot (HANDOFF line, or a tag it does not own).
+  function botLabel(div, bot, handoffFrom, askedBy){
     const b = typeof bot === "string" ? botById(bot) : bot;
     if (!b) return;
     const from = handoffFrom ? botById(handoffFrom) : null;
     const asker = askedBy && askedBy !== "user" ? botById(askedBy) : null;
     paintSender(div, { avatar: botAvatar(b), name: b.name,
-      note: asker ? `asked by @${asker.handle}` : from ? `from @${from.handle}`
-        : typeof picked === "string" && picked ? `picked for ${picked}` : "" });
+      note: asker ? `asked by @${asker.handle}` : from ? `from @${from.handle}` : "" });
     div.classList.toggle("consulted", !!asker);
   }
 
@@ -4902,7 +4913,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const name = who === "ceo" ? "Owner" : (byName || "Teammate");
     return { initial: name[0].toUpperCase(), name };
   }
-  function addMsg(role, text, bot, askedBy, ts, by, byName, picked){
+  function addMsg(role, text, bot, askedBy, ts, by, byName, handoffFrom){
     const div = document.createElement("div");
     div.className = "msg " + (role === "user" ? "me" : "ai");
     div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>
@@ -4912,7 +4923,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const who = senderOf(by, byName);
       paintSender(div, { avatar: `<span class="av">${esc(who.initial)}</span>`, name: who.name });
     }
-    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", null, askedBy, picked);
+    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", handoffFrom || null, askedBy);
     const bubble = div.querySelector(".b");
     setMsgContent(bubble, role, text);
     stream.appendChild(div);
@@ -5327,7 +5338,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       bubble.closest(".msg").classList.add("streaming");   // typing dots until text arrives
       replies.push({ bubble, meta: turnMeta });
       startTurnSteps(bubble);
-      if (info) { botLabel(bubble.closest(".msg"), info, null, info.asked_by || null); turnMeta.bot = info.id; }
+      if (info) { botLabel(bubble.closest(".msg"), info, info.handoff_from || null, info.asked_by || null); turnMeta.bot = info.id; }
     };
     startReply(null);
     const replyAt = i => (Number.isInteger(i) && replies[i]) || replies[replies.length - 1];
@@ -5379,7 +5390,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
               setActiveChat(obj.chat_id, obj.title, obj.project);
               stored = true;
             }
-            if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from, null, obj.bot.picked); turnMeta.bot = obj.bot.id; }
+            if (obj.bot) { botLabel(bubble.closest(".msg"), obj.bot, obj.bot.handoff_from, null); turnMeta.bot = obj.bot.id; }
             if (obj.msg_start) { startReply(obj.msg_start); pendingBreak = false; }
             if (obj.deliverables) { const r = replyAt(obj.msg); r.meta.deliverables = obj.deliverables; r.bubble.closest(".msg").hidden = false; }
             if (obj.usage) {
@@ -5422,7 +5433,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       }
 
       if (full) history.push({ role: "assistant", content: full });
-      reload = stored;   // a zero-model note (tag gate, allowance) is not in the saved thread: keep it on screen
+      reload = stored;   // a zero-model note (allowance, no index) is not in the saved thread: keep it on screen
       await refreshChatStatus("Ready");
     } catch(e) {
       if (e.name === "AbortError") {

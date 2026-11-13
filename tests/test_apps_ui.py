@@ -34,9 +34,9 @@ class Helpers(unittest.TestCase):
         out = _run(["jobMetaText"],
                    '[jobMetaText({bot:"cmo", skill:"positioning", schedule:"daily 09:00", enabled:false}, "Acme", 100),'
                    ' jobMetaText({bot:"cmo", skill:"positioning", schedule:"every 6h", enabled:true, next_due:50,'
-                   ' last_run:40, last_status:"waiting"}, "Acme", 100)]')
-        self.assertEqual(out[0], "Acme · @cmo /positioning · daily 09:00 · off · not run yet")
-        self.assertTrue(out[1].startswith("Acme · @cmo /positioning · every 6h · runs at the next check · last "), out[1])
+                   ' last_run:40, last_status:"waiting", cap:1.5}, "Acme", 100)]')
+        self.assertEqual(out[0], "Acme · @cmo /positioning · daily 09:00 · no cap · off · not run yet")
+        self.assertTrue(out[1].startswith("Acme · @cmo /positioning · every 6h · $1.5 per 24h · runs at the next check · last "), out[1])
         self.assertTrue(out[1].endswith(": waiting"), out[1])
 
     def test_grant_label(self):

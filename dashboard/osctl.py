@@ -10,12 +10,13 @@ import fnmatch
 import functools
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
-from dashboard import chat_session, db, fileops, job_cards  # noqa: E402
-from core import bots, jobs, memory, paths  # noqa: E402
+from dashboard import chat_session, db, fileops, job_cards, tokensave_bridge  # noqa: E402
+from core import bots, folders, jobs, memory, paths, skill_loads  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -43,20 +44,20 @@ _BLOCKED_IN_WORKSPACE = {"create-project"}
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
                    "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
-                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions"}
+                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions", "get-skill", "code-context"}
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV). That thread runs an ALLOWLIST: a new command
 # is refused there until it is added to _LOCAL_CMDS (tests/test_jobs.py fails on any
 # command in neither set).
 _NETWORK_CMDS = frozenset({"research-signal"})
 _LOCAL_CMDS = frozenset({
-    "add-evidence", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "add-evidence", "code-context", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
     "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
-    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-skill", "get-subsections", "get-voice",
     "extract-assumptions", "list-assumptions", "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
     "revise-post", "set-metric", "set-status", "tree", "update-brief", "update-brief-spec",
     "update-channel", "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
@@ -73,6 +74,8 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # never the private memory of the owner's DMs, and the owner alone writes either from
 # outside it; files read only from this workspace's folder and the public repo docs.
 _SHARED_BLOCKED = {"remember", "research-signal", "extract-assumptions",  # research-signal sends text off the machine
+                   # A guest's question must not steer a read of the owner's code.
+                   "code-context",
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
                    "propose-job", "list-jobs",
                    # Picks which connected app a scoring job reads: the owner's call, not a guest's.
@@ -88,12 +91,12 @@ _AUTO_WAITS = frozenset({"remember", "propose-job", "set-metric", *_AUTO_REPLACE
                          "delete-brief-spec", "delete-experiment", "delete-feature", "delete-memo",
                          "delete-phase", "delete-strategy", "delete-voice"})
 _AUTO_ALLOWED = frozenset({
-    "add-evidence", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "add-evidence", "code-context", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
     "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
     "get-brief-spec", "get-busy", "get-id-catalog", "get-memory", "get-posts", "get-project",
-    "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
+    "get-skill", "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
     "research-signal", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-channel", "update-experiment", "update-feature", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-strategy",
@@ -114,7 +117,7 @@ _SHARED_ALLOWED = frozenset({
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
-    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-skill", "get-subsections", "get-voice",
     "list-assumptions", "mark-done", "read-file", "recall", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-brief-spec", "update-channel", "update-experiment", "update-feature",
     "update-intake", "update-memo", "update-milestone", "update-phase", "update-post",
@@ -409,6 +412,40 @@ def _build_parser():
                                          shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
     p.set_defaults(_run=_recall)
 
+    p = sub.add_parser("get-skill", help="Load one of the team's skills: prints its instructions")
+    p.add_argument("--name", required=True)
+
+    def _get_skill(a):
+        text = skill_loads.body(a.name)
+        if not text:
+            raise fileops.ActionError(f"unknown skill: {a.name}. Skills: {', '.join(skill_loads.names())}")
+        # The server reads this record after the turn: the skill stays active for the thread.
+        skill_loads.record(bots.ROOT, os.environ.get("LEOBOT_CHAT") or "", a.name)
+        return {"skill": a.name, "body": text}
+    p.set_defaults(_run=_get_skill)
+
+    p = sub.add_parser("code-context", help="Ask the code index of this turn's linked folder")
+    p.add_argument("--query", required=True)
+
+    def _code_context(a):
+        # The server names the turn's folder (channel and bot folder limits applied); it must
+        # still be one this workspace linked and indexed.
+        if os.environ.get("LEOBOT_SHARED"):
+            raise fileops.ActionError("code-context is not available in a thread invited people can see")
+        folder = (os.environ.get("LEOBOT_CODE_FOLDER") or "").strip()
+        linked = folders.all_paths(_workspace() or bots.HQ, bots.ROOT)
+        if not folder or os.path.realpath(folder) not in linked or folders.first_indexed([{"path": folder}]) is None:
+            raise fileops.ActionError("no linked folder has a code index this turn")
+        if not shutil.which("tokensave"):
+            raise fileops.ActionError("tokensave is not installed on this machine")
+        ws = _workspace() or bots.HQ
+        try:
+            text = tokensave_bridge.context(ws, a.query, active_project=ws, include_code=True, folder=folder)
+        except (tokensave_bridge.BridgeError, OSError) as exc:
+            raise fileops.ActionError(f"the code index could not answer: {str(exc)[:600]}") from None
+        return {"context": text}
+    p.set_defaults(_run=_code_context)
+
     # -- scheduled jobs (core/jobs.py): a bot proposes, the owner approves -- #
     p = sub.add_parser("propose-job", help="Propose a new job, a change or a deletion: the owner "
                                            "gets a card in this thread; nothing is saved until they approve")
@@ -419,7 +456,7 @@ def _build_parser():
     p.add_argument("--name")
     p.add_argument("--message")
     p.add_argument("--schedule", help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
-    p.add_argument("--cap", help="dollars per 24 hours for this job, above 0")
+    p.add_argument("--cap", help="dollars per 24 hours for this job; 0 or omit for no cap")
     p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
     p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
 
@@ -1107,6 +1144,14 @@ def _brief_field_value(brief: dict, field: str):
     return brief.get(field)
 
 
+def _auto_reached_past_its_skill():
+    """This Auto job run loaded (osctl get-skill) a skill other than its job's own. The record
+    is per run (each run is a fresh chat): the next run starts clean."""
+    job = jobs.get(bots.ROOT, (os.environ.get("LEOBOT_JOB") or "").strip())
+    own = (job or {}).get("skill")
+    return any(s != own for s in skill_loads.loaded(bots.ROOT, os.environ.get("LEOBOT_CHAT") or ""))
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1116,6 +1161,9 @@ def main(argv=None):
         in_job = bool((os.environ.get("LEOBOT_JOB") or "").strip())
         if os.environ.get("LEOBOT_READONLY") and args.cmd not in _READ_ONLY_CMDS:
             raise fileops.ActionError(READONLY_TEXT.get(job_mode if in_job else None, READONLY_TEXT["approval"]))
+        if in_job and job_mode == "auto" and args.cmd not in _READ_ONLY_CMDS and _auto_reached_past_its_skill():
+            # An Auto run that loaded a skill other than its job's own saves nothing more by itself.
+            raise fileops.ActionError(READONLY_TEXT["approval"])
         if in_job and (args.cmd not in _AUTO_ALLOWED or args.cmd.startswith("delete-")):
             raise fileops.ActionError(
                 "a scheduled job never proposes jobs." if args.cmd == "propose-job" else

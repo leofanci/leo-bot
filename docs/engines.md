@@ -35,6 +35,16 @@ on a tagged message, never git, editor or secret files. **Codex and other CLIs o
 are read-only in linked folders**: their own tools have no per-folder rule for that
 never-write list, so Leo Bot never gives them edit access, and Settings, Engines says so.
 
+## Your own CLI setup stays out
+
+Claude Code and Codex start without your own plugins, skills and settings, so a bot never
+picks up your personal setup. CLIs over ACP start as clean as they allow: Gemini CLI with
+`-e none` (no extensions), OpenCode with `OPENCODE_DISABLE_CLAUDE_CODE=1` (no
+`~/.claude/CLAUDE.md` or `.claude/skills`). Neither can skip its own context files
+(`GEMINI.md`, `AGENTS.md` and OpenCode's own config), so Settings, Engines marks them
+"Loads its own context files". To get Leo Bot's short reply style, use the Short replies
+setting (Settings, Bots), not a plugin of your own.
+
 ## Keys
 
 Keys live in `team/engines.json`, owner-only. No bot can read that file and no screen

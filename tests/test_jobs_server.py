@@ -40,7 +40,7 @@ class JobTurn(unittest.TestCase):
 
         def ask(sess, text, with_web=False, model=None, read_dirs=(), edit_dirs=(), **kw):
             test.asks.append({"sess": sess, "text": text, "readonly": sess.readonly,
-                              "edit_dirs": tuple(edit_dirs), "kw": kw})
+                              "edit_dirs": tuple(edit_dirs), "with_web": with_web, "kw": kw})
             for ev in test.events or [("delta", test.reply), ("done", {"cost": 0.01})]:
                 yield ev
 
@@ -148,6 +148,19 @@ class JobTurn(unittest.TestCase):
             self.run_job(mode="report", message="draft the weekly email")
             self.run_job(mode="auto", message="draft the weekly email")
         self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
+
+    def test_job_turn_never_hands_off(self):
+        bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
+        self.reply = "Research should size it.\nHANDOFF @research: size the market"
+        out = self.run_job(mode="auto")
+        self.assertEqual(len(self.asks), 1)
+        rec = server.chat_store.load(out["chat"])
+        self.assertNotIn("HANDOFF", rec["messages"][-1]["content"])
+        self.assertTrue(any("does not hand off" in n for n in rec["messages"][-1].get("notices", [])))
+
+    def test_job_turn_has_no_web_unless_its_skill_needs_it(self):
+        self.run_job(mode="auto")
+        self.assertFalse(self.asks[0]["with_web"])
 
     def test_plain_reply_is_done(self):
         self.reply = "Nothing changed this week."
@@ -388,6 +401,15 @@ class JobTurn(unittest.TestCase):
         for bad in ({"ws": WS}, {"ws": WS, "mode": None}, {"ws": WS, "mode": "free"}):
             self.assertEqual(self.post(f"/api/jobs/{mine['id']}/mode", bad)[0], 400, bad)
         self.assertEqual(self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": "no"})[0], 400)
+        # The owner sets or clears the cap here: empty or 0 is no cap.
+        code, body = self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": "2.5"})
+        self.assertEqual((code, body["jobs"][0]["cap"]), (200, 2.5))
+        for none in ("", 0, None):
+            self.assertEqual(self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": none})[0], 200)
+            self.assertIsNone(jobs.get(self.root, mine["id"])["cap"])
+        self.assertEqual(self.post(f"/api/jobs/{mine['id']}/cap", {"ws": WS, "cap": "-1"})[0], 400)
+        self.assertEqual(self.post(f"/api/jobs/{other['id']}/cap", {"ws": WS, "cap": "1"})[0], 404)
+        jobs.update(self.root, mine["id"], cap=1)
         self.assertEqual(jobs.get(self.root, mine["id"])["mode"], "report")
         self.assertTrue(jobs.get(self.root, mine["id"])["enabled"])
         self.post(f"/api/jobs/{mine['id']}/enabled", {"ws": WS, "enabled": False})

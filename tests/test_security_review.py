@@ -602,7 +602,7 @@ class PrivateMemoryStaysPrivate(Tmp):
     def test_a_consulted_teammate_in_a_shared_thread_too(self):
         team = bots.team(self.root, "demo", {"slug": "demo"})
         with mock.patch.object(server, "ROOT", self.root):
-            text = server._teammate_prompt(team, "cmo", None, "which note?", "said", [], "demo", None, shared=True)
+            text = server._teammate_prompt(team, "cmo", None, "which note?", "said", [], "demo", shared=True)
         self.assertIn("TEAM-NOTE", text)
         self.assertNotIn("PRIVATE-NOTE", text)
 

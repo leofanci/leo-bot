@@ -41,7 +41,7 @@ PRESETS = {
 # ACP agents people commonly have: name, command, args.
 ACP_PRESETS = {
     "opencode": {"name": "OpenCode", "command": "opencode", "args": ["acp"]},
-    "gemini": {"name": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"]},
+    "gemini": {"name": "Gemini CLI", "command": "gemini", "args": ["--acp"]},
 }
 
 
