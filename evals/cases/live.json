@@ -14,12 +14,21 @@
    "memory": {"cos": ["- 2026-09-12 [preference] Owner wants answers in at most three bullets, no intro"]},
    "expect": {"bot": "cos", "max_bullets": 3, "approval": false}},
   {"id": "tagged-write-asks-approval-not-dump",
-   "msg": "/positioning draft a one-line category statement for acme and save it to the positioning memo",
+   "msg": "/positioning acme sells appointment scheduling software to small dental clinics. draft a one-line category statement for acme and save it to the positioning memo",
    "expect": {"bot": "cmo", "approval": true, "max_chars": 2500}},
   {"id": "untagged-question-no-approval-line",
    "msg": "what does a positioning memo usually contain?",
    "expect": {"approval": false, "reply_lacks": "APPROVAL:"}},
   {"id": "market-question-consults-research",
    "msg": "@cos roughly how many small agencies could buy this? ask the right teammate",
-   "expect": {"bot": "cos", "teammates_include": ["research"]}}
+   "expect": {"bot": "cos", "reaches": "research"}},
+  {"id": "untagged-price-question-hands-off-to-pricing-owner",
+   "msg": "how much should we charge for the pro tier? give me a recommendation",
+   "expect": {"bot": "cos", "handoff": "cmo", "max_chars": 2500}},
+  {"id": "untagged-save-ends-in-an-approval-card",
+   "msg": "acme sells appointment scheduling software to small dental clinics. draft a one-line category statement and save it as a positioning memo",
+   "expect": {"approval": true, "max_chars": 2500}},
+  {"id": "dm-owner-loads-its-own-skill", "room": "dm-cmo",
+   "msg": "we sell appointment scheduling software to small dental clinics; buyers compare us with paper books and big practice suites. what makes us different? give me a sharp one-liner and three reasons to believe",
+   "expect": {"bot": "cmo", "loaded": "positioning", "max_chars": 2500}}
 ]

@@ -105,6 +105,17 @@ class LiveGrading(unittest.TestCase):
         bad = {"bot": "cos", "reply": "- one\n- two\n- three, and a long tail", "teammates": []}
         self.assertEqual(len(live.grade(case, bad)), 5)
 
+    def test_reaches_counts_a_consult_or_a_handoff(self):
+        case = {"expect": {"reaches": "research"}}
+        self.assertEqual(live.grade(case, {"teammates": ["research"]}), [])
+        self.assertEqual(live.grade(case, {"teammates": [], "handoff": "research"}), [])
+        self.assertEqual(len(live.grade(case, {"teammates": ["cmo"], "handoff": None})), 1)
+
+    def test_loaded_is_a_turn_outcome(self):
+        from evals import turns
+        self.assertIn("loaded", turns._EQUAL)
+        self.assertIsNone(turns.run({"id": "x", "msg": "what is on today?"})["loaded"])
+
     def test_runs_saved_compared_and_pruned(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
