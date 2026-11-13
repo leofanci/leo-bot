@@ -237,11 +237,13 @@ the channel's lead, and that bot decides what it needs:
   up front.
 - **Saves.** Any message in your private threads can lead to a save: the bot says what it
   will make and where, and ends with one `APPROVAL:` line. Nothing is saved until you
-  approve the card. A thread invited people can see still needs a tagged skill for that.
+  approve the card, and Approve goes back to the bot that asked. A skill a bot loads by
+  itself never unlocks folder edits. A thread invited people can see still needs a tagged skill for that.
   Folder edits still need a tagged message.
-- **Web.** Web search is on in your private threads (not after the thread read a
-  connected app); only `/web` takes the stronger model. A page is fetched only from a site
-  you typed.
+- **Web.** Web search is on in your private threads, except on a turn where the bot has
+  its connected apps on, once the thread read an app, and in scheduled jobs: there only
+  `/web` (or a research skill) turns it on. Only `/web` takes the stronger model. A page is
+  fetched only from a site you typed.
 - **Teammates.** A bot ends its reply with `HANDOFF @handle: <task>` to pass the work on:
   that teammate answers next in the same message with its own skills and apps, and the
   thread's next message goes to it. One handoff per message. `CONSULT @handle: <question>`

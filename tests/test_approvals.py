@@ -128,7 +128,7 @@ class Turn(unittest.TestCase):
         self.assertEqual(approvals.pending(self.root), [])
         self.assertEqual(approvals.load(self.root)[-1]["status"], "approved")
         costs = server._costs("acme", self.tree)
-        self.assertEqual(costs["bots"]["cmo"]["turns"], 1)
+        self.assertEqual(costs["bots"]["cmo"]["turns"], 2)  # Approve answers the bot that asked
         self.assertEqual(costs["total"]["turns"], 2)
         self.assertAlmostEqual(costs["total"]["cost"], 0.04)
         self.assertEqual(server._costs("hq", self.tree)["total"]["tokens"], 3000)

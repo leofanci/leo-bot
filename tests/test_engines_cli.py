@@ -307,6 +307,9 @@ class AcpCleanLaunch(unittest.TestCase):
     def test_user_extension_choice_is_kept(self):
         argv, _ = acp.launch({"id": "gemini", "command": "gemini", "args": ["--acp", "-e", "x"]}, "/bin/gemini")
         self.assertEqual(argv, ["/bin/gemini", "--acp", "-e", "x"])
+        for given in (["--extensions=x"], ["--extensions", "x"], ["-e=x"]):
+            argv, _ = acp.launch({"id": "gemini", "command": "gemini", "args": ["--acp", *given]}, "/bin/gemini")
+            self.assertNotIn("none", argv, given)
 
     def test_opencode_skips_claude_files(self):
         argv, env = acp.launch({"id": "opencode", "command": "opencode", "args": ["acp"]}, "/bin/opencode")

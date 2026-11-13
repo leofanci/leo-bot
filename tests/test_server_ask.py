@@ -509,7 +509,7 @@ class TurnFolders(unittest.TestCase):
                  "folders": _folders.load(s, self.root)["folders"]} for s in ("acme", "demo")]
 
     def turn(self, msg, room="acme/general", engine=None, shared=False, explicit_thread=False,
-             runner=False, apps=False, session_id=None, ctx_error=None, recap=None):
+             runner=False, apps=False, session_id=None, ctx_error=None, recap=None, loaded_thread=False):
         seen = {"runs": [], "ctx": []}
         test = self
 
@@ -523,8 +523,9 @@ class TurnFolders(unittest.TestCase):
         class Sess:
             _started = False
             _turn_count = 0
-            _last_skill = "folder-work" if explicit_thread else None
+            _last_skill = "folder-work" if explicit_thread else ("positioning" if loaded_thread else None)
             _skill_explicit = explicit_thread
+            _skill_loaded = loaded_thread
             ask = record
 
             def is_fresh(self):
@@ -595,6 +596,12 @@ class TurnFolders(unittest.TestCase):
         self.assertFalse(seen["lead"]["web"])
         self.assertIsNone(seen["sess"].code_folder)
         self.assertNotIn("code-context", seen["lead"]["text"])
+
+    def test_a_loaded_skill_never_unlocks_edits_on_yes(self):
+        seen = self.turn("yes go ahead", loaded_thread=True)
+        self.assertEqual(seen["lead"]["edit_dirs"], ())
+        self.assertEqual(seen["lead"]["model"], server.chat_session.ESCALATED_MODEL)  # still the stronger model
+        self.assertFalse(server._continuation_allowed(seen["sess"], "yes go ahead"))
 
     def test_handoff_edits_only_when_the_message_allowed_edits(self):
         self.reply = "That's code.\nHANDOFF @cto: fix the login redirect"
@@ -849,7 +856,7 @@ class TurnFolders(unittest.TestCase):
         self.assertEqual(pick("tokensave", False, "rename the handler", None, editing=True),
                          server.chat_session.ESCALATED_MODEL)
         self.assertEqual(pick(None, False, "how does it work", None, editing=True), server.chat_session.CHAT_MODEL)
-        # The edit words never reach the tag gate.
+        # Edit words alone never unlock folder edits.
         self.assertIsNone(server._WRITE_TURN_RE.search("fix the login"))
 
     def test_untagged_private_turn_may_ask_approval(self):
@@ -1053,7 +1060,8 @@ class SkillLoadTests(unittest.TestCase):
             sess = self.make_session(root, load="positioning")
             self.turn(sess, root)
             self.assertEqual(sess._last_skill, "positioning")
-            self.assertTrue(sess._skill_explicit)
+            self.assertTrue(sess._skill_loaded)
+            self.assertFalse(sess._skill_explicit)  # a load is not a tag: no continuation rights
             self.assertEqual(skill_loads.loaded(root, CHAT), [])
             self.assertFalse((root / "team" / "skill_loads" / f"{CHAT}.json").exists())
         model, reason = server._pick_model_reason(None, False, "draft it", sess)
@@ -1066,7 +1074,7 @@ class SkillLoadTests(unittest.TestCase):
             sess = self.make_session(Path(tmp))
             self.turn(sess, Path(tmp))
         self.assertIsNone(sess._last_skill)
-        self.assertFalse(sess._skill_explicit)
+        self.assertFalse(getattr(sess, "_skill_loaded", False))
         self.assertEqual(server._pick_model_reason(None, False, "draft it", sess)[0],
                          server.chat_session.CHAT_MODEL)
 

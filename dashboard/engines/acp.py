@@ -37,7 +37,8 @@ def launch(agent, program):
     args = list(agent.get("args", []))
     clean = _CLEAN.get(agent.get("id"), {})
     extra = list(clean.get("args", []))
-    if extra[:1] == ["-e"] and ({"-e", "--extensions"} & set(args)):
+    if extra[:1] == ["-e"] and any(a in ("-e", "--extensions") or a.startswith(("-e=", "--extensions="))
+                                   for a in args):
         extra = []
     return [program, *args, *extra], dict(clean.get("env", {}))
 

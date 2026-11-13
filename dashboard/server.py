@@ -825,7 +825,7 @@ def _in_active_skill_thread(session):
     of _continuation_allowed's narrow phrase match (that one gates the write-gate
     and skill-body re-injection, which must stay strict; this one only affects
     model choice, so it can be broader)."""
-    return bool(session and getattr(session, "_skill_explicit", False)
+    return bool(session and (getattr(session, "_skill_explicit", False) or getattr(session, "_skill_loaded", False))
                 and getattr(session, "_last_skill", None))
 
 
@@ -863,8 +863,10 @@ def astuple_shallow(dc):
 
 def _adopt_loaded_skill(session):
     """After a bot run: the last skill it loaded with `osctl get-skill` becomes the thread's
-    active skill (stronger model and the continuation rules on the next turn), and the load
-    record is cleared. An engine that never passed the chat id to osctl recorded nothing:
+    active skill for the model choice only (the stronger model on the next turn), and the load
+    record is cleared. It never gets a tag's rights: a "yes" after it does not unlock folder
+    edits, a shared thread's write path or continuation routing (_continuation_allowed reads
+    _skill_explicit, which a load never sets). An engine that never passed the chat id to osctl recorded nothing:
     no escalation, no error. Returns the adopted skill or None."""
     chat = getattr(session, "session_id", None)
     if not isinstance(chat, str):
@@ -873,7 +875,7 @@ def _adopt_loaded_skill(session):
     if not got:
         return None
     skill_loads.clear(ROOT, chat)
-    session._last_skill, session._skill_explicit = got[-1], True
+    session._last_skill, session._skill_explicit, session._skill_loaded = got[-1], False, True
     return got[-1]
 
 
@@ -990,11 +992,14 @@ def _skill_menu(team, bot_id):
 
 
 def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fresh=False,
-               members=None, readonly=False, shared=False, query="", code_index=False):
+               members=None, readonly=False, shared=False, query="", code_index=False, apps_on=False,
+               handed_by_bot=False):
     """Persona for the speaking bot. Full card (job, team, memory) when the
     session is fresh or the speaker changed; a one-line marker otherwise.
     `query`: the message that opened the card, to pick the memory it carries. `code_index`:
-    this turn has an indexed linked folder (the card names `code-context`)."""
+    this turn has an indexed linked folder (the card names `code-context`). `apps_on`: this run
+    has the connected apps mounted (only then the card says "Your apps"). `handed_by_bot`: a
+    teammate's HANDOFF line, not a tag the user typed."""
     b = team.get(bot_id) if team else None
     if not b:
         return ""
@@ -1026,7 +1031,7 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                 return _apps_text(integrations.effective_grant(ws_apps, bid, ROOT)) if show_apps else ""
             except (OSError, ValueError):
                 return ""
-        mine = apps_of(bot_id)
+        mine = apps_of(bot_id) if apps_on else ""
         if mine:
             lines.append(f"Your apps: {mine}.")
         if code_index and not shared:
@@ -1057,8 +1062,9 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         lines.append(f"(speaking as @{b.handle})")
     if handoff_from and team.get(handoff_from):
         h = team.get(handoff_from)
-        lines.append(f"Handoff: user tagged @{h.handle}; this is your skill, so you own it. "
-                     f"Open with one short line that you are taking it from @{h.handle}.")
+        why = (f"@{h.handle} passed this to you; it is yours now." if handed_by_bot
+               else f"user tagged @{h.handle}; this is your skill, so you own it.")
+        lines.append(f"Handoff: {why} Open with one short line that you are taking it from @{h.handle}.")
     return "\n".join(lines)
 
 
@@ -1276,7 +1282,10 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
 
 
 def _followup_prompt(team, answers):
-    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {_extract_consults(approvals.extract(text)[0], team)[0].strip() or '(no answer)'}"
+    def clean(text):
+        text = _extract_consults(approvals.extract(text)[0], team)[0]
+        return _HANDOFF_RE.sub("", text).strip()
+    lines = [f"@{team.get(b).handle} ({team.get(b).name}): {clean(text) or '(no answer)'}"
              for b, text in answers]
     return ("## Your teammates answered\n" + "\n".join(lines)
             + "\n\nContinue for the user in a few short lines. Don't consult again this turn.")
@@ -2936,8 +2945,11 @@ class Handler(BaseHTTPRequestHandler):
             sess = person_chat_session(person["id"], project_scope, chat_id, new=not chat_id, linked=linked)
         else:
             sess = get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked)
+        card_bot = None
         if chat_id:
             answer = body.get("approval")
+            if answer in ("approved", "rejected"):
+                card_bot = approvals.asking_bot(chat_id, ROOT)
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
         sess.workspace = ws
         sess.deny_dirs = _workspace_deny_dirs(ws, projects)
@@ -2951,6 +2963,12 @@ class Handler(BaseHTTPRequestHandler):
             default_bot=(room or {}).get("lead") or bots.ROOT_BOT,
             dm=(room or {}).get("lead") if (room or {}).get("kind") == "dm" else None,
             members=members)
+        # Approve or Reject on a card answers the bot that asked (a handed-off teammate too),
+        # not the thread's skill owner. A tag the user typed still wins; a DM keeps its bot.
+        cb = team.get(card_bot) if card_bot else None
+        if (cb and cb.active and (members is None or cb.id in members) and (room or {}).get("kind") != "dm"
+                and not _explicit_skill(user_msg) and not team.mentioned(user_msg)):
+            route = (cb.id, *route[1:])
         # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
 
@@ -3015,7 +3033,10 @@ class Handler(BaseHTTPRequestHandler):
 
             # Web search is on every private turn; only asking for it (/web) takes the stronger model.
             web_asked = _needs_web(user_msg, skill) and not apps_used
-            with_web = _needs_web(user_msg, skill, private=not locked) and not apps_used
+            # Never next to the apps (app data must not reach a search query) unless the user
+            # asked for web; a job (unattended, bot-written message) keeps the explicit rule.
+            with_web = (web_asked or _needs_web(user_msg, skill, private=not (locked or job or app_turn or mount))) \
+                and not apps_used
             model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
                              else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                      editing=bool(may_edit and edit_dirs)))
@@ -3121,7 +3142,7 @@ class Handler(BaseHTTPRequestHandler):
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
                            handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
-                           code_index=bool(graph_folder),
+                           code_index=bool(graph_folder), apps_on=bool(app_turn or mount),
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
         )
@@ -3172,6 +3193,8 @@ class Handler(BaseHTTPRequestHandler):
         web_domains = () if job else chat_session.user_web_domains(user_msg)
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
+
+        engines_seen = {engine.id: 0}  # engine id → this turn's replies it did not see
 
         def notice(text):
             """A line under the latest reply; saved on it, so a reload keeps it."""
@@ -3294,6 +3317,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 return run(c, prompt, c_model, c_web, msg, skill_=c_skill, reason_=c_reason, **c_kw)
             finally:
+                if isinstance(getattr(c, "session_id", None), str):
+                    skill_loads.clear(ROOT, c.session_id)  # a consult's own loads never carry over
                 if slot.startswith("sess-"):
                     _EXTRA.pop(slot, None)  # one key per owner turn: never left behind
                 else:
@@ -3379,6 +3404,11 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"clean": clean3, "msg": len(msgs) - 1})
                 handoff = handoff or h3
             writers = {0: may_write}  # message index → may that run's APPROVAL line make a card
+            if handoff and job:
+                # A job is one bot's work in its approved mode: it never passes the run to a teammate.
+                notice(f"A scheduled job does not hand off: ask @{team.get(handoff[0]).handle} "
+                       "in a thread of your own.")
+                handoff = None
             if handoff and not cap_hit and may_run():
                 target, task = handoff
                 # Its own rights, as if tagged; folder edits only when the user's message allowed them.
@@ -3393,8 +3423,16 @@ class Handler(BaseHTTPRequestHandler):
                         context=context, skill=None, session=sess, projects=projects, workspace=hst.workspace,
                         bot=_bot_block(team, target, sess, project_slug if project_record else None, bot_id,
                                        fresh=True, shared=shared, query=task, code_index=bool(hst.graph_folder),
+                                       apps_on=bool(hst.app_turn or hst.mount), handed_by_bot=True,
                                        members=members),
                         only_project=(project_slug or None))
+                    if hst.engine.id != engine.id:
+                        # Another engine: what it missed of the thread, and what the lead just said.
+                        lead_said = (msgs[0]["content"] or "").strip()[:1500]
+                        h_text = "\n\n".join(x for x in (
+                            chat_store.recap(saved_rec, hst.engine.id),
+                            f"@{team.get(bot_id).handle} just replied: {lead_said}" if lead_said else "",
+                            h_text) if x)
                     emit({"msg_start": {**_bot_info(team, target), "handoff_from": bot_id}})
                     m4 = {"bot": target, "content": "", "handoff_from": bot_id}
                     msgs.append(m4)
@@ -3404,6 +3442,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.log_message("chat handoff from=%s to=%s model=%s", bot_id, target, hst.model)
                     run(sess, h_text, hst.model, hst.with_web, m4, skill_=None, reason_=hst.reason,
                         read_dirs=hst.read_dirs, edit_dirs=hst.edit_dirs, **h_kw)
+                    if hst.engine.id != engine.id:
+                        engines_seen = {engine.id: 1, hst.engine.id: 0}
                     if not job:
                         _adopt_loaded_skill(sess)
                     # One handoff per message: its own HANDOFF and CONSULT lines go unanswered.
@@ -3427,7 +3467,7 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"deliverables": handed, "msg": last})
             # The lead may ask for approval in its first reply or its follow-up, and a teammate
             # it handed off to in its own reply: every marker line goes, the last one asked counts.
-            asked = None
+            asked, dropped = None, []
             for i, m in enumerate(msgs):
                 if i not in writers and (m["bot"] != bot_id or m.get("asked_by")):
                     continue
@@ -3435,6 +3475,8 @@ class Handler(BaseHTTPRequestHandler):
                 if summary:
                     m["content"] = clean
                     emit({"clean": clean, "msg": i})
+                    if asked and asked[0] != i:
+                        dropped.append(asked[0])
                     asked = (i, summary, writers.get(i, may_write))
             # A chat-only turn's stray marker gets no buttons; a Report only job saves nothing.
             if asked and asked[2] and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
@@ -3443,6 +3485,10 @@ class Handler(BaseHTTPRequestHandler):
                                     bot=msgs[i]["bot"], summary=summary)
                 msgs[i]["approval"] = rec["id"]
                 emit({"approval": rec, "msg": i})
+                for j in dict.fromkeys(dropped):  # one card per thread: an earlier ask is replaced
+                    note = f"This proposal was replaced by @{team.get(msgs[i]['bot']).handle}'s below."
+                    msgs[j].setdefault("notices", []).append(note)
+                    emit({"notice": note, "msg": j})
                 if job:
                     live["status"] = "waiting"
             for i, m in enumerate(msgs):  # every bot of the turn may react to the message
@@ -3474,6 +3520,8 @@ class Handler(BaseHTTPRequestHandler):
                     traceback.print_exc()
                 if isinstance(getattr(sess, "session_id", None), str):
                     skill_loads.clear(ROOT, sess.session_id)  # the run is over: the next starts clean
+            elif isinstance(getattr(sess, "session_id", None), str):
+                skill_loads.clear(ROOT, sess.session_id)  # a stopped run: its loads never reach the next turn
             # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
             # checked again from this thread's workspace, then held as cards. Never from a shared
             # thread or a job's own turn.
@@ -3528,7 +3576,8 @@ class Handler(BaseHTTPRequestHandler):
                         by=person["id"] if person else None, by_name=person["name"] if person else None,
                         shared=shared, reactions=reacts, ws=ws,
                         job=job["id"] if job else None,
-                        title=f"Job: {job['name']}" if job else None)
+                        title=f"Job: {job['name']}" if job else None,
+                        engines_seen=engines_seen)
                 except (OSError, ValueError):
                     traceback.print_exc()
                 else:

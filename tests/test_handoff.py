@@ -103,7 +103,7 @@ class HandoffTurn(unittest.TestCase):
                 yield ("done", {"tokens": 100, "cost": 0.01})
         return S()
 
-    def ask(self, msg, replies, **patches):
+    def ask(self, msg, replies, approval=None, **patches):
         self.replies = list(replies)
         sink = io.BytesIO()
         h = server.Handler.__new__(server.Handler)
@@ -121,7 +121,8 @@ class HandoffTurn(unittest.TestCase):
             c.start()
         try:
             h._handle_ask({"messages": [{"role": "user", "content": msg}],
-                           "room_id": "acme/general", "chat_id": CHAT})
+                           "room_id": "acme/general", "chat_id": CHAT,
+                           **({"approval": approval} if approval else {})})
         finally:
             for c in reversed(ctx):
                 c.stop()
@@ -134,6 +135,8 @@ class HandoffTurn(unittest.TestCase):
         self.assertIn("size the market", self.runs[1]["text"])
         self.assertIn("Original request: what is our market size?", self.runs[1]["text"])
         self.assertIn("taking it from @cos", self.runs[1]["text"])
+        self.assertIn("@cos passed this to you", self.runs[1]["text"])  # a bot's handoff, not a user tag
+        self.assertNotIn("user tagged", self.runs[1]["text"])
         msgs = rec["messages"][-2:]
         self.assertEqual((msgs[0]["bot"], msgs[0]["content"]), ("cos", "That's research's area."))
         self.assertEqual((msgs[1]["bot"], msgs[1]["handoff_from"], msgs[1]["content"]),
@@ -187,6 +190,74 @@ class HandoffTurn(unittest.TestCase):
             out, rec = self.ask("x?", ["HANDOFF @research: size it", "never"])
         self.assertEqual(len(self.runs), 1)
         self.assertIn("daily cap", out)
+
+    def test_approve_goes_to_the_bot_that_asked(self):
+        self.sess._last_skill, self.sess._skill_explicit = "positioning", True  # a tagged skill thread (cmo's)
+        self.ask("size it and save", ["HANDOFF @research: size it", "One memo.\nAPPROVAL: save sizing memo"])
+        out, _ = self.ask("Yes, approved.", ["Saved."], approval="approved")
+        bot = next(e["bot"] for e in events(out) if "bot" in e)
+        self.assertEqual(bot["id"], "research")
+
+    def test_a_tag_still_wins_over_the_card(self):
+        self.ask("size it", ["HANDOFF @research: size it", "One memo.\nAPPROVAL: save sizing memo"])
+        out, _ = self.ask("@cmo yes, approved", ["ok"], approval="approved")
+        self.assertEqual(next(e["bot"] for e in events(out) if "bot" in e)["id"], "cmo")
+
+    def test_both_proposals_one_card_and_a_note_on_the_dropped_one(self):
+        out, rec = self.ask("x?", ["Plan A.\nAPPROVAL: save plan A\nHANDOFF @research: check it",
+                                   "Plan B.\nAPPROVAL: save plan B"])
+        pend = approvals.pending(self.root, "acme")
+        self.assertEqual([p["summary"] for p in pend], ["save plan B"])
+        lead = rec["messages"][-2]
+        self.assertTrue(any("replaced" in n for n in lead.get("notices", [])), lead)
+
+    def test_target_on_another_engine_gets_the_thread_and_both_engines_are_saved(self):
+        class E:
+            kind, full_disk, supports, label, shared_safe = "cli", False, frozenset(), "E", True
+
+            def __init__(self, eid):
+                self.id = eid
+
+            def resolve_model(self, m):
+                return m
+
+            def is_fresh(self, s):
+                return False
+        engines = {"cos": E("claude-code"), "research": E("codex")}
+        self.ask("hello", ["hi"])  # an earlier exchange the target engine never saw
+        with mock.patch.object(server.engine_registry, "pick", side_effect=lambda r, w, b, **k: engines[b]), \
+                mock.patch.object(server.engine_registry, "metered", return_value=True):
+            _, rec = self.ask("market size?", ["Over to research.\nHANDOFF @research: size it", "2M."])
+        self.assertIn("hello", self.runs[-1]["text"])  # the recap of what it missed
+        self.assertIn("Over to research.", self.runs[-1]["text"])  # what the lead just said
+        self.assertEqual(set(rec["engines"]), {"claude-code", "codex"})
+        n = len(rec["messages"])
+        self.assertEqual((rec["engines"]["claude-code"]["seen"], rec["engines"]["codex"]["seen"]), (n - 1, n))
+
+    def test_consult_and_failed_runs_leave_no_load_record(self):
+        from core import skill_loads
+        test = self
+
+        def ask(self_, text, **kw):
+            test.runs.append({"text": text})
+            skill_loads.record(test.root, getattr(self_, "session_id", None) or "x", "positioning")
+            reply = test.replies.pop(0)
+            if reply == "FAIL":
+                yield ("error", "boom")
+                return
+            yield ("delta", reply)
+            yield ("done", {"tokens": 1, "cost": 0.0})
+        with mock.patch.object(type(self.sess), "ask", ask), \
+                mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            self.ask("x?", ["CONSULT @cmo: tone?", "warm", "done"])
+            self.assertEqual(list((self.root / "team" / "skill_loads").glob("*.json")), [])
+            self.ask("y?", ["FAIL"])
+        self.assertEqual(list((self.root / "team" / "skill_loads").glob("*.json")), [])
+
+    def test_consulted_teammates_handoff_never_reaches_the_follow_up(self):
+        self.ask("x?", ["CONSULT @cmo: tone?", "warm\nHANDOFF @research: take it", "done"])
+        self.assertEqual(len(self.runs), 3)
+        self.assertNotIn("HANDOFF", self.runs[2]["text"])
 
     def test_loaded_skill_by_target_becomes_active(self):
         from core import skill_loads

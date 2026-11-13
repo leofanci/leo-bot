@@ -198,6 +198,8 @@ class Routing(unittest.TestCase):
     def test_handoff_shows_on_live_and_saved_replies(self):
         js = (Path(server.__file__).parent / "app.js").read_text()
         self.assertNotIn("picked for", js)
+        self.assertNotIn("Untagged messages go to the lead only", js)
+        self.assertNotIn("untagged → lead", js)
         self.assertIn("info.handoff_from || null", js)
         self.assertIn("m.by_name, m.handoff_from)", js)
 

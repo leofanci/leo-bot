@@ -102,9 +102,13 @@ class RosterApps(unittest.TestCase):
         self.assertNotIn("apps:", r["@cmo"])
 
     def test_speaker_gets_its_own_line(self):
-        text = server._bot_block(self.team, "social", None, "acme", fresh=True)
+        text = server._bot_block(self.team, "social", None, "acme", fresh=True, apps_on=True)
         self.assertIn("Your apps: gmail (read), instagram (read+write).", text)
-        self.assertNotIn("Your apps", server._bot_block(self.team, "cmo", None, "acme", fresh=True))
+        self.assertNotIn("Your apps", server._bot_block(self.team, "cmo", None, "acme", fresh=True, apps_on=True))
+
+    def test_no_own_apps_line_when_its_turn_has_none(self):
+        # A full-disk engine or a runner turn mounts no apps: the bot must not claim them.
+        self.assertNotIn("Your apps", server._bot_block(self.team, "social", None, "acme", fresh=True))
 
     def test_shared_card_shows_no_apps(self):
         text = server._bot_block(self.team, "social", None, "acme", fresh=True, shared=True)

@@ -36,6 +36,12 @@ class ChatSession:
         self._turn_count = 0
         self._last_skill = None  # last routed skill (server); skip re-injecting body
         self._skill_explicit = False  # True when user tagged @/skill (Sonnet gate)
+        # True when the bot loaded _last_skill itself (osctl get-skill): the stronger model on the
+        # next turn, never the rights of a tag (continuation, edits).
+        self._skill_loaded = False
+        # True when the bot loaded _last_skill itself (osctl get-skill): the stronger model on the
+        # next turn, never the rights of a tag (continuation, edits).
+        self._skill_loaded = False
         self._pending_skill = None
         self._pending_skill_explicit = False
         self._last_bot = None  # bot that spoke last (server routes untagged turns to it)
@@ -70,6 +76,8 @@ class ChatSession:
         sess._turn_count = int(rec.get("turn_count") or 0)
         sess._last_skill = rec.get("last_skill")
         sess._skill_explicit = bool(rec.get("skill_explicit"))
+        sess._skill_loaded = bool(rec.get("skill_loaded"))
+        sess._skill_loaded = bool(rec.get("skill_loaded"))
         sess._last_bot = rec.get("last_bot")
         sess.apps_used = bool(rec.get("apps_used"))
         sess.folder_paths = {p for p in rec.get("folder_paths") or () if isinstance(p, str)}
@@ -135,6 +143,8 @@ class ChatSession:
         if self._pending_skill:
             self._last_skill = self._pending_skill
             self._skill_explicit = self._pending_skill_explicit
+            self._skill_loaded = False
+            self._skill_loaded = False
         self._pending_skill = None
         self._pending_skill_explicit = False
         if self._pending_bot:

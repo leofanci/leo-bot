@@ -915,7 +915,7 @@ async function renderRoomForm(name){
       ${flabel("Members")}
       <div class="chan-checks">${active.map(b => `<label class="chan-check"><input type="checkbox" class="room-member" value="${esc(b.id)}"${members.has(b.id) ? " checked" : ""}> ${botAvatar(b)} ${esc(b.name)}</label>`).join("")}</div>
       ${flabel("Lead")}${fsel("lead", active.map(b => [b.id, b.name]), lead)}
-      <p class="field-help">Untagged messages go to the lead only. Members answer when you @tag them.</p>
+      <p class="field-help">An untagged message goes to the bot that spoke last, else the lead. Bots hand work to each other; @tag one to ask it directly.</p>
       ${_WS === "hq" ? "" : `<label class="chan-check"><input type="checkbox" id="room-private"${existing?.private ? " checked" : ""}> Private channel</label>
       <p class="field-help">Everyone in the workspace sees an open channel. A private one shows only to the owner and the people ticked below.</p>
       <div class="chan-checks" id="room-people"${existing?.private ? "" : " hidden"}>${folks.length ? folks.map(r => `<label class="chan-check"><input type="checkbox" class="room-person" value="${esc(r.id)}"${inRoom.has(r.id) || r.you ? " checked" : ""}${r.you ? " disabled" : ""}> ${esc(r.name)} <small>${esc(r.role)}</small></label>`).join("") : `<p class="field-help">Nobody invited yet. Invite people on the Team page.</p>`}</div>`}
@@ -4353,7 +4353,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     roomEditBtn.hidden = room.kind !== "topic" || !["owner", "admin"].includes(myRole());
     input.placeholder = room.kind === "dm"
       ? `Message ${room.name}…`
-      : `Message #${room.name} (untagged → ${lead?.name || "lead"}, @ to tag)`;
+      : `Message #${room.name} (@ to tag a teammate)`;
   }
   roomEditBtn.onclick = () => { const r = roomById(activeRoomId); if (r) { showCanvas(); navigate(`#/room/${r.name}/edit`); } };
 
