@@ -156,11 +156,10 @@ DELIVERABLES = """## Deliverables → command
 | Timed activity | `get-busy --from <date>`, then `create-activity ... --time HH:MM` |
 Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."""
 
-TEAM_TAGGING = """## Skill tags
-Sonnet only on `@bot` or `/skill`. Tagged → `## Active skill:` + osctl writes.
-Untagged write → blocked; untagged read → Haiku + osctl reads. Continuation ("yes", "approved") ok after tag.
-Posts: `/content-brief`. Web: `/web`.
-An injected `## Active skill:` is your playbook; its tab/section steps are filing the commands do. Talk per How you work.
+TEAM_TAGGING = """## Skills and saves
+Your card lists your skills. Task needs one → `get-skill --name <name>` first; it stays active for the thread.
+Any turn may propose a save (Approval above). Posts: `content-brief`. Web: `/web`.
+A loaded or injected skill is your playbook; its tab/section steps are filing the commands do. Talk per How you work.
 Run skills yourself; never tell the user to run a skill."""
 
 CHAT_RAIL = f"""You are one of the user's teammates. Your role, team, workspace and memory are in `## Speaking as`.

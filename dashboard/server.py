@@ -886,7 +886,7 @@ def _adopt_loaded_skill(session):
 
 
 # Words that ask for a change in a folder. Used only to pick the model on a turn that may
-# edit: they never reach the tag gate (_WRITE_TURN_RE), so "fix" alone still runs untagged.
+# edit: "fix" alone still runs untagged (no write gate: the owner's approval is the gate).
 _EDIT_WORD_RE = re.compile(r"\b(fix|change|edit|refactor|rename|delete|remove|implement|patch)\b", re.I)
 
 
@@ -965,20 +965,6 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
             return chat_session.CHAT_MODEL, "skill-thread-read"
         return chat_session.ESCALATED_MODEL, "skill-thread"
     return chat_session.CHAT_MODEL, "default"
-
-
-def _tag_gate_message(suggest, team=None):
-    skill = f"/{suggest}" if suggest else "/workspace or the skill for your task"
-    who = ""
-    if suggest and team is not None:
-        owner = team.get(team.owner(suggest))
-        if owner:
-            who = f"@{owner.handle} ({owner.name}) or "
-    return (
-        f"That's a save, so tag who should do it: {who}{skill} (type @ or / in the box). "
-        "Untagged messages are for questions only; tagging puts the right teammate "
-        "and the stronger model on it."
-    )
 
 
 _MENU_DESC_CHARS = 100
@@ -1076,9 +1062,8 @@ _RESUME_NOTE = (
 _RAIL_COVERED_SKILL_STUBS = skill_loads.RAIL_STUBS
 
 
-def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=None,
-                        explicit=False, workspace=None, bot=None, suggest_owner=None,
-                        only_project=None):
+def compose_turn_prompt(*, user_msg, context, skill, session, projects,
+                        explicit=False, workspace=None, bot=None, only_project=None):
     """Assemble one chat turn. Snapshot + full skill body only on fresh session.
     `bot` = the persona block from _bot_block (speaker, team, memory)."""
     parts = []
@@ -1108,14 +1093,6 @@ def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=
             parts.append(f"## Active skill: {skill}\n{_SKILL_CONTINUATION}")
     elif _continuation_allowed(session, user_msg):
         parts.append(f"## Active skill: {session._last_skill}\n{_SKILL_CONTINUATION}")
-    elif suggest and not explicit:
-        parts.append(
-            f"## Skill hint (not active)\n"
-            f"Wording suggests `{suggest}` — user did not tag. "
-            f"Before any osctl write: tell them to tag "
-            f"{'`@' + suggest_owner + '` or ' if suggest_owner else ''}`/{suggest}`. "
-            "Reads ok; no commits this turn unless they tagged or this is a continuation."
-        )
 
     if context:
         parts.append(context.strip())
@@ -2878,7 +2855,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "no user message"})
         user_msg = messages[-1]["content"]
 
-        # Per-turn routing: explicit @bot or /skill tags only (keyword → hint, not Sonnet).
+        # Per-turn routing: explicit @bot or /skill tags; untagged turns load skills themselves.
         context = (body.get("context") or "").strip()
         projects = db.tree()
         ws, project_record = _resolve_workspace(
@@ -2939,13 +2916,13 @@ class Handler(BaseHTTPRequestHandler):
             members=list(room.get("members") or ()) if room and room.get("kind") == "topic" else None)
         bot_id, skill, routed, handoff_from = route
         explicit = skill if routed else None
-        suggest = _suggest_skill(user_msg) if not explicit else None
-        # Only a turn that may write (tagged skill, or its continuation) can ask for approval.
-        may_write = bool(explicit) or _continuation_allowed(sess, user_msg)
+        # Any private turn may propose a save (one APPROVAL line; the owner's approval is the gate).
+        # A job, or a thread invited people can see, still needs a tagged skill or its continuation.
+        may_write = (not shared and not job) or bool(explicit) or _continuation_allowed(sess, user_msg)
         # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
         # change files in its edit folders; an untagged one reads and searches only.
         may_edit = False if job else _may_edit(explicit, room, user_msg, team, sess)
-        # An app request is not a content write: decided before the write gate, and
+        # An app request is not a content write: decided before may_write, and
         # its only approval path is the held app action (no skill, no APPROVAL line).
         # A thread an invited person can see never reaches the owner's connected apps.
         app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
@@ -2956,7 +2933,7 @@ class Handler(BaseHTTPRequestHandler):
                 and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
             app_turn = True
         if app_turn:
-            skill = explicit = suggest = None
+            skill = explicit = None
             may_write = False
             sess.apps_used = True
 
@@ -2986,31 +2963,13 @@ class Handler(BaseHTTPRequestHandler):
             drop_edit=bool(app_turn or mount or apps_used), engine=engine)
         sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
-        if (_WRITE_TURN_RE.search(user_msg or "")
-                and not app_turn
-                and not explicit
-                and not _continuation_allowed(sess, user_msg)):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Accel-Buffering", "no")
-            self.end_headers()
-            gate = _tag_gate_message(suggest, team)
-            self.wfile.write(f"data: {json.dumps({'delta': gate})}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
-            self.log_message(
-                "chat tag-gate suggest=%s turn=%d", suggest or "-", sess._turn_count,
-            )
-            return
-
         with_web = _needs_web(user_msg, skill) and not apps_used
         model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
                          else _pick_model_reason(skill, with_web, user_msg, sess, explicit=bool(explicit),
                                                  editing=bool(may_edit and edit_dirs)))
 
         wants_file_search = _needs_workspace(user_msg, skill)
-        wants_app_context = _needs_app_context(user_msg, skill, suggest)
+        wants_app_context = _needs_app_context(user_msg, skill)
         # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
         # people can see: their question would steer a read of the owner's code (names, paths).
         layered = [] if locked else _layered_folders(ws, room, bot_id)
@@ -3026,7 +2985,7 @@ class Handler(BaseHTTPRequestHandler):
                 "once inside the folder, then use /tokensave again. No model turn was spent."
             )
             return self._sse_message(message)
-        # Caps: after the replies that cost nothing (tag gate, no index), before anything runs.
+        # Caps: after the replies that cost nothing (no index), before anything runs.
         if engine.kind != "runner":  # a person's own Mac is never capped
             capped = spend.refusal(ws, sender, records=_spend_records, job=job_cap)
             if capped:
@@ -3094,14 +3053,12 @@ class Handler(BaseHTTPRequestHandler):
             skill=skill,
             session=sess,
             projects=projects,
-            suggest=suggest,
             explicit=bool(explicit),
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
                            handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
-            suggest_owner=(team.get(team.owner(suggest)).handle if suggest else None),
         )
         # What crosses between engines: the thread's visible messages, never a transcript.
         sess.recap = chat_store.recap(saved_rec)

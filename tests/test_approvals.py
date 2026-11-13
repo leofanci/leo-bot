@@ -83,6 +83,7 @@ class Turn(unittest.TestCase):
         h = server.Handler.__new__(server.Handler)
         h.wfile = sink
         h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+        h.server = mock.Mock(server_address=("127.0.0.1", 8765))
 
         class S:
             _started = True
@@ -131,6 +132,28 @@ class Turn(unittest.TestCase):
         self.assertEqual(costs["total"]["turns"], 2)
         self.assertAlmostEqual(costs["total"]["cost"], 0.04)
         self.assertEqual(server._costs("hq", self.tree)["total"]["tokens"], 3000)
+
+
+class UntaggedSaves(Turn):
+    """An untagged private turn may propose a save; the owner's approval stays the gate."""
+
+    def test_untagged_private_turn_gets_a_card(self):
+        out, rec = self.ask("save the positioning memo", "One memo.\nAPPROVAL: save positioning memo")
+        self.assertNotIn("tag who should do it", out)
+        self.assertIn('"approval"', out)
+        self.assertEqual(approvals.pending(self.root, "acme")[0]["summary"], "save positioning memo")
+        self.assertEqual(rec["messages"][-1]["content"], "One memo.")
+
+    def test_shared_thread_gets_no_card(self):
+        with mock.patch.object(server, "_shared_room", return_value=True):
+            out, _ = self.ask("save the positioning memo", "One memo.\nAPPROVAL: save positioning memo")
+        self.assertNotIn('"approval"', out)
+        self.assertEqual(approvals.pending(self.root, "acme"), [])
+
+    def test_prompt_takes_no_skill_hint(self):
+        with self.assertRaises(TypeError):
+            server.compose_turn_prompt(user_msg="x", context="", skill=None, session=None,
+                                       projects=[], suggest="positioning")
 
 
 class Memory(unittest.TestCase):

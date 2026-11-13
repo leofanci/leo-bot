@@ -338,34 +338,27 @@ class SkillRouting(unittest.TestCase):
         self.assertIn("## Active skill: problem-validation", seen["text"])
         self.assertEqual(seen["model"], server.chat_session.ESCALATED_MODEL)
 
-    def test_untagged_read_gets_hint_not_skill(self):
+    def test_untagged_read_gets_no_hint_and_no_skill(self):
         seen = _captured({"messages": [{"role": "user", "content": "help me with positioning"}]})
-        self.assertIn("Skill hint", seen["text"])
+        self.assertNotIn("Skill hint", seen["text"])
         self.assertNotIn("## Active skill:", seen["text"])
         self.assertEqual(seen["model"], server.chat_session.CHAT_MODEL)
 
-    def test_untagged_write_blocked_at_gate(self):
+    def test_untagged_write_runs_the_model(self):
         sink = io.BytesIO()
         h = _bare_handler(sink)
 
-        class S:
+        class S(FakeSession):
             _started = True
             _turn_count = 1
-            _last_skill = None
-            _skill_explicit = False
-
-            def is_fresh(self):
-                return False
-
-            def note_skill(self, skill, explicit=False):
-                pass
 
         with mock.patch.object(server, "get_chat_session", return_value=S()):
             h._handle_ask({"messages": [{"role": "user", "content": "fill all the tabs"}]})
         out = sink.getvalue().decode()
-        self.assertIn("tag who should do it: @cos (Chief of Staff) or /workspace", out)
+        self.assertNotIn("tag who should do it", out)
+        self.assertIn('"delta": "Hi "', out)
         self.assertIn("[DONE]", out)
-        self.assertNotIn("Active skill", out)
+        self.assertFalse(hasattr(server, "_tag_gate_message"))
 
 
 class ComposeTurnPrompt(unittest.TestCase):
@@ -590,10 +583,10 @@ class TurnFolders(unittest.TestCase):
                 self.assertEqual(lead["edit_dirs"], (str(self.a),))
                 self.assertEqual(lead["read_dirs"], (str(self.a), str(self.b)))
 
-    def test_untagged_save_word_still_hits_the_tag_gate(self):
+    def test_untagged_save_word_runs_but_edits_nothing(self):
         seen = self.turn("update the readme with the new steps")
-        self.assertEqual(seen["runs"], [])
-        self.assertIn("tag who should do it", seen["out"])
+        self.assertNotIn("tag who should do it", seen["out"])
+        self.assertEqual(seen["lead"]["edit_dirs"], ())
 
     def test_read_folder_never_in_edit_dirs(self):
         lead = self.turn("@cto refactor the docs folder")["lead"]
@@ -821,11 +814,11 @@ class TurnFolders(unittest.TestCase):
         # The edit words never reach the tag gate.
         self.assertIsNone(server._WRITE_TURN_RE.search("fix the login"))
 
-    def test_may_write_and_approvals_unchanged(self):
+    def test_untagged_private_turn_may_ask_approval(self):
         self.reply = "Done.\nAPPROVAL: save it"
         seen = self.turn("tidy the readme please", room="acme/dm-cto", session_id="c1")
         self.assertEqual(seen["lead"]["edit_dirs"], (str(self.a),))  # a DM turn may edit
-        seen["approvals"].assert_not_called()  # but an untagged turn still asks no approval
+        seen["approvals"].assert_called_once()  # any private turn may propose a save
         seen = self.turn("/folder-work fix the readme", session_id="c1")
         seen["approvals"].assert_called_once()
 

@@ -5422,7 +5422,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       }
 
       if (full) history.push({ role: "assistant", content: full });
-      reload = stored;   // a zero-model note (tag gate, allowance) is not in the saved thread: keep it on screen
+      reload = stored;   // a zero-model note (allowance, no index) is not in the saved thread: keep it on screen
       await refreshChatStatus("Ready");
     } catch(e) {
       if (e.name === "AbortError") {
