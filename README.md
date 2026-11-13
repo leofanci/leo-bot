@@ -83,7 +83,8 @@ for the latest code instead of releases, `--version vX.Y.Z`, `--service` / `--no
 - `leobot eval` checks bot behavior offline for free: routing, model choice, the save gate,
   approval cards and memory recall, on a throwaway workspace. `leobot eval --live` sends a few
   known-answer prompts to your engine (it asks first and shows the cost) and compares the run
-  with the last one, saved in `~/.leobot/evals/`.
+  with that engine's last one, saved in `~/.leobot/evals/`. `--engine all` runs the same cases
+  on every ready engine, so they stay alike.
 - `leobot uninstall` removes the app and keeps your data unless you add `--data`.
 
 Your data lives in `~/.leobot/data` (`projects/`, `portfolio/`, `chats/`, `team/`). It never

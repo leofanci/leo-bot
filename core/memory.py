@@ -343,9 +343,70 @@ def _stem(word):
     return word
 
 
-def _fts(path, root, words, limit):
+# Words people use for the same thing. A query word also finds its group, so a question asked
+# in other words ("why did people leave over the summer?") reaches the entry ("churn in August")
+# whatever engine wrote the search. Generic business vocabulary only; one group per concept.
+_SYNONYM_GROUPS = (
+    "churn churned leave left leaving quit quitting cancel cancelled canceled cancellation attrition "
+    "unsubscribe unsubscribed",
+    "customer customers client clients user users buyer buyers subscriber subscribers",
+    "price prices pricing cost costs charge charges fee fees expensive cheap",
+    "summer june july august",
+    "winter december january february",
+    "spring march april",
+    "autumn fall september october november",
+    "audience target icp persona segment niche positioning",
+    "option options choice choices alternative alternatives recommendation recommend",
+    "feature features request requested requests ask asked wish wishes",
+    "country countries region regions location locations geography international usa uk europe",
+    "hire hiring hired recruit recruiting headcount",
+    "revenue sales income mrr arr earnings",
+    "traffic visits visitors pageviews",
+    "competitor competitors rival rivals competition",
+    "launch launched release released ship shipped",
+    "complaint complaints ticket tickets issue issues problem problems bug bugs",
+    "budget spend spending expense expenses",
+    "signup signups registration registrations",
+    "meeting meetings call calls",
+)
+_SYNONYMS = {}
+for _g in _SYNONYM_GROUPS:
+    _members = tuple(_g.split())
+    for _m in _members:
+        _SYNONYMS.setdefault(_m, _members)
+        _SYNONYMS.setdefault(_stem(_m), _members)
+
+
+def _concepts(words):
+    """One tuple of terms per query word: the word, then the words for the same thing."""
+    out = []
+    for w in words:
+        group = _SYNONYMS.get(w) or _SYNONYMS.get(_stem(w)) or ()
+        out.append((w, *(t for t in group if t != w)))
+    return out
+
+
+def _has(tokens, term):
+    s = _stem(term)
+    return any(t.startswith(s) for t in tokens)
+
+
+def _rank(candidates, words, concepts, limit):
+    """Best first: most query words met (in any of their words), then most met word for word,
+    then the search's own order. `candidates`: entry lines in that order."""
+    scored = []
+    for i, line in enumerate(candidates):
+        e = parse(line)
+        tokens = re.findall(r"\w+", (e.text if e else line).lower())
+        met = sum(any(_has(tokens, t) for t in c) for c in concepts)
+        if met:
+            scored.append((-met, -sum(_has(tokens, w) for w in words), i, line))
+    return [line for *_, line in sorted(scored)[:limit]]
+
+
+def _fts(path, root, terms, limit):
     rel = str(path.relative_to(root))
-    match = " OR ".join(f'"{w}"' for w in words)
+    match = " OR ".join(f'"{t}"' for t in terms)
 
     def search(conn):
         _sync(conn, path, root, force=False)
@@ -356,15 +417,9 @@ def _fts(path, root, words, limit):
     return _with_index(root, search)
 
 
-def _scan(path, words, limit):
-    scored = []
-    stems = [_stem(w) for w in words]
-    for i, e in enumerate(_read(path)):
-        text = e.text.lower()
-        score = sum(s in text for s in stems)
-        if score:
-            scored.append((-score, -i, e.line))
-    return [line for *_, line in sorted(scored)[:limit]]
+def _scan(path):
+    """Every entry, newest first (the no-FTS5 fallback ranks them all)."""
+    return [e.line for e in reversed(_read(path))]
 
 
 def _fit(lines, budget=RECALL_CHARS):
@@ -389,15 +444,26 @@ def recall(bot_id, query, project=None, root=ROOT, shared=False, limit=8):
     if not words:
         return []
     root = Path(root)
+    concepts = _concepts(words)
+    terms = list(dict.fromkeys(t for c in concepts for t in c))
     lines = None
     if HAS_FTS5:
         try:
-            lines = _fts(path, root, words, limit)
+            lines = _fts(path, root, terms, max(4 * limit, 40))
         except (sqlite3.Error, OSError):
             lines = None
     if lines is None:
-        lines = _scan(path, words, limit)
-    return _fit(lines)
+        lines = _scan(path)
+    return _fit(_rank(lines, words, concepts, limit))
+
+
+def newest(bot_id, project=None, root=ROOT, shared=False, limit=8):
+    """The newest entry lines, newest first, RECALL_CHARS at most ([] for a bad scope)."""
+    try:
+        lines = [e.line for e in reversed(entries(bot_id, project, root, shared))]
+    except (TypeError, ValueError):
+        return []
+    return _fit(lines[:max(1, min(RECALL_MAX, int(limit)))])
 
 
 def card_block(bot_id, project=None, root=ROOT, shared=False, query=""):
@@ -409,3 +475,12 @@ def card_block(bot_id, project=None, root=ROOT, shared=False, query=""):
     hits = [ln for ln in recall(bot_id, query, project, root, shared,
                                 limit=HITS_IN_CARD + PINNED_IN_CARD) if ln not in seen]
     return "\n".join(pinned + hits[:HITS_IN_CARD])
+
+
+def matching_block(bot_id, project=None, root=ROOT, shared=False, query=""):
+    """A later turn's memory: the top recall hits for its message, minus the pinned lines the
+    card already carried. "" if none."""
+    pinned = {e.line for e in entries(bot_id, project, root, shared) if e.type in PINNED}
+    hits = [ln for ln in recall(bot_id, query, project, root, shared,
+                                limit=HITS_IN_CARD + PINNED_IN_CARD) if ln not in pinned]
+    return "\n".join(hits[:HITS_IN_CARD])

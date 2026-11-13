@@ -1005,7 +1005,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true")
     p = sub.add_parser("eval", help="check bot behavior: offline (free), or --live on a real engine")
     p.add_argument("--live", action="store_true", help="send the live cases to a real engine (spends)")
-    p.add_argument("--engine", help="with --live: engine id to use (default: your default engine)")
+    p.add_argument("--engine", help="with --live: engine id, or all: every ready engine (default: your default engine)")
     p.add_argument("--case", action="append", help="with --live: run only this case (repeatable)")
     p.add_argument("--yes", action="store_true", help="with --live: do not ask before spending")
     return ap
