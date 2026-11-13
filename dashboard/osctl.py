@@ -58,8 +58,8 @@ _LOCAL_CMDS = frozenset({
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
     "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
     "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
-    "revise-post", "set-status", "tree", "update-brief", "update-brief-spec", "update-channel",
-    "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
+    "revise-post", "set-metric", "set-status", "tree", "update-brief", "update-brief-spec",
+    "update-channel", "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-roadmap",
     "update-strategy", "update-subsections", "update-technical", "update-validation-tab",
     "update-voice",
@@ -74,7 +74,9 @@ _PRIVATE_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".sq
 # outside it; files read only from this workspace's folder and the public repo docs.
 _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text off the machine
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
-                   "propose-job", "list-jobs"}
+                   "propose-job", "list-jobs",
+                   # Picks which connected app a scoring job reads: the owner's call, not a guest's.
+                   "set-metric"}
 # An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself: an ALLOWLIST
 # (_AUTO_ALLOWED), so a new command waits for an APPROVAL line until it is added. What removes
 # work waits (_AUTO_WAITS): every delete-* command, and the commands that replace a whole
@@ -82,7 +84,7 @@ _SHARED_BLOCKED = {"remember", "research-signal",  # research-signal sends text 
 # never proposes jobs. tests/test_jobs.py fails on any command in neither set.
 _AUTO_REPLACES = frozenset({"update-intake", "update-technical", "update-roadmap", "update-subsections",
                             "update-validation-tab", "update-brief-spec", "update-voice"})
-_AUTO_WAITS = frozenset({"remember", "propose-job", *_AUTO_REPLACES,
+_AUTO_WAITS = frozenset({"remember", "propose-job", "set-metric", *_AUTO_REPLACES,
                          "delete-brief-spec", "delete-experiment", "delete-feature", "delete-memo",
                          "delete-phase", "delete-strategy", "delete-voice"})
 _AUTO_ALLOWED = frozenset({
@@ -471,6 +473,27 @@ def _build_parser():
     p.add_argument("--strategy", help="GTM strategy stem this experiment validates (sec07 lens)")
     p.set_defaults(_run=lambda a: fileops.update_experiment(
         a.project, a.stem, _fields(a, ["assumption", "success_criteria", "kill_criteria", "strategy"])))
+
+    p = sub.add_parser("set-metric", help="Set or clear an experiment's metric source (read-only app action)")
+    p.add_argument("--project", required=True)
+    p.add_argument("--stem", required=True)
+    p.add_argument("--app")
+    p.add_argument("--action", help="Composio tool slug; must be a read-only action")
+    p.add_argument("--args", dest="metric_args", default="{}", help="action arguments as JSON")
+    p.add_argument("--path", dest="metric_path", help="dotted keys to the number in the action result")
+    p.add_argument("--window-days", dest="window_days", type=int, default=7)
+    p.add_argument("--clear", action="store_true")
+
+    def _set_metric(a):
+        if a.clear:
+            return fileops.set_metric(a.project, a.stem, None, clear=True)
+        try:
+            margs = json.loads(a.metric_args)
+        except ValueError:
+            raise fileops.ActionError("--args must be JSON")
+        return fileops.set_metric(a.project, a.stem, {"app": a.app, "action": a.action, "args": margs,
+                                                      "path": a.metric_path, "window_days": a.window_days})
+    p.set_defaults(_run=_set_metric)
 
     p = sub.add_parser("update-memo", help="Patch an existing memo JSON (same version, in place)")
     p.add_argument("--project", required=True)

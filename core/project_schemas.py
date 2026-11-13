@@ -133,6 +133,9 @@ SECTION_ALIASES = {
 }
 
 EXPERIMENT_STATUSES = frozenset({"planned", "running", "done"})
+METRIC_MAX_WINDOW_DAYS = 365
+METRIC_DEFAULT_WINDOW_DAYS = 7
+_METRIC_PATH = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*")
 SEVERITY_VALUES = frozenset({"vitamin", "painkiller", "emergency"})
 VALIDATION_STATUS_VALUES = frozenset({"unvalidated", "weak", "strong"})
 FEATURE_PRIORITIES = frozenset({"critical", "high", "normal", "low"})
@@ -401,6 +404,34 @@ def normalize_memo_body(mtype: str, body: dict | None, *, version: int | None = 
     return out
 
 
+def normalize_metric(raw: Any) -> dict | None:
+    """Shape of an experiment's metric source, or None when it is not one. Shape only: whether
+    the action is read-only is app_rules.metric_problem, checked when the metric is saved.
+    `path` is dotted keys into the action result (a digit picks a list item); not final until a
+    real Composio read-only result is checked."""
+    if not isinstance(raw, dict):
+        return None
+    app = str(raw.get("app") or "").strip().lower()
+    action = str(raw.get("action") or "").strip()
+    path = str(raw.get("path") or "").strip()
+    args = raw.get("args", {})
+    if args is None:
+        args = {}
+    try:
+        days = raw.get("window_days")
+        days = METRIC_DEFAULT_WINDOW_DAYS if days in (None, "") else int(days)
+    except (TypeError, ValueError):
+        return None
+    if not app or not action or len(path) > 200 or not _METRIC_PATH.fullmatch(path) \
+            or not isinstance(args, dict) or not 1 <= days <= METRIC_MAX_WINDOW_DAYS:
+        return None
+    try:
+        json.dumps(args)
+    except (TypeError, ValueError):
+        return None
+    return {"app": app, "action": action, "args": args, "path": path, "window_days": days}
+
+
 def normalize_experiment_body(body: dict | None) -> dict:
     src = dict(body or {})
     assumption = (
@@ -425,6 +456,9 @@ def normalize_experiment_body(body: dict | None) -> dict:
     strat = str(src.get("strategy") or "").strip()
     if strat:
         out["strategy"] = strat
+    metric = normalize_metric(src.get("metric"))
+    if metric:
+        out["metric"] = metric
     return out
 
 
