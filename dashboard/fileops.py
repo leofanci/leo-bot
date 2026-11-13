@@ -408,10 +408,7 @@ def generate_brief(post_id, instruction=None, profile_slug=None, brief_id=None, 
         cmd += [f"--spec={brief_id}"]
     if voice_id:
         cmd += [f"--voice={voice_id}"]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=GENERATE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise _timed_out(GENERATE_TIMEOUT) from None
+    res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise ActionError(f"brief job failed: {(res.stderr or res.stdout).strip()[:800]}")
     return {"id": post_id, "status": "briefed", "stdout": res.stdout.strip()}
@@ -451,10 +448,7 @@ def revise_post(post_id, instruction, profile_slug=None, brief_id=None, voice_id
         cmd += [f"--spec={brief_id}"]
     if voice_id:
         cmd += [f"--voice={voice_id}"]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=GENERATE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise _timed_out(GENERATE_TIMEOUT) from None
+    res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
         raise ActionError(f"revise job failed: {(res.stderr or res.stdout).strip()[:800]}")
 
@@ -2215,11 +2209,7 @@ def _plan_args(profile_slug, params):
 def run_plan(profile_slug, params):
     """Generate a content calendar for a profile via claude -p, then re-index."""
     _profile_dir(profile_slug)
-    try:
-        res = subprocess.run(_plan_args(profile_slug, params), capture_output=True, text=True,
-                             timeout=GENERATE_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise _timed_out(GENERATE_TIMEOUT) from None
+    res = subprocess.run(_plan_args(profile_slug, params), capture_output=True, text=True)
     if res.returncode != 0:
         raise ActionError(f"plan job failed: {(res.stderr or res.stdout).strip()[:800]}")
     reindex()
