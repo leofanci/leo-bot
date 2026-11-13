@@ -15,6 +15,8 @@ Work files: projects/<slug>/** (docs, memos, posts, briefs, per-project memory) 
 team/memory/** (HQ bot memory). HQ conversations see every workspace, so any listed file counts.
 """
 import json
+import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -100,6 +102,22 @@ def pending(root, ws):
     return sorted(rows, key=lambda r: r.get("at") or 0, reverse=True)
 
 
+_REL_RE = re.compile(r"^(?:projects|team)/[A-Za-z0-9._ -]+(?:/[A-Za-z0-9._ -]+)*$")
+
+
+def _listed_path(root, items, rel):
+    """(ledger key, absolute path) for a listed file: the key comes from the ledger, never the
+    caller, and must be a plain path inside the data folder."""
+    key = next((k for k in items if k == rel), None)
+    if key is None or not _REL_RE.fullmatch(key) or ".." in key.split("/"):
+        raise LookupError("not a listed file")
+    base = os.path.realpath(str(root))
+    full = os.path.realpath(os.path.join(base, key))
+    if not full.startswith(base + os.sep):
+        raise LookupError("not a listed file")
+    return key, Path(full)
+
+
 def _sig(path):
     st = path.stat()
     return f"{st.st_mtime_ns}:{st.st_size}"
@@ -108,9 +126,7 @@ def _sig(path):
 def preview(root, rel):
     """{"text", "sig", "cut"}: the whole saved text (capped), so the owner reads what a bot will
     read, and the version it is (trust names it: a later change is not trusted with it)."""
-    if rel not in _load(root):
-        raise LookupError("not a listed file")
-    path = Path(root) / rel
+    _, path = _listed_path(root, _load(root), rel)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
         return {"text": text[:PREVIEW_CHARS], "cut": len(text) > PREVIEW_CHARS, "sig": _sig(path)}
@@ -123,9 +139,7 @@ def trust(root, rel, sig):
     changed since, or one too long to show whole, keeps its label."""
     with _LOCK:
         items = _load(root)
-        if rel not in items:
-            raise LookupError("not a listed file")
-        path = Path(root) / rel
+        key, path = _listed_path(root, items, rel)
         try:
             now = _sig(path)
             whole = path.stat().st_size <= PREVIEW_CHARS * 4  # bytes; the text check is below
@@ -136,5 +150,5 @@ def trust(root, rel, sig):
             raise ValueError("it changed since you opened it: open it again")
         if not whole or len(text) > PREVIEW_CHARS:
             raise ValueError("too long to read here whole: open the file, trim or delete it")
-        items.pop(rel)
+        items.pop(key)
         _save(root, items)
