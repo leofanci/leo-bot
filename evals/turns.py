@@ -10,6 +10,7 @@ A case (cases/turns.json):
   shared                       true: a thread invited people can see
   apps                         {"gmail": "read"}: the lead bot's connected-app grant
   folder                       "edit" or "read": one linked folder in the workspace
+  active                       ["social"]: bots switched on in the workspace (others keep their default)
   memory                       {"cmo": [file lines], "shared:cmo": [...]}: memory files
   context                      the thread's last reply had this context size (tokens): past
                                LEOBOT_COMPACT_TOKENS the turn compacts (needs `thread`)
@@ -39,7 +40,7 @@ _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
 GATE_TEXT = "tag who should do it"
 
 
-_CASE_KEYS = {"id", "category", "msg", "room", "thread", "shared", "apps", "folder", "memory", "context",
+_CASE_KEYS = {"id", "category", "msg", "room", "thread", "shared", "apps", "folder", "active", "memory", "context",
               "reply", "teammate_reply", "followup_reply", "expect", "gap"}
 
 
@@ -112,6 +113,10 @@ def _data_root(tmp, ext, case):
         app = Path(ext).resolve() / "linked-app"  # outside the data folder, as a real link is
         app.mkdir()
         folders.add(WS, str(app), folders.EDIT if case["folder"] == "edit" else folders.READ, root)
+    if case.get("active"):
+        from core import bots
+        for bot in case["active"]:
+            bots.set_active(bot, True, root, WS, {"slug": WS, "kind": "venture"})
     for key, lines in (case.get("memory") or {}).items():
         scope, _, bot = key.rpartition(":")  # "cmo" or "shared:cmo"
         path = proj / "team" / ("shared" if scope else "") / f"{bot}.md"

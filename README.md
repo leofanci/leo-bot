@@ -241,10 +241,16 @@ the channel's lead, and that bot decides what it needs:
   approve the card, and Approve goes back to the bot that asked. A skill a bot loads by
   itself never unlocks folder edits. A thread invited people can see still needs a tagged skill for that.
   Folder edits still need a tagged message.
-- **Web.** Web search is on in your private threads, except on a turn where the bot has
-  its connected apps on, once the thread read an app, and in scheduled jobs: there only
-  `/web` (or a research skill) turns it on. Only `/web` takes the stronger model. A page is
-  fetched only from a site you typed.
+- **Web.** Web search is on in your private threads and scheduled jobs, beside connected
+  apps too: a search query only reaches the search engine. A page is fetched only from a
+  site you typed (a job's message grants none). Only `/web` takes the stronger model. Codex
+  searches its index on those turns and never fetches a page live.
+- **Apps.** Each bot gets each app per workspace as Read, Read + write (anything that is not
+  a read waits for your click), or Acts on its own (it sends, posts and messages without
+  asking; deletes and paid lookups still wait). Actions held together in one call wait for
+  one Approve all. A bot that needs an app or account it lacks asks you to connect it in Apps.
+- **Working alone.** Given a job, a bot checks memory, files, apps and the web first, and
+  asks only when it is blocked.
 - **Teammates.** A bot ends its reply with `HANDOFF @handle: <task>` to pass the work on:
   that teammate answers next in the same message with its own skills and apps, and the
   thread's next message goes to it. One handoff per message. `CONSULT @handle: <question>`

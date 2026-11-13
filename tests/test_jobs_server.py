@@ -158,9 +158,10 @@ class JobTurn(unittest.TestCase):
         self.assertNotIn("HANDOFF", rec["messages"][-1]["content"])
         self.assertTrue(any("does not hand off" in n for n in rec["messages"][-1].get("notices", [])))
 
-    def test_job_turn_has_no_web_unless_its_skill_needs_it(self):
+    def test_job_turn_searches_the_web(self):
+        # A research job runs unattended end to end: web search on, fetch hosts none (below).
         self.run_job(mode="auto")
-        self.assertFalse(self.asks[0]["with_web"])
+        self.assertTrue(self.asks[0]["with_web"])
 
     def test_plain_reply_is_done(self):
         self.reply = "Nothing changed this week."

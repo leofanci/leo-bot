@@ -15,8 +15,8 @@ def _fn(name):
     return m.group(0)
 
 
-def _run(names, expr):
-    script = "\n".join(_fn(n) for n in names) + f"\nprocess.stdout.write(JSON.stringify({expr}));"
+def _run(names, expr, prelude=""):
+    script = prelude + "\n".join(_fn(n) for n in names) + f"\nprocess.stdout.write(JSON.stringify({expr}));"
     out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True).stdout
     return json.loads(out)
 
@@ -40,8 +40,16 @@ class Helpers(unittest.TestCase):
         self.assertTrue(out[1].endswith(": waiting"), out[1])
 
     def test_grant_label(self):
-        self.assertEqual(_run(["grantLabel"], '[grantLabel(undefined), grantLabel("read"), grantLabel("write")]'),
-                         ["Off", "Read", "Read + write"])
+        self.assertEqual(_run(["grantLabel"], '[grantLabel(undefined), grantLabel("read"), grantLabel("write"), grantLabel("act")]'),
+                         ["Off", "Read", "Read + write, asks first", "Acts on its own"])
+
+    def test_batch_card_offers_approve_all(self):
+        self.assertEqual(_run(["batchSize", "appCardHtml"],
+                              '[batchSize({batch:"b1"}, [{batch:"b1",status:"pending"},{batch:"b1",status:"pending"},{batch:"b2"}]),'
+                              ' batchSize({}, [{}]), /Approve all 2/.test(appCardHtml({batch:"b1", preview:{title:"Send", fields:[]}}, 2)),'
+                              ' /Approve all/.test(appCardHtml({preview:{title:"Send", fields:[]}}, 1))]',
+                              prelude=APP_JS.splitlines()[2] + "\n"),  # const esc
+                         [2, 1, True, False])
 
     def test_app_status_label(self):
         self.assertEqual(_run(["appStatusLabel"],

@@ -152,11 +152,62 @@ class Gate(unittest.TestCase):
         self.assertIn("Held for approval", out)
 
     def test_ungranted_and_blocked_refused(self):
-        for slug in ("INSTAGRAM_GET_USER_INFO", "FIRECRAWL_SCRAPE", "NOPE_DO_IT"):
+        for slug in ("FIRECRAWL_SCRAPE", "NOPE_DO_IT"):
             reply = self.handle(multi({"tool_slug": slug, "arguments": {}}))
             self.assertEqual(text_of(reply), f'"{slug}" is not available to this bot. This call was not performed.')
         self.assertEqual(self.up.frames, [])
         self.assertEqual(approvals.pending(self.root), [])
+
+    def test_ungranted_app_asks_the_owner_to_connect_it(self):
+        reply = self.handle(multi({"tool_slug": "INSTAGRAM_GET_USER_INFO", "arguments": {}}))
+        out = text_of(reply)
+        self.assertIn("Ask the owner to connect a instagram account in Apps", out)
+        self.assertIn("This call was not performed.", out)
+        self.assertEqual(self.up.frames, [])
+
+    def test_missing_account_asks_the_owner_to_connect_it(self):
+        integrations.set_account("hq", "ca_g1", False, self.root)
+        reply = self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}))
+        self.assertIn("Ask the owner to connect a gmail account in Apps", text_of(reply))
+
+    def acts(self):
+        integrations.set_grant("hq", "cos", {"gmail": "act"}, self.root)
+
+    def test_act_grant_sends_without_a_card_and_keeps_a_record(self):
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com", "body": "hi"}}
+        reply = self.handle(multi(send))
+        self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"tools": [send]})
+        self.assertIn("upstream ok", text_of(reply))
+        self.assertEqual(approvals.pending(self.root), [])
+        done = [r for r in approvals.load(self.root) if r.get("kind") == approvals.APP]
+        self.assertEqual([(r["status"], r["action"]["slug"], r.get("auto")) for r in done],
+                         [("done", "GMAIL_SEND_EMAIL", True)])
+
+    def test_act_grant_still_holds_a_delete(self):
+        self.acts()
+        reply = self.handle(multi({"tool_slug": "GMAIL_DELETE_MESSAGE", "arguments": {"message_id": "m1"}}))
+        self.assertEqual(self.up.frames, [])
+        self.assertIn("Held for approval", text_of(reply))
+
+    def test_act_grant_in_a_report_only_job_sends_nothing(self):
+        self.acts()
+        reply, _ = apps_relay.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}), {**CTX, "report": True},
+                                     None, self.up, self.root, catalog=CAT, read_only=self.tagged)
+        self.assertEqual(self.up.frames, [])
+        self.assertIn("only reports", text_of(reply))
+
+    def test_writes_held_together_share_one_batch(self):
+        sends = [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": f"p{i}@example.com"}}
+                 for i in range(3)]
+        reply = self.handle(multi(*sends))
+        rows = approvals.pending(self.root)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual(len({r["batch"] for r in rows}), 1)
+        self.assertIn("3 actions wait for one approval", text_of(reply))
+        alone = self.handle(multi(sends[0]))
+        self.assertEqual(len([r for r in approvals.pending(self.root) if "batch" not in r]), 1)
+        self.assertIn("Held for approval", text_of(alone))
 
     def test_read_grant_refuses_write(self):
         reply = self.handle(multi({"tool_slug": "GOOGLEDRIVE_UPLOAD_FILE", "arguments": {}}))
@@ -177,7 +228,8 @@ class Gate(unittest.TestCase):
     def test_grant_reread_each_call(self):
         integrations.set_grant("hq", "cos", {}, self.root)
         reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
-        self.assertIn("not available", text_of(reply))
+        self.assertIn("connect a gmail account in Apps", text_of(reply))
+        self.assertEqual(self.up.frames, [])
 
     def second_gmail(self):
         known = [{"id": a, **r} for a, r in integrations.known(self.root).items()]

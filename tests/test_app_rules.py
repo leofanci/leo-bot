@@ -71,6 +71,17 @@ class Classify(unittest.TestCase):
         app_rules.decide("GMAIL_SEND_EMAIL", g, cat, read_only=asked.append)
         self.assertEqual(asked, [])  # a write by name never costs a lookup
 
+    def test_act_grant_runs_writes_but_holds_deletes_and_spending(self):
+        g = {"gmail": "act", "instagram": "act", "apollo": "act"}
+        self.assertEqual(app_rules.decide("GMAIL_SEND_EMAIL", g, CAT, read_only=_YES), ("run", "gmail"))
+        self.assertEqual(app_rules.decide("INSTAGRAM_SEND_TEXT_MESSAGE", g, CAT, read_only=_YES), ("run", "instagram"))
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", g, CAT, read_only=_YES), ("read", "gmail"))
+        for slug in ("GMAIL_DELETE_MESSAGE", "GMAIL_MOVE_TO_TRASH", "GMAIL_BATCH_DELETE_MESSAGES",
+                     "INSTAGRAM_REMOVE_POST"):
+            self.assertEqual(app_rules.decide(slug, g, CAT, read_only=_YES)[0], "hold", slug)
+        self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", g, CAT, read_only=_YES), ("hold", "apollo"))  # spends
+        self.assertEqual(app_rules.decide("GMAIL_SEND_EMAIL", g, CAT, read_only=_YES, paid={"gmail"})[0], "hold")
+
     def test_read_grant_refuses_paid_read(self):
         self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", {"apollo": "read"}, CAT, read_only=_YES), ("refuse", "apollo"))
 

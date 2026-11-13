@@ -7,8 +7,10 @@ to the accounts the workspace picked), adding the key, and gates every call:
 
   tools/list   only the search, schema and multi-execute meta tools
   tools/call   each app tool inside a multi-execute: read -> runs now,
-               not a read on a write grant -> held in Approvals (refused in a
-               Report only job), else refused;
+               a write on an "act" grant (not a delete, not paid) -> runs now and
+               is logged in Approvals as done, not a read on a write grant -> held
+               in Approvals (several in one call share a batch: one Approve all),
+               a Report only job refuses every non-read, else refused;
                with several accounts of one app, the call names one of them
 
 The bot's body is never forwarded as is: reads are rebuilt into a fresh
@@ -27,10 +29,16 @@ MAX_AGE = 1800  # hard cap; a token normally dies with its chat request
 METHODS = ("initialize", "ping", "tools/list", "tools/call")
 PASS_THROUGH = ("COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS")
 HELD = "Held for approval ({id}): {title}. It has not run. Tell the user it is waiting in Approvals."
+HELD_BATCH = ("{n} actions wait for one approval (Approve all in Approvals): {titles}. None has run. "
+              "Tell the user the plan is waiting for one click.")
+RAN = "Ran on its own: {title}. Say in your reply what went out."
+CONNECT = ('"{slug}": you have no {toolkit} access in this workspace. Ask the owner to connect a {toolkit} '
+           'account in Apps and give you access, then stop. This call was not performed.')
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
 REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
-NO_ACCOUNT = '"{slug}": {toolkit} has no account picked in this workspace. This call was not performed.'
+NO_ACCOUNT = ('"{slug}": {toolkit} has no account picked in this workspace. Ask the owner to connect a {toolkit} '
+              'account in Apps, then stop. This call was not performed.')
 PICK_ACCOUNT = ('"{slug}": set "account" on the tool to one of this workspace\'s {toolkit} accounts: '
                 '{choices}. This call was not performed.')
 
@@ -146,31 +154,44 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
     else:
         items = composio.catalog(root)
         cat, paid = [a["slug"] for a in items], composio.paid_read_toolkits(items)
-    reads, notes = [], []
+    reads, notes, hold, runs = [], [], [], []
     read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
     for c in calls:
         verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid)
         if verdict == "refuse":
-            notes.append(REFUSED.format(slug=c["tool_slug"]))
+            # An app Leo Bot knows but this bot may not use here: the owner can fix that in Apps.
+            ok = tk and tk not in app_rules.BLOCKED_TOOLKITS and tk not in grant
+            notes.append(CONNECT.format(slug=c["tool_slug"], toolkit=tk) if ok else REFUSED.format(slug=c["tool_slug"]))
             continue
         account, refusal = pick_account(c, tk, picks, root)
         if refusal:
             notes.append(refusal)
-        elif verdict == "read":
+        elif verdict == "read" or (verdict == "run" and not ctx.get("report")):
             # The account travels only when there is a choice: one account is the pin.
             reads.append({"tool_slug": c["tool_slug"], "arguments": c["arguments"],
                           **({"account": account} if len(picks[tk]) > 1 else {})})
-        elif ctx.get("report"):  # a Report only job: nothing waits for a click
+            if verdict == "run":
+                runs.append((tk, c, account))
+        elif ctx.get("report"):  # a Report only job: nothing waits for a click, nothing goes out
             notes.append(REPORT_ONLY.format(slug=c["tool_slug"]))
         else:
-            rec = approvals.add_app_action(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
-                                           bot=ctx["bot"], person=ctx["person"], toolkit=tk,
-                                           slug=c["tool_slug"], arguments=c["arguments"], account=account)
-            notes.append(HELD.format(id=rec["id"], title=rec["preview"]["title"]))
+            hold.append((tk, c, account))
+    batch = secrets.token_hex(6) if len(hold) > 1 else None
+    held = [approvals.add_app_action(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
+                                     bot=ctx["bot"], person=ctx["person"], toolkit=tk, slug=c["tool_slug"],
+                                     arguments=c["arguments"], account=account, batch=batch)
+            for tk, c, account in hold]
+    if batch:
+        notes.append(HELD_BATCH.format(n=len(held), titles="; ".join(r["preview"]["title"] for r in held[:5])
+                                       + (f"; and {len(held) - 5} more" if len(held) > 5 else "")))
+    else:
+        notes += [HELD.format(id=r["id"], title=r["preview"]["title"]) for r in held]
     if not reads:
-        return _text(rid, notes, not any(n.startswith("Held") for n in notes)), sid
+        return _text(rid, notes, not held), sid
     rebuilt = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                "params": {"name": app_rules.MULTI_EXECUTE, "arguments": {"tools": reads}}}
+    if runs:
+        return _forward_runs(rebuilt, sid, upstream, ctx, runs, notes, root)
     if not notes:
         return upstream.forward(rebuilt, sid)
     # What was held or refused is told even when the reads fail: a bot that never hears its
@@ -184,6 +205,29 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
     elif isinstance(reply, dict):
         failed = (reply.get("error") or {}).get("message") if isinstance(reply.get("error"), dict) else None
         return _text(rid, [f"The reads did not run ({str(failed or 'no reply')[:200]})."] + notes, True), sid
+    return reply, sid
+
+
+def _forward_runs(rebuilt, sid, upstream, ctx, runs, notes, root):
+    """Send reads with the writes an "act" grant runs on its own, and log each write in Approvals
+    (status done, or the may-have-run note when the call broke), so the owner sees what went out."""
+    try:
+        reply, sid = upstream.forward(rebuilt, sid)
+        status, line = "done", "Ran on its own."
+    except composio.ComposioError as e:
+        reply, status, line = None, "failed", approvals.STALE_NOTE if e.status is None or e.status >= 500 else f"Failed: {e}"
+    ok = isinstance(reply, dict) and isinstance(reply.get("result"), dict)
+    if reply is not None and not ok:  # an error reply: some calls may have gone out
+        status, line = "failed", approvals.STALE_NOTE
+    done = [approvals.log_app_run(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"), bot=ctx["bot"],
+                                  person=ctx["person"], toolkit=tk, slug=c["tool_slug"], arguments=c["arguments"],
+                                  account=account, status=status, result=line)
+            for tk, c, account in runs]
+    if status == "done":
+        notes = [RAN.format(title=r["preview"]["title"]) for r in done] + notes
+    if not ok:
+        return _text(rebuilt.get("id"), [f"The calls did not finish ({line})"] + notes, True), sid
+    reply["result"].setdefault("content", []).extend({"type": "text", "text": n} for n in notes)
     return reply, sid
 
 

@@ -975,7 +975,8 @@ def _one_line(text, limit):
 
 def _apps_text(grant):
     """'gmail (read), instagram (read+write)': a grant as one line, '' when empty."""
-    return ", ".join(f"{tk} ({'read+write' if scope == 'write' else 'read'})" for tk, scope in sorted(grant.items()))
+    words = {"write": "read+write", "act": "acts on its own"}
+    return ", ".join(f"{tk} ({words.get(scope, 'read')})" for tk, scope in sorted(grant.items()))
 
 
 def _skill_menu(team, bot_id):
@@ -1929,10 +1930,18 @@ def _integrations_view():
     return view
 
 
-def _apps_accounts_note(ws, grant):
-    """Which account ids this workspace's bot may name, per granted app."""
+_HOW_IT_RUNS = {"act": "acts on its own", "write": "waits for approval", "read": "reads only"}
+
+
+def _apps_accounts_note(ws, grant, bot=None):
+    """Which account ids this workspace's bot may name, per granted app, how its actions run,
+    and (with `bot`) which granted apps still have no account here."""
     picks = integrations.accounts_for(ws, ROOT)
-    lines = [f"- {tk}: {apps_relay.choices_text(picks[tk], ROOT)}" for tk in sorted(grant) if tk in picks]
+    lines = [f"- {tk} ({_HOW_IT_RUNS.get(grant[tk], 'reads only')}): {apps_relay.choices_text(picks[tk], ROOT)}"
+             for tk in sorted(grant) if tk in picks]
+    missing = sorted(tk for tk in (integrations.grant(ws, bot, ROOT) if bot else {}) if tk not in picks)
+    lines += [f"- {tk}: no account connected. A job that needs it: ask the owner to connect one in Apps, then stop."
+              for tk in missing]
     if not lines:
         return ""
     return ("## App accounts in this workspace\n" + "\n".join(lines)
@@ -2204,6 +2213,23 @@ def _approve_app_action(aid, arguments=None):
     if rec.get("chat"):
         chat_store.append_note(rec["chat"], rec["bot"], line)
     return rec
+
+
+def _answer_app_batch(batch, approve):
+    """Approve all (or No to all) for app actions held together. Each one runs through
+    _approve_app_action, so every re-check (grant, account, run once) still holds; one that is
+    refused or fails does not stop the rest."""
+    recs = approvals.batch_pending(batch, ROOT) if isinstance(batch, str) and batch else []
+    if not recs:
+        raise LookupError("nothing waiting in that batch")
+    results = []
+    for rec in recs:
+        try:
+            out = _approve_app_action(rec["id"]) if approve else approvals.reject(rec["id"], ROOT)
+        except (_AppRefused, LookupError, ValueError) as e:
+            out = {**rec, "status": "refused", "result": str(e)}
+        results.append(out)
+    return {"ok": True, "results": results}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3047,12 +3073,12 @@ class Handler(BaseHTTPRequestHandler):
                 drop_edit=bool(app_turn or mount or apps_used), engine=engine)
             sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
-            # Web search is on every private turn; only asking for it (/web) takes the stronger model.
-            web_asked = _needs_web(user_msg, skill) and not apps_used
-            # Never next to the apps (app data must not reach a search query) unless the user
-            # asked for web; a job (unattended, bot-written message) keeps the explicit rule.
-            with_web = (web_asked or _needs_web(user_msg, skill, private=not (locked or job or app_turn or mount))) \
-                and not apps_used
+            # Web search is on every private turn and every job, beside the apps too: a search query
+            # only reaches the search engine, and a fetch only reaches hosts the owner typed (a job's
+            # message grants none), so app data has no road to another host. Asking for it (/web)
+            # takes the stronger model. A thread invited people can see keeps the explicit rule.
+            web_asked = _needs_web(user_msg, skill)
+            with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
             model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
                              else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                      editing=bool(may_edit and edit_dirs)))
@@ -3114,8 +3140,13 @@ class Handler(BaseHTTPRequestHandler):
                 workspace = ("## App workspace unavailable\n" + why
                              + " Do not inspect the Leo Bot source tree as a substitute.")
 
-            if app_turn or mount:  # which accounts the bot may name this turn (a workspace's own picks)
-                workspace = "\n\n".join(x for x in (workspace, _apps_accounts_note(ws, app_grant)) if x) or None
+            if (app_turn or mount or integrations.api_key(ROOT)) and not locked:
+                # Which accounts the bot may name this turn (a workspace's own picks), how each app
+                # runs, and which granted apps still need an account: the bot asks for those itself.
+                # Apps not on this turn (an engine without them): only what is left to connect.
+                shown = app_grant if (app_turn or mount) else {}
+                workspace = "\n\n".join(
+                    x for x in (workspace, _apps_accounts_note(ws, shown, bot=bot_id)) if x) or None
             if locked:
                 workspace = "\n\n".join(x for x in (workspace, SHARED_NOTE) if x)
             elif engine.kind == "api":
@@ -3316,7 +3347,7 @@ class Handler(BaseHTTPRequestHandler):
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
             # A teammate never gets web the user did not ask for: the lead's own turn decides it,
             # not a question the lead model wrote (it may echo text from a file or another person).
-            c_web = bool(with_web) and not apps_used  # app data in this thread
+            c_web = bool(with_web)  # search only: fetch hosts stay the owner's typed ones
             c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
             c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
@@ -4314,6 +4345,14 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError(f"unknown bot: {bot_id}")
                     return self._send(200, {"ws": ws, "bot": bot_id,
                                             "apps": integrations.set_grant(ws, bot_id, body.get("apps"), ROOT)})
+                if path.startswith("/api/approvals/batch/"):
+                    batch, _, verb = path[len("/api/approvals/batch/"):].partition("/")
+                    if verb not in ("approve", "reject"):
+                        return self._send(404, {"error": "unknown endpoint"})
+                    try:
+                        return self._send(200, _answer_app_batch(batch, verb == "approve"))
+                    except LookupError as e:
+                        return self._send(404, {"ok": False, "error": str(e)})
                 if path.startswith("/api/approvals/"):
                     aid = path[len("/api/approvals/"):].rsplit("/", 1)[0]
                     try:
