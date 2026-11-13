@@ -1047,13 +1047,20 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
                                      for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
         # HQ has no team memory (nobody joins HQ), so a shared thread there carries none.
-        mem = ("" if shared and not project_slug
-               else memory.card_block(bot_id, project_slug or None, ROOT, shared=shared, query=query))
+        no_mem = shared and not project_slug
+        scope_ = (bot_id, project_slug or None, ROOT)
+        whole = "" if no_mem else memory.whole_block(*scope_, shared=shared)
+        mem = "" if no_mem or whole else memory.card_block(*scope_, shared=shared, query=query)
         where = f"{project_slug}, team" if shared and project_slug else (project_slug or "HQ")
-        lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
-                     else f"Your memory ({where}): nothing pinned or matching.")
-        lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`. A question about the past "
-                     "(what happened, why, what we decided): recall first, then ask only if nothing matches.")
+        if whole:  # small: every entry, the model judges what matters
+            lines.append(f"Your memory ({where}), every entry:\n{whole}\n"
+                         "A question about the past (what happened, why, what we decided): answer from "
+                         "these, then ask only if none fits.")
+        else:
+            lines.append(f"Your memory ({where}), pinned and matching this message:\n{mem}" if mem
+                         else f"Your memory ({where}): nothing pinned or matching.")
+            lines.append(f"Older entries: `recall --bot {b.id} --query \"...\"`. A question about the past "
+                         "(what happened, why, what we decided): recall first, then ask only if nothing matches.")
         scope = f" --project {project_slug}" if project_slug else ""
         if not readonly and not shared:
             lines.append("When the user states a lasting decision or preference, save one line: "

@@ -304,9 +304,57 @@ class Card(TempRoot):
     def test_later_shared_turn_reads_team_memory_only(self):
         self.fixture()
         memory.remember("cmo", "team pricing rule", "acme", self.root, shared=True)
+        for i in range(60):
+            memory.remember("cmo", f"team weekly note {i} " + "x" * 40, "acme", self.root, shared=True)
         text = self.later_turn("pricing?", shared=True)
         self.assertIn("team pricing rule", text)
         self.assertNotIn("49 euros", text)
+
+    def small(self):
+        memory.remember("cmo", "Churn spiked in August", "acme", self.root)
+        memory.remember("cmo", "Pro tier stays at 29", "acme", self.root, type="decision")
+        memory.remember("cmo", "Office plant needs water", "acme", self.root)
+
+    def test_small_memory_goes_whole_on_the_card(self):
+        # Small enough to read: the model sees every entry and judges what matters, no search.
+        self.small()
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True,
+                                     query="why did people leave over the summer?")
+        self.assertIn("Your memory (acme), every entry:", text)
+        for s in ("Churn spiked", "Pro tier", "Office plant"):
+            self.assertIn(s, text)
+        self.assertNotIn("recall --bot", text)
+        self.assertIn("remember --bot cmo", text)
+
+    def test_whole_memory_is_newest_first_within_budget(self):
+        self.small()
+        whole = memory.whole_block("cmo", "acme", self.root)
+        self.assertTrue(whole.splitlines()[0].endswith("Office plant needs water"))
+        self.assertLessEqual(len(whole), memory.WHOLE_CHARS)
+
+    def test_large_memory_falls_back_to_pinned_and_matching(self):
+        self.fixture()
+        self.assertEqual(memory.whole_block("cmo", "acme", self.root), "")
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True, query="pricing anchor?")
+        self.assertIn("pinned and matching this message", text)
+        self.assertIn("recall --bot cmo", text)
+
+    def test_later_turn_on_small_memory_adds_nothing(self):
+        self.small()  # the card carried all of it
+        self.assertEqual(self.later_turn("churn?"), "(speaking as @cmo)")
+
+    def test_whole_memory_keeps_scopes_apart(self):
+        self.small()
+        memory.remember("cmo", "team rule", "acme", self.root, shared=True)
+        team = bots.team(self.root, "acme", {"slug": "acme"})
+        with mock.patch.object(server, "ROOT", self.root):
+            text = server._bot_block(team, "cmo", None, "acme", fresh=True, shared=True, query="x")
+        self.assertIn("team rule", text)
+        self.assertNotIn("Churn spiked", text)
 
     def test_empty_card_still_names_recall(self):
         team = bots.team(self.root, "acme", {"slug": "acme"})

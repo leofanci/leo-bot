@@ -43,6 +43,9 @@ RECALL_CHARS = 800
 RECALL_MAX = 20
 PINNED_IN_CARD = 10
 HITS_IN_CARD = 5
+# A memory this small goes on the card whole: the model reads every entry and judges what
+# matters, so no search wording (and no engine) decides what it sees.
+WHOLE_CHARS = 3000
 INDEX_RELPATH = Path("database") / "data" / "memory.db"
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -477,9 +480,17 @@ def card_block(bot_id, project=None, root=ROOT, shared=False, query=""):
     return "\n".join(pinned + hits[:HITS_IN_CARD])
 
 
+def whole_block(bot_id, project=None, root=ROOT, shared=False):
+    """Every entry, newest first, when the memory fits WHOLE_CHARS. "" if empty or larger."""
+    text = "\n".join(e.line for e in reversed(entries(bot_id, project, root, shared)))
+    return text if len(text) <= WHOLE_CHARS else ""
+
+
 def matching_block(bot_id, project=None, root=ROOT, shared=False, query=""):
     """A later turn's memory: the top recall hits for its message, minus the pinned lines the
-    card already carried. "" if none."""
+    card already carried. "" if none, or when the card carried the whole memory."""
+    if whole_block(bot_id, project, root, shared):
+        return ""
     pinned = {e.line for e in entries(bot_id, project, root, shared) if e.type in PINNED}
     hits = [ln for ln in recall(bot_id, query, project, root, shared,
                                 limit=HITS_IN_CARD + PINNED_IN_CARD) if ln not in pinned]
