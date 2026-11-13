@@ -102,6 +102,24 @@ def _sse(resp):
             yield obj
 
 
+_WEB_BLOCKS = ("server_tool_use", "web_search_tool_result", "web_fetch_tool_result")
+
+
+def _without_web(messages):
+    """A copy of the history with no web search blocks or citations, for a request that offers
+    no web tool (each server tool block needs its tool defined)."""
+    out = []
+    for m in messages:
+        content = m.get("content")
+        if not isinstance(content, list):
+            out.append(m)
+            continue
+        kept = [{k: v for k, v in b.items() if k != "citations"} if isinstance(b, dict) else b
+                for b in content if not (isinstance(b, dict) and b.get("type") in _WEB_BLOCKS)]
+        out.append({**m, "content": kept or [{"type": "text", "text": "(web results removed)"}]})
+    return out
+
+
 class ApiEngine(Engine):
     kind = "api"
     shared_safe = True  # a shared turn is only ever offered osctl (plus web when allowed)
@@ -371,7 +389,7 @@ class ApiEngine(Engine):
     def _anthropic_tools(self, box, policy, model):
         tools = [{"name": s["name"], "description": s["description"], "input_schema": s["input_schema"]}
                  for s in box.specs]
-        if policy.web:
+        if policy.web and box.web_open():  # asked before each request: app data turns it off
             # Dynamic filtering needs Sonnet or Opus; Haiku keeps the basic variant.
             kind = "web_search_20260209" if re.search(r"sonnet|opus", model) else "web_search_20250305"
             tools.append({"type": kind, "name": "web_search", "max_uses": 5})
@@ -382,15 +400,18 @@ class ApiEngine(Engine):
         pending = [{"role": "user", "content": text}]
         self._append(session, pending)
         messages = self._repair(self._trim(self._load(session), session.engine_state[self.id], session.rail))
-        tools = self._anthropic_tools(box, policy, model)
         parts, usage, calls, context = [], {}, 0, None
         while True:
             if cancel.stopped:
                 return
+            # Per request: an app read since the last one turns web search off (dashboard/taint.py),
+            # and the history then goes without its web blocks (no web tool to match them).
+            tools = self._anthropic_tools(box, policy, model)
+            web_on = any(t.get("name") == "web_search" for t in tools)
             if time.time() - started > TURN_TIMEOUT:
                 yield ("error", f"This turn on {self.label} took too long, so it was stopped.")
                 return
-            system, request = self._cached(session.rail, messages)
+            system, request = self._cached(session.rail, messages if web_on else _without_web(messages))
             resp = self._open("/v1/messages", {
                 "model": model, "max_tokens": MAX_TOKENS, "stream": True, "system": system,
                 "messages": request, **({"tools": tools} if tools else {})}, cancel)
@@ -411,6 +432,8 @@ class ApiEngine(Engine):
                         content.append(block)
                         if block.get("type") in ("tool_use", "server_tool_use"):
                             block["_json"] = ""
+                            if block.get("type") == "server_tool_use":
+                                box.saw_web()  # its results are outside content
                             yield ("tool", block.get("name", ""))
                     elif et == "content_block_delta" and content:
                         d = ev.get("delta") or {}

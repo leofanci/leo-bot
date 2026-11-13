@@ -241,14 +241,19 @@ the channel's lead, and that bot decides what it needs:
   approve the card, and Approve goes back to the bot that asked. A skill a bot loads by
   itself never unlocks folder edits. A thread invited people can see still needs a tagged skill for that.
   Folder edits still need a tagged message.
-- **Web.** Web search is on in your private threads and scheduled jobs, beside connected
-  apps too: a search query only reaches the search engine. A page is fetched only from a
-  site you typed (a job's message grants none). Only `/web` takes the stronger model. Codex
-  searches its index on those turns and never fetches a page live.
+- **Web.** Web search is on in your private threads and scheduled jobs until a conversation
+  holds data from your connected apps: from then on no search or page runs in it, checked at
+  the moment the tool would run, so a query can never carry that data out. A page is fetched
+  only from a site you typed (a job's message grants none). Only `/web` takes the stronger
+  model. Codex searches its index on those turns and never fetches a page live.
+- **Outside content.** Mail, pages, app data and a guest's message are someone else's words.
+  Once a conversation holds any, nothing a bot does goes out on its own: its app actions wait
+  for one Approve all, and an Auto job saves only through an approval card. A bot acts alone
+  only on what you wrote.
 - **Apps.** Each bot gets each app per workspace as Read, Read + write (anything that is not
   a read waits for your click), or Acts on its own (it sends, posts and messages without
-  asking; deletes, payments, ads, databases, code, sharing and paid lookups still wait, and
-  past 100 actions a day the rest wait too). Each action it runs shows in Approvals as done or
+  asking while the conversation holds only your words; deletes, payments, ads, databases,
+  code, sharing and paid lookups still wait, and past 100 actions a day the rest wait too). Each action it runs shows in Approvals as done or
   failed. Actions held together in one call wait for one Approve all. A bot that needs an app,
   an account or more access asks you for it.
 - **Working alone.** Given a job, a bot checks memory, files, apps and the web first, and

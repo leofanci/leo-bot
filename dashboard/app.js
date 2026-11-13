@@ -1271,7 +1271,7 @@ async function renderTeam(){
             const scope = grantsOf(b)[slug];
             return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(appName(slug))} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
               ${["", "read", "write", "act"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
-          }).join("")}</div><small>Read + write asks you before anything that isn't a read. Acts on its own sends, posts and messages without asking (up to 100 a day); deletes, payments, ads, databases, code, sharing and paid lookups still ask.</small></div>` : ""}
+          }).join("")}</div><small>Read + write asks you before anything that isn't a read. Acts on its own sends, posts and messages without asking (up to 100 a day) while the thread holds only your words; once it has read mail, pages or app data, it asks once (Approve all). Deletes, payments, ads, databases, code, sharing and paid lookups always ask.</small></div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;

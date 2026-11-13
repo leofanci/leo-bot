@@ -56,6 +56,7 @@ import os_relay          # noqa: E402
 import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
+from dashboard import taint  # noqa: E402  (one registry: the API engine imports it by this name)
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
@@ -2456,6 +2457,25 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": -32000, "message": f"Connected apps unavailable: {e}"}})
         return self._send_rpc(202 if reply is None else 200, reply, sid)
 
+    def _handle_gate(self):
+        """May this tool run now? Asked by the Claude Code web hook and by osctl in an Auto job
+        (dashboard/taint.py). Only ever adds taint; a bad or late token gets a 403 (they deny)."""
+        auth = self.headers.get("Authorization", "")
+        turn = taint.GATES.lookup(auth[7:]) if auth.startswith("Bearer ") else None
+        if not self._local_request() or turn is None:
+            return self._send(403, {"allow": False, "reason": "no gate for this run"})
+        try:
+            body = self._read_json()
+        except ValueError:
+            return self._send(400, {"allow": False, "reason": "bad request"})
+        tool = body.get("tool") if isinstance(body, dict) else None
+        if not isinstance(tool, str):
+            return self._send(400, {"allow": False, "reason": "bad request"})
+        allow, reason = turn.decide(tool)
+        if not allow:
+            self.log_message("gate deny tool=%s", tool[:40])
+        return self._send(200, {"allow": allow, "reason": reason})
+
     def _runner_from(self, token):
         """The runner behind a token, while its person still belongs here."""
         rec = runners.verify(ROOT, token) if self._valid_host() else None
@@ -3073,12 +3093,14 @@ class Handler(BaseHTTPRequestHandler):
                 drop_edit=bool(app_turn or mount or apps_used), engine=engine)
             sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
 
-            # Web search is on every private turn and every job, beside the apps too: a search query
-            # only reaches the search engine, and a fetch only reaches hosts the owner typed (a job's
-            # message grants none), so app data has no road to another host. Asking for it (/web)
-            # takes the stronger model. A thread invited people can see keeps the explicit rule.
+            # Web search is on every private turn and every job until app data is in the conversation
+            # (dashboard/taint.py: then no query may carry it out; mid-run the gate turns it off).
+            # A fetch only reaches hosts the owner typed (a job's message grants none). Asking for it
+            # (/web) takes the stronger model. A thread invited people can see keeps the explicit rule.
             web_asked = _needs_web(user_msg, skill)
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
+            if turn.app_data:  # app data in this conversation: no query may carry it out
+                web_asked = with_web = False
             model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
                              else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                      editing=bool(may_edit and edit_dirs)))
@@ -3162,6 +3184,10 @@ class Handler(BaseHTTPRequestHandler):
                              web_asked=web_asked, with_web=with_web, model=model, reason=reason,
                              graph_folder=graph_folder, graph_context=graph_context, workspace=workspace)
 
+        # What outside content this request's conversation holds (dashboard/taint.py), shared by
+        # every run in it. A guest's message or a thread invited people can see is outside content.
+        turn = taint.Turn(app_data=getattr(sess, "app_data", False),
+                          outside=getattr(sess, "outside", False) or bool(person) or bool(shared))
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
             return self._sse_message(st)
@@ -3270,24 +3296,46 @@ class Handler(BaseHTTPRequestHandler):
             eng = getattr(s_, "engine", None)
             model_ = eng.resolve_model(model_) if eng else model_
             job_live(msg, 0.0)
-            for kind, payload in s_.ask(prompt_, with_web=web_, model=model_,
-                                        web_domains=web_domains, **kw):
-                if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
-                    so_far = payload.get("cost")
-                    if so_far is None:
-                        so_far = prices.estimate(model_, payload.get("usage"))
-                    job_live(msg, so_far)
-                elif kind == "delta":
-                    parts.append(payload)
-                    msg["content"] = "".join(parts)
-                    emit({"delta": payload})
-                elif kind == "tool":
-                    emit({"tool": payload})
-                elif kind == "error":
-                    emit({"error": payload})
-                    failed = True
-                elif kind == "done":
-                    fin = payload or {}
+            # The taint gate (dashboard/taint.py): this machine's Claude Code and API engines ask it
+            # as each web tool or Auto save runs. Any other engine cannot be watched mid-run, so its
+            # web (or its own full-disk tools) counts as outside content up front, and an Auto job
+            # on it saves only through an approval card.
+            gated = bool(eng) and (eng.kind == "api" or eng.id == chat_session.ClaudeCodeEngine.id)
+            gate_kw, mode_was = {}, getattr(s_, "job_mode", None)
+            port = (getattr(getattr(self, "server", None), "server_address", None) or (None, None))[1]
+            if gated and isinstance(port, int):
+                gate_kw = {"gate_token": taint.GATES.mint(turn), "gate_port": port}
+            elif web_ or (eng and eng.full_disk):
+                turn.saw_outside()
+                if mode_was == "auto":
+                    s_.job_mode = "approval"
+            try:
+                for kind, payload in s_.ask(prompt_, with_web=web_, model=model_, web_domains=web_domains,
+                                            **kw, **gate_kw):
+                    if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
+                        so_far = payload.get("cost")
+                        if so_far is None:
+                            so_far = prices.estimate(model_, payload.get("usage"))
+                        job_live(msg, so_far)
+                    elif kind == "delta":
+                        parts.append(payload)
+                        msg["content"] = "".join(parts)
+                        emit({"delta": payload})
+                    elif kind == "tool":
+                        emit({"tool": payload})
+                    elif kind == "error":
+                        emit({"error": payload})
+                        failed = True
+                    elif kind == "done":
+                        fin = payload or {}
+            finally:
+                if gate_kw:
+                    taint.GATES.revoke(gate_kw["gate_token"])
+                if getattr(s_, "job_mode", None) != mode_was:
+                    s_.job_mode = mode_was
+                # The thread keeps what its context now holds: taint only ever grows.
+                sess.app_data = bool(getattr(sess, "app_data", False) or turn.app_data)
+                sess.outside = bool(getattr(sess, "outside", False) or turn.outside)
             usage = fin.get("usage") if isinstance(fin.get("usage"), dict) else None
             cost = fin.get("cost")
             runner = bool(eng and eng.kind == "runner")
@@ -3347,7 +3395,7 @@ class Handler(BaseHTTPRequestHandler):
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
             # A teammate's web follows the lead's turn, never the question the lead model wrote (it
             # may echo text from a file or another person): search, and fetch only the owner's typed hosts.
-            c_web = bool(with_web)
+            c_web = bool(with_web) and not turn.app_data  # the lead may have read an app since
             c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
             c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
@@ -3382,6 +3430,7 @@ class Handler(BaseHTTPRequestHandler):
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
                            "report": job_mode == "report",
+                           "taint": turn,  # reads mark it; actions wait once it holds outside content
                            # the first app call marks the thread: no web search after app data
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
                       "apps_port": self.server.server_address[1]}
@@ -3959,6 +4008,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_apps_relay()
         if path == OS_RELAY_PATH:
             return self._handle_os_relay()
+        if path == taint.GATE_PATH:  # a bot run's web hook or osctl: gate token only
+            return self._handle_gate()
         if path.startswith(RUNNER_PREFIX):  # a person's Mac: runner token, no cookie
             return self._handle_runner(path)
         if path.startswith("/join/"):  # the invite form (no cookie yet)

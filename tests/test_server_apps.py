@@ -607,3 +607,32 @@ class Turn(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Gate(Base):
+    PATH = "/api/internal/gate"
+
+    def setUp(self):
+        super().setUp()
+        self.turn = server.taint.Turn()
+        self.token = server.taint.GATES.mint(self.turn)
+        self.addCleanup(server.taint.GATES.revoke, self.token)
+
+    def ask(self, tool, token=None, **kw):
+        return request("POST", self.PATH, {"tool": tool}, cookie=False, origin=False,
+                       headers={"Authorization": f"Bearer {token or self.token}"}, **kw)
+
+    def test_web_allowed_then_off_after_app_data(self):
+        code, data, _, _ = self.ask("WebSearch")
+        self.assertEqual((code, data["allow"]), (200, True))
+        self.assertTrue(self.turn.outside)
+        self.turn.saw_app_data()
+        code, data, _, _ = self.ask("WebFetch")
+        self.assertEqual((code, data["allow"]), (200, False))
+        self.assertIn("off in this conversation", data["reason"])
+
+    def test_refuses_without_a_live_token_or_from_another_host(self):
+        self.assertEqual(self.ask("WebSearch", token="nope")[0], 403)
+        self.assertEqual(self.ask("WebSearch", host="evil.example")[0], 403)
+        self.assertEqual(request("POST", self.PATH, {"tool": "WebSearch"})[0], 403)  # a cookie is not a token
+        self.assertFalse(self.turn.outside)

@@ -18,8 +18,10 @@ a top-level `result` line. A plain-text stdin turn (no positional prompt) is acc
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -28,7 +30,8 @@ from pathlib import Path
 
 from core import folders, paths
 from dashboard.engines import prices
-from dashboard.engines.base import TURN_ENV, Engine, EngineRefused, SessionLost, drain, stop_child, turn_vars
+from dashboard.engines.base import (TURN_ENV, Engine, EngineRefused, SessionLost, drain, gate_vars, stop_child,
+                                    turn_vars)
 
 
 def parse_event(obj):
@@ -325,6 +328,18 @@ def remove_bot_tmpdir():
             _BOT_TMPDIR = None
 
 
+HOOK_PATH = Path(__file__).resolve().parent.parent / "turn_hook.py"
+
+
+def gate_settings():
+    """Claude Code settings holding one PreToolUse hook on the web tools: it asks the server's
+    gate (dashboard/turn_hook.py) and denies when it cannot. Verified live (2.1.325): a hook
+    passed with --settings runs under --setting-sources "", and its deny is final."""
+    cmd = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(HOOK_PATH))}"
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "WebSearch|WebFetch",
+                                                 "hooks": [{"type": "command", "command": cmd}]}]}})
+
+
 def _mcp_server(port, path, env):
     return {"type": "http", "url": f"http://127.0.0.1:{port}{path}",
             "headers": {"Authorization": "Bearer ${" + env + "}"}}
@@ -392,7 +407,7 @@ class ClaudeCodeEngine(Engine):
         session.engine_state[self.id] = {"session": str(uuid.uuid4())}
         return True
 
-    def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None):
+    def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None, gate=False):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
         # the routed skill's body into the prompt instead), so we always pass
         # --disable-slash-commands + --setting-sources "": zero skill-discovery
@@ -422,6 +437,8 @@ class ClaudeCodeEngine(Engine):
         if shared:  # no file, shell or app tools: the osctl relay only
             read_dirs = edit_dirs = ()
             apps_port = None
+        if with_web and apps_port and not gate:  # app data and web with nothing between them: never
+            with_web = False
         tools = ((WEB_TOOLS if with_web else []) if shared else
                  (list(BASE_TOOLS)
                   + (APP_TOOLS if read_dirs else [])
@@ -463,6 +480,9 @@ class ClaudeCodeEngine(Engine):
                *(["--mcp-config", mcp] if mcp else []),
                "--disable-slash-commands",
                "--setting-sources", "",
+               # The taint gate (dashboard/taint.py): a web tool asks it first. A run without one
+               # (a runner on another Mac) has no apps; with apps and no gate, web is off above.
+               *(["--settings", gate_settings()] if with_web and gate else []),
                "--restricted",
                "--permission-mode", "default"]
         for d in read_dirs:
@@ -481,7 +501,8 @@ class ClaudeCodeEngine(Engine):
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
-                **({RUNNER_TOKEN_ENV: tokens.runner_token} if tokens.runner_token else {})}
+                **({RUNNER_TOKEN_ENV: tokens.runner_token} if tokens.runner_token else {}),
+                **gate_vars(tokens)}
 
     def turn(self, session, text, policy, model, tokens):
         """One `claude -p` invocation, resumed by session id so context persists."""
@@ -491,7 +512,8 @@ class ClaudeCodeEngine(Engine):
                 self.build_cmd(session, policy, model,
                                apps_port=tokens.apps_port if tokens.apps_token else None,
                                os_port=tokens.os_port if tokens.os_token else None,
-                               os_url=tokens.os_url if tokens.os_token else None),
+                               os_url=tokens.os_url if tokens.os_token else None,
+                               gate=bool(gate_vars(tokens))),
                 cwd=session.repo_dir,
                 env=self.turn_env(policy, tokens),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

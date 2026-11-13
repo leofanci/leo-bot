@@ -1159,6 +1159,26 @@ def _auto_reached_past_its_skill():
     return any(s != own for s in skill_loads.loaded(bots.ROOT, os.environ.get("LEOBOT_CHAT") or ""))
 
 
+def _gate_refuses_save():
+    """This run's taint gate (dashboard/taint.py) says a save must wait: outside content is in the
+    conversation. A run given a gate that cannot be reached is refused too (fails closed)."""
+    token, url = os.environ.get("LEOBOT_GATE_TOKEN"), os.environ.get("LEOBOT_GATE_URL")
+    if not token:
+        return None  # no gate on this run: the server set the job's mode for it
+    import json as _json
+    import urllib.request
+    try:
+        if not (url or "").startswith("http://127.0.0.1:"):
+            raise ValueError("gate address")
+        req = urllib.request.Request(url, data=_json.dumps({"tool": "osctl-write"}).encode(), method="POST",
+                                     headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  (127.0.0.1 only, above)
+            answer = _json.loads(resp.read() or b"{}")
+    except Exception:  # noqa: BLE001
+        return READONLY_TEXT["approval"]
+    return None if answer.get("allow") is True else str(answer.get("reason") or READONLY_TEXT["approval"])
+
+
 def main(argv=None):
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -1171,6 +1191,11 @@ def main(argv=None):
         if in_job and job_mode == "auto" and args.cmd not in _READ_ONLY_CMDS and _auto_reached_past_its_skill():
             # An Auto run that loaded a skill other than its job's own saves nothing more by itself.
             raise fileops.ActionError(READONLY_TEXT["approval"])
+        if in_job and job_mode == "auto" and args.cmd not in _READ_ONLY_CMDS:
+            # An Auto run that read outside content (mail, pages, app data) saves nothing by itself.
+            waits = _gate_refuses_save()
+            if waits:
+                raise fileops.ActionError(waits)
         if in_job and (args.cmd not in _AUTO_ALLOWED or args.cmd.startswith("delete-")):
             raise fileops.ActionError(
                 "a scheduled job never proposes jobs." if args.cmd == "propose-job" else

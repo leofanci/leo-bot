@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from core import approvals, composio, integrations
-from dashboard import apps_relay
+from dashboard import apps_relay, taint
 
 CAT = ["gmail", "googlecalendar", "googledrive", "instagram"]
 CTX = {"ws": "hq", "bot": "cos", "chat": "c1", "room": "hq/general", "person": "ceo"}
@@ -59,12 +59,14 @@ class Gate(unittest.TestCase):
         integrations.note_known([{"id": "ca_g1", "toolkit": "gmail", "label": "work"},
                                  {"id": "ca_d1", "toolkit": "googledrive", "label": "drive"}], self.root)
         self.up = FakeUpstream()
+        self.turn = taint.Turn()  # a clean conversation: only the owner's words so far
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def handle(self, frame):
-        reply, _ = apps_relay.handle(frame, CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
+    def handle(self, frame, **ctx):
+        reply, _ = apps_relay.handle(frame, {**CTX, "taint": self.turn, **ctx}, None, self.up, self.root,
+                                     catalog=CAT, read_only=self.tagged)
         return reply
 
     def tagged(self, slug):  # Composio's readOnlyHint tag: every tool here carries it
@@ -229,6 +231,41 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(self.up.frames), 1)  # the third send did not go out
         self.assertEqual(len(approvals.pending(self.root)), 1)
         self.assertIn("daily limit", text_of(reply))
+
+    def test_after_outside_content_an_act_grant_waits_for_approval(self):
+        # The lethal trifecta: once someone else's words are in the conversation, nothing goes out alone.
+        self.acts()
+        self.turn.saw_outside()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        reply = self.handle(multi(send, send))
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(len(approvals.pending(self.root)), 2)
+        self.assertIn("outside content", text_of(reply))
+        self.assertIn("wait for one approval", text_of(reply))
+
+    def test_a_read_marks_the_conversation_and_later_sends_wait(self):
+        self.acts()
+        self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
+        self.assertTrue(self.turn.app_data and self.turn.outside)
+        self.assertFalse(self.turn.web())  # no web query may carry the mail out now
+        self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))
+        self.assertEqual(len(self.up.frames), 1)  # only the read went out
+        self.assertEqual(len(approvals.pending(self.root)), 1)
+
+    def test_a_send_beside_a_read_in_one_call_runs(self):
+        # Written before the read's result existed: the owner's words alone decided it.
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}, send))
+        self.assertEqual(len(self.up.frames[-1]["params"]["arguments"]["tools"]), 2)
+        self.assertEqual(approvals.pending(self.root), [])
+
+    def test_no_taint_record_means_nothing_runs_alone(self):
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        reply, _ = apps_relay.handle(multi(send), CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(len(approvals.pending(self.root)), 1)
 
     def test_writes_held_together_share_one_batch(self):
         sends = [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": f"p{i}@example.com"}}
