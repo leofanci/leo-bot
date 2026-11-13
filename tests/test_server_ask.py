@@ -1084,9 +1084,7 @@ class SkillLoadTests(unittest.TestCase):
         self.assertIsNone(sess._last_skill)
 
 
-class Taint(unittest.TestCase):
-    """dashboard/taint.py through a real turn: the run gets a gate, and the thread keeps its taint."""
-
+class _Turns:
     def _turn(self, sess, msg="what changed this week?"):
         h = _bare_handler(io.BytesIO())
         h.server = mock.Mock(server_address=("127.0.0.1", 8765))
@@ -1117,6 +1115,10 @@ class Taint(unittest.TestCase):
                 yield ("done", {"result": "ok"})
         return Sess()
 
+
+class Taint(_Turns, unittest.TestCase):
+    """dashboard/taint.py through a real turn: the run gets a gate, and the thread keeps its taint."""
+
     def test_a_local_run_gets_a_gate_and_the_thread_keeps_what_it_read(self):
         from dashboard import taint
         live = []
@@ -1139,3 +1141,30 @@ class Taint(unittest.TestCase):
         self._turn(sess)
         self.assertTrue(sess.seen[0]["with_web"])
         self.assertFalse(sess.app_data)
+
+
+class Provenance(_Turns, unittest.TestCase):
+    def test_a_tainted_turn_labels_its_saves_and_the_next_clean_thread_does_not_act_alone(self):
+        from core import provenance
+        from dashboard import taint
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "team" / "memory").mkdir(parents=True)
+            turns = []
+
+            def read_then_save(kw):
+                gate = taint.GATES.lookup(kw.get("gate_token"))
+                turns.append(gate)
+                if len(turns) == 1:
+                    gate.saw_app_data()  # read a mail...
+                    (root / "team" / "memory" / "cos.md").write_text("- from the mail\n")  # ...and saved
+
+            h = _bare_handler(io.BytesIO())
+            h.server = mock.Mock(server_address=("127.0.0.1", 8765))
+            with mock.patch.object(server, "ROOT", root), mock.patch.object(server.db, "tree", return_value=[]):
+                for sess in (self._session(read_then_save), self._session(read_then_save)):
+                    with mock.patch.object(server, "get_chat_session", return_value=sess):
+                        h._handle_ask({"messages": [{"role": "user", "content": "hi"}]})
+                self.assertEqual([r["path"] for r in provenance.pending(root, "hq")], ["team/memory/cos.md"])
+            self.assertTrue(turns[1].outside)  # a new, clean thread: the saved mail still counts
+            self.assertFalse(turns[1].app_data)  # but its web stays on

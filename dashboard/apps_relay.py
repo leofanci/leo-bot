@@ -44,8 +44,9 @@ READ_GRANT = ('"{slug}": you have read-only access to {toolkit}. If the job need
 LIMIT = ("You reached today's limit of {n} actions on your own, so the rest wait in Approvals like any "
          "held action (daily limit). Tell the user.")
 NOT_SENT = "Did not go out: {title} ({why})."
-OUTSIDE = ("This conversation holds outside content (mail, pages or app data someone else wrote), so "
-           "your actions wait for one approval instead of running on their own. Tell the user.")
+OUTSIDE = ("This conversation holds outside content (mail, pages or app data someone else wrote, or saved "
+           "files made from it that the owner has not trusted yet), so your actions wait for one approval "
+           "instead of running on their own. Tell the user.")
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
 REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
