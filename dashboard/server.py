@@ -2178,7 +2178,7 @@ def _approve_app_action(aid, arguments=None):
         raise _AppRefused(str(e)) from None
     verdict, toolkit = app_rules.decide(action["slug"], integrations.grant(rec["ws"], rec["bot"], ROOT), catalog,
                                       action.get("arguments"))
-    if verdict != "hold":
+    if verdict not in ("hold", "run"):  # "run": the owner since let the bot act on its own
         raise _AppRefused(f"{rec['bot']} may no longer do this")
     picks = integrations.accounts_for(rec["ws"], ROOT).get(toolkit) or []
     account = action.get("account")
@@ -3345,9 +3345,9 @@ class Handler(BaseHTTPRequestHandler):
             c_read = tuple(d for d in c_read if str(d) in lead_read)
             c_rows = [r for r in c_rows if str(r.get("path")) in lead_read]
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
-            # A teammate never gets web the user did not ask for: the lead's own turn decides it,
-            # not a question the lead model wrote (it may echo text from a file or another person).
-            c_web = bool(with_web)  # search only: fetch hosts stay the owner's typed ones
+            # A teammate's web follows the lead's turn, never the question the lead model wrote (it
+            # may echo text from a file or another person): search, and fetch only the owner's typed hosts.
+            c_web = bool(with_web)
             c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
             c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],

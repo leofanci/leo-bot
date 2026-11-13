@@ -353,7 +353,6 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
         "last_skill": sess._last_skill,
         "skill_explicit": sess._skill_explicit,
         "skill_loaded": bool(getattr(sess, "_skill_loaded", False)),
-        "skill_loaded": bool(getattr(sess, "_skill_loaded", False)),
         "last_bot": getattr(sess, "_last_bot", None),
         "apps_used": bool(getattr(sess, "apps_used", False)),
         "folder_paths": sorted(_paths(getattr(sess, "folder_paths", None)) | _paths(rec.get("folder_paths"))),

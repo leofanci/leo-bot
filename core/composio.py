@@ -215,7 +215,8 @@ def _categories(item):
 def _parse_catalog_page(data):
     items = [{"slug": i["slug"], "name": i.get("name") or i["slug"],
               "logo": (i.get("meta") or {}).get("logo"), "auth": _auth_kind(i),
-              "paid_reads": bool(_categories(i) & app_rules.PAID_READ_CATEGORIES)}
+              "paid_reads": bool(_categories(i) & app_rules.PAID_READ_CATEGORIES),
+              "act_holds": bool(_categories(i) & app_rules.ACT_HOLD_CATEGORIES)}
              for i in data.get("items") or [] if isinstance(i, dict) and i.get("slug")]
     return items, data.get("next_cursor")
 
@@ -224,6 +225,12 @@ def paid_read_toolkits(items):
     """Toolkits in `items` (a catalog) whose reads wait like writes: Composio files them
     under a category that spends credits or fetches arbitrary pages."""
     return frozenset(i["slug"] for i in items if i.get("paid_reads"))
+
+
+def act_hold_toolkits(items):
+    """Toolkits in `items` (a catalog) whose writes wait even on an "act" grant: Composio files
+    them under a category that moves money, buys ads, or holds databases and access."""
+    return frozenset(i["slug"] for i in items if i.get("act_holds"))
 
 
 def catalog(root=bots.ROOT):

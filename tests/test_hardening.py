@@ -45,6 +45,17 @@ class AppReads(unittest.TestCase):
         self.assertEqual(app_rules.decide("NOTES_LIST_PAGES", grant, ["acme", "notes"], {}, _yes, paid)[0], "read")
         self.assertIn("hunter", app_rules.PAID_READ_TOOLKITS)
 
+    def test_money_categories_hold_writes_on_an_act_grant(self):
+        page = {"items": [{"slug": "acme", "meta": {"categories": [{"name": "Payment Processing"}]}},
+                          {"slug": "notes", "meta": {"categories": [{"name": "notes"}]}}]}
+        items, _ = composio._parse_catalog_page(page)
+        holds = composio.act_hold_toolkits(items)
+        self.assertEqual(holds, {"acme"})
+        grant = {"acme": "act", "notes": "act"}
+        cat = ["acme", "notes"]
+        self.assertEqual(app_rules.decide("ACME_CREATE_LINK", grant, cat, {}, _yes, holds=holds)[0], "hold")
+        self.assertEqual(app_rules.decide("NOTES_CREATE_PAGE", grant, cat, {}, _yes, holds=holds)[0], "run")
+
 
 class HeldNotesSurviveFailedReads(Tmp):
     def setUp(self):

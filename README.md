@@ -247,8 +247,10 @@ the channel's lead, and that bot decides what it needs:
   searches its index on those turns and never fetches a page live.
 - **Apps.** Each bot gets each app per workspace as Read, Read + write (anything that is not
   a read waits for your click), or Acts on its own (it sends, posts and messages without
-  asking; deletes and paid lookups still wait). Actions held together in one call wait for
-  one Approve all. A bot that needs an app or account it lacks asks you to connect it in Apps.
+  asking; deletes, payments, ads, databases, code, sharing and paid lookups still wait, and
+  past 100 actions a day the rest wait too). Each action it runs shows in Approvals as done or
+  failed. Actions held together in one call wait for one Approve all. A bot that needs an app,
+  an account or more access asks you for it.
 - **Working alone.** Given a job, a bot checks memory, files, apps and the web first, and
   asks only when it is blocked.
 - **Teammates.** A bot ends its reply with `HANDOFF @handle: <task>` to pass the work on:

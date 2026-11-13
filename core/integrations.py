@@ -6,7 +6,7 @@
   known.<account id>   {"toolkit", "label"}: the ACTIVE accounts Composio listed last time
   accounts.<ws>.<tk>   account ids this workspace may use; nothing is shared automatically
   grants.<ws>.<bot>    toolkit slug -> "read" | "write" (non-reads wait on approval) | "act" (non-reads
-                       run at once, except deletes and paid toolkits)
+                       run at once, except the ones that always ask: core.app_rules.decide)
 
 An account is connected once (HQ) and each workspace picks which accounts it
 uses; a workspace session only ever sees its own picks, pinned by Composio.
@@ -26,7 +26,7 @@ from core import app_rules, bots
 
 LOCK = threading.Lock()
 # read: reads only. write: other calls wait for a click. act: other calls run at once,
-# except deletes and paid toolkits (core.app_rules.decide).
+# except deletes, money, code, access changes and paid toolkits (core.app_rules.decide).
 SCOPES = ("read", "write", "act")
 DEFAULT_GRANTS = {bots.HQ: {bots.ROOT_BOT: {"gmail": "write", "googlecalendar": "write"}}}
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")

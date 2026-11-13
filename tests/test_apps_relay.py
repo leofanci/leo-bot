@@ -1,4 +1,5 @@
 """The connected-apps relay: turn tokens, method allowlist, tool filter, read/hold/refuse gate."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -161,14 +162,14 @@ class Gate(unittest.TestCase):
     def test_ungranted_app_asks_the_owner_to_connect_it(self):
         reply = self.handle(multi({"tool_slug": "INSTAGRAM_GET_USER_INFO", "arguments": {}}))
         out = text_of(reply)
-        self.assertIn("Ask the owner to connect a instagram account in Apps", out)
+        self.assertIn("Ask the owner to connect instagram in Apps", out)
         self.assertIn("This call was not performed.", out)
         self.assertEqual(self.up.frames, [])
 
     def test_missing_account_asks_the_owner_to_connect_it(self):
         integrations.set_account("hq", "ca_g1", False, self.root)
         reply = self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}))
-        self.assertIn("Ask the owner to connect a gmail account in Apps", text_of(reply))
+        self.assertIn("Ask the owner to connect gmail in Apps", text_of(reply))
 
     def acts(self):
         integrations.set_grant("hq", "cos", {"gmail": "act"}, self.root)
@@ -197,6 +198,38 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames, [])
         self.assertIn("only reports", text_of(reply))
 
+    def test_act_grant_logs_a_failed_send_as_failed(self):
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        read = {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}
+        self.up.result = {"content": [{"type": "text", "text": json.dumps({"successful": True, "data": {"results": [
+            {"tool_slug": "GMAIL_FETCH_EMAILS", "index": 0, "response": {"successful": True, "data": {}}},
+            {"tool_slug": "GMAIL_SEND_EMAIL", "index": 1,
+             "response": {"successful": False, "error": "invalid recipient"}}]}})}]}
+        reply = self.handle(multi(read, send))
+        rows = [r for r in approvals.load(self.root) if r.get("kind") == approvals.APP]
+        self.assertEqual([(r["status"], r["result"]) for r in rows], [("failed", "Failed: invalid recipient")])
+        self.assertNotIn("Ran on its own", text_of(reply))
+        self.assertIn("Did not go out: Send email", text_of(reply))
+
+    def test_act_grant_error_reply_is_not_logged_as_sent(self):
+        self.acts()
+        self.up.result = {"content": [{"type": "text", "text": "boom"}], "isError": True}
+        reply = self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {}}))
+        rows = [r for r in approvals.load(self.root) if r.get("kind") == approvals.APP]
+        self.assertEqual([r["status"] for r in rows], ["failed"])
+        self.assertNotIn("Ran on its own", text_of(reply))
+
+    def test_act_grant_has_a_daily_limit_then_holds(self):
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        with mock.patch.object(apps_relay, "MAX_AUTO_RUNS", 2):
+            self.handle(multi(send, send))
+            reply = self.handle(multi(send))
+        self.assertEqual(len(self.up.frames), 1)  # the third send did not go out
+        self.assertEqual(len(approvals.pending(self.root)), 1)
+        self.assertIn("daily limit", text_of(reply))
+
     def test_writes_held_together_share_one_batch(self):
         sends = [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": f"p{i}@example.com"}}
                  for i in range(3)]
@@ -211,7 +244,8 @@ class Gate(unittest.TestCase):
 
     def test_read_grant_refuses_write(self):
         reply = self.handle(multi({"tool_slug": "GOOGLEDRIVE_UPLOAD_FILE", "arguments": {}}))
-        self.assertIn("not available", text_of(reply))
+        self.assertIn("read-only access to googledrive", text_of(reply))
+        self.assertIn("ask the owner", text_of(reply))
         self.assertEqual(approvals.pending(self.root), [])
 
     def test_hidden_meta_tool_refused(self):
@@ -228,7 +262,7 @@ class Gate(unittest.TestCase):
     def test_grant_reread_each_call(self):
         integrations.set_grant("hq", "cos", {}, self.root)
         reply = self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
-        self.assertIn("connect a gmail account in Apps", text_of(reply))
+        self.assertIn("connect gmail in Apps", text_of(reply))
         self.assertEqual(self.up.frames, [])
 
     def second_gmail(self):
