@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 from dashboard.engines import prices
 from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, stop_child, turn_vars
@@ -24,6 +25,10 @@ from dashboard.engines.claude_code import (
 
 ENGINE_ID = "codex"
 FULL_DISK_NOTE = "This engine can read any file on this computer."
+_INSTRUCTIONS_FILE = Path(__file__).with_name("codex_instructions.md")
+# Bump when changing the base role: resumed Codex sessions retain their old instructions.
+_INSTRUCTIONS_VERSION = 1
+OS_TOOL_TIMEOUT = 600  # seconds; matches os_relay.TIMEOUT
 _OFF = ("features.shell_tool=false", "features.apps=false", "features.multi_agent=false",
         "features.image_generation=false", "features.goals=false")
 
@@ -75,15 +80,19 @@ class CodexEngine(Engine):
         return None if model in ("haiku", "sonnet", None) else model  # the login's own default
 
     def is_fresh(self, session):
-        return not (session.engine_state.get(self.id) or {}).get("session")
+        state = session.engine_state.get(self.id) or {}
+        return not state.get("session") or state.get("instructions_version") != _INSTRUCTIONS_VERSION
 
     def build_cmd(self, session, policy, model, tokens):
         state = session.engine_state.get(self.id) or {}
         cmd = [self.codex_bin, "exec"]
-        if state.get("session"):
+        if not self.is_fresh(session):
             cmd += ["resume", state["session"]]
         cmd += ["--json", "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
                 "-c", 'sandbox_mode="read-only"', "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+                "-c", f"model_instructions_file={_toml(str(_INSTRUCTIONS_FILE))}",
+                "-c", "project_doc_max_bytes=0", "-c", "skills.include_instructions=false",
+                "-c", "skills.bundled.enabled=false",
                 "-c", f"developer_instructions={_toml(session.rail)}"]
         for off in _OFF:
             cmd += ["-c", off]
@@ -91,7 +100,9 @@ class CodexEngine(Engine):
             url = f"http://127.0.0.1:{tokens.os_port}{OS_MCP_PATH}"
             cmd += ["-c", f"mcp_servers.os.url={_toml(url)}",
                     "-c", f"mcp_servers.os.bearer_token_env_var={_toml(OS_TOKEN_ENV)}",
-                    "-c", 'mcp_servers.os.default_tools_approval_mode="approve"']
+                    "-c", 'mcp_servers.os.default_tools_approval_mode="approve"',
+                    # Codex cuts an MCP call off at 60s; revise/generate runs take longer.
+                    "-c", f"mcp_servers.os.tool_timeout_sec={OS_TOOL_TIMEOUT}"]
         if model:
             cmd += ["-m", model]
         return cmd
@@ -106,6 +117,10 @@ class CodexEngine(Engine):
     def turn(self, session, text, policy, model, tokens):
         self.check(policy)
         had_session = bool((session.engine_state.get(self.id) or {}).get("session"))
+        if had_session and self.is_fresh(session):
+            # ChatSession retries with the visible conversation recap and a fresh app role.
+            session.engine_state[self.id] = {}
+            raise SessionLost("Codex's app instructions changed.")
         session.engine_state.setdefault(self.id, {})
         try:
             proc = subprocess.Popen(self.build_cmd(session, policy, self.resolve_model(model), tokens),
@@ -130,7 +145,8 @@ class CodexEngine(Engine):
                 except ValueError:
                     continue
                 if obj.get("type") == "thread.started" and obj.get("thread_id"):
-                    session.engine_state[self.id] = {"session": obj["thread_id"]}
+                    session.engine_state[self.id] = {"session": obj["thread_id"],
+                                                     "instructions_version": _INSTRUCTIONS_VERSION}
                 for ev in parse_event(obj):
                     if ev[0] == "error":
                         errors.append(ev[1])

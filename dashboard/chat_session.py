@@ -15,6 +15,7 @@ from dashboard.engines.claude_code import (  # noqa: F401  (the server and osctl
     APP_ALLOWED_TOOLS, APP_TOOLS, APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, BASE_ALLOWED_TOOLS,
     BASE_TOOLS, CHAT_MODEL, ENGINE_ENV, ESCALATED_MODEL, OS_MCP_PATH, OS_TOKEN_ENV, SECRET_FILE_GLOBS,
     WEB_ALLOWED_TOOLS, WEB_TOOLS, ClaudeCodeEngine, apps_mcp_config, bot_tmpdir, os_mcp_config,
+    forget_transcripts, private_tmpdir, sweep_stale_tmpdirs, tmp_name,
     parse_event, private_read_rules, remove_bot_tmpdir, user_web_domains, web_fetch_rules,
 )
 

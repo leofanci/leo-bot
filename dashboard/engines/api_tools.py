@@ -22,7 +22,7 @@ import socket
 import stat
 import subprocess
 import sys
-import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,6 +36,7 @@ MAX_FILE_BYTES = 2_000_000
 MAX_FETCH_BYTES = 2_000_000
 MAX_REDIRECTS = 4
 FETCH_TIMEOUT = 20
+FETCH_DEADLINE = 60  # the whole fetch, redirects included
 MAX_MATCHES = 200
 # Every workspace's data at once, or the machine's own state (same list as osctl read-file).
 _PRIVATE_PREFIXES = ("chats/", "team/", "portfolio/", "private/", "database/", "os.db", ".remember/",
@@ -255,30 +256,54 @@ def _edit_target(raw, root, policy):
 
 
 def _write_atomic(base, target, data):
-    """Write through a temp file in the same folder, then swap it in, keeping the mode."""
+    """Write through a temp file in the same folder, then swap it in, keeping the mode. The walk
+    from the edit folder down opens one folder at a time without following links (openat-style),
+    so a folder swapped for a symlink after the checks is refused, never written through."""
     try:
-        mode = stat.S_IMODE(os.lstat(target).st_mode)
-    except FileNotFoundError:
-        mode = 0o644
+        parts = Path(target).relative_to(base).parts
+    except ValueError:
+        raise ToolError("only files inside a linked folder with edit access can be changed") from None
+    if not parts:
+        raise ToolError("a file path is required")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    tmp = None
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # Created after the checks: re-check the folder it landed in is still inside.
-        if base not in target.parent.resolve().parents and target.parent.resolve() != base:
-            raise ToolError("only files inside a linked folder with edit access can be changed")
-        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".leobot-", suffix=".tmp")
+        dfd = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as e:
         raise ToolError(f"could not write that file: {e.strerror or e}") from None
     try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, 0o755, dir_fd=dfd)
+            except FileExistsError:
+                pass
+            nfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=dfd)
+            os.close(dfd)
+            dfd = nfd
+        name = parts[-1]
+        try:
+            st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            if not stat.S_ISREG(st.st_mode):
+                raise ToolError("only regular files can be replaced")
+            mode = stat.S_IMODE(st.st_mode)
+        except FileNotFoundError:
+            mode = 0o644
+        tmp = f".leobot-{os.urandom(6).hex()}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600, dir_fd=dfd)
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.chmod(tmp, mode)
-        os.replace(tmp, target)
+            os.fchmod(f.fileno(), mode)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        tmp = None
     except OSError as e:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
         raise ToolError(f"could not write that file: {e.strerror or e}") from None
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp, dir_fd=dfd)
+            except OSError:
+                pass
+        os.close(dfd)
 
 
 def write_file(raw_path, content, root, policy):
@@ -399,12 +424,32 @@ def _fetch_opener():
     return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect, _PublicHTTP, _PublicHTTPS)
 
 
+def _read_until(resp, limit, deadline):
+    """Up to `limit` bytes, one socket read at a time, stopping at `deadline`: the socket
+    timeout covers each read, so a server dripping a byte at a time could hold a turn."""
+    chunks, got = [], 0
+    read = getattr(resp, "read1", None) or resp.read
+    while got < limit:
+        if time.monotonic() > deadline:
+            raise ToolError("the page took too long to load")
+        chunk = read(min(65536, limit - got))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
+
+
 def web_fetch(url, policy, opener=None):
     opener = opener or _fetch_opener()
+    deadline = time.monotonic() + FETCH_DEADLINE
     for _ in range(MAX_REDIRECTS + 1):
         parts = urllib.parse.urlsplit(url if isinstance(url, str) else "")
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ToolError("an http(s) address is required")
+        if "@" in parts.netloc or "\\" in parts.netloc or "%" in parts.netloc:
+            # urllib connects to the raw netloc: a user part or escapes could name another host
+            raise ToolError("an address with a user name or escaped characters is not fetched")
         if not _host_allowed(parts.hostname, policy.web_domains):
             raise ToolError(f"{parts.hostname} was not named in the message, so it cannot be fetched")
         if not _public_host(parts.hostname):
@@ -412,7 +457,7 @@ def web_fetch(url, policy, opener=None):
         req = urllib.request.Request(url, headers={"User-Agent": "Leo Bot", "Accept": "text/html,text/plain,*/*"})
         try:
             with opener.open(req, timeout=FETCH_TIMEOUT) as resp:
-                raw = resp.read(MAX_FETCH_BYTES)
+                raw = _read_until(resp, MAX_FETCH_BYTES, deadline)
                 ctype = resp.headers.get("Content-Type", "")
             return _page_text(raw, ctype)[:MAX_OUT_CHARS]
         except urllib.error.HTTPError as e:

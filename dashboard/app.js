@@ -4552,7 +4552,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
               const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.readAsDataURL(blob);
             });
             const ext = imgType.split("/")[1] || "png";
-            const { path } = await jpost("/api/upload-temp", { data: b64, ext });
+            const { path } = await jpost("/api/upload-temp", { data: b64, ext, ws: _WS });
             if (termSock && termSock.readyState === 1) termSock.send(path);
             return;
           }

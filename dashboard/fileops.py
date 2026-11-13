@@ -182,11 +182,21 @@ def _confined_dir(base: Path, component: str, label: str) -> Path:
 
 
 # --------------------------------------------------------------------------- #
+# generate.py ends itself at its own JOB_DEADLINE; these outer limits catch a child that cannot.
+GENERATE_TIMEOUT = 1600
+REINDEX_TIMEOUT = 300
+
+
+def _timed_out(timeout):
+    return ActionError(f"stopped after {timeout // 60} minutes: it did not finish")
+
+
 def reindex():
-    res = subprocess.run(
-        [sys.executable, str(_INDEX_SCRIPT), str(ROOT)],
-        capture_output=True, text=True,
-    )
+    try:
+        res = subprocess.run([sys.executable, str(_INDEX_SCRIPT), str(ROOT)],
+                             capture_output=True, text=True, timeout=REINDEX_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise _timed_out(REINDEX_TIMEOUT) from None
     if res.returncode != 0:
         raise ActionError(f"re-index failed: {res.stderr.strip()[:600]}")
     # Guard: the SQLite index upserts by id, so two posts sharing one id
@@ -595,11 +605,14 @@ def write_channel_guidelines(slug, text):
 def refine_guidelines(slug, raw_text):
     """AI-polish rough guideline notes via generate.py; returns text, does NOT save."""
     _channel_dir(slug)
-    res = subprocess.run(
-        [sys.executable, str(_GENERATE_SCRIPT),
-         "--workspace", str(ROOT), "refine-guidelines", slug],
-        input=raw_text or "", capture_output=True, text=True,
-    )
+    try:
+        res = subprocess.run(
+            [sys.executable, str(_GENERATE_SCRIPT),
+             "--workspace", str(ROOT), "refine-guidelines", slug],
+            input=raw_text or "", capture_output=True, text=True, timeout=GENERATE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise _timed_out(GENERATE_TIMEOUT) from None
     if res.returncode != 0:
         raise ActionError(f"refine failed: {(res.stderr or res.stdout).strip()[:800]}")
     return {"refined": res.stdout}
@@ -948,6 +961,17 @@ def _need_known_entity(slug: str) -> None:
         raise ActionError(f"no project, profile, channel or product called '{slug}'")
 
 
+def _forget_leftovers(slug: str) -> None:
+    """A new workspace starts empty even when a delete of the same slug stopped half way
+    (people, invites, approvals, app grants and engine picks are kept outside its folder)."""
+    from core import approvals, integrations, people
+    from dashboard.engines import config as engine_config
+    approvals.forget_workspace(slug, ROOT)
+    integrations.forget_workspace(slug, ROOT)
+    people.forget_workspace(ROOT, slug)
+    engine_config.forget_workspace(slug, ROOT)
+
+
 def create_project(slug: str, fields: dict) -> dict:
     slug = _safe_component(slug, "project slug")
     projects_dir = ROOT / "projects"
@@ -956,6 +980,7 @@ def create_project(slug: str, fields: dict) -> dict:
     if project_dir != Path(os.path.realpath(projects_dir)) / slug or project_dir.exists():
         raise ActionError(f"project '{slug}' already exists")
     _need_free_slug(slug)
+    _forget_leftovers(slug)
     name = _one_line(fields.get("name") or slug, "name")
     kind = _one_line(fields.get("kind") or "venture", "kind")
     priority = _priority(fields.get("priority") or "primary")

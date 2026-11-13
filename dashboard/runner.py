@@ -7,11 +7,12 @@ agent CLI and your own login, and streams the answers back. Each turn has no she
 and no file tools: its only Leo Bot tool is osctl, which runs on the server.
 """
 import argparse
+import atexit
 import json
 import os
 import re
+import shutil
 import sys
-import tempfile
 import threading
 import time
 import urllib.error
@@ -23,7 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from dashboard.engines.base import EngineRefused, SessionLost, TurnPolicy, TurnTokens  # noqa: E402
-from dashboard.engines.claude_code import ClaudeCodeEngine  # noqa: E402
+from dashboard.engines.claude_code import (  # noqa: E402
+    ClaudeCodeEngine, private_tmpdir, remove_bot_tmpdir, sweep_stale_tmpdirs)
 
 POLL_TIMEOUT = 40
 FLUSH_SECONDS = 0.25
@@ -206,7 +208,10 @@ def main(argv=None):
     status = engine.status()
     if not status["ok"]:
         sys.exit(f"Claude Code is not ready here: {status['detail']}")
-    workdir = tempfile.mkdtemp(prefix="leobot-runner-")  # no project files: nothing here to read
+    sweep_stale_tmpdirs()  # what a crashed runner left behind
+    workdir = private_tmpdir("leobot-runner-")  # no project files: nothing here to read
+    atexit.register(shutil.rmtree, workdir, True)  # and its bot temp folder: gone on exit
+    atexit.register(remove_bot_tmpdir)
     sessions = Sessions()
     print(f"Connected to {args.server}. Your messages there now run on this Mac. Ctrl-C to stop.")
     backoff = 1

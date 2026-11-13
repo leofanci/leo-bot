@@ -240,6 +240,16 @@ class Hub:
                     turn.events.put(None)
             self._cond.notify_all()
 
+    def drop_workspace(self, ws):
+        """A deleted workspace: every turn there ends now, whoever's runner holds it."""
+        with self._cond:
+            for turn in list(self._turns.values()):
+                if (turn.job.get("policy") or {}).get("workspace") == ws:
+                    turn.cancelled = True
+                    turn.events.put(("error", "This workspace was deleted."))
+                    turn.events.put(None)
+            self._cond.notify_all()
+
     def drop(self, rid):
         with self._cond:
             self._seen.pop(rid, None)

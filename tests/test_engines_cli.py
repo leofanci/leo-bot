@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -72,12 +73,45 @@ class CodexDriver(Base):
         call = self.calls()[0]
         argv = " ".join(call["argv"])
         for needed in ("--ignore-user-config", "--ignore-rules", 'sandbox_mode="read-only"', "features.shell_tool=false",
-                       "features.apps=false", "bearer_token_env_var", "LEOBOT_OS_TOKEN"):
+                       "features.apps=false", "bearer_token_env_var", "LEOBOT_OS_TOKEN",
+                       "project_doc_max_bytes=0", "skills.include_instructions=false", "skills.bundled.enabled=false",
+                       "mcp_servers.os.tool_timeout_sec=600"):  # Codex's own 60s cap would cut revise/generate off
             self.assertIn(needed, argv)
         self.assertNotIn("tok ", argv + " ")  # relay token in env only
         self.assertEqual(call["token"], "tok")
         self.assertIsNone(call["leak"])
         self.assertEqual(call["stdin"].strip(), "hi")
+
+    def test_app_role_replaces_builtin_coding_instructions_on_every_turn(self):
+        s = self.session(self.engine)
+        list(s.ask("one"))
+        list(s.ask("two"))
+        for call in self.calls():
+            argv = call["argv"]
+            settings = {}
+            for i, arg in enumerate(argv[:-1]):
+                if arg == "-c":
+                    settings.update(tomllib.loads(argv[i + 1]))
+            instructions = Path(settings["model_instructions_file"])
+            self.assertTrue(instructions.is_absolute())
+            self.assertTrue(instructions.is_file())
+            self.assertIn("teammate inside Leo Bot", instructions.read_text())
+            self.assertEqual(settings["developer_instructions"], s.rail)
+
+    def test_old_coding_session_restarts_with_visible_recap(self):
+        s = self.session(self.engine)
+        s.engine_state["codex"] = {"session": "old-coding-session"}
+        s.recap = "Earlier: update the launch post."
+        self.assertTrue(s.is_fresh())
+        list(s.ask("Keep it unscheduled."))
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("resume", calls[0]["argv"])
+        self.assertEqual(calls[0]["stdin"].strip(), s.recap + "\n\nKeep it unscheduled.")
+        self.assertFalse(s.is_fresh())
+
+        list(s.ask("And the pricing post."))
+        self.assertEqual(self.calls()[1]["argv"][:3], ["exec", "resume", "th-1"])
 
     def test_second_turn_resumes_with_the_same_locks(self):
         s = self.session(self.engine)
