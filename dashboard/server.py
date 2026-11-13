@@ -754,19 +754,34 @@ _DRIVE_INTENT_RE = re.compile(r"\b(?:google )?drive\b|\bgoogle docs?\b", re.I)
 _APP_INTENT = {"gmail": _GMAIL_INTENT_RE, "googlecalendar": _GCAL_INTENT_RE, "googledrive": _DRIVE_INTENT_RE}
 
 
+# Words people use for a social app, and verbs that act on it (send, DM, read...). "write a
+# LinkedIn post" has none of those verbs, so it stays content work for the pipeline.
+_APP_WORDS = {"instagram": ("insta", "ig"), "facebook": ("fb",), "twitter": ("x",)}
+_APP_ACT = (r"send|dm|message|text|reach out to|reach|contact|check|read|fetch|pull|list|look at|"
+            r"look up|show|reply|answer|follow up")
+
+
+def _app_acted_on(slug, text):
+    """The message sends to, reads or messages on this app (its name or a short form)."""
+    names = [slug.replace("_", " "), *_APP_WORDS.get(slug, ())]
+    word = "|".join(re.escape(n) for n in names)
+    return bool(re.search(rf"\b(?:{_APP_ACT})\b[^.?!\n]{{0,60}}\b(?:{word})\b"
+                          rf"|\b(?:{word})\s+(?:profile|account|dms?|inbox|handle)\b", text, re.I))
+
+
 def _needs_apps(text, grant, explicit_skill=False):
     """Pure string classifier, like _needs_web: no model call, no network."""
     if explicit_skill or not grant:
         return False
     text = text or ""
-    if "apps" in _MENTION_RE.findall(text.lower()):
+    if "apps" in _MENTION_RE.findall(text.lower()) or re.search(r"\bcomposio\b", text, re.I):
         return True
     for slug in grant:
         rx = _APP_INTENT.get(slug)
         if rx is not None:
             if rx.search(text):
                 return True
-        elif re.search(rf"\bmy {re.escape(slug.replace('_', ' '))}\b", text, re.I):
+        elif re.search(rf"\bmy {re.escape(slug.replace('_', ' '))}\b", text, re.I) or _app_acted_on(slug, text):
             return True
     return False
 
@@ -968,7 +983,7 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
             except Exception:  # noqa: BLE001 - the line is still told with the slug
                 name = None
             if name and name != ws:
-                shown = f"{name} (folder and id: {ws})"
+                shown = f"{name} (slug {ws}). This is {name}: \"{name}\", \"this project\" and \"here\" all mean this workspace"
         lines.append("Workspace: HQ, the holding's CEO office (sees every company)." if ws == bots.HQ
                      else f"Workspace: {shown}. You work only for this company; other workspaces "
                           "are invisible except as busy time in the shared calendar.")
@@ -2906,6 +2921,10 @@ class Handler(BaseHTTPRequestHandler):
         app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
                      if integrations.api_key(ROOT) and not shared else {})
         app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
+        # A short follow-up ("yes", "go ahead") in a thread that already used apps stays an app turn.
+        if (not app_turn and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
+                and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
+            app_turn = True
         if app_turn:
             skill = explicit = suggest = None
             may_write = False

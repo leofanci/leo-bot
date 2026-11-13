@@ -238,7 +238,8 @@ class Card(TempRoot):
         with mock.patch.object(server, "ROOT", self.root), \
                 mock.patch.object(server.db, "tree", return_value=[{"slug": "acme", "name": "Acme Inc"}]):
             text = server._bot_block(team, "cmo", None, "acme", fresh=True)
-        self.assertIn("Workspace: Acme Inc (folder and id: acme).", text)
+        self.assertIn("Workspace: Acme Inc (slug acme). This is Acme Inc:", text)
+        self.assertIn('"this project" and "here" all mean this workspace.', text)
         with mock.patch.object(server, "ROOT", self.root), \
                 mock.patch.object(server.db, "tree", return_value=[{"slug": "acme", "name": "acme"}]):
             self.assertIn("Workspace: acme.", server._bot_block(team, "cmo", None, "acme", fresh=True))
