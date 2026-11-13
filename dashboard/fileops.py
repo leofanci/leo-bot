@@ -1697,17 +1697,18 @@ def _memo_assumptions(project_slug: str, mtype: str) -> dict[int, list[dict]]:
     """{version: assumptions} for every saved version of a memo type."""
     if mtype not in MEMO_TYPES:
         raise ActionError(f"unknown memo type '{mtype}'")
-    memo_dir = _project_dir(project_slug) / "strategy" / "memos"
+    _project_dir(project_slug)  # rejects an unknown or unsafe project
     out: dict[int, list[dict]] = {}
-    for ver in range(1, next_memo_version(memo_dir, mtype)):
-        path = memo_dir / f"{mtype}-v{ver}.json"
-        if not path.is_file():
+    # The index knows each saved memo file: read those, never a path built from the arguments.
+    for row in _db_module().memos():
+        if row["entity_slug"] != project_slug or row["type"] != mtype:
             continue
         try:
-            body = json.loads(path.read_text(encoding="utf-8"))
+            body = json.loads((ROOT / row["file_path"]).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        out[ver] = assumptions.normalize(body.get("assumptions") if isinstance(body, dict) else None)
+        out[int(row["version"])] = assumptions.normalize(
+            body.get("assumptions") if isinstance(body, dict) else None)
     return out
 
 
