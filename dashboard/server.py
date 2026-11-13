@@ -61,7 +61,7 @@ from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
 from dashboard import compaction, costs, job_cards, job_ledger, judge as judge_model, score_run, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
-from ai_rules import CHAT_RAIL  # noqa: E402
+from ai_rules import CHAT_RAIL, SHORT_REPLIES  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
 from core.ids import (  # noqa: E402
     PROJECT_SECTIONS,
@@ -117,7 +117,17 @@ UPLOAD_EXTENSIONS = frozenset({"png", "jpg", "jpeg", "gif", "webp"})
 VENDOR_TYPES = {".css": "text/css", ".js": "application/javascript",
                 ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 
-RAIL = CHAT_RAIL
+def rail() -> str:
+    """The chat system rail, read per new session: the Short replies setting adds the style."""
+    try:
+        short = updater.settings()["short_replies"]
+    except Exception:  # noqa: BLE001 - a broken settings file keeps the default
+        short = True
+    return CHAT_RAIL + ("\n\n## Reply style\n" + SHORT_REPLIES if short else "")
+
+
+def new_chat_session():
+    return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=rail())
 
 # The session token is handed out only to whoever proves they already know it:
 # the macOS app reads it from this owner-only file, a terminal user gets it in
@@ -1640,7 +1650,7 @@ def _folder_gone(sess_or_rec, linked):
 
 
 def _fresh_with_recap(rec):
-    sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+    sess = new_chat_session()
     sess.pending_recap = chat_store.recap(rec) or None
     return sess
 
@@ -1652,10 +1662,10 @@ def _reopen(rec, scope, linked):
     rec_slug = _scope_slug(rec.get("scope")) if rec else None
     same = rec and (rec_slug == _scope_slug(scope) or (rec_slug is None and not _used_paths(rec)))
     if not same:
-        return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        return new_chat_session()
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(paths.CODE), RAIL, rec)
+    return chat_session.ChatSession.restore(str(paths.CODE), rail(), rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
@@ -1679,7 +1689,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if new:
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        _CHAT = new_chat_session()
         _CHAT_SCOPE = scope
         return _CHAT
     if chat_id and (_CHAT is None or getattr(_CHAT, "session_id", None) != chat_id):
@@ -1700,7 +1710,7 @@ def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
     if _CHAT is None or _scope_slug(_CHAT_SCOPE) != _scope_slug(scope):
         if _CHAT is not None:
             _CHAT.close()
-        _CHAT = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        _CHAT = new_chat_session()
     _CHAT_SCOPE = scope
     return _CHAT
 
@@ -1745,7 +1755,7 @@ def person_chat_session(pid, project_scope=None, chat_id=None, new=False, linked
         if cur is not None:
             cur.close()
         rec = chat_store.load(chat_id) if (chat_id and not new) else None
-        sess = _reopen(rec, scope, linked) if rec else chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+        sess = _reopen(rec, scope, linked) if rec else new_chat_session()
         _PERSON_CHATS[pid] = [sess, scope]
         return sess
 
@@ -2916,7 +2926,7 @@ class Handler(BaseHTTPRequestHandler):
         if allowance:
             return self._sse_message(allowance)
         if job:
-            sess = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+            sess = new_chat_session()
             # Approval and Report only: osctl refuses every write. Auto: osctl creates and updates,
             # deletes and memory still wait (osctl reads LEOBOT_JOB and LEOBOT_JOB_MODE).
             sess.readonly = job_mode != "auto"
@@ -3242,7 +3252,7 @@ class Handler(BaseHTTPRequestHandler):
 
         def run_teammate(b2, question, asked_by, msg):
             """A teammate answers once, read-only, in its own fresh session."""
-            c = chat_session.ChatSession(repo_dir=str(paths.CODE), rail=RAIL)
+            c = new_chat_session()
             c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
             c.ephemeral = True
@@ -3689,6 +3699,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(403, {"error": "forbidden"})
         if path == "/api/update":  # owner only (checked above); needs no index
             return self._send(200, _update_view())
+        if path == "/api/settings/chat":  # owner only (checked above)
+            return self._send(200, {"short_replies": updater.settings()["short_replies"]})
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
@@ -3875,6 +3887,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._send(200, {"public_url": people.set_public_url(ROOT, body.get("url"))})
+            if path == "/api/settings/chat":  # Settings, Bots: Short replies (new threads pick it up)
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                if not isinstance(body.get("short_replies"), bool):
+                    return self._send(400, {"error": "short_replies: true or false"})
+                updater.save_settings({"short_replies": body["short_replies"]})
+                return self._send(200, {"short_replies": updater.settings()["short_replies"]})
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})

@@ -130,7 +130,7 @@ def run(case, live_root=None):
         yield ("done", {"result": replies[role]})
 
     if live:
-        sess = server.chat_session.ChatSession(repo_dir=str(server.paths.CODE), rail=server.RAIL)
+        sess = server.chat_session.ChatSession(repo_dir=str(server.paths.CODE), rail=server.rail())
     else:
         engine = _Engine(ClaudeCodeEngine.supports)
 

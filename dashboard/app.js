@@ -1680,7 +1680,8 @@ async function renderEngines(tab = "engines"){
       : "Keys stay on this machine and no bot can read them."}</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   let adding = null;
   const draw = async () => {
-    const d = await api("/api/engines").catch(e => ({ error: e.message }));
+    const [d, chatCfg] = await Promise.all([api("/api/engines").catch(e => ({ error: e.message })),
+      tab === "bots" ? api("/api/settings/chat").catch(() => null) : null]);
     if (!stillOn()) return;
     const box = $("#eng");
     if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
@@ -1735,6 +1736,8 @@ async function renderEngines(tab = "engines"){
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
         <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
+        ${chatCfg ? `<div class="eng-choice"><label><input type="checkbox" data-short-replies${chatCfg.short_replies ? " checked" : ""}> <span>Short replies</span></label>
+          <small>Bots answer first and skip filler in chat. Saved work (memos, posts, briefs) stays in full prose. New threads pick it up.</small></div>` : ""}
       </section>
       <section class="integ-group"><h3>By workspace</h3><p class="eng-hint">Only bots switched on in that workspace. Switch them on or off in its Team.</p>${wsCards || `<div class="empty">No bots yet.</div>`}</section>`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
@@ -1758,6 +1761,11 @@ async function renderEngines(tab = "engines"){
       } catch (err) { toast("✗ " + err.message); }
       b.disabled = false; b.textContent = "Test";
     });
+    const shortBox = box.querySelector("[data-short-replies]");
+    if (shortBox) shortBox.onchange = async () => {
+      try { await jpost("/api/settings/chat", { short_replies: shortBox.checked }); toast(shortBox.checked ? "Short replies on ✓" : "Short replies off ✓"); }
+      catch (err) { toast("✗ " + err.message); draw(); }
+    };
     box.querySelectorAll("[data-choice]").forEach(sel => sel.onchange = async () => {
       try { await jpost("/api/engines/choice", { name: sel.dataset.choice, value: sel.value, scope: sel.dataset.scope || null }); }
       catch (err) { toast("✗ " + err.message); draw(); }
