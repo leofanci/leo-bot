@@ -206,11 +206,24 @@ def _auth_kind(item):
     return "own_app"
 
 
+def _categories(item):
+    raw = (item.get("meta") or {}).get("categories") if isinstance(item.get("meta"), dict) else None
+    names = ((c.get("name") if isinstance(c, dict) else c) for c in (raw if isinstance(raw, list) else []))
+    return {str(n).strip().lower() for n in names if isinstance(n, str)}
+
+
 def _parse_catalog_page(data):
     items = [{"slug": i["slug"], "name": i.get("name") or i["slug"],
-              "logo": (i.get("meta") or {}).get("logo"), "auth": _auth_kind(i)}
+              "logo": (i.get("meta") or {}).get("logo"), "auth": _auth_kind(i),
+              "paid_reads": bool(_categories(i) & app_rules.PAID_READ_CATEGORIES)}
              for i in data.get("items") or [] if isinstance(i, dict) and i.get("slug")]
     return items, data.get("next_cursor")
+
+
+def paid_read_toolkits(items):
+    """Toolkits in `items` (a catalog) whose reads wait like writes: Composio files them
+    under a category that spends credits or fetches arbitrary pages."""
+    return frozenset(i["slug"] for i in items if i.get("paid_reads"))
 
 
 def catalog(root=bots.ROOT):
@@ -227,6 +240,34 @@ def catalog(root=bots.ROOT):
     items = [i for i in items if i["slug"] not in app_rules.BLOCKED_TOOLKITS]
     _CATALOG.update(at=time.time(), items=items)
     return items
+
+
+_TOOL_SLUG_RE = re.compile(r"[A-Z0-9][A-Z0-9_]{0,127}")
+_READ_ONLY = {}  # tool slug -> (checked at, bool); failures are not kept
+READ_ONLY_CACHE_MAX = 2000
+
+
+def _parse_tool_read_only(data):
+    tags = data.get("tags") if isinstance(data, dict) else None
+    return isinstance(tags, list) and "readOnlyHint" in tags
+
+
+def tool_read_only(slug, root=bots.ROOT):
+    """True when Composio tags this tool readOnlyHint, False when it does not, None when
+    it could not be asked (the call then waits for approval like a write). Cached an hour."""
+    if not isinstance(slug, str) or not _TOOL_SLUG_RE.fullmatch(slug):
+        return None
+    hit = _READ_ONLY.get(slug)
+    if hit and time.time() - hit[0] < CATALOG_TTL:
+        return hit[1]
+    try:
+        value = _parse_tool_read_only(_json("GET", "/tools/" + urllib.parse.quote(slug), None, root))
+    except ComposioError:
+        return None
+    if len(_READ_ONLY) >= READ_ONLY_CACHE_MAX:
+        _READ_ONLY.clear()
+    _READ_ONLY[slug] = (time.time(), value)
+    return value
 
 
 def own_auth_config(toolkit, root=bots.ROOT):

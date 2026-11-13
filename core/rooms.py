@@ -127,7 +127,9 @@ def save_topic(ws, name, members, lead, root=bots.ROOT, *, replace=None, private
         members.insert(0, lead)
     rows = _load_topics(ws, root)
     if any(r["name"] == name for r in rows) and name != replace:
-        raise ValueError(f"#{name} already exists")
+        # Same words whether or not the caller can see that channel: a private one's
+        # name is not confirmed to someone outside it beyond "taken".
+        raise ValueError(f"#{name} is taken: pick another name")
     row = {"name": name, "members": members, "lead": lead}
     if private:
         row["private"] = True
@@ -140,6 +142,20 @@ def save_topic(ws, name, members, lead, root=bots.ROOT, *, replace=None, private
         rows.append(row)
     _save_topics(ws, root, rows)
     return f"{ws}/t-{name}"
+
+
+def forget_person(ws, pid, root=bots.ROOT):
+    """Take a removed person off every private channel of `ws` in one write. No re-check of
+    the channel's bots: a removal must never stop half way over a bot switched off since."""
+    rows = _load_topics(ws, root)
+    changed = False
+    for r in rows:
+        if pid in (r.get("people") or []):
+            r["people"] = [x for x in r["people"] if x != pid]
+            changed = True
+    if changed:
+        _save_topics(ws, root, rows)
+    return changed
 
 
 def delete_topic(ws, name, root=bots.ROOT):

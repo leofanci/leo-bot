@@ -227,12 +227,44 @@ class IndexSwapsWhole(Tmp):
         self.assertEqual(self.build().returncode, 0)
         db_file = self.root / "database/data/os.db"
         good = db_file.read_bytes()
-        project.write_text("---\nname: Demo\npriority: urgent\n---\n")  # the schema refuses this one mid-build
-        failed = self.build()
-        self.assertNotEqual(failed.returncode, 0)
-        self.assertIn("INDEX FAILED", failed.stderr)
+        project.write_text("---\nname: Demo B\npriority: primary\n---\n")
+        import contextlib, io as _io
+        import index
+        err = _io.StringIO()
+        # A failure after the new index was started (here, mid-build) leaves the old one whole.
+        with mock.patch.object(index, "check_slugs", side_effect=index.IndexError_("boom")), \
+                mock.patch.object(sys, "argv", ["index.py", str(self.root)]), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(_io.StringIO()), \
+                self.assertRaises(SystemExit):
+            index.main()
+        self.assertIn("INDEX FAILED", err.getvalue())
         self.assertEqual(db_file.read_bytes(), good)
         self.assertEqual([p.name for p in db_file.parent.iterdir() if ".tmp" in p.name], [])
+
+    def test_one_bad_file_is_skipped_never_the_whole_index(self):
+        for slug in ("demo", "acme"):
+            (self.root / f"projects/{slug}/strategy/memos").mkdir(parents=True)
+            (self.root / f"projects/{slug}/project.md").write_text(f"---\nname: {slug}\npriority: primary\n---\n")
+        (self.root / "projects/demo/project.md").write_text("---\nname: Demo\npriority: urgent\n---\n")
+        (self.root / "projects/demo/strategy/memos/positioning-v1.json").write_text("{not json")
+        (self.root / "projects/acme/strategy/memos/positioning-v1.json").write_text('{"status": "approved"}')
+        exp = self.root / "projects/acme/strategy/experiments"
+        exp.mkdir(parents=True)
+        (exp / "e1.json").write_text('{"assumption": "x", "duration_days": "99999999999999999999999"}')
+        (self.root / "portfolio").mkdir()
+        (self.root / "portfolio/milestones.json").write_text(
+            '{"milestones": [{"id": "m1", "entity": "gone", "date": "2026-01-01", "title": "t"}, "junk"]}')
+        built = self.build()
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.assertIn("warn", built.stdout)
+        import sqlite3
+        conn = sqlite3.connect(self.root / "database/data/os.db")
+        rows = dict(conn.execute("SELECT slug, priority FROM entities").fetchall())
+        self.assertEqual(rows, {"demo": None, "acme": "primary"})
+        self.assertEqual(conn.execute("SELECT entity_slug FROM memos").fetchall(), [("acme",)])
+        self.assertEqual(conn.execute("SELECT duration_days FROM experiments").fetchall(), [(None,)])
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM milestones").fetchone(), (0,))
+        conn.close()
 
 
 class Jobs(Tmp):

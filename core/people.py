@@ -122,11 +122,12 @@ def pending_invites(root=bots.ROOT, ws=None):
             if _live(r, now) and (ws is None or r.get("ws") == ws)]
 
 
-def revoke_invite(root=bots.ROOT, invite_id=None, *, ws):
+def revoke_invite(root=bots.ROOT, invite_id=None, *, ws, role=None):
+    """Revoke one live invite of `ws`. `role`: only invites of that role (an admin's reach)."""
     with LOCK:
         rows = _invites(root)
         hit = next((r for r in rows if r.get("id") == invite_id and r.get("ws") == ws
-                    and _live(r, time.time())), None)
+                    and _live(r, time.time()) and (role is None or r.get("role") == role)), None)
         if not hit:
             raise LookupError("unknown invite")
         hit["revoked"] = time.time()

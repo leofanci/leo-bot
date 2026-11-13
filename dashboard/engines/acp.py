@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import threading
 
-from dashboard.engines.base import Engine, SessionLost
+from dashboard.engines.base import Engine, EngineRefused, SessionLost
 from dashboard.engines.claude_code import OS_MCP_PATH
 from dashboard.engines.codex import FULL_DISK_NOTE
 
@@ -86,7 +86,12 @@ class AcpEngine(Engine):
 
     def _spawn(self, session):
         env = {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
-        return subprocess.Popen([self.agent["command"], *self.agent.get("args", [])], cwd=session.repo_dir, env=env,
+        command = self.agent["command"]
+        # Resolved before the spawn: a relative path would resolve inside the project folder.
+        program = command if os.path.isabs(command) else (shutil.which(command) if "/" not in command else None)
+        if not program:
+            raise EngineRefused(f"{self.label}: '{command}' was not found. Check Settings, Engines.")
+        return subprocess.Popen([program, *self.agent.get("args", [])], cwd=session.repo_dir, env=env,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 text=True, bufsize=1)
 

@@ -33,6 +33,16 @@ jobs:
       - name: Reject private data and unsafe boundaries
         run: python -m unittest tests.test_no_usage_data tests.test_security_boundaries
 
+      # The step above runs the PR's own copy of the gate, which the PR could weaken. This
+      # one runs main's copy of both checks over the PR's files.
+      - name: Same checks, as main has them
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout "$BASE_SHA" -- tests/test_no_usage_data.py tests/test_security_boundaries.py
+          python -m unittest tests.test_no_usage_data tests.test_security_boundaries
+
   install-script:
     name: install-script
     runs-on: ubuntu-latest

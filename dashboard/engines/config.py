@@ -67,11 +67,51 @@ def load(root=ROOT):
         data = {}
     if not isinstance(data, dict):
         data = {}
-    data["providers"] = [p for p in data.get("providers") or [] if isinstance(p, dict) and p.get("id")]
-    data["acp_agents"] = [a for a in data.get("acp_agents") or [] if isinstance(a, dict) and a.get("id")]
+    # A hand-edited file never crashes a turn: rows of the wrong shape are dropped here.
+    data["providers"] = [p for p in data.get("providers") or [] if _provider_ok(p)]
+    data["acp_agents"] = [a for a in data.get("acp_agents") or [] if _acp_ok(a)]
     for key in ("workspaces", "bots"):
-        data[key] = data.get(key) if isinstance(data.get(key), dict) else {}
+        raw = data.get(key) if isinstance(data.get(key), dict) else {}
+        data[key] = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+    for key in ("default", "people", "terminal"):
+        if not isinstance(data.get(key), str):
+            data.pop(key, None)
     return data
+
+
+def _provider_ok(p):
+    return (isinstance(p, dict) and isinstance(p.get("id"), str) and _ID_RE.match(p["id"])
+            and p.get("format") in FORMATS and isinstance(p.get("base_url"), str) and base_url_ok(p["base_url"])
+            and isinstance(p.get("key", ""), str) and isinstance(p.get("models"), dict)
+            and all(isinstance(p["models"].get(t, ""), str) for t in ("fast", "strong")))
+
+
+def _acp_ok(a):
+    return (isinstance(a, dict) and isinstance(a.get("id"), str) and _ID_RE.match(a["id"])
+            and isinstance(a.get("command"), str) and command_ok(a["command"])
+            and isinstance(a.get("args", []), list) and all(isinstance(x, str) for x in a.get("args", [])))
+
+
+_LOOPBACK = ("127.0.0.1", "localhost", "[::1]", "::1")
+
+
+def base_url_ok(url):
+    """An https address, or plain http only to this machine (Ollama): a key never crosses the
+    network in clear text."""
+    m = re.match(r"^(https?)://([^\s/?#@]+)", url or "")
+    if not m:
+        return False
+    if m.group(1) == "https":
+        return True
+    host = m.group(2).lower()
+    host = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]"
+    return host in _LOOPBACK
+
+
+def command_ok(command):
+    """An absolute path, or a bare program name looked up on PATH: never a relative path,
+    which would resolve inside the project folder a turn runs in."""
+    return bool(command) and (os.path.isabs(command) or ("/" not in command and "\\" not in command))
 
 
 def save(data, root=ROOT):
@@ -103,6 +143,8 @@ def upsert_provider(fields, root=ROOT):
     base = str(fields.get("base_url") or old.get("base_url") or preset.get("base_url") or "").strip().rstrip("/")
     if not re.match(r"^https?://[^\s/]+", base):
         raise ValueError("base_url: an http(s) address")
+    if not base_url_ok(base):
+        raise ValueError("base_url: use https (plain http only for this machine, e.g. Ollama)")
     key = str(fields.get("key") or "").strip()
     if not key and old.get("key"):
         if old.get("base_url") != base:  # a saved key never follows a new address on its own
@@ -135,6 +177,8 @@ def upsert_acp(fields, root=ROOT):
     args = fields.get("args") if isinstance(fields.get("args"), list) else preset.get("args") or []
     if not command or not all(isinstance(a, str) for a in args):
         raise ValueError("command required")
+    if not command_ok(command):
+        raise ValueError("command: a program name (found on PATH) or a full path, not a relative one")
     row = {"id": aid, "name": str(fields.get("name") or preset.get("name") or aid)[:60], "command": command, "args": args}
     data = load(root)
     data["acp_agents"] = [a for a in data["acp_agents"] if a["id"] != aid] + [row]

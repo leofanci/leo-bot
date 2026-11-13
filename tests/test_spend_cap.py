@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+
 from pathlib import Path
 from unittest import mock
 
@@ -10,6 +11,10 @@ from dashboard import chat_store
 
 # os_relay imports its dashboard siblings as top-level modules (as the server runs it).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "dashboard"))
+
+
+def _YES(slug):  # Composio tags the tool readOnlyHint
+    return True
 
 
 class SpendCap(unittest.TestCase):
@@ -66,9 +71,9 @@ class ReadSize(unittest.TestCase):
     def test_big_argument_holds(self):
         from core import app_rules
         cat = {"gmail": {}}
-        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a"})[0], "read")
-        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a" * 3000})[0], "hold")
-        self.assertEqual(app_rules.decide("GMAIL_GENERATE_THING", {"gmail": "write"}, cat, {})[0], "hold")
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a"}, read_only=_YES)[0], "read")
+        self.assertEqual(app_rules.decide("GMAIL_FETCH_EMAILS", {"gmail": "write"}, cat, {"q": "a" * 3000}, read_only=_YES)[0], "hold")
+        self.assertEqual(app_rules.decide("GMAIL_GENERATE_THING", {"gmail": "write"}, cat, {}, read_only=_YES)[0], "hold")
 
 
 class OpenFolder(unittest.TestCase):

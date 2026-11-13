@@ -46,6 +46,7 @@ POST_STATUSES = {
 }
 ACTIVITY_STATUSES = {"planned", "running", "blocked", "done"}
 PRIORITIES = {"critical", "high", "normal", "low"}
+PROJECT_PRIORITIES = {"primary", "secondary", "experiment"}
 
 
 class IndexError_(Exception):
@@ -87,14 +88,19 @@ def first_int(raw):
     if raw is None:
         return None
     m = re.search(r"-?\d+", str(raw))
-    return int(m.group()) if m else None
+    if not m or len(m.group().lstrip("-")) > 15:  # sqlite holds 64-bit: a huge number is no number
+        return None
+    return int(m.group())
 
 
 def load_json(path: Path):
+    """The file's JSON, or None (with a warning) when it cannot be read: one bad file is
+    skipped, never the whole index (every workspace's writes wait on a rebuild)."""
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise IndexError_(f"{path}: invalid JSON ({exc})")
+    except (OSError, ValueError) as exc:
+        print(f"  warn: {path.name}: invalid JSON ({exc}), skipping it")
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -170,7 +176,8 @@ def collect_entities(root: Path):
         kind = meta.get("kind") or ("venture" if (has_strategy or has_products) else "brand")
         entities.append({
             "slug": pslug, "type": "project", "subtype": kind,
-            "name": meta.get("name") or pslug, "priority": meta.get("priority"),
+            "name": meta.get("name") or pslug,
+            "priority": meta.get("priority") if meta.get("priority") in PROJECT_PRIORITIES else None,
             "status": meta.get("status") or "active",
             "hours_per_week": first_int(meta.get("hours_per_week")),
             "local_folder": None,  # folders live in team/folders.json (core.folders)
@@ -239,6 +246,8 @@ def collect_memos(root: Path, slugs):
                 print(f"  warn: memo type '{mtype}' not in allowed set, skipping: {rel(f, root)}")
                 continue
             data = load_json(f)
+            if data is None:
+                continue
             status = data.get("status") if isinstance(data, dict) else None
             if status not in ("proposed", "approved", "superseded"):
                 status = "proposed"
@@ -301,6 +310,8 @@ def collect_posts(root: Path):
             for plan in sorted(content.glob("plan-*.json")):
                 data = load_json(plan)
                 for post in (data.get("posts", []) if isinstance(data, dict) else []):
+                    if not isinstance(post, dict):
+                        continue
                     pid = post.get("id")
                     if not pid:
                         continue
@@ -406,6 +417,8 @@ def collect_milestones(root: Path, slugs):
         return rows
     data = load_json(path)
     for m in (data.get("milestones", []) if isinstance(data, dict) else []):
+        if not isinstance(m, dict):
+            continue
         entity = m.get("entity")
         # 'external' (or unknown-but-external_type) events map to no entity row
         if entity and (entity == "external" or m.get("entity_type") == "external"):
@@ -432,40 +445,56 @@ def collect_milestones(root: Path, slugs):
 # slug integrity
 # --------------------------------------------------------------------------- #
 def check_slugs(slugs, relationships, memos, experiments, posts, post_channels, features, activities, milestones):
-    errors = []
+    """Drop (with a warning) every row that names an entity no project has: one bad file
+    never stops the index. Returns the kept lists in the same order."""
+    def keep(rows, slug_of, where):
+        out = []
+        for r in rows:
+            slug = slug_of(r)
+            if slug is not None and slug not in slugs:
+                print(f"  warn: unresolved slug '{slug}' in {where(r)}, skipping it")
+            else:
+                out.append(r)
+        return out
 
-    def need(slug, where):
-        if slug is not None and slug not in slugs:
-            errors.append(f"unresolved slug '{slug}' in {where}")
-
-    for frm, to, kind in relationships:
-        need(frm, f"relationship from_slug ({kind})")
-        need(to, f"relationship to_slug ({kind})")
-    for m in memos:
-        need(m["entity_slug"], f"memo {m['type']}-v{m['version']}")
-    for x in experiments:
-        need(x["entity_slug"], f"experiment {x['file_path']}")
-    for p in posts:
-        need(p["profile_slug"], f"post {p['id']}")
-    for pc in post_channels:
-        need(pc["channel_slug"], f"post_channel post_id={pc['post_id']}")
-    for f in features:
-        need(f["product_slug"], f"feature '{f['title']}'")
-    for a in activities:
-        need(a["entity_slug"], f"activity '{a['title']}'")
-    for ms in milestones:
-        need(ms["entity_slug"], f"milestone {ms.get('id')}")
-
-    if errors:
-        raise IndexError_(
-            "slug integrity check failed — fix the offending file:\n  - "
-            + "\n  - ".join(errors)
-        )
+    relationships = keep(relationships, lambda r: r[0] if r[0] not in slugs else (r[1] if r[1] not in slugs else None),
+                         lambda r: f"relationship ({r[2]})")
+    memos = keep(memos, lambda m: m["entity_slug"], lambda m: f"memo {m['type']}-v{m['version']}")
+    experiments = keep(experiments, lambda x: x["entity_slug"], lambda x: f"experiment {x['file_path']}")
+    posts = keep(posts, lambda p: p["profile_slug"], lambda p: f"post {p['id']}")
+    live = {p["id"] for p in posts}
+    post_channels = [pc for pc in keep(post_channels, lambda pc: pc["channel_slug"],
+                                       lambda pc: f"post_channel post_id={pc['post_id']}") if pc["post_id"] in live]
+    features = keep(features, lambda f: f["product_slug"], lambda f: f"feature '{f['title']}'")
+    activities = keep(activities, lambda a: a["entity_slug"], lambda a: f"activity '{a['title']}'")
+    milestones = keep(milestones, lambda m: m["entity_slug"], lambda m: f"milestone {m.get('id')}")
+    return relationships, memos, experiments, posts, post_channels, features, activities, milestones
 
 
 # --------------------------------------------------------------------------- #
 # build
 # --------------------------------------------------------------------------- #
+# One INSERT per table, row by row (build): a refused row is skipped, not fatal.
+_SQL = {
+    "entities": ("INSERT INTO entities (slug,type,subtype,name,priority,status,hours_per_week,local_folder,file_path,updated_at)"
+                  " VALUES (:slug,:type,:subtype,:name,:priority,:status,:hours_per_week,:local_folder,:file_path,:updated_at)"),
+    "relationships": "INSERT INTO relationships (from_slug,to_slug,kind) VALUES (?,?,?)",
+    "memos": ("INSERT INTO memos (entity_slug,type,version,status,file_path,created_at)"
+               " VALUES (:entity_slug,:type,:version,:status,:file_path,:created_at)"),
+    "experiments": ("INSERT INTO experiments (entity_slug,assumption,status,duration_days,started_on,decision,result,file_path)"
+                     " VALUES (:entity_slug,:assumption,:status,:duration_days,:started_on,:decision,:result,:file_path)"),
+    "posts": ("INSERT INTO posts (id,profile_slug,date,pillar,working_title,concept,status,version,brief_path)"
+               " VALUES (:id,:profile_slug,:date,:pillar,:working_title,:concept,:status,:version,:brief_path)"),
+    "post_channels": "INSERT INTO post_channels (post_id,channel_slug) VALUES (:post_id,:channel_slug)",
+    "features": ("INSERT INTO features (product_slug,title,status,priority,target_date,shipped_date,release)"
+                  " VALUES (:product_slug,:title,:status,:priority,:target_date,:shipped_date,:release)"),
+    "activities": ("INSERT INTO activities (entity_slug,title,date,date_end,time,time_end,type,status,priority)"
+                    " VALUES (:entity_slug,:title,:date,:date_end,:time,:time_end,:type,:status,:priority)"),
+    "milestones": ("INSERT INTO milestones (id,entity_slug,entity_type,type,title,date,date_end,priority,notes)"
+                    " VALUES (:id,:entity_slug,:entity_type,:type,:title,:date,:date_end,:priority,:notes)"),
+}
+
+
 def build(root: Path):
     db_path = root / DB_RELPATH
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -476,9 +505,15 @@ def build(root: Path):
         print(f"  normalized {len(changed)} artifact(s)")
 
     entities, relationships = collect_entities(root)
-    slugs = {e["slug"] for e in entities}
-    if len(slugs) != len(entities):
-        raise IndexError_("duplicate entity slug in projects/")
+    seen, unique = set(), []
+    for e in entities:  # a slug used twice keeps its first entity (sorted walk): the rest are skipped
+        if e["slug"] in seen:
+            print(f"  warn: duplicate entity slug '{e['slug']}' ({e['type']}), skipping it")
+            continue
+        seen.add(e["slug"])
+        unique.append(e)
+    entities = unique
+    slugs = set(seen)
 
     memos = collect_memos(root, slugs)
     experiments = collect_experiments(root)
@@ -514,7 +549,9 @@ def build(root: Path):
                   f"'{pc['channel_slug']}' — dropping that channel ref")
     post_channels = kept_pc
 
-    check_slugs(slugs, relationships, memos, experiments, posts, post_channels, features, activities, milestones)
+    (relationships, memos, experiments, posts, post_channels, features, activities,
+     milestones) = check_slugs(slugs, relationships, memos, experiments, posts, post_channels, features,
+                               activities, milestones)
 
     # Recreate from schema beside the old one, and swap only when it all worked: a failure
     # here must leave the last good index in place, not an empty one.
@@ -526,50 +563,36 @@ def build(root: Path):
         conn.executescript(migration.read_text(encoding="utf-8"))
 
     cur = conn.cursor()
-    # entities FIRST (every other table FKs to them)
-    cur.executemany(
-        "INSERT INTO entities (slug,type,subtype,name,priority,status,hours_per_week,local_folder,file_path,updated_at)"
-        " VALUES (:slug,:type,:subtype,:name,:priority,:status,:hours_per_week,:local_folder,:file_path,:updated_at)",
-        entities,
-    )
-    cur.executemany(
-        "INSERT INTO relationships (from_slug,to_slug,kind) VALUES (?,?,?)",
-        relationships,
-    )
-    cur.executemany(
-        "INSERT INTO memos (entity_slug,type,version,status,file_path,created_at)"
-        " VALUES (:entity_slug,:type,:version,:status,:file_path,:created_at)",
-        memos,
-    )
-    cur.executemany(
-        "INSERT INTO experiments (entity_slug,assumption,status,duration_days,started_on,decision,result,file_path)"
-        " VALUES (:entity_slug,:assumption,:status,:duration_days,:started_on,:decision,:result,:file_path)",
-        experiments,
-    )
-    cur.executemany(
-        "INSERT INTO posts (id,profile_slug,date,pillar,working_title,concept,status,version,brief_path)"
-        " VALUES (:id,:profile_slug,:date,:pillar,:working_title,:concept,:status,:version,:brief_path)",
-        posts,
-    )
-    cur.executemany(
-        "INSERT INTO post_channels (post_id,channel_slug) VALUES (:post_id,:channel_slug)",
-        post_channels,
-    )
-    cur.executemany(
-        "INSERT INTO features (product_slug,title,status,priority,target_date,shipped_date,release)"
-        " VALUES (:product_slug,:title,:status,:priority,:target_date,:shipped_date,:release)",
-        features,
-    )
-    cur.executemany(
-        "INSERT INTO activities (entity_slug,title,date,date_end,time,time_end,type,status,priority)"
-        " VALUES (:entity_slug,:title,:date,:date_end,:time,:time_end,:type,:status,:priority)",
-        activities,
-    )
-    cur.executemany(
-        "INSERT INTO milestones (id,entity_slug,entity_type,type,title,date,date_end,priority,notes)"
-        " VALUES (:id,:entity_slug,:entity_type,:type,:title,:date,:date_end,:priority,:notes)",
-        milestones,
-    )
+
+    def insert(sql, rows, label):
+        """Insert row by row: one row the schema refuses (a value of the wrong kind) is
+        skipped with a warning; the rest of the index still builds."""
+        kept = []
+        for r in rows:
+            try:
+                cur.execute(sql, r)
+                kept.append(r)
+            except (sqlite3.IntegrityError, sqlite3.InterfaceError, sqlite3.ProgrammingError,
+                    OverflowError, TypeError) as exc:
+                print(f"  warn: {label} row skipped ({exc}): {str(r)[:120]}")
+        return kept
+
+    # entities FIRST (every other table FKs to them); a refused one takes its rows with it
+    entities = insert(_SQL["entities"], entities, "entity")
+    slugs = {e["slug"] for e in entities}
+    (relationships, memos, experiments, posts, post_channels, features, activities,
+     milestones) = check_slugs(slugs, relationships, memos, experiments, posts, post_channels, features,
+                               activities, milestones)
+    relationships = insert(_SQL["relationships"], relationships, "relationship")
+    memos = insert(_SQL["memos"], memos, "memo")
+    experiments = insert(_SQL["experiments"], experiments, "experiment")
+    posts = insert(_SQL["posts"], posts, "post")
+    live = {p["id"] for p in posts}
+    post_channels = insert(_SQL["post_channels"], [pc for pc in post_channels if pc["post_id"] in live],
+                           "post_channel")
+    features = insert(_SQL["features"], features, "feature")
+    activities = insert(_SQL["activities"], activities, "activity")
+    milestones = insert(_SQL["milestones"], milestones, "milestone")
     conn.commit()
 
     counts = {

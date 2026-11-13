@@ -947,6 +947,21 @@ def cmd_eval(args) -> int:
     return subprocess.call(cmd, cwd=str(paths.CODE))
 
 
+def cmd_rotate_token(args) -> int:
+    """A new owner login token: every browser signed in with the old one is signed out. On a
+    Mac the token is new on every start already; on a server it is kept until this runs."""
+    if not args.yes:
+        print("This signs out every browser logged in as the owner (Leo Bot restarts). "
+              "Run again with --yes to go ahead.")
+        return 1
+    port = _stop_if_running()
+    (paths.DATA / "team" / "owner-token").unlink(missing_ok=True)
+    print("Owner token removed: a new one is made on the next start.")
+    if port:
+        return cmd_start(argparse.Namespace(port=port))
+    return 0
+
+
 # ----------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -986,6 +1001,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--auto-check", choices=("on", "off"),
                    help="the daily check for a new release (on by default; asks origin only)")
+    p = sub.add_parser("rotate-token", help="new owner login token: signs every owner browser out")
+    p.add_argument("--yes", action="store_true")
     p = sub.add_parser("eval", help="check bot behavior: offline (free), or --live on a real engine")
     p.add_argument("--live", action="store_true", help="send the live cases to a real engine (spends)")
     p.add_argument("--engine", help="with --live: engine id to use (default: your default engine)")
@@ -997,7 +1014,8 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {"open": cmd_open, "start": cmd_start, "stop": cmd_stop, "status": cmd_status,
             "version": cmd_version, "doctor": cmd_doctor, "backup": cmd_backup,
             "move-data": cmd_move_data, "uninstall": cmd_uninstall,
-            "service": cmd_service, "update": cmd_update, "eval": cmd_eval}
+            "service": cmd_service, "update": cmd_update, "eval": cmd_eval,
+            "rotate-token": cmd_rotate_token}
 
 
 def main(argv=None) -> int:

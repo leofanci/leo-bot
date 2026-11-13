@@ -35,7 +35,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         installMainMenu()
 
         let cfg = WKWebViewConfiguration()
-        cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        // Web Inspector only when asked for (LEOBOT_DEVTOOLS=1), never in everyday use.
+        if ProcessInfo.processInfo.environment["LEOBOT_DEVTOOLS"] == "1" {
+            cfg.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        }
         webView = WKWebView(frame: .zero, configuration: cfg)
         // Without a uiDelegate, WKWebView silently ignores <input type=file>
         // clicks — the chat's attach button looks dead. See runOpenPanel below.

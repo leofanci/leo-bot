@@ -50,7 +50,11 @@ def save(rec):
     os.replace(tmp, target)
 
 
+_DELETED = set()  # ids deleted while this process runs: a turn still in flight cannot recreate them
+
+
 def delete(chat_id):
+    _DELETED.add(str(chat_id))
     prefix = f"{_path(chat_id).stem}."
     for extra in CHATS_DIR.iterdir() if CHATS_DIR.is_dir() else ():  # api engine history
         if extra.name.startswith(prefix) and extra.name.endswith(".jsonl"):
@@ -256,6 +260,10 @@ def recap(rec, engine_id=None):
         if not (m.get("content") or "").strip() and not m.get("reactions"):
             continue  # a reply that was only an emoji or an approval card
         who = m.get("by_name") or ("You" if m.get("role") == "user" else f"@{m.get('bot') or 'bot'}")
+        if str(m.get("engine") or "").startswith("runner:"):
+            # Written on an invited person's own Mac, not by the owner's engine: later turns
+            # read it as that person's input, never as the bot's own decision.
+            who += f" (via {str(m.get('engine_label') or 'a person' + chr(39) + 's Mac')[:60]})"
         line = f"{who}: {(m.get('content') or '').strip()}{_reactions_tag(m)}"
         size += len(line)
         if size > RECAP_CHARS:
@@ -360,6 +368,10 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
 
 
 def record_turn(*args, **kwargs):
+    sess = kwargs.get("sess", args[0] if args else None)
+    chat_id = getattr(sess, "session_id", None)
+    if chat_id is not None and str(chat_id) in _DELETED:
+        return None  # deleted mid-turn: the delete is final
     with _LOCK:
         return _record_turn(*args, **kwargs)
 

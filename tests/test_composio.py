@@ -214,6 +214,24 @@ class Client(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
         self.assertIn("cursor=c2", self.sent[1].full_url)
 
+    def test_tool_read_only_reads_the_tag_and_caches(self):
+        composio._READ_ONLY.clear()
+        self.addCleanup(composio._READ_ONLY.clear)
+        err = urllib.error.HTTPError(composio.BASE, 503, "busy", Message(), io.BytesIO(b"{}"))
+        self.replies = [FakeResp({"slug": "GMAIL_FETCH_EMAILS", "tags": ["important", "readOnlyHint"]}),
+                        FakeResp({"slug": "GMAIL_SEND_EMAIL", "tags": ["openWorldHint"]}),
+                        err, FakeResp({"tags": "readOnlyHint"})]
+        with self.patched():
+            self.assertIs(composio.tool_read_only("GMAIL_FETCH_EMAILS", self.root), True)
+            self.assertIs(composio.tool_read_only("GMAIL_FETCH_EMAILS", self.root), True)  # cached
+            self.assertIs(composio.tool_read_only("GMAIL_SEND_EMAIL", self.root), False)
+            self.assertIsNone(composio.tool_read_only("GMAIL_LIST_LABELS", self.root))  # unreachable
+            self.assertIs(composio.tool_read_only("GMAIL_LIST_DRAFTS", self.root), False)  # tags not a list
+            self.assertIsNone(composio.tool_read_only("../toolkits", self.root))  # never sent
+        self.assertEqual(len(self.sent), 4)
+        self.assertTrue(self.sent[0].full_url.endswith("/tools/GMAIL_FETCH_EMAILS"))
+        self.assertNotIn("GMAIL_LIST_LABELS", composio._READ_ONLY)  # a failure is asked again
+
     def test_key_never_in_error(self):
         self.pick(("ca_g1", "gmail"))
         self.saved()

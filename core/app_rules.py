@@ -1,8 +1,11 @@
 """app_rules.py — what a bot's Composio tool call may do (connected apps).
 
 A call is read (runs now), hold (waits on an Approve click), or refuse. A read
-is narrow on purpose: the first action word is a read verb and no word is a
-write verb, or the slug is a known noun-first read. Everything else is a write.
+is narrow on purpose, and two checks must agree: Composio tags the tool
+readOnlyHint (an allowlist from its own metadata), and the name reads (the first
+action word is a read verb and no word is a write verb, or the slug is a known
+noun-first read). Neither is enough alone: Composio tags some writes read-only
+(setting a user active, managing secrets). An untagged or unknown tool is a write.
 """
 import re
 
@@ -13,8 +16,15 @@ BLOCKED_TOOLKITS = frozenset({
     "browserbase_tool", "browser_tool", "codeinterpreter", "composio",
     "googlesuper",  # bundles every Google app: would bypass per-app grants
 })
-# Reads that spend money (enrichment credits) wait on approval like writes.
-PAID_READ_TOOLKITS = frozenset({"apollo"})
+# Reads that spend money (enrichment or model credits) or fetch arbitrary pages wait on
+# approval like writes: these toolkits, and any toolkit Composio files under one of
+# PAID_READ_CATEGORIES (composio.paid_read_toolkits), so a new app of that kind is covered too.
+PAID_READ_TOOLKITS = frozenset({"apollo", "hunter", "peopledatalabs", "lusha", "zoominfo", "clay",
+                                "openai", "anthropic", "apify", "scrapingbee"})
+PAID_READ_CATEGORIES = frozenset({
+    "people & contact data", "ai sales tools", "ai web scraping", "web scraping & browser",
+    "web search & research", "ai models", "ai content generation", "ai chatbots", "seo & ai visibility",
+})
 
 READ_VERBS = frozenset("GET LIST FETCH SEARCH READ FIND RETRIEVE LOOKUP VIEW CHECK COUNT".split())
 WRITE_VERBS = frozenset((
@@ -137,14 +147,20 @@ def _size(value, _depth=0):
     return 0
 
 
-def decide(slug, grant, catalog, arguments=None):
-    """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant."""
-    tk = toolkit_of(slug, catalog)
+def decide(slug, grant, catalog, arguments=None, read_only=None, paid=frozenset()):
+    """("read" | "hold" | "refuse", toolkit) for one app tool call under a bot's grant.
+    `read_only(slug)` says whether Composio tags the tool readOnlyHint (True, False, or None
+    when unknown); asked only when everything else allows a read. Without it, nothing reads.
+    `paid`: more toolkits whose reads wait like writes (from Composio's categories)."""
+    # Blocked toolkits stay in the attribution set (the catalog drops them): a slug of a blocked
+    # toolkit is pinned to it and refused, never to a shorter allowed prefix.
+    tk = toolkit_of(slug, set(catalog) | BLOCKED_TOOLKITS)
     if tk is None:
         return "refuse", None
     if tk in BLOCKED_TOOLKITS or grant.get(tk) not in ("read", "write"):
         return "refuse", tk
-    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS) \
-            and _size(arguments) <= MAX_READ_ARG_CHARS:
+    if is_read(slug, tk) and tk not in PAID_READ_TOOLKITS and tk not in paid \
+            and not has_url(arguments, tk in ADDRESS_SAFE_TOOLKITS) \
+            and _size(arguments) <= MAX_READ_ARG_CHARS and read_only is not None and read_only(slug) is True:
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk

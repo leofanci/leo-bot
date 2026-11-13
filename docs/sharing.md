@@ -28,9 +28,8 @@ never reaches a shared thread. Its team memory is what shared threads use. Only 
 add to team memory, in Team, under the bot's Memory. Everyone in those threads can
 get a bot to repeat what's in it. A background tidy-up of a long memory keeps one
 backup of the previous list and never drops a decision or preference.
-Bots can still answer from an outline of a linked folder's code (names and
-structure, never its source code), but shared threads never get the folders
-themselves or their paths. A thread where a bot worked in your folders stays
+Shared threads never get your linked folders, their paths, or an outline of
+their code. A thread where a bot worked in your folders stays
 hidden from invited people, also from someone who joins later. For
 mail, calendar or anything on your machine, use a DM with a bot or a private
 channel with no people in it. On the shared calendar, other workspaces show
@@ -65,6 +64,13 @@ cloudflared tunnel --url http://127.0.0.1:8765
 
 A quick tunnel prints a random `https://….trycloudflare.com` address that
 changes on every run; a named tunnel keeps one address.
+
+Use one of these tunnels. Each one tells Leo Bot a request came through it
+(it adds a forwarding header such as `X-Forwarded-For` or `CF-Connecting-IP`),
+which is how Leo Bot keeps this machine's own routes (the terminal, the bots'
+relays) away from the shared address. A proxy of your own (nginx, Caddy, a raw
+TCP forward) must keep the original `Host` header and add `X-Forwarded-For`,
+or requests through it look like they came from this machine.
 
 ## 2. Save the address in Leo Bot
 

@@ -126,6 +126,11 @@ class Engine:
             raise EngineRefused(f"{self.label} cannot use connected apps.")
         if policy.edit_dirs and "folder_edit" not in self.supports:
             raise EngineRefused(f"{self.label} cannot change files in linked folders.")
+        if policy.apps_used and getattr(self, "full_disk", False):
+            # Its own web and file tools cannot be switched off after an app read: mail or
+            # calendar text could then be sent anywhere. Claude Code or an API engine can.
+            raise EngineRefused(f"This thread read a connected app, so {self.label} cannot continue it "
+                                "(its own web tools stay on). Pick Claude Code or an API engine, or start a new thread.")
 
     def turn(self, session, text, policy, model, tokens):
         raise NotImplementedError

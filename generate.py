@@ -185,6 +185,40 @@ def parse_model_json(text: str) -> dict:
 # --------------------------------------------------------------------------- #
 # validation
 # --------------------------------------------------------------------------- #
+# What a plan file keeps from the model's reply: the fields the prompt asks for and the code
+# reads, each a short string (channels: a list of them). Anything else, or a value of another
+# kind (a nested object, a huge number), is dropped before it reaches the index.
+PLAN_KEYS = ("period", "profile", "strategy_note", "posts")
+PLAN_POST_KEYS = ("id", "date", "channels", "platform", "format", "pillar", "objective", "working_title",
+                  "concept", "status", "brief_id", "voice_id")
+PLAN_TEXT_MAX = 2000
+
+
+def _plan_text(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return None
+    return str(value)[:PLAN_TEXT_MAX]
+
+
+def clean_plan(obj):
+    """The plan with only known keys and plain values (see PLAN_POST_KEYS)."""
+    out = {k: _plan_text(obj.get(k)) for k in PLAN_KEYS if k != "posts" and _plan_text(obj.get(k)) is not None}
+    posts = []
+    for post in obj.get("posts") or []:
+        if not isinstance(post, dict):
+            continue
+        row = {}
+        for k in PLAN_POST_KEYS:
+            if k == "channels":
+                chans = post.get(k)
+                row[k] = [str(c)[:120] for c in chans if isinstance(c, str)] if isinstance(chans, list) else []
+            elif _plan_text(post.get(k)) is not None:
+                row[k] = _plan_text(post[k])
+        posts.append(row)
+    out["posts"] = posts
+    return out
+
+
 def validate_plan(obj, require_date: bool = True) -> list:
     errs = []
     if not isinstance(obj, dict):
@@ -537,6 +571,7 @@ def do_plan(root: Path, profile_slug: str, period: str, platforms, cadence, focu
         post["brief_id"] = bid
         post["voice_id"] = vid
 
+    obj = clean_plan(obj)
     fname = "plan-" + re.sub(r"[^0-9a-zA-Z]+", "-", period).strip("-") + ".json"
     out = content_dir / fname
     out.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -11,7 +11,7 @@ from unittest import mock
 
 import index
 from core import bots, jobs, memory
-from dashboard import db, fileops, osctl
+from dashboard import chat_session, db, fileops, osctl
 from dashboard.engines import registry
 
 
@@ -329,7 +329,7 @@ class Osctl(unittest.TestCase):
             self.assertIn("APPROVAL", r["error"])
         self.assertIn("whole document", self.run_osctl("update-intake", "--project", "acme", "--text", "x",
                                                        env=auto)["error"])
-        self.assertTrue(osctl._AUTO_REPLACES <= osctl._AUTO_BLOCKED)
+        self.assertTrue(osctl._AUTO_REPLACES <= osctl._AUTO_WAITS)
         r = self.run_osctl("create-memo", "--project", "acme", "--type", "positioning", "--summary", "s", env=auto)
         self.assertNotIn("Auto job", r.get("error", ""))  # past the mode gate
 
@@ -342,6 +342,27 @@ class Osctl(unittest.TestCase):
         self.assertIn("APPROVAL", self.run_osctl(*argv, env={**base, "LEOBOT_JOB": "j1",
                                                              "LEOBOT_JOB_MODE": "approval"})["error"])
         self.assertIn("the lead saves", self.run_osctl(*argv, env=base)["error"])
+
+    def test_every_command_is_classified_for_auto_jobs_and_app_threads(self):
+        import argparse
+        names = {n for a in osctl._build_parser()._actions
+                 if isinstance(a, argparse._SubParsersAction) for n in a.choices}
+        for allowed, other in ((osctl._AUTO_ALLOWED, osctl._AUTO_WAITS),
+                               (osctl._LOCAL_CMDS, osctl._NETWORK_CMDS)):
+            self.assertEqual(names - allowed - other, set())  # a new command: pick a side
+            self.assertEqual(allowed & other, set())
+            self.assertEqual(allowed - names, set())  # no stale names
+        self.assertFalse({n for n in osctl._AUTO_ALLOWED if n.startswith("delete-")})
+
+    def test_unlisted_command_is_refused_in_auto_jobs_and_app_threads(self):
+        auto = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_JOB": "j1", "LEOBOT_JOB_MODE": "auto"}
+        with mock.patch.object(osctl, "_AUTO_ALLOWED", osctl._AUTO_ALLOWED - {"create-memo"}):
+            r = self.run_osctl("create-memo", "--project", "acme", "--type", "positioning", env=auto)
+        self.assertIn("APPROVAL", r["error"])
+        apps = {"LEOBOT_WORKSPACE": "acme", chat_session.APPS_USED_ENV: "1"}
+        with mock.patch.object(osctl, "_LOCAL_CMDS", osctl._LOCAL_CMDS - {"tree"}):
+            self.assertIn("read a connected app", self.run_osctl("tree", env=apps)["error"])
+        self.assertNotIn("connected app", self.run_osctl("tree", env=apps).get("error", ""))
 
     def test_job_commands_are_outside_shared_and_read_only_sets(self):
         for cmd in ("propose-job", "list-jobs"):

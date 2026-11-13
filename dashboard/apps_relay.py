@@ -125,7 +125,7 @@ def _text(rid, lines, is_error=False):
             "result": {"content": [{"type": "text", "text": t} for t in lines], "isError": is_error}}
 
 
-def _gate(frame, ctx, sid, upstream, root, catalog):
+def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
     rid = frame.get("id")
     params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
     name = params.get("name")
@@ -139,10 +139,15 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
         return _text(rid, [UNREADABLE], True), sid
     grant = integrations.grant(ctx["ws"], ctx["bot"], root)  # re-read: grants change mid-turn
     picks = integrations.accounts_for(ctx["ws"], root)  # and so do a workspace's accounts
-    cat = list(catalog if catalog is not None else [a["slug"] for a in composio.catalog(root)])
+    if catalog is not None:
+        cat, paid = list(catalog), frozenset()
+    else:
+        items = composio.catalog(root)
+        cat, paid = [a["slug"] for a in items], composio.paid_read_toolkits(items)
     reads, notes = [], []
+    read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
     for c in calls:
-        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"])
+        verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid)
         if verdict == "refuse":
             notes.append(REFUSED.format(slug=c["tool_slug"]))
             continue
@@ -164,14 +169,25 @@ def _gate(frame, ctx, sid, upstream, root, catalog):
         return _text(rid, notes, not any(n.startswith("Held") for n in notes)), sid
     rebuilt = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                "params": {"name": app_rules.MULTI_EXECUTE, "arguments": {"tools": reads}}}
-    reply, sid = upstream.forward(rebuilt, sid)
-    if notes and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
+    if not notes:
+        return upstream.forward(rebuilt, sid)
+    # What was held or refused is told even when the reads fail: a bot that never hears its
+    # write was held asks again, and a second card queues the same action twice.
+    try:
+        reply, sid = upstream.forward(rebuilt, sid)
+    except composio.ComposioError as e:
+        return _text(rid, [f"The reads did not run ({e})."] + notes, True), sid
+    if isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         reply["result"].setdefault("content", []).extend({"type": "text", "text": n} for n in notes)
+    elif isinstance(reply, dict):
+        failed = (reply.get("error") or {}).get("message") if isinstance(reply.get("error"), dict) else None
+        return _text(rid, [f"The reads did not run ({str(failed or 'no reply')[:200]})."] + notes, True), sid
     return reply, sid
 
 
-def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None):
-    """One JSON-RPC frame from a bot -> (reply or None, mcp-session-id)."""
+def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None, read_only=None):
+    """One JSON-RPC frame from a bot -> (reply or None, mcp-session-id). `catalog` and
+    `read_only` stand in for Composio's toolkit list and tool tags (tests)."""
     if not isinstance(frame, dict):
         return _error(None, -32600, "invalid request"), mcp_session_id
     method = frame.get("method") or ""
@@ -180,7 +196,7 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT, catalog=None):
     if method not in METHODS:
         return _error(frame.get("id"), -32601, "method not available"), mcp_session_id
     if method == "tools/call":
-        return _gate(frame, ctx, mcp_session_id, upstream, root, catalog)
+        return _gate(frame, ctx, mcp_session_id, upstream, root, catalog, read_only)
     reply, sid = upstream.forward(frame, mcp_session_id)
     if method == "tools/list" and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         tools = reply["result"].get("tools") or []
