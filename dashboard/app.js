@@ -1692,7 +1692,8 @@ async function renderEngines(tab = "engines"){
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
       const models = p ? `<span class="eng-chip">fast · ${esc(p.models?.fast || "-")}</span><span class="eng-chip">strong · ${esc(p.models?.strong || "-")}</span>` : "";
-      const note = e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "";
+      const note = (e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "")
+        + (e.own_context ? `<span class="eng-chip warm" title="${esc(e.own_context)}">Loads its own context files</span>` : "");
       return `<div class="eng-card">${engineLogo(e.id, 44)}
         <div class="eng-body"><div class="eng-name"><b>${esc(e.label)}</b><span class="eng-state ${e.ok ? "on" : "off"}">${e.ok ? "Ready" : "Not ready"}</span></div>
           ${e.detail ? `<div class="eng-detail">${esc(e.detail)}</div>` : ""}

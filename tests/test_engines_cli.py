@@ -293,6 +293,59 @@ class FullDiskRules(unittest.TestCase):
         self.assertFalse(codex.CodexEngine().shared_safe)
 
 
+class AcpCleanLaunch(unittest.TestCase):
+    """Known agents launch without the user's own extensions where the CLI allows it
+    (Gemini CLI docs: `-e none` disables all extensions, ACP mode is `--acp`; OpenCode docs:
+    OPENCODE_DISABLE_CLAUDE_CODE=1 skips ~/.claude/CLAUDE.md and .claude/skills). Neither CLI
+    documents a switch for its own context files (GEMINI.md, AGENTS.md): the screen says so."""
+
+    def test_gemini_skips_extensions(self):
+        argv, env = acp.launch({"id": "gemini", "command": "/bin/gemini", "args": ["--acp"]}, "/bin/gemini")
+        self.assertEqual(argv, ["/bin/gemini", "--acp", "-e", "none"])
+        self.assertEqual(env, {})
+
+    def test_user_extension_choice_is_kept(self):
+        argv, _ = acp.launch({"id": "gemini", "command": "gemini", "args": ["--acp", "-e", "x"]}, "/bin/gemini")
+        self.assertEqual(argv, ["/bin/gemini", "--acp", "-e", "x"])
+
+    def test_opencode_skips_claude_files(self):
+        argv, env = acp.launch({"id": "opencode", "command": "opencode", "args": ["acp"]}, "/bin/opencode")
+        self.assertEqual((argv, env), (["/bin/opencode", "acp"], {"OPENCODE_DISABLE_CLAUDE_CODE": "1"}))
+
+    def test_unknown_agent_unchanged(self):
+        argv, env = acp.launch({"id": "mine", "command": "mine", "args": ["--x"]}, "/bin/mine")
+        self.assertEqual((argv, env), (["/bin/mine", "--x"], {}))
+
+    def test_spawn_uses_the_clean_launch(self):
+        seen = {}
+
+        def popen(argv, **kw):
+            seen.update(argv=argv, env=kw["env"])
+            raise OSError("stop")
+        eng = acp.AcpEngine({"id": "opencode", "name": "OpenCode", "command": "/bin/echo", "args": ["acp"]})
+        with mock.patch.object(acp.subprocess, "Popen", popen):
+            with self.assertRaises(OSError):
+                eng._spawn(type("S", (), {"repo_dir": "/tmp"})())
+            self.assertEqual(seen["argv"], ["/bin/echo", "acp"])
+            self.assertEqual(seen["env"]["OPENCODE_DISABLE_CLAUDE_CODE"], "1")
+            seen.clear()
+            eng.probe(timeout=1)
+            self.assertEqual(seen["env"]["OPENCODE_DISABLE_CLAUDE_CODE"], "1")
+
+    def test_status_says_what_still_loads(self):
+        for aid, want in (("gemini", "GEMINI.md"), ("opencode", "AGENTS.md"),
+                          ("mine", "This CLI loads its own extensions and context files on its turns.")):
+            row = acp.AcpEngine({"id": aid, "command": "/bin/echo", "args": []}).status()
+            self.assertIn(want, row["own_context"], aid)
+
+    def test_gemini_preset_uses_the_current_acp_flag(self):
+        self.assertEqual(config.ACP_PRESETS["gemini"]["args"], ["--acp"])
+
+    def test_engines_screen_shows_the_note(self):
+        js = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text()
+        self.assertIn("e.own_context", js)
+
+
 class AcpConfig(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

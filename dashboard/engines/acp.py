@@ -17,6 +17,31 @@ from dashboard.engines.base import Engine, EngineRefused, SessionLost
 from dashboard.engines.claude_code import OS_MCP_PATH
 from dashboard.engines.codex import FULL_DISK_NOTE
 
+# Known agents start without the user's own add-ons where the CLI has a switch for it, so the
+# owner's personal setup never reaches a bot (like Claude Code's --setting-sources ""). From each
+# CLI's own docs: Gemini CLI `-e none` disables all extensions; OpenCode
+# OPENCODE_DISABLE_CLAUDE_CODE=1 skips ~/.claude/CLAUDE.md and .claude/skills. Neither documents
+# a switch for its own context files, so the Engines screen says what still loads.
+_CLEAN = {
+    "gemini": {"args": ["-e", "none"], "env": {},
+               "note": "Gemini CLI starts without its extensions, but still loads GEMINI.md context files on its turns."},
+    "opencode": {"args": [], "env": {"OPENCODE_DISABLE_CLAUDE_CODE": "1"},
+                 "note": "OpenCode skips Claude Code files, but still loads its own config and AGENTS.md on its turns."},
+}
+_OWN_CONTEXT = "This CLI loads its own extensions and context files on its turns."
+
+
+def launch(agent, program):
+    """(argv, extra env) for one agent: its own args plus the known clean-launch switches.
+    An extensions choice the owner set in the args is kept."""
+    args = list(agent.get("args", []))
+    clean = _CLEAN.get(agent.get("id"), {})
+    extra = list(clean.get("args", []))
+    if extra[:1] == ["-e"] and ({"-e", "--extensions"} & set(args)):
+        extra = []
+    return [program, *args, *extra], dict(clean.get("env", {}))
+
+
 PROTOCOL_VERSION = 1
 START_TIMEOUT = 60
 # A clean environment: never Leo Bot's tokens, never a key from the server's own env.
@@ -91,7 +116,8 @@ class AcpEngine(Engine):
         program = command if os.path.isabs(command) else (shutil.which(command) if "/" not in command else None)
         if not program:
             raise EngineRefused(f"{self.label}: '{command}' was not found. Check Settings, Engines.")
-        return subprocess.Popen([program, *self.agent.get("args", [])], cwd=session.repo_dir, env=env,
+        argv, extra = launch(self.agent, program)
+        return subprocess.Popen(argv, cwd=session.repo_dir, env={**env, **extra},
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                 text=True, bufsize=1)
 
@@ -219,8 +245,9 @@ class AcpEngine(Engine):
     def probe(self, timeout=15):
         """The Test button: does it really speak ACP? An error string, or None."""
         try:
-            proc = subprocess.Popen([self.agent["command"], *self.agent.get("args", [])],
-                                    env={k: os.environ[k] for k in _ENV_KEEP if k in os.environ},
+            argv, extra = launch(self.agent, self.agent["command"])
+            proc = subprocess.Popen(argv,
+                                    env={**{k: os.environ[k] for k in _ENV_KEEP if k in os.environ}, **extra},
                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         except OSError as e:
             return f"{self.label} could not start: {e}"
@@ -249,4 +276,5 @@ class AcpEngine(Engine):
         path = shutil.which(self.agent["command"])
         return {"id": self.id, "label": self.label, "kind": self.kind, "installed": bool(path), "ok": bool(path),
                 "full_disk": True, "acp": True,
+                "own_context": _CLEAN.get(self.agent.get("id"), {}).get("note", _OWN_CONTEXT),
                 "detail": f"{FULL_DISK_NOTE} Used only on your private threads." if path else "not installed"}
