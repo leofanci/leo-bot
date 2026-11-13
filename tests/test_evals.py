@@ -116,6 +116,22 @@ class LiveGrading(unittest.TestCase):
         self.assertIn("loaded", turns._EQUAL)
         self.assertIsNone(turns.run({"id": "x", "msg": "what is on today?"})["loaded"])
 
+    def test_live_relay_is_served_by_the_eval_itself(self):
+        # Codex and ACP reach osctl through the relay at h.server's port: in a live eval that must
+        # be a server inside the run (its tokens), never the owner's real one on 8765.
+        import urllib.error
+        import urllib.request
+        from evals import turns
+        import dashboard.server as server
+        with turns._relay_server() as srv:
+            port = srv.server_address[1]
+            self.assertNotEqual(port, 8765)
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{server.OS_RELAY_PATH}", data=b"{}",
+                                         headers={"Content-Type": "application/json"})
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                urllib.request.urlopen(req, timeout=5)
+            self.assertIn(e.exception.code, (401, 403))  # served here, refused without a token
+
     def test_runs_saved_compared_and_pruned(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)

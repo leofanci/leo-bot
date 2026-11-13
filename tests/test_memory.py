@@ -231,6 +231,7 @@ class Card(TempRoot):
         self.assertIn("49 euros", text)
         self.assertNotIn("weekly note 49", text)
         self.assertIn("recall --bot cmo", text)
+        self.assertIn("recall first, then ask only if nothing matches", text)
         self.assertIn("--type decision|preference|fact", text)
 
     def test_bot_block_names_the_workspace_by_its_display_name(self):
