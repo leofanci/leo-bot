@@ -134,6 +134,8 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
                                  "params": {"name": name, "arguments": params.get("arguments")}}, sid)
     if name != app_rules.MULTI_EXECUTE:
         return _text(rid, [REFUSED.format(slug=name)], True), sid
+    if callable(ctx.get("on_call")):
+        ctx["on_call"]()
     calls = app_rules.calls_in(name, params.get("arguments"))
     if calls is None:
         return _text(rid, [UNREADABLE], True), sid
