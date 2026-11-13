@@ -82,6 +82,22 @@ class Classify(unittest.TestCase):
         self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", g, CAT, read_only=_YES), ("hold", "apollo"))  # spends
         self.assertEqual(app_rules.decide("GMAIL_SEND_EMAIL", g, CAT, read_only=_YES, paid={"gmail"})[0], "hold")
 
+    def test_act_grant_holds_money_code_and_access_changes(self):
+        cat = CAT + ["stripe", "shopify", "googledocs"]
+        g = {tk: "act" for tk in cat}
+        for slug in ("STRIPE_CREATE_PAYMENT_INTENT",                 # a payment app: every non-read
+                     "SUPABASE_EXECUTE_PROJECT_DATABASE_QUERY",      # runs code: could drop a table
+                     "GOOGLEDRIVE_SHARE_FILE",                       # changes who can see a file
+                     "GOOGLEDRIVE_ADD_FILE_SHARING_PREFERENCE",
+                     "GMAIL_EMPTY_TRASH", "INSTAGRAM_BLOCK_USER"):
+            self.assertEqual(app_rules.decide(slug, g, cat, read_only=_YES)[0], "hold", slug)
+        # A toolkit Composio files under a money category (composio.act_hold_toolkits) holds too.
+        self.assertEqual(app_rules.decide("SHOPIFY_CREATE_PRODUCT", g, cat, read_only=_YES, holds={"shopify"})[0],
+                         "hold")
+        for slug in ("GMAIL_SEND_EMAIL", "GMAIL_REPLY_TO_THREAD", "GOOGLEDOCS_CREATE_DOCUMENT",
+                     "GOOGLECALENDAR_CREATE_EVENT", "INSTAGRAM_CREATE_MEDIA_CONTAINER"):
+            self.assertEqual(app_rules.decide(slug, g, cat, read_only=_YES)[0], "run", slug)
+
     def test_read_grant_refuses_paid_read(self):
         self.assertEqual(app_rules.decide("APOLLO_SEARCH_PEOPLE", {"apollo": "read"}, CAT, read_only=_YES), ("refuse", "apollo"))
 

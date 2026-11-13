@@ -350,6 +350,14 @@ class Approve(Base):
         self.assertEqual((code, data["status"]), (200, "rejected"))
         ex.assert_not_called()
 
+    def test_approve_still_runs_after_grant_raised_to_act(self):
+        # Held under "write"; the owner then lets the bot act on its own: the card still runs.
+        integrations.set_grant("hq", "cos", {"gmail": "act"}, self.root)
+        with mock.patch.object(server.composio, "execute", return_value={"successful": True, "data": {}}) as ex:
+            code, data, _, _ = request("POST", self.path + "/approve", {})
+        self.assertEqual((code, data["status"]), (200, "done"))
+        ex.assert_called_once()
+
     def test_approve_refused_after_grant_removed(self):
         integrations.set_grant("hq", "cos", {}, self.root)
         with mock.patch.object(server.composio, "execute") as ex:

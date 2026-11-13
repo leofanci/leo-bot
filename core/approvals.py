@@ -38,6 +38,7 @@ from core import app_preview, bots, integrations
 MARKER_RE = re.compile(r"^[ \t>*_-]*APPROVAL:[*_ \t]*(.+?)[ \t*_]*$", re.M)
 SUMMARY_MAX = 200
 KEEP = 200
+AUTO_KEEP = 86400  # a bot's own app runs are kept at least this long (its daily limit counts them)
 STATUSES = {"pending", "approved", "rejected", "answered", "superseded",
             "running", "done", "failed", "expired"}
 APP = "app_action"
@@ -80,7 +81,9 @@ def _is_held(r):
 
 
 def _protected(r):
-    return _is_held(r) and r.get("status") in ("pending", "running")
+    # A bot's own runs of the last day stay too: they are its daily limit and the owner's record.
+    return (_is_held(r) and r.get("status") in ("pending", "running")) or \
+        (r.get("auto") and time.time() - (r.get("resolved") or 0) < AUTO_KEEP)
 
 
 def _save(root, rows):
@@ -218,6 +221,12 @@ def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, a
         rows.append(rec)
         _save(root, rows)
     return rec
+
+
+def auto_runs(ws, bot, since, root=bots.ROOT):
+    """How many app calls this bot ran on its own in this workspace since `since` (epoch)."""
+    return sum(1 for r in load(root) if r.get("kind") == APP and r.get("auto") and r.get("ws") == ws
+               and r.get("bot") == bot and (r.get("resolved") or 0) >= since)
 
 
 def batch_pending(batch, root=bots.ROOT):
