@@ -21,7 +21,7 @@ from pathlib import Path
 from evals import turns
 
 CASES = Path(__file__).parent / "cases" / "live.json"
-_LIVE_KEYS = ("mentions", "max_chars", "max_bullets", "teammates_include")
+_LIVE_KEYS = ("mentions", "max_chars", "max_bullets", "teammates_include", "reaches")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
 KEEP_RUNS = 20
 
@@ -50,6 +50,10 @@ def grade(case, outcome):
     missing = set(expect.get("teammates_include") or ()) - set(outcome.get("teammates") or ())
     if missing:
         fails.append(f"teammates_include: {sorted(missing)} not consulted")
+    if "reaches" in expect:  # the teammate answers, consulted or handed the work (HANDOFF)
+        got = set(outcome.get("teammates") or ()) | {outcome.get("handoff")}
+        if expect["reaches"] not in got:
+            fails.append(f"reaches: @{expect['reaches']} neither consulted nor handed the work")
     return fails
 
 

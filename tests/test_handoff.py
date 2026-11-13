@@ -137,6 +137,7 @@ class HandoffTurn(unittest.TestCase):
         self.assertIn("taking it from @cos", self.runs[1]["text"])
         self.assertIn("@cos passed this to you", self.runs[1]["text"])  # a bot's handoff, not a user tag
         self.assertNotIn("user tagged", self.runs[1]["text"])
+        self.assertIn("No HANDOFF of your own this message", self.runs[1]["text"])  # one per message, said up front
         msgs = rec["messages"][-2:]
         self.assertEqual((msgs[0]["bot"], msgs[0]["content"]), ("cos", "That's research's area."))
         self.assertEqual((msgs[1]["bot"], msgs[1]["handoff_from"], msgs[1]["content"]),
@@ -149,6 +150,11 @@ class HandoffTurn(unittest.TestCase):
         out, _ = self.ask("and in Europe?", ["Half of that."])
         bot = next(e["bot"] for e in events(out) if "bot" in e)
         self.assertEqual(bot["id"], "research")
+
+    def test_cos_persona_hands_off_by_name(self):
+        text = (Path(server.__file__).resolve().parents[1] / "bots" / "cos.md").read_text()
+        self.assertIn("HANDOFF @handle", text)
+        self.assertNotIn("name them (@handle)", text)
 
     def test_wording_no_longer_moves_the_turn(self):
         self.sess._last_bot = "cos"

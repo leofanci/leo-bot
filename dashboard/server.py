@@ -984,7 +984,7 @@ def _skill_menu(team, bot_id):
     if not skills:
         return ""
     desc = {s["name"]: s["description"] for s in _skills_index()}
-    lines = ["Your skills (load one with `osctl get-skill --name <name>` when the task needs it):"]
+    lines = ["Your skills (load one with `osctl get-skill --name <name>` before working on what it covers):"]
     for name in skills:
         d = _one_line(desc.get(name, ""), _MENU_DESC_CHARS)
         lines.append(f"- {name}: {d}" if d else f"- {name}")
@@ -1064,7 +1064,9 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         h = team.get(handoff_from)
         why = (f"@{h.handle} passed this to you; it is yours now." if handed_by_bot
                else f"user tagged @{h.handle}; this is your skill, so you own it.")
-        lines.append(f"Handoff: {why} Open with one short line that you are taking it from @{h.handle}.")
+        lines.append(f"Handoff: {why} Open with one short line that you are taking it from @{h.handle}."
+                     + (" No HANDOFF of your own this message: name who should take it next instead."
+                        if handed_by_bot else ""))
     return "\n".join(lines)
 
 

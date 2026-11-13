@@ -29,7 +29,7 @@ from unittest import mock
 CASES = Path(__file__).parent / "cases" / "turns.json"
 WS = "acme"
 THREAD_ID = "e7a10000-0000-4000-8000-000000000000"  # chat_store takes UUID-shaped ids only
-_EQUAL = ("bot", "skill", "handoff_from", "handoff", "tier", "reason", "web", "gate", "approval",
+_EQUAL = ("bot", "skill", "handoff_from", "handoff", "loaded", "tier", "reason", "web", "gate", "approval",
           "teammates", "followup", "reactions", "edit", "runs")
 _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
          "prompt_lacks": "prompt", "teammate_prompt_has": "teammate_prompt",
@@ -221,6 +221,8 @@ def run(case, live_root=None):
         "skill": bot_ev.get("skill"),
         "handoff_from": bot_ev.get("handoff_from"),
         "handoff": next((s.get("id") for s in starts if s.get("handoff_from")), None),
+        # The skill a bot loaded itself this turn (osctl get-skill), as the thread now holds it.
+        "loaded": getattr(sess, "_last_skill", None) if getattr(sess, "_skill_loaded", False) else None,
         "tier": tiers.get(lead["model"], lead["model"]) if lead else None,
         "reason": recorded.get("meta", {}).get("reason") if lead else None,
         "web": bool(lead and lead["web"]),

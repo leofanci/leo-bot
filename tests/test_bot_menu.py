@@ -7,7 +7,7 @@ from unittest import mock
 from core import bots
 import dashboard.server as server
 
-HEADER = "Your skills (load one with `osctl get-skill --name <name>` when the task needs it):"
+HEADER = "Your skills (load one with `osctl get-skill --name <name>` before working on what it covers):"
 
 
 class SkillMenu(unittest.TestCase):
