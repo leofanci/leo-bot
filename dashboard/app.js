@@ -2251,12 +2251,21 @@ function featureStatusPill(status){
   return `<span class="stp ${k}">${esc(status || "idea")}</span>`;
 }
 
+// A memo that rests on a contradicted assumption says so, and names the evidence.
+function renderMemoStale(memo){
+  if (!memo.stale || !(memo.stale_why || []).length) return "";
+  const rows = memo.stale_why.map(w => `<li>${esc(w.text)} <span class="memo-stale-id">${esc(w.assumption)}</span>`
+    + (w.evidence ? ` · evidence <span class="memo-stale-id">${esc(w.evidence)}</span>` : "") + `</li>`).join("");
+  return `<div class="memo-stale"><b>Stale</b>: this memo rests on contradicted assumptions.<ul>${rows}</ul></div>`;
+}
+
 function renderMemoCard(projectSlug, memo, opts = {}){
   const b = memo.body || {};
   const title = opts.title || `${memoTypeLabel(memo.type)} v${memo.version}`;
   const id = memoArtifactId(projectSlug, memo);
   let body = renderMemoBody(b, memo.type || "");
   if (!body) body = `<p>${esc(memo.status || EMPTY)}</p>`;
+  body = renderMemoStale(memo) + body;
   if (opts.headless) {
     return `<div class="pcard"><div class="sec-body memo-body">${body}</div></div>`;
   }

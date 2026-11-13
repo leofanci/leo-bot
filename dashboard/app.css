@@ -436,6 +436,9 @@ summary.pf-head::-webkit-details-marker{display:none}
 .memo-list li{margin:0 0 var(--ui-space-1)}
 .memo-src{opacity:.7}
 .memo-empty{color:var(--ui-color-text-muted);font-style:italic}
+.memo-stale{border-left:3px solid var(--ui-color-warning,#c2410c);padding:6px 10px;margin-bottom:8px;font-size:13px}
+.memo-stale ul{margin:4px 0 0 16px;padding:0}
+.memo-stale-id{color:var(--ui-color-text-muted);font-family:monospace;font-size:12px}
 .memo-rec{margin:0 0 var(--ui-space-3-5);padding:var(--ui-space-2-5) var(--ui-space-3);border-radius:var(--ui-radius-control);background:var(--ui-color-accent-soft);box-shadow:inset 3px 0 0 var(--ui-color-accent)}
 .memo-rec .rec-lbl{display:inline-block;margin-bottom:var(--ui-space-1);font:var(--ui-weight-semibold) var(--ui-type-caption)/1 var(--ui-font-sans);color:var(--ui-color-accent)}
 .memo-rec .rec-body{color:var(--ui-color-text)}

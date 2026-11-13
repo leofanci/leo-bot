@@ -455,6 +455,27 @@ def linked_workspace_prompt(project_slug, rows, *, graph_context="", graph_error
     return "\n\n".join(parts)
 
 
+def _stale_lines(slug, memos, reg):
+    """One line per memo type whose newest version holds a contradicted assumption."""
+    from core import stale
+    latest = {}
+    for m in memos:
+        t = m.get("type") or ""
+        if t not in latest or int(m.get("version") or 0) > int(latest[t].get("version") or 0):
+            latest[t] = m
+    out, intake = [], None
+    for m in latest.values():
+        body = fileops.read_authored_json(m.get("file_path"))
+        if not isinstance(body, dict) or not body.get("assumptions"):
+            continue
+        if intake is None:
+            intake = fileops._intake_text(slug)
+        for w in stale.why(slug, m["type"], int(m["version"]), body, reg, intake):
+            ev = f" (evidence {w['evidence']})" if w["evidence"] else ""
+            out.append(f"  stale memo {w['assumption'].rsplit('.', 1)[0]}: {w['text']}{ev}")
+    return out
+
+
 def state_snapshot(projects, only=None):
     """COMPACT OS index for the chat agent — projects/profiles/channels plus
     per-entity counts, NOT full content. Bounded in size as content grows (the
@@ -498,8 +519,9 @@ def state_snapshot(projects, only=None):
             head += f", {p['priority']}"
         head += ")"
         tally = []
+        stale_lines = _stale_lines(slug, [m for m in all_memos if m.get("entity_slug") == slug], reg)
         if memo_counts.get(slug):
-            tally.append(f"{memo_counts[slug]} memos")
+            tally.append(f"{memo_counts[slug]} memos" + (", stale" if stale_lines else ""))
         if exp_counts.get(slug):
             tally.append(f"{exp_counts[slug]} exp")
         if open_act_counts.get(slug):
@@ -507,6 +529,7 @@ def state_snapshot(projects, only=None):
         if tally:
             head += "  [" + " · ".join(tally) + "]"
         lines.append(head)
+        lines += stale_lines
 
         proj_memos = [m for m in all_memos if m.get("entity_slug") == slug]
         proj_exps = [e for e in all_exps if e.get("entity_slug") == slug]

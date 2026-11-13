@@ -2074,14 +2074,28 @@ def feature_roadmap_details(product_slug: str) -> dict[str, dict]:
     return out
 
 
+def _intake_text(project_slug: str) -> str:
+    path = _project_doc_path(project_slug, "intake")
+    try:
+        return path.read_text(encoding="utf-8") if path and path.is_file() else ""
+    except OSError:
+        return ""
+
+
 def enrich_project_memos(memos: list[dict], project_slug: str, registry) -> list[dict]:
+    from core import stale  # noqa: WPS433
     from core.ids import lk_memo  # noqa: WPS433
-    rows = []
+    rows, intake = [], None
     for m in memos or []:
         row = dict(m)
         if registry:
             row["id"] = registry.lookup.get(
                 lk_memo(project_slug, m.get("type") or "", int(m.get("version") or 0)))
+            if intake is None and isinstance(row.get("body"), dict) and row["body"].get("assumptions"):
+                intake = _intake_text(project_slug)
+            row["stale_why"] = stale.why(project_slug, row.get("type") or "", int(row.get("version") or 0),
+                                         row.get("body"), registry, intake or "")
+            row["stale"] = bool(row["stale_why"])
         rows.append(row)
     return rows
 
