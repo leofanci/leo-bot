@@ -1456,7 +1456,7 @@ function jobMetaText(j, wsName, now){
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
 function isHeld(a){
-  return !!a && (a.kind === "app_action" || a.kind === "job");
+  return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction");
 }
 // What Edit on a card changes: an app action's arguments, a job card's fields.
 function heldEditable(a){
@@ -1481,11 +1481,12 @@ function acctPicked(picked, ws, slug, id){
 }
 function appCardHtml(a){
   const p = a.preview || { title: a.action?.slug || a.summary || "App action", fields: [] };
-  const sub = a.kind === "job" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
+  const sub = a.kind === "job" || a.kind === "contradiction" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
+  const edit = a.kind === "contradiction" ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
   return `<div class="app-card-h"><b>${esc(p.title)}</b><small>${sub}</small></div>
     <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
-      <button class="btn sm" data-app="edit">Edit</button>
+      ${edit}
       <button class="btn sm ghost" data-app="reject">No</button></div>`;
 }
 function wireAppCard(el, a){
@@ -1496,13 +1497,14 @@ function wireAppCard(el, a){
     try {
       const r = await jpost(`/api/approvals/${encodeURIComponent(a.id)}/${verb}`, body || {});
       _APPROVALS = _APPROVALS.filter(x => x.id !== a.id);
-      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? (a.kind === "job" ? "Not saved." : "Not sent.") : r.result || r.status)}</div>`;
+      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? (a.kind === "job" || a.kind === "contradiction" ? "Not saved." : "Not sent.") : r.result || r.status)}</div>`;
       renderRail().catch(() => {});
     } catch (e) { toast("✗ " + e.message); lock(false); }
   };
   el.querySelector('[data-app="approve"]').onclick = () => answer("approve");
   el.querySelector('[data-app="reject"]').onclick = () => answer("reject");
-  el.querySelector('[data-app="edit"]').onclick = e => {
+  const editBtn = el.querySelector('[data-app="edit"]');
+  if (editBtn) editBtn.onclick = e => {
     const { key, values: args } = heldEditable(a);
     const form = document.createElement("form");
     form.className = "app-edit";
@@ -2251,12 +2253,21 @@ function featureStatusPill(status){
   return `<span class="stp ${k}">${esc(status || "idea")}</span>`;
 }
 
+// A memo that rests on a contradicted assumption says so, and names the evidence.
+function renderMemoStale(memo){
+  if (!memo.stale || !(memo.stale_why || []).length) return "";
+  const rows = memo.stale_why.map(w => `<li>${esc(w.text)} <span class="memo-stale-id">${esc(w.assumption)}</span>`
+    + (w.evidence ? ` · evidence <span class="memo-stale-id">${esc(w.evidence)}</span>` : "") + `</li>`).join("");
+  return `<div class="memo-stale"><b>Stale</b>: this memo rests on contradicted assumptions.<ul>${rows}</ul></div>`;
+}
+
 function renderMemoCard(projectSlug, memo, opts = {}){
   const b = memo.body || {};
   const title = opts.title || `${memoTypeLabel(memo.type)} v${memo.version}`;
   const id = memoArtifactId(projectSlug, memo);
   let body = renderMemoBody(b, memo.type || "");
   if (!body) body = `<p>${esc(memo.status || EMPTY)}</p>`;
+  body = renderMemoStale(memo) + body;
   if (opts.headless) {
     return `<div class="pcard"><div class="sec-body memo-body">${body}</div></div>`;
   }

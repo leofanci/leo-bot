@@ -13,6 +13,9 @@ it, exactly once (pending -> running -> done/failed). Chat rules never touch
 these rows: a new message does not resolve them and a newer proposal does not
 supersede them. Rows with no `kind` are chat approvals.
 
+A fourth kind, `contradiction`, says new evidence breaks a memo's assumption; Approve marks
+the assumption contradicted, exactly once.
+
 A third kind, `job`, is a scheduled-job proposal (create, change or delete), built by
 the server from what a bot proposed (dashboard/job_cards.py). It is held like an app
 action: only its own card answers it, and Approve applies it exactly once.
@@ -36,7 +39,8 @@ STATUSES = {"pending", "approved", "rejected", "answered", "superseded",
             "running", "done", "failed", "expired"}
 APP = "app_action"
 JOB = "job"
-HELD = (APP, JOB)  # answered only through their own card
+CONTRA = "contradiction"
+HELD = (APP, JOB, CONTRA)  # answered only through their own card
 APP_TTL = 7 * 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
@@ -159,7 +163,7 @@ def _housekeep(rows):
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
         elif r.get("status") == "running" and now - (r.get("started") or 0) > RUNNING_STALE:
-            r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") == JOB else STALE_NOTE,
+            r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") in (JOB, CONTRA) else STALE_NOTE,
                      resolved=now)
             changed = True
     return changed
@@ -202,6 +206,25 @@ def add_job(root=bots.ROOT, *, ws, room, chat, bot, job, summary, preview):
             if (r.get("kind") == JOB and r.get("status") == "pending" and r.get("chat") == chat
                     and _job_target(r.get("job")) == _job_target(job)):
                 r.update(status="superseded", resolved=rec["created"])
+        rows.append(rec)
+        _save(root, rows)
+    return rec
+
+
+def add_contradiction(root=bots.ROOT, *, ws, room, chat, bot, contra, summary, preview):
+    """Hold one finding ({"assumption", "evidence", "reason"}) for an Approve click. A pending
+    card for the same (assumption, evidence) is not repeated."""
+    key = (contra.get("assumption"), contra.get("evidence"))
+    with LOCK:
+        rows = load(root)
+        for r in rows:
+            c = r.get("contra") or {}
+            if r.get("kind") == CONTRA and r.get("status") == "pending" \
+                    and (c.get("assumption"), c.get("evidence")) == key:
+                return r
+        rec = {"id": uuid.uuid4().hex[:12], "kind": CONTRA, "ws": ws, "room": room, "chat": chat,
+               "bot": bot, "status": "pending", "created": time.time(), "contra": contra,
+               "summary": str(summary)[:SUMMARY_MAX], "preview": preview}
         rows.append(rec)
         _save(root, rows)
     return rec

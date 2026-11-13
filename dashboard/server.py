@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import compaction, costs, job_cards, job_ledger, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_cards, job_ledger, judge as judge_model, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -455,6 +455,27 @@ def linked_workspace_prompt(project_slug, rows, *, graph_context="", graph_error
     return "\n\n".join(parts)
 
 
+def _stale_lines(slug, memos, reg):
+    """One line per memo type whose newest version holds a contradicted assumption."""
+    from core import stale
+    latest = {}
+    for m in memos:
+        t = m.get("type") or ""
+        if t not in latest or int(m.get("version") or 0) > int(latest[t].get("version") or 0):
+            latest[t] = m
+    out, intake = [], None
+    for m in latest.values():
+        body = fileops.read_authored_json(m.get("file_path"))
+        if not isinstance(body, dict) or not body.get("assumptions"):
+            continue
+        if intake is None:
+            intake = fileops._intake_text(slug)
+        for w in stale.why(slug, m["type"], int(m["version"]), body, reg, intake):
+            ev = f" (evidence {w['evidence']})" if w["evidence"] else ""
+            out.append(f"  stale memo {w['assumption'].rsplit('.', 1)[0]}: {w['text']}{ev}")
+    return out
+
+
 def state_snapshot(projects, only=None):
     """COMPACT OS index for the chat agent — projects/profiles/channels plus
     per-entity counts, NOT full content. Bounded in size as content grows (the
@@ -498,8 +519,9 @@ def state_snapshot(projects, only=None):
             head += f", {p['priority']}"
         head += ")"
         tally = []
+        stale_lines = _stale_lines(slug, [m for m in all_memos if m.get("entity_slug") == slug], reg)
         if memo_counts.get(slug):
-            tally.append(f"{memo_counts[slug]} memos")
+            tally.append(f"{memo_counts[slug]} memos" + (", stale" if stale_lines else ""))
         if exp_counts.get(slug):
             tally.append(f"{exp_counts[slug]} exp")
         if open_act_counts.get(slug):
@@ -507,6 +529,7 @@ def state_snapshot(projects, only=None):
         if tally:
             head += "  [" + " · ".join(tally) + "]"
         lines.append(head)
+        lines += stale_lines
 
         proj_memos = [m for m in all_memos if m.get("entity_slug") == slug]
         proj_exps = [e for e in all_exps if e.get("entity_slug") == slug]
@@ -1873,6 +1896,80 @@ def _job_cards_for_turn(chat, ws, room, bot_id, allowed, notice):
     return cards
 
 
+def _contradiction_cards_for_turn(chat, ws, room, bot_id, allowed, notice, judge=None):
+    """Take this thread's queued evidence checks; when `allowed`, judge each once (the entry's
+    text quoted as data) and hold a card only for a contradiction. Else drop them."""
+    if not isinstance(chat, str) or not chat:
+        return []
+    try:
+        checks = jobs.take_checks(ROOT, chat)
+    except (OSError, ValueError):
+        traceback.print_exc()
+        return []
+    if not checks or not allowed:
+        return []
+    from core import evidence as evidence_log, scoring
+    judge = judge or (lambda prompt: judge_model.complete(ROOT, ws, bot_id, "contradiction-check", prompt,
+                                                         records=_spend_records))
+    cards = []
+    reg = build_id_registry(db.tree(), db.posts(), root=ROOT)
+    for chk in checks:
+        asm, ev = reg.resolve(chk.get("assumption")), reg.resolve(chk.get("evidence"))
+        proj = (asm or {}).get("ref", {}).get("project")
+        if not asm or not ev or asm["kind"] != "assumption" or ev["kind"] != "evidence" \
+                or (ev.get("ref") or {}).get("project") != proj or (ws != bots.HQ and proj != ws):
+            continue
+        a_ref = asm["ref"]
+        item = next((i for i in fileops.list_assumptions(proj, a_ref["memo_type"])
+                     if i["version"] == a_ref["version"] and i["asm"] == a_ref["assumption"]), None)
+        entry = next((e for e in evidence_log.entries(fileops._intake_text(proj))
+                      if e["n"] == ev["ref"]["n"]), None)
+        resolved = reg.resolve(entry["ref"]) if entry and entry["ref"] else None
+        if not item or not entry or not resolved or resolved["id"] != asm["id"]:
+            continue
+        answer = judge(scoring.contradiction_prompt(item["text"], entry["text"]))
+        if answer is None:
+            continue
+        contradicts, reason = scoring.parse_contradiction(answer)
+        if not contradicts:
+            continue
+        cards.append(approvals.add_contradiction(
+            ROOT, ws=ws, room=(room or {}).get("id"), chat=chat, bot=bot_id,
+            contra={"assumption": asm["id"], "evidence": ev["id"], "reason": reason},
+            summary=f"Mark contradicted: {item['text'][:100]}",
+            preview={"title": "Assumption contradicted", "fields": [
+                ["Assumption", item["text"]], ["Memo", asm["parent"]], ["Evidence", entry["text"]],
+                ["Why", reason or "-"]]}))
+    return cards
+
+
+def _approve_contradiction_card(aid):
+    """Mark the assumption contradicted, exactly once, after checking it still exists."""
+    rec = approvals.get(aid, ROOT)
+    if not rec or rec.get("kind") != approvals.CONTRA:
+        raise LookupError("no such card")
+    if rec.get("status") != "pending":
+        raise _AppRefused(f"already {rec.get('status')}")
+    try:
+        claimed = approvals.claim(aid, ROOT)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    reg = build_id_registry(db.tree(), db.posts(), root=ROOT)
+    asm = reg.resolve((claimed.get("contra") or {}).get("assumption"))
+    try:
+        if not asm or asm["kind"] != "assumption":
+            raise fileops.ActionError("that assumption no longer exists")
+        r = asm["ref"]
+        fileops.set_assumption_status(r["project"], r["memo_type"], r["version"], r["assumption"], "contradicted")
+        status, line = "done", f"Marked contradicted: {asm['label']}. Ask for a new memo version when ready."
+    except fileops.ActionError as e:
+        status, line = "failed", f"Not saved: {e}"
+    out = approvals.finish(aid, status, line, ROOT)
+    if out.get("chat"):
+        chat_store.append_note(out["chat"], out["bot"], line)
+    return out
+
+
 def _approve_job_card(aid, fields=None):
     """Apply one job card, exactly once, after checking it again. `fields` (the card's Edit)
     replace the proposal's fields and are checked like the bot's were."""
@@ -3198,6 +3295,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 - the turn is still saved
                 traceback.print_exc()
                 cards = []
+            try:
+                cards += _contradiction_cards_for_turn(
+                    getattr(sess, "session_id", None), ws, room, bot_id,
+                    allowed=not job and not shared and not person, notice=lambda t: _quiet(notice, t))
+            except Exception:  # noqa: BLE001 - the turn is still saved
+                traceback.print_exc()
             if cards:
                 _quiet(emit, {"app_actions": cards, "msg": len(msgs) - 1})
             if apps_kw.get("apps_token"):
@@ -3948,6 +4051,8 @@ class Handler(BaseHTTPRequestHandler):
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
                         held = approvals.get(aid, ROOT) or {}
+                        if held.get("kind") == approvals.CONTRA:
+                            return self._send(200, _approve_contradiction_card(aid))
                         if held.get("kind") == approvals.JOB:
                             fields = body.get("fields")
                             return self._send(200, _approve_job_card(aid, fields if isinstance(fields, dict) else None))

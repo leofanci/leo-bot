@@ -27,6 +27,8 @@ plus any prior assessment memos.
 Propose assessment memo in chat (target `sec01`, `create-memo --type assessment`). Commit only after user approves.
 
 ## Rules
+- A stale memo (contradicted assumption in the state index): name the assumption and its evidence, offer a new
+  version, never write it unasked.
 - Pace call MUST follow from evidence: no revenue + unvalidated problem = never "accelerate".
 - Each ICP hypothesis cites its evidence_basis from intake; if none, confidence = "low".
 - 2-4 positioning options, genuinely different (not the same idea reworded).
