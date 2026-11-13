@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 from dashboard import chat_session, db, fileops, job_cards  # noqa: E402
-from core import bots, jobs, memory, paths  # noqa: E402
+from core import bots, jobs, memory, paths, skill_loads  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -43,7 +43,7 @@ _BLOCKED_IN_WORKSPACE = {"create-project"}
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
                    "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
-                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions"}
+                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions", "get-skill"}
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV). That thread runs an ALLOWLIST: a new command
 # is refused there until it is added to _LOCAL_CMDS (tests/test_jobs.py fails on any
@@ -56,7 +56,7 @@ _LOCAL_CMDS = frozenset({
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
-    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-skill", "get-subsections", "get-voice",
     "extract-assumptions", "list-assumptions", "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
     "revise-post", "set-metric", "set-status", "tree", "update-brief", "update-brief-spec",
     "update-channel", "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
@@ -93,7 +93,7 @@ _AUTO_ALLOWED = frozenset({
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
     "get-brief-spec", "get-busy", "get-id-catalog", "get-memory", "get-posts", "get-project",
-    "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
+    "get-skill", "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
     "research-signal", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-channel", "update-experiment", "update-feature", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-strategy",
@@ -114,7 +114,7 @@ _SHARED_ALLOWED = frozenset({
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
-    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-subsections", "get-voice",
+    "get-id-catalog", "get-memory", "get-posts", "get-project", "get-skill", "get-subsections", "get-voice",
     "list-assumptions", "mark-done", "read-file", "recall", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-brief-spec", "update-channel", "update-experiment", "update-feature",
     "update-intake", "update-memo", "update-milestone", "update-phase", "update-post",
@@ -408,6 +408,18 @@ def _build_parser():
         return {"entries": memory.recall(a.bot, a.query, _workspace(), root=bots.ROOT,
                                          shared=bool(os.environ.get("LEOBOT_SHARED")), limit=a.limit)}
     p.set_defaults(_run=_recall)
+
+    p = sub.add_parser("get-skill", help="Load one of the team's skills: prints its instructions")
+    p.add_argument("--name", required=True)
+
+    def _get_skill(a):
+        text = skill_loads.body(a.name)
+        if not text:
+            raise fileops.ActionError(f"unknown skill: {a.name}. Skills: {', '.join(skill_loads.names())}")
+        # The server reads this record after the turn: the skill stays active for the thread.
+        skill_loads.record(bots.ROOT, os.environ.get("LEOBOT_CHAT") or "", a.name)
+        return {"skill": a.name, "body": text}
+    p.set_defaults(_run=_get_skill)
 
     # -- scheduled jobs (core/jobs.py): a bot proposes, the owner approves -- #
     p = sub.add_parser("propose-job", help="Propose a new job, a change or a deletion: the owner "

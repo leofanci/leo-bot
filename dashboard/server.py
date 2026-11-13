@@ -48,7 +48,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
-from core import approvals, jobs  # noqa: E402
+from core import approvals, jobs, skill_loads  # noqa: E402
 from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -1029,14 +1029,7 @@ _RESUME_NOTE = (
 
 
 # Skills fully covered by CHAT_RAIL — inject stub only (avoids ~1k+ duplicate tok/turn).
-_RAIL_COVERED_SKILL_STUBS: dict[str, str] = {
-    "workspace": (
-        "You route for the team (rules in system prompt). Work out what the user needs. "
-        "A teammate owns it → @mention them and say why in one line. Yours → do it. "
-        "\"Set everything up\" → list the deliverables to make (one line each), get approval, "
-        "then save one per turn."
-    ),
-}
+_RAIL_COVERED_SKILL_STUBS = skill_loads.RAIL_STUBS
 
 
 def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=None,
@@ -1089,15 +1082,7 @@ def compose_turn_prompt(*, user_msg, context, skill, session, projects, suggest=
 def _load_skill_body(name):
     """Read a routed skill's SKILL.md, returning its instruction body (frontmatter
     stripped). Returns '' if missing. Rail-covered skills return a short stub."""
-    stub = _RAIL_COVERED_SKILL_STUBS.get(name)
-    if stub:
-        return stub
-    f = SKILLS_DIR / name / "SKILL.md"
-    if not f.exists():
-        return ""
-    txt = f.read_text(encoding="utf-8")
-    # same frontmatter parser as _skills_index, so one malformed file reads one way
-    return fileops._parse_frontmatter(txt)[1] if txt.startswith("---") else txt.strip()
+    return skill_loads.body(name)
 
 
 def _skills_index():
