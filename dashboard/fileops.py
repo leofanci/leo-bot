@@ -1857,7 +1857,8 @@ def update_experiment(project_slug: str, stem: str, fields: dict) -> dict:
     if not isinstance(body, dict):
         raise ActionError(f"experiment '{stem}' is not a JSON object")
     patch = dict(body)
-    for key in ("assumption", "assumption_under_test", "success_criteria", "kill_criteria", "status", "strategy"):
+    for key in ("assumption", "assumption_under_test", "success_criteria", "kill_criteria", "status", "strategy",
+                "result"):
         if key in fields and fields[key] is not None:
             patch[key] = fields[key]
     if fields.get("strategy"):
@@ -1872,6 +1873,18 @@ def update_experiment(project_slug: str, stem: str, fields: dict) -> dict:
         "path": rel,
         "project": project_slug,
     }
+
+
+def read_experiment(project_slug: str, stem: str) -> dict:
+    """An experiment's saved JSON body, or ActionError when it is gone."""
+    stem = _safe_component(stem, "experiment stem")
+    path = _project_dir(project_slug) / "strategy" / "experiments" / f"{stem}.json"
+    if not path.exists():
+        raise ActionError(f"experiment '{stem}' not found")
+    body = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(body, dict):
+        raise ActionError(f"experiment '{stem}' is not a JSON object")
+    return body
 
 
 def set_metric(project_slug: str, stem: str, fields: dict | None, clear: bool = False,
@@ -2127,12 +2140,22 @@ def enrich_project_memos(memos: list[dict], project_slug: str, registry) -> list
 
 def enrich_project_experiments(experiments: list[dict], project_slug: str, registry) -> list[dict]:
     from core.ids import experiment_stem_from_path, lk_experiment  # noqa: WPS433
-    rows = []
+    entries, rows = None, []
     for x in experiments or []:
         row = dict(x)
         stem = row.get("stem") or experiment_stem_from_path(row.get("file_path") or "") or ""
         if registry and stem:
             row["id"] = registry.lookup.get(lk_experiment(project_slug, stem))
+        metric = (row.get("body") or {}).get("metric") if isinstance(row.get("body"), dict) else None
+        if metric:
+            # The metric source and the newest evidence entry that points at this experiment.
+            if entries is None:
+                entries = evidence.entries(_intake_text(project_slug))
+            mine = [e for e in entries if e["ref"] and e["ref"] == row.get("id")]
+            last = mine[-1] if mine else None
+            row["metric"] = {**metric, "last": ({"date": last["date"], "text": last["text"],
+                                                 "evidence": registry.lookup.get(lk_evidence(project_slug, last["n"]))
+                                                 if registry else None} if last else None)}
         rows.append(row)
     return rows
 

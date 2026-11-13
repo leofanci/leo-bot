@@ -58,7 +58,7 @@ from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
 from dashboard.engines.runner import RunnerEngine  # noqa: E402
-from dashboard import compaction, costs, job_cards, job_ledger, judge as judge_model, job_runner, memory_consolidate, spend  # noqa: E402
+from dashboard import compaction, costs, job_cards, job_ledger, judge as judge_model, score_run, job_runner, memory_consolidate, spend  # noqa: E402
 from core import runners  # noqa: E402
 from ai_rules import CHAT_RAIL  # noqa: E402
 from core.project_schemas import schemas_for_api  # noqa: E402
@@ -1432,6 +1432,22 @@ def _job_problem(job, projects):
     return None
 
 
+def _score_job(job):
+    """The scoring job (skills/score-experiments): the server reads each metric source and judges the
+    number itself, so no bot turn ever sees source text. Cards are held for Approve."""
+    ws, bot = job.get("workspace") or bots.HQ, job["bot"]
+    if ws == bots.HQ:
+        return {"status": "refused", "chat": None, "cost": 0.0,
+                "detail": "score-experiments runs in a project workspace, not HQ"}
+    out = score_run.run(
+        job, root=ROOT, records=_spend_records, post=chat_store.post_note,
+        judge=lambda prompt: judge_model.run(ROOT, ws, bot, "score-experiments", prompt,
+                                             records=_spend_records, for_job=job["id"]),
+        read=lambda app, action, args: composio.read_metric(app, action, args, ws, bot, ROOT))
+    status = "capped" if out["status"] == "capped" else "waiting" if out["cards"] else "done"
+    return {**out, "status": status}
+
+
 def run_job(job, srv):
     """One run of a scheduled job (core/jobs.py) through the normal ask path, on a handler
     with no socket: `@bot /skill message` in the bot's DM, a fresh read-only thread.
@@ -1439,6 +1455,8 @@ def run_job(job, srv):
     problem = _job_problem(job, db.tree())
     if problem:
         return {"status": "refused", "chat": None, "cost": 0.0, "detail": problem}
+    if job.get("skill") == "score-experiments":
+        return _score_job(job)
     live = {}
     _JOB_RUN["live"] = live
     h = Handler.__new__(Handler)
@@ -1967,6 +1985,46 @@ def _approve_contradiction_card(aid):
     out = approvals.finish(aid, status, line, ROOT)
     if out.get("chat"):
         chat_store.append_note(out["chat"], out["bot"], line)
+    return out
+
+
+_VERDICT_STATUS = {"met": "done", "killed": "done", "on track": "running"}
+
+
+def _approve_verdict_card(aid):
+    """Save a verdict: the result on the experiment and one evidence entry, exactly once, after
+    checking the experiment still exists and still has the metric the card read."""
+    rec = approvals.get(aid, ROOT)
+    if not rec or rec.get("kind") != approvals.VERDICT:
+        raise LookupError("no such card")
+    if rec.get("status") != "pending":
+        raise _AppRefused(f"already {rec.get('status')}")
+    v = rec.get("verdict") or {}
+    try:
+        claimed = approvals.claim(aid, ROOT)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    try:
+        body = fileops.read_experiment(v.get("project"), v.get("stem"))
+        if body.get("metric") != v.get("metric"):
+            raise fileops.ActionError("the experiment's metric changed since this was read")
+        line = f"{v['verdict']}: {v['number']:g} over {v['window_days']}d on {v['date']}." \
+            if v.get("number") is not None else f"{v['verdict']} on {v['date']}."
+        line = f"{line} {v.get('reason') or ''}".strip()
+        patch = {"result": line}
+        if v["verdict"] in _VERDICT_STATUS:
+            patch["status"] = _VERDICT_STATUS[v["verdict"]]
+        fileops.update_experiment(v["project"], v["stem"], patch)
+        try:
+            fileops.add_evidence(v["project"], {"text": line, "ref": v["exp"]})
+        except fileops.ActionError as e:
+            raise fileops.ActionError(f"result saved, evidence not: {e}")
+        status, text = "done", f"Saved: {line}"
+    except fileops.ActionError as e:
+        status, text = "failed", f"Not saved: {e}"
+    out = approvals.finish(aid, status, text, ROOT)
+    if out.get("chat"):
+        chat_store.append_note(out["chat"], out["bot"], text)
     return out
 
 
@@ -4051,6 +4109,8 @@ class Handler(BaseHTTPRequestHandler):
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
                         held = approvals.get(aid, ROOT) or {}
+                        if held.get("kind") == approvals.VERDICT:
+                            return self._send(200, _approve_verdict_card(aid))
                         if held.get("kind") == approvals.CONTRA:
                             return self._send(200, _approve_contradiction_card(aid))
                         if held.get("kind") == approvals.JOB:

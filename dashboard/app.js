@@ -1456,7 +1456,7 @@ function jobMetaText(j, wsName, now){
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
 function isHeld(a){
-  return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction");
+  return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict");
 }
 // What Edit on a card changes: an app action's arguments, a job card's fields.
 function heldEditable(a){
@@ -1481,8 +1481,8 @@ function acctPicked(picked, ws, slug, id){
 }
 function appCardHtml(a){
   const p = a.preview || { title: a.action?.slug || a.summary || "App action", fields: [] };
-  const sub = a.kind === "job" || a.kind === "contradiction" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
-  const edit = a.kind === "contradiction" ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
+  const sub = a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
+  const edit = a.kind === "contradiction" || a.kind === "verdict" ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
   return `<div class="app-card-h"><b>${esc(p.title)}</b><small>${sub}</small></div>
     <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
@@ -1497,7 +1497,7 @@ function wireAppCard(el, a){
     try {
       const r = await jpost(`/api/approvals/${encodeURIComponent(a.id)}/${verb}`, body || {});
       _APPROVALS = _APPROVALS.filter(x => x.id !== a.id);
-      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? (a.kind === "job" || a.kind === "contradiction" ? "Not saved." : "Not sent.") : r.result || r.status)}</div>`;
+      el.innerHTML = `<div class="app-result">${esc(r.status === "rejected" ? (a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict" ? "Not saved." : "Not sent.") : r.result || r.status)}</div>`;
       renderRail().catch(() => {});
     } catch (e) { toast("✗ " + e.message); lock(false); }
   };
@@ -2324,6 +2324,8 @@ function renderExperimentCard(slug, x){
   if (x.started_on) body += ` · started ${esc(x.started_on)}`;
   body += `</div>`;
   if (x.result) body += `<div>${"<b>Result</b> · "}${esc(x.result)}</div>`;
+  if (x.metric) body += `<div class="metric-chip"><b>Metric</b> · ${esc(x.metric.app)} ${esc(x.metric.action)} → ${esc(x.metric.path)} (${esc(x.metric.window_days)}d)`
+    + (x.metric.last ? ` · last ${esc(x.metric.last.date)}: ${esc(x.metric.last.text)}` : " · not scored yet") + `</div>`;
   // success / kill lines → paired call-out blocks (mockup experiment record)
   if (b.success_criteria || b.kill_criteria){
     body += `<div class="crit-grid">`

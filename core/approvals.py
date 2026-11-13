@@ -13,6 +13,9 @@ it, exactly once (pending -> running -> done/failed). Chat rules never touch
 these rows: a new message does not resolve them and a newer proposal does not
 supersede them. Rows with no `kind` are chat approvals.
 
+A fifth kind, `verdict`, is a scoring job's verdict on one experiment; Approve writes the
+result and one evidence entry, exactly once.
+
 A fourth kind, `contradiction`, says new evidence breaks a memo's assumption; Approve marks
 the assumption contradicted, exactly once.
 
@@ -40,7 +43,8 @@ STATUSES = {"pending", "approved", "rejected", "answered", "superseded",
 APP = "app_action"
 JOB = "job"
 CONTRA = "contradiction"
-HELD = (APP, JOB, CONTRA)  # answered only through their own card
+VERDICT = "verdict"
+HELD = (APP, JOB, CONTRA, VERDICT)  # answered only through their own card
 APP_TTL = 7 * 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
@@ -163,7 +167,7 @@ def _housekeep(rows):
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
         elif r.get("status") == "running" and now - (r.get("started") or 0) > RUNNING_STALE:
-            r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") in (JOB, CONTRA) else STALE_NOTE,
+            r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") in (JOB, CONTRA, VERDICT) else STALE_NOTE,
                      resolved=now)
             changed = True
     return changed
@@ -224,6 +228,36 @@ def add_contradiction(root=bots.ROOT, *, ws, room, chat, bot, contra, summary, p
                 return r
         rec = {"id": uuid.uuid4().hex[:12], "kind": CONTRA, "ws": ws, "room": room, "chat": chat,
                "bot": bot, "status": "pending", "created": time.time(), "contra": contra,
+               "summary": str(summary)[:SUMMARY_MAX], "preview": preview}
+        rows.append(rec)
+        _save(root, rows)
+    return rec
+
+
+def _verdict_key(v):
+    return (v.get("exp"), v.get("number"), v.get("verdict"))
+
+
+def has_pending_verdict(root, verdict):
+    """A pending card already holds this experiment, number and verdict."""
+    return any(r.get("kind") == VERDICT and r.get("status") == "pending"
+               and _verdict_key(r.get("verdict") or {}) == _verdict_key(verdict) for r in load(root))
+
+
+def add_verdict(root=bots.ROOT, *, ws, room, chat, bot, verdict, summary, preview):
+    """Hold one verdict ({"exp", "project", "stem", "metric", "number", "window_days", "date",
+    "verdict", "reason", "raw"}) for an Approve click. The same (experiment, number, verdict)
+    pending is not repeated; the same experiment with other numbers supersedes the old card."""
+    with LOCK:
+        rows = load(root)
+        for r in rows:
+            v = r.get("verdict") or {}
+            if r.get("kind") == VERDICT and r.get("status") == "pending" and v.get("exp") == verdict.get("exp"):
+                if _verdict_key(v) == _verdict_key(verdict):
+                    return r
+                r.update(status="superseded", resolved=time.time())
+        rec = {"id": uuid.uuid4().hex[:12], "kind": VERDICT, "ws": ws, "room": room, "chat": chat,
+               "bot": bot, "status": "pending", "created": time.time(), "verdict": verdict,
                "summary": str(summary)[:SUMMARY_MAX], "preview": preview}
         rows.append(rec)
         _save(root, rows)
