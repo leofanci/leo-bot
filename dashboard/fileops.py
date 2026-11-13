@@ -1695,17 +1695,16 @@ def create_memo(project_slug: str, memo_type: str, fields: dict | None = None,
 
 def _memo_assumptions(memo_dir: Path, mtype: str) -> dict[int, list[dict]]:
     """{version: assumptions} for every saved version of a memo type."""
-    mtype = _safe_component(mtype, "memo type")
     out: dict[int, list[dict]] = {}
-    for f in memo_dir.glob(f"{mtype}-v*.json"):
-        m = re.fullmatch(re.escape(mtype) + r"-v(\d+)\.json", f.name)
-        if not m:
+    for f in memo_dir.glob("*.json"):
+        m = re.fullmatch(r"(.+)-v(\d+)\.json", f.name)
+        if not m or m.group(1) != mtype:
             continue
         try:
             body = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        out[int(m.group(1))] = assumptions.normalize(body.get("assumptions") if isinstance(body, dict) else None)
+        out[int(m.group(2))] = assumptions.normalize(body.get("assumptions") if isinstance(body, dict) else None)
     return out
 
 
