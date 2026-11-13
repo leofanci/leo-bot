@@ -50,7 +50,7 @@ _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-cata
 # command in neither set).
 _NETWORK_CMDS = frozenset({"research-signal"})
 _LOCAL_CMDS = frozenset({
-    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "add-evidence", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
     "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
@@ -88,7 +88,7 @@ _AUTO_WAITS = frozenset({"remember", "propose-job", "set-metric", *_AUTO_REPLACE
                          "delete-brief-spec", "delete-experiment", "delete-feature", "delete-memo",
                          "delete-phase", "delete-strategy", "delete-voice"})
 _AUTO_ALLOWED = frozenset({
-    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "add-evidence", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
     "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
@@ -108,7 +108,7 @@ READONLY_TEXT = {
 # A thread invited people can see runs an ALLOWLIST: a new command is refused there until
 # someone adds it here (tests/test_case_variants.py fails on any command in neither set).
 _SHARED_ALLOWED = frozenset({
-    "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
+    "add-evidence", "add-feature", "add-post", "add-slide", "add-subsection", "create-activity",
     "create-brief-spec", "create-channel", "create-experiment", "create-intake", "create-memo",
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "delete-brief-spec",
@@ -473,6 +473,13 @@ def _build_parser():
     p.add_argument("--strategy", help="GTM strategy stem this experiment validates (sec07 lens)")
     p.set_defaults(_run=lambda a: fileops.update_experiment(
         a.project, a.stem, _fields(a, ["assumption", "success_criteria", "kill_criteria", "strategy"])))
+
+    p = sub.add_parser("add-evidence", help="Append a dated entry to the intake Evidence log")
+    p.add_argument("--project", required=True)
+    p.add_argument("--text", required=True)
+    p.add_argument("--ref", help="composed id of an experiment of this project")
+    p.add_argument("--date", help="YYYY-MM-DD (default today)")
+    p.set_defaults(_run=lambda a: fileops.add_evidence(a.project, _fields(a, ["text", "ref", "date"])))
 
     p = sub.add_parser("set-metric", help="Set or clear an experiment's metric source (read-only app action)")
     p.add_argument("--project", required=True)

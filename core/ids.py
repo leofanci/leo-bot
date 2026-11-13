@@ -240,6 +240,10 @@ def lk_experiment(project: str, stem: str) -> str:
     return f"exp:proj:{project}:{stem}"
 
 
+def lk_evidence(project: str, n: int) -> str:
+    return f"ev:proj:{project}:{n}"
+
+
 def lk_phase(project: str, phase_id: str) -> str:
     return f"phase:proj:{project}:{phase_id}"
 
@@ -472,6 +476,16 @@ class IdRegistry:
                         reg._add(cid, stem, kind="exp", parent=exp_sec_id,
                                  ref={"project": pslug, "section": "experiments", "stem": stem})
                         reg._bind(lk_experiment(pslug, stem), cid)
+                # Evidence entries keep the number written in the intake log: never renumbered.
+                intake_file = proj_dir / "strategy" / "intake.md"
+                if intake_file.is_file():
+                    from core import evidence as _ev  # local import, like gtm below
+                    ev_sec = f"{pr_id}.sec{PROJ_SEC_NUM['validation']}"
+                    for e in _ev.entries(intake_file.read_text(encoding="utf-8")):
+                        cid = f"{ev_sec}.ev{e['n']}"
+                        reg._add(cid, f"ev{e['n']}", kind="evidence", parent=ev_sec,
+                                 meta=e["date"], ref={"project": pslug, "section": "validation", "n": e["n"]})
+                        reg._bind(lk_evidence(pslug, e["n"]), cid)
                 prod_root = proj_dir / "products"
                 if prod_root.is_dir():
                     for d in sorted(prod_root.iterdir()):
