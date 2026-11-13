@@ -164,3 +164,37 @@ def decide(slug, grant, catalog, arguments=None, read_only=None, paid=frozenset(
             and _size(arguments) <= MAX_READ_ARG_CHARS and read_only is not None and read_only(slug) is True:
         return "read", tk
     return ("hold" if grant[tk] == "write" else "refuse"), tk
+
+
+_SLUG = re.compile(r"[A-Z0-9][A-Z0-9_]{0,127}")
+
+
+def metric_problem(app, action, catalog, args=None, read_only=None, paid=frozenset()):
+    """Why `action` of `app` cannot be an experiment's metric source, or None when it can.
+    Same rules as a bot's own read (decide): the metric job reads without a click, so it
+    holds to the exact same bar. `read_only(slug)` is Composio's readOnlyHint tag."""
+    if not isinstance(action, str) or not _SLUG.fullmatch(action):
+        return "action must be a Composio tool slug like APP_GET_SOMETHING"
+    tk = toolkit_of(action, set(catalog) | BLOCKED_TOOLKITS)
+    if tk is None:
+        return f"{action} belongs to no known app"
+    if tk != app:
+        return f"{action} belongs to {tk}, not {app}"
+    if tk in BLOCKED_TOOLKITS:
+        return f"{tk} can never be a metric source"
+    if tk in PAID_READ_TOOLKITS or tk in paid:
+        return f"{tk} reads spend credits or fetch pages: they wait for approval, so they cannot run on a schedule"
+    if not is_read(action, tk):
+        return f"{action} does not read: only read actions (GET, LIST, FETCH, ...) can be a metric source"
+    if has_url(args, tk in ADDRESS_SAFE_TOOLKITS):
+        return "read arguments may not hold a URL or address"
+    if _size(args) > MAX_READ_ARG_CHARS:
+        return f"read arguments over {MAX_READ_ARG_CHARS} characters"
+    if read_only is None:
+        return "cannot check Composio's read-only tag"
+    tagged = read_only(action)
+    if tagged is None:
+        return f"cannot confirm Composio tags {action} read-only"
+    if tagged is not True:
+        return f"Composio does not tag {action} read-only"
+    return None

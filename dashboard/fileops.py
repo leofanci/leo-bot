@@ -47,7 +47,7 @@ from core.voice_util import (
     read_voice_text,
     write_voice_text,
 )
-from core import folders, paths
+from core import app_rules, folders, paths
 from core import gtm as gtm_store
 from core.ids import (
     build_id_registry,
@@ -69,11 +69,13 @@ from core.ids import (
 from core.project_schemas import (
     FEATURE_PRIORITIES,
     MEMO_TYPES,
+    METRIC_MAX_WINDOW_DAYS,
     ROADMAP_SECTION_ALIASES,
     dumps_json,
     normalize_experiment_body,
     normalize_markdown,
     normalize_memo_body,
+    normalize_metric,
     parse_markdown_sections,
 )
 from core.subsections import (
@@ -1705,7 +1707,9 @@ def create_experiment(project_slug: str, fields: dict) -> dict:
     path = exp_dir / f"{stem}.json"
     if path.exists():
         raise ActionError(f"experiment '{stem}' already exists")
-    body = normalize_experiment_body({**fields, "assumption": assumption})
+    # A metric source is saved only by set_metric, which checks the action is read-only.
+    body = normalize_experiment_body({**{k: v for k, v in fields.items() if k != "metric"},
+                                      "assumption": assumption})
     if fields.get("strategy"):
         _require_strategy(project_slug, fields["strategy"])
     path.write_text(dumps_json(body), encoding="utf-8")
@@ -1744,6 +1748,50 @@ def update_experiment(project_slug: str, stem: str, fields: dict) -> dict:
         "stem": stem,
         "path": rel,
         "project": project_slug,
+    }
+
+
+def set_metric(project_slug: str, stem: str, fields: dict | None, clear: bool = False,
+               catalog=None, read_only=None, paid=frozenset()) -> dict:
+    """Set (or clear) an experiment's metric source. Only a read-only app action is saved: the
+    scoring job reads it with no click, so a write action is rejected here with the reason.
+    `catalog` (toolkit slugs), `read_only` (slug -> Composio's tag) and `paid` stand in for
+    Composio's own answers (tests); left out, they are asked of Composio."""
+    stem = _safe_component(stem, "experiment stem")
+    path = _project_dir(project_slug) / "strategy" / "experiments" / f"{stem}.json"
+    if not path.exists():
+        raise ActionError(f"experiment '{stem}' not found")
+    body = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(body, dict):
+        raise ActionError(f"experiment '{stem}' is not a JSON object")
+    body.pop("metric", None)
+    if not clear:
+        metric = normalize_metric(fields)
+        if metric is None:
+            raise ActionError("metric needs app, action, path (dotted keys like data.followers) "
+                              f"and window_days 1 to {METRIC_MAX_WINDOW_DAYS}")
+        if catalog is None:
+            from core import composio
+            try:
+                items = composio.catalog()
+            except composio.ComposioError as e:
+                raise ActionError(f"cannot check the action is read-only ({e})")
+            catalog, paid = [a["slug"] for a in items], composio.paid_read_toolkits(items)
+            read_only = read_only or composio.tool_read_only
+        elif read_only is None:
+            raise ActionError("cannot check the action is read-only")
+        why = app_rules.metric_problem(metric["app"], metric["action"], catalog, metric["args"], read_only, paid)
+        if why:
+            raise ActionError(f"metric rejected: {why}")
+        body["metric"] = metric
+    path.write_text(dumps_json(normalize_experiment_body(body)), encoding="utf-8")
+    reindex()
+    return {
+        "id": _composed_id(lk_experiment(project_slug, stem)),
+        "stem": stem,
+        "path": str(path.relative_to(ROOT)),
+        "project": project_slug,
+        "metric": body.get("metric"),
     }
 
 
