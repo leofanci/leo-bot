@@ -961,8 +961,16 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
     if fresh or getattr(session, "_last_bot", None) != bot_id:
         lines.append(f"## Speaking as @{b.handle}: {b.name}\n{b.body}")
         ws = getattr(team, "ws", bots.HQ)
+        shown = ws
+        if ws != bots.HQ:  # the owner's name for it, when it differs from the folder slug
+            try:
+                name = next((p.get("name") for p in db.tree() if p.get("slug") == ws), None)
+            except Exception:  # noqa: BLE001 - the line is still told with the slug
+                name = None
+            if name and name != ws:
+                shown = f"{name} (folder and id: {ws})"
         lines.append("Workspace: HQ, the holding's CEO office (sees every company)." if ws == bots.HQ
-                     else f"Workspace: {ws}. You work only for this company; other workspaces "
+                     else f"Workspace: {shown}. You work only for this company; other workspaces "
                           "are invisible except as busy time in the shared calendar.")
         if b.covering:
             names = ", ".join(team.get(c).name for c in b.covering)
