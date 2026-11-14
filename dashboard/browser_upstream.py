@@ -342,8 +342,11 @@ class BrowserUpstream(browser_relay.Upstream):
         if mode not in ("bot", "my_chrome"):
             raise ValueError(f"unknown browser mode: {mode}")
         self.ws, self.bot, self.mode, self.root = ws, bot, mode, root
-        self.browser_key = browser_relay.browser_key_for(mode, ws, bot)
         self.session = session_name(ws, bot, mode)
+        # One lock per real browser (all my_chrome bots share the owner's Chrome); typed text
+        # per tab (each my_chrome bot has its own pinned tab).
+        self.lock_key = self.browser_key = browser_relay.browser_key_for(mode, ws, bot)
+        self.typed_key = browser_relay.typed_key_for(mode, ws, bot, self.session)
         self.last_used = time.time()
         self.closed = stopped
         self._closed_line = STOPPING if stopped else CLOSED
@@ -527,7 +530,7 @@ class BrowserUpstream(browser_relay.Upstream):
                     except _Failed:
                         self._drop()
                         raise
-                    browser_relay.set_aside(self.browser_key, self.root)  # a new page, as after open
+                    browser_relay.set_aside(self.typed_key, self.root)  # a new page, as after open
                     raise _Failed(TAB_RESET)
                 reply = dict(reply)
                 reply["id"] = rid

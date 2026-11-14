@@ -17,9 +17,12 @@ def u(rest):  # built from parts so no literal URL host sits in a tracked file
 
 
 class FakeUpstream(browser_relay.Upstream):
-    def __init__(self, url=None, mode="bot", redirects=None, values=None, browser_key=None, typing=True):
+    def __init__(self, url=None, mode="bot", redirects=None, values=None, browser_key=None, typing=True,
+                 typed_key=None):
         self.url, self.mode, self.frames = url, mode, []
         self.browser_key = browser_key or "bot:fake-%d" % id(self)  # its own browser unless shared
+        self.lock_key = self.browser_key
+        self.typed_key = typed_key or self.browser_key  # one fake is one tab
         self.redirects = redirects or {}
         self.history = []
         self.values = list(values or [])  # what the relay's field eval sees on the page

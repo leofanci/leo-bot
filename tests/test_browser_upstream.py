@@ -243,10 +243,10 @@ class Children(Base):
             return browser_relay.handle(call(rid, name, **args), ctx, "s-1", up, self.root)[0]
         self.assertFalse(relay(1, P + "open", url=page)["result"]["isError"])
         relay(2, P + "type", selector="@e1", text="hello")
-        self.assertEqual(browser_relay.typed_state(up.browser_key, self.root)["typed"], "hello")
+        self.assertEqual(browser_relay.typed_state(up.typed_key, self.root)["typed"], "hello")
         self.control(tab_gone_on=P + "get_text")
         self.assertEqual(text(relay(3, P + "get_text", selector="@e1")), bu.TAB_RESET)
-        self.assertEqual(browser_relay.typed_state(up.browser_key, self.root),
+        self.assertEqual(browser_relay.typed_state(up.typed_key, self.root),
                          {"typed": "", "aside": "hello"})
         reply = relay(4, P + "click", selector="@e2")  # listed site, no filled field: a plain click
         self.assertFalse(reply["result"]["isError"], reply)
@@ -424,6 +424,62 @@ class Children(Base):
         listed, _ = up.forward({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, None)
         self.assertEqual(listed["id"], 9)
         self.assertIn(P + "open", [t["name"] for t in listed["result"]["tools"]])
+
+
+class SharedChrome(Base):
+    """Two bots in the owner's Chrome: one lock, one typed record per bot's pinned tab."""
+
+    def setUp(self):
+        super().setUp()
+        from core import browser
+        browser.set_bot("acme", "b1", "write", "my_chrome", self.root)
+        browser.set_bot("acme", "b2", "write", "my_chrome", self.root)
+        self.chrome(CDP)
+        self.a = self.pool.get("acme", "b1", "my_chrome", self.root)
+        self.b = self.pool.get("acme", "b2", "my_chrome", self.root)
+        self.page = "https" + "://" + "other.test/inbox"  # an unlisted site: typed rules only
+
+    def relay(self, up, bot, name, **args):
+        ctx = {"ws": "acme", "bot": bot, "chat": "c1", "room": "acme/general", "person": "ceo"}
+        return browser_relay.handle(call(1, name, **args), ctx, "s-1", up, self.root)[0]
+
+    def test_keys(self):
+        self.assertEqual((self.a.lock_key, self.b.lock_key), ("my_chrome", "my_chrome"))
+        self.assertEqual(self.a.browser_key, self.a.lock_key)
+        self.assertEqual((self.a.typed_key, self.b.typed_key),
+                         ("my_chrome:acme--b1--chrome", "my_chrome:acme--b2--chrome"))
+        bot = self.pool.get("demo", "b3", "bot", self.root)
+        self.assertEqual((bot.lock_key, bot.typed_key, bot.browser_key), ("bot:demo--b3",) * 3)
+
+    def test_other_bots_open_never_unlocks_an_unplanned_send(self):
+        self.relay(self.a, "b1", P + "open", url=self.page)
+        self.relay(self.a, "b1", P + "fill", selector="@e1", text="UNPLANNED")
+        self.assertEqual(text(self.relay(self.a, "b1", P + "click", selector="@e2")), browser_relay.NO_PLAN)
+        before = browser_relay.typed_state(self.a.typed_key, self.root)
+        self.relay(self.b, "b2", P + "open", url=self.page)
+        self.assertEqual(browser_relay.typed_state(self.a.typed_key, self.root), before)
+        self.assertEqual(text(self.relay(self.a, "b1", P + "click", selector="@e2")), browser_relay.NO_PLAN)
+
+    def test_tab_reset_of_one_bot_leaves_the_others_typed(self):
+        self.relay(self.a, "b1", P + "open", url=self.page)
+        self.relay(self.a, "b1", P + "fill", selector="@e1", text="mine")
+        self.relay(self.b, "b2", P + "open", url=self.page)
+        self.control(tab_gone_on=P + "get_text")
+        self.assertEqual(text(self.relay(self.b, "b2", P + "get_text", selector="@e1")), bu.TAB_RESET)
+        self.assertEqual(browser_relay.typed_state(self.a.typed_key, self.root), {"typed": "mine", "aside": ""})
+
+    def test_two_bots_still_one_call_at_a_time(self):
+        held = []
+        for up in (self.a, self.b):
+            real = up.forward
+
+            def forward(frame, sid, real=real):
+                held.append(browser_relay._browser_lock("my_chrome").locked())
+                return real(frame, sid)
+            up.forward = forward
+        self.relay(self.a, "b1", P + "open", url=self.page)
+        self.relay(self.b, "b2", P + "open", url=self.page)
+        self.assertTrue(held and all(held))
 
 
 class Sweeper(Base):

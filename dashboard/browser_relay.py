@@ -17,10 +17,10 @@ agent-browser child for that bot. The relay decides what passes:
                checked again: a redirect onto a site bound to the other mode, or a page it cannot
                name, is hidden and left.
 
-What was typed belongs to the real browser (Upstream.browser_key: a bot's own browser, or
-the one owner Chrome all my_chrome bots share), not to an MCP session or a bot, and is
-kept on disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls on one
-browser run one at a time. Opening a page or a new tab
+What was typed belongs to the tab it went into (Upstream.typed_key: a bot's own browser,
+or that bot's own pinned tab in the owner's Chrome), not to an MCP session, and is kept on
+disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls on one real browser
+run one at a time (Upstream.lock_key: the owner Chrome is one lock for every my_chrome bot). Opening a page or a new tab
 sets the typed text aside; history, reload and tab moves bring it back, because the
 browser restores what was in those fields. A refused send keeps it too: the text is still
 in the field, so a second click is still a send. On a listed site every commit first reads
@@ -145,15 +145,25 @@ _LOCK = threading.Lock()
 
 def browser_key_for(mode, ws, bot):
     """Which real browser a bot drives: its own bot browser, or the one owner Chrome every
-    my_chrome bot shares. Typed text and the call lock follow this key."""
+    my_chrome bot shares. The call lock follows this key (lock_key)."""
     return "my_chrome" if mode == "my_chrome" else f"bot:{ws}--{bot}"
 
 
+def typed_key_for(mode, ws, bot, session=None):
+    """Where typed text lives: the bot browser, or one bot's own pinned tab in the owner's
+    Chrome ("my_chrome:<session>"), so another bot's tab never moves it."""
+    if mode != "my_chrome":
+        return browser_key_for(mode, ws, bot)
+    return f"my_chrome:{session or f'{ws}--{bot}'}"
+
+
 class Upstream:
-    """The browser behind the gate. `mode` is "bot" or "my_chrome"; `browser_key` is
-    browser_key_for(mode, ws, bot)."""
+    """The browser behind the gate. `mode` is "bot" or "my_chrome". `lock_key` (alias
+    `browser_key`) is browser_key_for(mode, ws, bot); `typed_key` is typed_key_for(...)."""
     mode = "bot"
     browser_key = None
+    lock_key = None
+    typed_key = None
 
     def forward(self, frame, mcp_session_id):
         """(JSON-RPC reply or None for a notification, mcp-session-id)."""
@@ -184,9 +194,14 @@ def _browser_lock(key):
         return _BROWSER_LOCKS.setdefault(key, threading.Lock())
 
 
-def _key_of(upstream, mode, ctx):
-    key = getattr(upstream, "browser_key", None)
-    return key if isinstance(key, str) and key else browser_key_for(mode, ctx["ws"], ctx["bot"])
+def _keys_of(upstream, mode, ctx):
+    """(lock key, typed key) of this upstream, or the ones its mode and bot give."""
+    def given(name):
+        key = getattr(upstream, name, None)
+        return key if isinstance(key, str) and key else None
+    lock = given("lock_key") or given("browser_key") or browser_key_for(mode, ctx["ws"], ctx["bot"])
+    typed = given("typed_key") or (lock if mode != "my_chrome" else typed_key_for(mode, ctx["ws"], ctx["bot"]))
+    return lock, typed
 
 
 def _typed_path(root):
@@ -462,8 +477,8 @@ def _gate(frame, ctx, sid, upstream, root):
         if _has_control(args["text"]):
             return _text(rid, CONTROL_TEXT), sid
     sends = name in COMMIT_TOOLS and key != "safe"  # click, select, check, uncheck, Enter
-    bkey = _key_of(upstream, mode, ctx)
-    with _browser_lock(bkey):
+    lkey, bkey = _keys_of(upstream, mode, ctx)  # bkey: where this tab's typed text lives
+    with _browser_lock(lkey):
         if "url" in args:
             refusal = _url_refusal(args["url"], mode, root)
             if refusal:
