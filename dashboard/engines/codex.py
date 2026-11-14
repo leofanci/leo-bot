@@ -17,7 +17,7 @@ with no approvals; Approve for me routes approvals to Codex's automatic review
 own that no flag lists (a live probe in the PR shows them), so this is a full-disk
 engine: only the owner's private threads, only on the owner's own Mac (registry.pick). It is
 never shared_safe. A bot's granted apps come through Leo Bot's apps relay (an MCP server, like
-osctl's), with the same rules as on any engine.
+osctl's), with the same rules as on any engine; so does its browser (the browser relay).
 """
 import json
 import os
@@ -28,8 +28,8 @@ from pathlib import Path
 from dashboard.engines import prices
 from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, gate_vars, stop_child, turn_vars
 from dashboard.engines.claude_code import (
-    APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, HOOK_COMMAND, OS_MCP_PATH, OS_TOKEN_ENV,
-    RUNNER_TOKEN_ENV,
+    APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, BROWSER_MCP_PATH, BROWSER_TOKEN_ENV, ENGINE_ENV, HOOK_COMMAND,
+    OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
 )
 
 ENGINE_ID = "codex"
@@ -81,7 +81,7 @@ class CodexEngine(Engine):
     shared_safe = False
     full_disk = True
     own_sandbox = True  # a shell level runs in Codex's sandbox: Leo Bot's gate does not rewrite commands
-    supports = frozenset({"shell", "review", "apps"})
+    supports = frozenset({"shell", "review", "apps", "browser"})
     reports_tokens = True  # turn.completed carries usage; the login's model is priced as UNKNOWN
 
     def __init__(self, codex_bin="codex"):
@@ -149,17 +149,30 @@ class CodexEngine(Engine):
                     "-c", f"mcp_servers.apps.bearer_token_env_var={_toml(APPS_TOKEN_ENV)}",
                     "-c", 'mcp_servers.apps.default_tools_approval_mode="approve"',
                     "-c", f"mcp_servers.apps.tool_timeout_sec={OS_TOOL_TIMEOUT}"]
+        if self._browser(policy, tokens):  # the bot's browser, through Leo Bot's browser relay
+            url = f"http://127.0.0.1:{tokens.browser_port}{BROWSER_MCP_PATH}"
+            cmd += ["-c", f"mcp_servers.browser.url={_toml(url)}",
+                    "-c", f"mcp_servers.browser.bearer_token_env_var={_toml(BROWSER_TOKEN_ENV)}",
+                    "-c", 'mcp_servers.browser.default_tools_approval_mode="approve"',
+                    "-c", f"mcp_servers.browser.tool_timeout_sec={OS_TOOL_TIMEOUT}"]
         if model:
             cmd += ["-m", model]
         return cmd
 
+    @staticmethod
+    def _browser(policy, tokens):
+        return bool(getattr(policy, "browser", False) and not policy.shared
+                    and getattr(tokens, "browser_token", None) and getattr(tokens, "browser_port", None))
+
     def turn_env(self, policy, tokens):
-        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
+        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, BROWSER_TOKEN_ENV,
+                *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 **turn_vars(policy),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
+                **({BROWSER_TOKEN_ENV: tokens.browser_token} if self._browser(policy, tokens) else {}),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **(gate_vars(tokens) if self.shell_dirs(policy, tokens) else {})}
 

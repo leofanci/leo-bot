@@ -31,7 +31,7 @@ READ_TIMEOUT = 300
 RETRIES = 2
 HISTORY_CHARS = 400_000  # about 100k tokens; oldest messages go first, the first one stays
 PRICES = prices.PRICES  # re-export; the table lives in prices.py
-# Backends the server plugs in (os_relay, apps_relay); generate.py jobs need none.
+# Backends the server plugs in (os_relay, apps_relay, browser_relay); generate.py jobs need none.
 BACKENDS = {}
 
 
@@ -140,7 +140,7 @@ def _without_web(messages):
 class ApiEngine(Engine):
     kind = "api"
     shared_safe = True  # a shared turn is only ever offered osctl (plus web when allowed)
-    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell", "review"})
+    supports = frozenset({"web", "apps", "browser", "folder_edit", "complete", "shell", "review"})
     reports_tokens = True
 
     def __init__(self, provider, root):

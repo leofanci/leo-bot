@@ -223,6 +223,10 @@ WEB_TOOLS = ["WebSearch", "WebFetch"]
 # env, never in argv (`ps` shows argv to every local user).
 APPS_MCP_PATH = "/api/internal/apps/mcp"
 APPS_TOKEN_ENV = "LEOBOT_APPS_TOKEN"
+# The bot's browser: the same kind of server, gated by dashboard/browser_relay.py inside the
+# dashboard process (its send counts and locks live there). Its own token, never the apps one.
+BROWSER_MCP_PATH = "/api/internal/browser/mcp"
+BROWSER_TOKEN_ENV = "LEOBOT_BROWSER_TOKEN"
 # A shared thread (an invited person can see it): no Bash/Read/Glob/Grep at all,
 # because Claude Code runs read-only tools and shell reads (cat, `< file`) on any
 # path without asking. Its one Leo Bot tool is the osctl relay (os_relay.py).
@@ -383,6 +387,19 @@ def apps_mcp_config(port):
     return json.dumps({"mcpServers": {"apps": _mcp_server(port, APPS_MCP_PATH, APPS_TOKEN_ENV)}})
 
 
+def browser_mcp_config(port):
+    return json.dumps({"mcpServers": {"browser": _mcp_server(port, BROWSER_MCP_PATH, BROWSER_TOKEN_ENV)}})
+
+
+def _mcp_configs(*configs):
+    """One --mcp-config value holding every server of these configs (None when there is none)."""
+    servers = {}
+    for c in configs:
+        if c:
+            servers.update(json.loads(c)["mcpServers"])
+    return json.dumps({"mcpServers": servers}) if servers else None
+
+
 def os_mcp_config(port, url=None):
     server = _mcp_server(port, OS_MCP_PATH, OS_TOKEN_ENV)
     if url:  # a runner: the relay is on the server, and it also asks who this runner is
@@ -422,7 +439,7 @@ class ClaudeCodeEngine(Engine):
     label = "Claude Code"
     kind = "cli"
     shared_safe = True  # verified live: see tests/test_chat_session.py and PR #22
-    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell", "review"})
+    supports = frozenset({"web", "apps", "browser", "folder_edit", "complete", "shell", "review"})
     reports_tokens = True
 
     def __init__(self, claude_bin="claude"):
@@ -452,7 +469,8 @@ class ClaudeCodeEngine(Engine):
         dirs = [d for d in policy.edit_dirs if d in read and _hooks_expressible(d)]
         return dirs[0] if dirs else None
 
-    def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None, gate=False):
+    def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None, gate=False,
+                  browser_port=None):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
         # the routed skill's body into the prompt instead), so we always pass
         # --disable-slash-commands + --setting-sources "": zero skill-discovery
@@ -479,10 +497,13 @@ class ClaudeCodeEngine(Engine):
         if any(folders.has_glob_chars(w) for w in walls):  # a deny rule could not match it: never run
             raise EngineRefused("Leo Bot's data folder path holds * ? [ or ] characters, so bots "
                                 "could read past their walls. Move the folder to a plain path.")
-        if shared:  # no file, shell or app tools: the osctl relay only
+        if not getattr(policy, "browser", False):
+            browser_port = None
+        if shared:  # no file, shell, app or browser tools: the osctl relay only
             read_dirs = edit_dirs = ()
-            apps_port = None
-        if with_web and apps_port and not gate:  # app data and web with nothing between them: never
+            apps_port = browser_port = None
+        # App data or pages read, and web, with nothing between them: never.
+        if with_web and (apps_port or browser_port) and not gate:
             with_web = False
         # A shell level: commands checked by the gate (dashboard/shell_rules.py) as they run. Full
         # access allows every command; Approve for me leaves each one to Claude Code's own reviewer
@@ -501,10 +522,12 @@ class ClaudeCodeEngine(Engine):
                          + (WEB_ALLOWED_TOOLS if with_web else [])
                          + (web_fetch_rules(web_domains) if with_web else [])
                          + (["mcp__apps"] if apps_port else [])
+                         + (["mcp__browser"] if browser_port else [])
                          + (["mcp__os"] if shared and (os_port or os_url) else [])
                          + (["Bash"] if shell and not review else []))
-        mcp = (apps_mcp_config(apps_port) if apps_port
-               else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
+        mcp = (os_mcp_config(os_port, os_url) if shared and (os_port or os_url)
+               else _mcp_configs(apps_mcp_config(apps_port) if apps_port else None,
+                                 browser_mcp_config(browser_port) if browser_port else None))
         # Claude Code matches these across letter case, dot-dot and NFC/NFD spellings of the path
         # (probed live with the real binary, 2.1.322): one spelling per rule is enough.
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
@@ -547,7 +570,8 @@ class ClaudeCodeEngine(Engine):
 
     def turn_env(self, policy, tokens, repo_dir=None):
         """`repo_dir`: a turn working in another folder still runs `python3 -m dashboard.osctl`."""
-        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
+        drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, BROWSER_TOKEN_ENV,
+                *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
                 **({"PYTHONPATH": os.pathsep.join(x for x in (str(repo_dir), os.environ.get("PYTHONPATH")) if x)}
                    if repo_dir else {}),
@@ -557,6 +581,8 @@ class ClaudeCodeEngine(Engine):
                 **turn_vars(policy),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
+                **({BROWSER_TOKEN_ENV: tokens.browser_token}
+                   if getattr(tokens, "browser_token", None) and policy.browser and not policy.shared else {}),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
                 **({RUNNER_TOKEN_ENV: tokens.runner_token} if tokens.runner_token else {}),
                 **gate_vars(tokens)}
@@ -571,7 +597,8 @@ class ClaudeCodeEngine(Engine):
                                apps_port=tokens.apps_port if tokens.apps_token else None,
                                os_port=tokens.os_port if tokens.os_token else None,
                                os_url=tokens.os_url if tokens.os_token else None,
-                               gate=gated),
+                               gate=gated,
+                               browser_port=tokens.browser_port if getattr(tokens, "browser_token", None) else None),
                 # A shell level works in its edit folder. Claude Code keys a session to its folder:
                 # a thread that moves in or out of one continues with its recap (SessionLost).
                 cwd=self.shell_dir(policy, gated) or session.repo_dir,

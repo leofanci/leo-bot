@@ -26,6 +26,7 @@ class TurnPolicy:
     web: bool = False              # web tools allowed this turn
     web_domains: tuple = ()        # hosts the user typed (fetch only these)
     apps: bool = False             # connected-apps relay this turn
+    browser: bool = False          # browser relay this turn (dashboard/browser_relay.py)
     workspace: str = "hq"          # LEOBOT_WORKSPACE
     read_dirs: tuple = ()          # linked folders this turn may read and search (absolute)
     edit_dirs: tuple = ()          # of those, the ones it may also change (a subset)
@@ -72,6 +73,8 @@ class TurnTokens:
     runner_token: str = None
     gate_token: str = None    # this run's taint gate (dashboard/taint.py): web and Auto saves ask it
     gate_port: int = None
+    browser_token: str = None # the browser relay (dashboard/browser_relay.py), on the dashboard's own port
+    browser_port: int = None
 
 
 def drain(stream):
@@ -116,7 +119,7 @@ class Engine:
     kind = ""              # "cli" | "api" | "runner"
     shared_safe = False    # lockdown verified live for shared threads
     full_disk = False      # its shell and read tools reach any file (spec section 5a)
-    supports = frozenset() # {"web", "apps", "folder_edit", "complete"}
+    supports = frozenset() # {"web", "apps", "browser", "folder_edit", "complete"}
     reports_tokens = False # every run's done payload carries its token usage: cost can be estimated
 
     def resolve_model(self, model):
@@ -140,6 +143,8 @@ class Engine:
             raise EngineRefused(f"{self.label} cannot run in a thread invited people can see.")
         if policy.apps and "apps" not in self.supports:
             raise EngineRefused(f"{self.label} cannot use connected apps.")
+        if getattr(policy, "browser", False) and "browser" not in self.supports:
+            raise EngineRefused(f"{self.label} cannot use the browser.")
         # Edit folders: an engine that enforces per-folder limits, or one on a shell level whose
         # own sandbox writes only there (Codex's workspace-write over the edit folders).
         if policy.edit_dirs and "folder_edit" not in self.supports \
