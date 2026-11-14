@@ -14,8 +14,9 @@ with network and no approvals; Approve for me routes approvals to Codex's automa
 (--approve-for-me). Verified live with codex-cli 0.167.2: a -c hook fires under `exec` with
 --dangerously-bypass-hook-trust and its deny holds; --approve-for-me runs non-interactively. Codex still keeps tools of its
 own that no flag lists (a live probe in the PR shows them), so this is a full-disk
-engine: only the owner's private threads, only on the owner's own Mac, no connected
-apps (registry.pick and spec section 5a). It is never shared_safe.
+engine: only the owner's private threads, only on the owner's own Mac (registry.pick). It is
+never shared_safe. A bot's granted apps come through Leo Bot's apps relay (an MCP server, like
+osctl's), with the same rules as on any engine.
 """
 import json
 import os
@@ -28,7 +29,8 @@ from pathlib import Path
 from dashboard.engines import prices
 from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, gate_vars, stop_child, turn_vars
 from dashboard.engines.claude_code import (
-    APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, HOOK_PATH, OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
+    APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, HOOK_PATH, OS_MCP_PATH, OS_TOKEN_ENV,
+    RUNNER_TOKEN_ENV,
 )
 
 ENGINE_ID = "codex"
@@ -79,7 +81,7 @@ class CodexEngine(Engine):
     kind = "cli"
     shared_safe = False
     full_disk = True
-    supports = frozenset({"shell", "review"})
+    supports = frozenset({"shell", "review", "apps"})
     reports_tokens = True  # turn.completed carries usage; the login's model is priced as UNKNOWN
 
     def __init__(self, codex_bin="codex"):
@@ -139,6 +141,12 @@ class CodexEngine(Engine):
                     "-c", 'mcp_servers.os.default_tools_approval_mode="approve"',
                     # Codex cuts an MCP call off at 60s; revise/generate runs take longer.
                     "-c", f"mcp_servers.os.tool_timeout_sec={OS_TOOL_TIMEOUT}"]
+        if tokens.apps_token and tokens.apps_port:  # the bot's granted apps, through Leo Bot's relay
+            url = f"http://127.0.0.1:{tokens.apps_port}{APPS_MCP_PATH}"
+            cmd += ["-c", f"mcp_servers.apps.url={_toml(url)}",
+                    "-c", f"mcp_servers.apps.bearer_token_env_var={_toml(APPS_TOKEN_ENV)}",
+                    "-c", 'mcp_servers.apps.default_tools_approval_mode="approve"',
+                    "-c", f"mcp_servers.apps.tool_timeout_sec={OS_TOOL_TIMEOUT}"]
         if model:
             cmd += ["-m", model]
         return cmd
@@ -149,6 +157,8 @@ class CodexEngine(Engine):
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 **turn_vars(policy),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
+                **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
+                **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
                 **(gate_vars(tokens) if self.shell_dirs(policy, tokens) else {})}
 
     def turn(self, session, text, policy, model, tokens):

@@ -211,7 +211,6 @@ class JobTurn(unittest.TestCase):
                 mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}):
             out = self.run_job(mode="auto", message="review the week")
         self.assertEqual(len(minted), 1)
-        self.assertEqual(self.pick.call_args.kwargs.get("apps"), False)
         rec = server.chat_store.load(out["chat"])
         self.assertEqual(rec["messages"][-1].get("skill"), "positioning")
 
@@ -282,8 +281,7 @@ class JobTurn(unittest.TestCase):
         real = server.apps_relay.TOKENS.mint
         with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
                 mock.patch.object(server.integrations, "api_key", return_value="k"), \
-                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}), \
-                mock.patch.object(server, "_needs_apps", return_value=True):
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}):
             self.run_job(mode="report", message="draft the weekly email")
             self.run_job(mode="auto", message="draft the weekly email")
         self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
@@ -427,7 +425,6 @@ class JobTurn(unittest.TestCase):
             yield ("done", {"cost": 0.01})
         with mock.patch.object(server.integrations, "api_key", return_value="k"), \
                 mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}), \
-                mock.patch.object(server, "_needs_apps", return_value=True), \
                 mock.patch.object(server.chat_session.ChatSession, "ask", ask):
             out = self.run_job(message="draft the weekly email")
         self.assertEqual(out["status"], "waiting")

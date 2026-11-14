@@ -429,6 +429,16 @@ class ClaudeCodeEngine(Engine):
         session.engine_state[self.id] = {"session": str(uuid.uuid4())}
         return True
 
+    @staticmethod
+    def shell_dir(policy, gate):
+        """The edit folder a shell-level turn works in (its cwd, so a command never lands in the
+        Leo Bot checkout), or None: no shell level, no gate, no edit folder it may change."""
+        if not (getattr(policy, "shell", False) and gate and not policy.shared):
+            return None
+        read = [d for d in policy.read_dirs if not folders.has_glob_chars(d)]
+        dirs = [d for d in policy.edit_dirs if d in read and _hooks_expressible(d)]
+        return dirs[0] if dirs else None
+
     def build_cmd(self, session, policy, model, apps_port=None, os_port=None, os_url=None, gate=False):
         # Lean per-turn flags. Skills are NEVER discovered here (the server injects
         # the routed skill's body into the prompt instead), so we always pass
@@ -465,7 +475,7 @@ class ClaudeCodeEngine(Engine):
         # access allows every command; Approve for me leaves each one to Claude Code's own reviewer
         # (permission mode auto, verified live with 2.1.325). No gate, or no edit folder to work
         # in: the osctl-only shell of every other turn.
-        shell = bool(getattr(policy, "shell", False)) and gate and bool(edit_dirs) and not shared
+        shell = bool(self.shell_dir(policy, gate))
         review = shell and getattr(policy, "level", "") == "approve"
         tools = ((WEB_TOOLS if with_web else []) if shared else
                  (list(BASE_TOOLS) + AGENT_TOOLS
@@ -522,9 +532,12 @@ class ClaudeCodeEngine(Engine):
         cmd += ["--resume", sid] if session._started else ["--session-id", sid]
         return cmd
 
-    def turn_env(self, policy, tokens):
+    def turn_env(self, policy, tokens, repo_dir=None):
+        """`repo_dir`: a turn working in another folder still runs `python3 -m dashboard.osctl`."""
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
+                **({"PYTHONPATH": os.pathsep.join(x for x in (str(repo_dir), os.environ.get("PYTHONPATH")) if x)}
+                   if repo_dir else {}),
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(policy.workspace or "hq"),
                 ENGINE_ENV: self.id,
@@ -538,15 +551,18 @@ class ClaudeCodeEngine(Engine):
     def turn(self, session, text, policy, model, tokens):
         """One `claude -p` invocation, resumed by session id so context persists."""
         was_started = session._started
+        gated = bool(gate_vars(tokens))
         try:
             proc = subprocess.Popen(
                 self.build_cmd(session, policy, model,
                                apps_port=tokens.apps_port if tokens.apps_token else None,
                                os_port=tokens.os_port if tokens.os_token else None,
                                os_url=tokens.os_url if tokens.os_token else None,
-                               gate=bool(gate_vars(tokens))),
-                cwd=session.repo_dir,
-                env=self.turn_env(policy, tokens),
+                               gate=gated),
+                # A shell level works in its edit folder. Claude Code keys a session to its folder:
+                # a thread that moves in or out of one continues with its recap (SessionLost).
+                cwd=self.shell_dir(policy, gated) or session.repo_dir,
+                env=self.turn_env(policy, tokens, repo_dir=session.repo_dir if self.shell_dir(policy, gated) else None),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1)
         except FileNotFoundError:
