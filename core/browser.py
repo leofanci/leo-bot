@@ -7,6 +7,9 @@ Bots default to level off, mode bot. Sites hold per-site overrides: a mode that
 beats the bot's, and a daily action cap. A site with neither stays listed.
 Hosts match by suffix, so www.linkedin.com belongs to linkedin.com but
 evil-linkedin.com does not. Stored sites replace the defaults once saved.
+
+The lock guards threads in this process only, same as core/integrations.py.
+A file of the wrong shape reads as defaults and is overwritten by the next write.
 """
 import json
 import threading
@@ -49,8 +52,12 @@ def _update(root, fn):
         return out
 
 
+def _dict(x):
+    return x if isinstance(x, dict) else {}
+
+
 def bot_setting(ws, bot, root=bots.ROOT):
-    row = (((load(root).get("bots") or {}).get(ws) or {}).get(bot)) or {}
+    row = _dict(_dict(_dict(load(root).get("bots")).get(ws)).get(bot))
     level, mode = row.get("level"), row.get("mode")
     return {"level": level if level in LEVELS else "off", "mode": mode if mode in MODES else "bot"}
 
@@ -61,16 +68,24 @@ def set_bot(ws, bot, level, mode, root=bots.ROOT):
     if mode not in MODES:
         raise ValueError("unknown mode")
     row = {"level": level, "mode": mode}
-    _update(root, lambda d: d.setdefault("bots", {}).setdefault(ws, {}).__setitem__(bot, row))
+
+    def fn(d):
+        if not isinstance(d.get("bots"), dict):
+            d["bots"] = {}
+        if not isinstance(d["bots"].get(ws), dict):
+            d["bots"][ws] = {}
+        d["bots"][ws][bot] = row
+    _update(root, fn)
     return dict(row)
 
 
 def sites(root=bots.ROOT):
     stored = load(root).get("sites")
     src = stored if isinstance(stored, dict) else DEFAULT_SITES
+    src = {k: v for k, v in src.items() if isinstance(k, str)}
     out = {}
     for host, row in src.items():
-        row = row if isinstance(row, dict) else {}
+        row = _dict(row)
         mode, daily = row.get("mode"), row.get("daily")
         out[host] = {
             "mode": mode if mode in MODES else None,
@@ -110,12 +125,19 @@ def set_site(host, mode, daily, root=bots.ROOT):
     return dict(row)
 
 
+def _browser_normalize(url):
+    """Parse a URL the way a browser does: trim C0 controls and spaces, drop tab and
+    newlines anywhere, read a backslash as a slash."""
+    url = url.strip("".join(chr(i) for i in range(0x21)))
+    return url.replace("\t", "").replace("\n", "").replace("\r", "").replace("\\", "/")
+
+
 def site_of(url, root=bots.ROOT):
     """The listed site a URL belongs to, or None. Never raises."""
     try:
         if not isinstance(url, str):
             return None
-        parts = urlsplit(url.strip())
+        parts = urlsplit(_browser_normalize(url))
         if parts.scheme.lower() not in ("http", "https"):
             return None
         host = (parts.hostname or "").rstrip(".")
@@ -135,4 +157,9 @@ def forget_workspace(ws, root=bots.ROOT):
     """A deleted project: a new one with the same slug starts with browsing off."""
     if ws == bots.HQ:
         return
-    _update(root, lambda d: (d.get("bots") or {}).pop(ws, None))
+    with LOCK:
+        data = load(root)
+        bots_map = data.get("bots")
+        if isinstance(bots_map, dict) and ws in bots_map:
+            del bots_map[ws]
+            _save(root, data)

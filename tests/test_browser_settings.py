@@ -38,6 +38,39 @@ class Settings(unittest.TestCase):
                     "not a url", u("linkedin.com", "ftp"), "", None, u("[bad", "http")):
             self.assertIsNone(browser.site_of(url, self.root), url)
 
+    def test_site_of_reads_like_a_browser(self):
+        def u(rest):
+            return "https://" + rest
+        # a browser reads the backslash as a slash: the host is the listed site
+        self.assertEqual(browser.site_of(u("linkedin.com\\@evil.example/"), self.root), "linkedin.com")
+        # ...and here the host is the other one
+        self.assertIsNone(browser.site_of(u("evil.example\\@linkedin.com/"), self.root))
+        # tab and newline vanish inside the host; edges are trimmed
+        self.assertEqual(browser.site_of(u("linked\nin.com/"), self.root), "linkedin.com")
+        self.assertEqual(browser.site_of(u("linkedin.com\t.evil.example/"), self.root), None)
+        self.assertEqual(browser.site_of("  \x01" + u("www.linkedin.com") + " \r\n", self.root), "linkedin.com")
+
+    def test_wrong_shape_files_read_as_defaults(self):
+        path = self.root / "team" / "browser.json"
+        path.parent.mkdir(parents=True)
+        for raw in ("not json {", "[1]", '{"bots":[1]}', '{"bots":{"demo":[1]}}',
+                    '{"bots":{"demo":{"b1":5}}}', '{"sites":[1]}', '{"sites":{"x.test":7}}', '{"sites":{"x.test":[1]}}'):
+            path.write_text(raw)
+            self.assertEqual(browser.bot_setting("demo", "b1", self.root), {"level": "off", "mode": "bot"}, raw)
+            self.assertIn("linkedin.com", browser.sites(self.root)) if "x.test" not in raw else browser.sites(self.root)
+            self.assertIsNone(browser.site_of("http" + "://other.test", self.root))
+            browser.forget_workspace("demo", self.root)
+            path.write_text(raw)
+            browser.set_bot("demo", "b1", "read", "bot", self.root)
+            self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "read", raw)
+            path.write_text(raw)
+            browser.set_site("acme.test", "bot", 5, self.root)
+            self.assertEqual(browser.sites(self.root)["acme.test"], {"mode": "bot", "daily": 5}, raw)
+
+    def test_forget_workspace_skips_write_when_nothing_removed(self):
+        browser.forget_workspace("demo", self.root)
+        self.assertFalse((self.root / "team" / "browser.json").exists())
+
     def test_daily_bounds(self):
         for bad in (0, 501, -1, True, "5"):
             with self.assertRaises(ValueError):
