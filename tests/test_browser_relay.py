@@ -17,7 +17,7 @@ def u(rest):  # built from parts so no literal URL host sits in a tracked file
 
 
 class FakeUpstream(browser_relay.Upstream):
-    def __init__(self, url=None, mode="bot", redirects=None, values=None, browser_key=None, typing=False):
+    def __init__(self, url=None, mode="bot", redirects=None, values=None, browser_key=None, typing=True):
         self.url, self.mode, self.frames = url, mode, []
         self.browser_key = browser_key or "bot:fake-%d" % id(self)  # its own browser unless shared
         self.redirects = redirects or {}
@@ -31,10 +31,11 @@ class FakeUpstream(browser_relay.Upstream):
         params = frame.get("params") or {}
         args = params.get("arguments") or {}
         if params.get("name") in (P + "open", P + "tab_new") and args.get("url"):
-            self.history.append(self.url)
+            self.history.append((self.url, self.values))
             self.url = self.redirects.get(args["url"], args["url"])
-        elif params.get("name") == P + "back" and self.history:
-            self.url = self.history.pop()
+            self.values = []  # a fresh page: its fields are empty
+        elif params.get("name") in (P + "back", P + "tab_switch") and self.history:
+            self.url, self.values = self.history.pop()  # the browser restores the old fields
         if self.typing and params.get("name") in (P + "fill", P + "type"):
             before = self.values[0] if self.values else ""
             self.values[:1] = [args["text"] if params["name"] == P + "fill" else before + args["text"]]
@@ -183,7 +184,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(up.frames[-1]["params"]["arguments"], {"url": "about:blank"})
         # a history move that lands there is hidden too
         up2 = FakeUpstream(bound)
-        up2.history = [bound]
+        up2.history = [(bound, [])]
         up2.url = self.page
         self.assertIn("demo.test is set", text_of(self.handle(call(P + "back"), up=up2)))
 
@@ -452,7 +453,7 @@ class Gate(unittest.TestCase):
         self.handle(call(P + "fill", text="Hi"), up=up)
         self.assertEqual(browser_relay.typed_state("bot:acme--b1", self.root), {"typed": "Hi", "aside": ""})
         self.assertTrue((self.root / "run" / "browser_typed.json").is_file())
-        fresh = FakeUpstream(self.page, browser_key="bot:acme--b1")  # a new engine child after a restart
+        fresh = FakeUpstream(self.page, values=["Hi"], browser_key="bot:acme--b1")  # restarted, page restored
         self.assertEqual(text_of(self.handle(call(P + "click"), up=fresh)), browser_relay.NO_PLAN)
 
     def test_read_with_url_refused(self):
@@ -566,9 +567,10 @@ class Gate(unittest.TestCase):
         up = FakeUpstream(self.page, values=["EVIL"], typing=True)
         self.handle(call(P + "type", selector="@e1", text="hello"), up=up)
         self.assertEqual(up.values, ["EVILhello"])
-        self.assertEqual(text_of(self.handle(call(P + "press", key="Enter"), up=up)), browser_relay.NO_PLAN)
+        self.assertEqual(text_of(self.handle(call(P + "press", key="Enter"), up=up)), browser_relay.TYPED_MISMATCH)
         self.assertEqual(up.calls(), [P + "type"])
-        # the plan matches once the field holds exactly the planned text
+        # the plan matches once a fresh page's field holds exactly the planned text
+        self.handle(call(P + "open", url=self.page), up=up)
         self.handle(call(P + "fill", selector="@e1", text="hello"), up=up)
         self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
 
@@ -620,6 +622,39 @@ class Gate(unittest.TestCase):
         self.assertIn("not available", text_of(self.handle(call(P + "eval", script="1"))))
         tools = self.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
         self.assertNotIn(P + "eval", [t["name"] for t in tools])
+
+    # Fix round 4
+
+    def test_typed_must_match_the_one_visible_field(self):
+        self.plan("hello")
+        up = FakeUpstream(self.page, values=["hello"], typing=False)  # a search box; the composer is unseen
+        self.handle(call(P + "fill", selector="@e9", text="EVIL"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.TYPED_MISMATCH)
+        self.assertEqual(up.calls(), [P + "fill"])
+        # whitespace aside, the same text passes
+        up2 = FakeUpstream(self.page, values=["hello  "])
+        self.handle(call(P + "open", url=self.page), up=up2)
+        self.handle(call(P + "fill", text=" hello"), up=up2)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up2)), "ok")
+
+    def test_typed_with_no_visible_field_refused(self):
+        self.plan("hello")
+        up = FakeUpstream(self.page, values=[], typing=False)  # the field is in a frame the read cannot see
+        self.handle(call(P + "fill", text="hello"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.HIDDEN_TYPED)
+        self.assertEqual(up.calls(), [P + "fill"])
+        self.assertEqual(len([r for r in approvals.load(self.root) if r["status"] == "approved"]), 1)
+
+    def test_overlong_field_refused_before_claim(self):
+        self.level("act")
+        up = FakeUpstream(self.page, values=["x" * (browser_relay.MAX_TEXT + 1)])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.TOO_LONG)
+        self.assertEqual(approvals.load(self.root), [])
+
+    def test_invisible_only_field_counts_as_empty(self):
+        self.level("write")
+        up = FakeUpstream(self.page, values=["\u200b\u200d\u00ad\ufeff\u2060", "\u200c "])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
 
 
 class Preview(unittest.TestCase):

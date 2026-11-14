@@ -116,6 +116,13 @@ CONTROL_TEXT = ("Text with a line break or another control character is not type
 READ_URL = "Open the page first with agent_browser_open, then read it without a url. This call was not performed."
 UNKNOWN_PAGE = "The browser could not tell which page it is on, so the result was withheld. Open a page to go on."
 NO_CHECK = "The page could not be checked for typed text, so nothing was clicked."
+HIDDEN_TYPED = ("What you typed is not in any field this page shows, so it could go out unseen. Open the page "
+                "again, type the message into its visible box, then try again. Nothing was clicked.")
+TYPED_MISMATCH = ("The text in this page's field is not what you typed, so this could send something else. Open the "
+                  "page again, type the message once into its box, then try again. Nothing was clicked.")
+TOO_LONG = "The text in this page's field is too long to check, so nothing was clicked."
+# Characters a field can hold that show nothing: a value of only these counts as empty.
+_INVISIBLE = dict.fromkeys([0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x00AD])
 MANY_FIELDS = ("More than one field on this page holds text, so this could send any of it. Clear the other "
                "fields with fill and an empty text, keep only the message, then try again. Nothing was clicked.")
 
@@ -291,7 +298,7 @@ def _read_fields(upstream, rid, sid, ctx):
     fields = result.get("fields") if isinstance(result, dict) else None
     if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
         return None, sid
-    return [v for v in (" ".join(f.split()) for f in fields) if v], sid
+    return [v for v in (" ".join(f.split()) for f in fields) if v.translate(_INVISIBLE).strip()], sid
 
 
 def _mode_of(upstream, setting):
@@ -471,6 +478,12 @@ def _gate(frame, ctx, sid, upstream, root):
                     return _text(rid, NO_CHECK), sid
                 if len(fields) > 1:
                     return _text(rid, MANY_FIELDS), sid
+                if fields and len(fields[0]) > MAX_TEXT:
+                    return _text(rid, TOO_LONG), sid
+                if typed and not fields:  # typed into something the read cannot see
+                    return _text(rid, HIDDEN_TYPED), sid
+                if typed and fields[0] != typed:
+                    return _text(rid, TYPED_MISMATCH), sid
                 if fields:
                     typed = fields[0]
             if typed:
