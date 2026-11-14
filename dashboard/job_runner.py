@@ -4,8 +4,9 @@ HQ digest.
 A tick thread wakes every TICK seconds and runs each due job, one at a time across all
 workspaces, through `run_turn` (server.run_job: the normal ask path, read-only). The job's
 state is written before the run (`running`) and after it, so a restart never runs it twice;
-a run cut off by a stop is marked `interrupted` on the next start. A run longer than
-JOB_TURN_SECONDS is stopped (`stop_turn`) and ends as `timeout`.
+a run cut off by a stop is marked `interrupted` on the next start. A run that shows no activity
+(`activity()`: its last event) for IDLE_SECONDS is stopped (`stop_turn`) and ends as `timeout`;
+a run that keeps working goes on, up to MAX_TURN_SECONDS as a last backstop.
 
 Once a day, from DIGEST_HOUR local time, one thread in HQ's #general lists what ran, what it
 cost, which memory files were tidied and what waits for approval. Built from the saved
@@ -19,7 +20,9 @@ from core import approvals, bots, jobs
 from dashboard import chat_store, job_ledger
 
 TICK = 60
-JOB_TURN_SECONDS = 1800
+IDLE_SECONDS = 600  # no event from the run for this long: it is stuck
+MAX_TURN_SECONDS = 6 * 3600  # a run that never stops working still ends here
+WATCH_EVERY = 15
 DIGEST_HOUR = 8
 DIGEST_MAX_DAYS = 7
 DIGEST_ROOM = f"{bots.HQ}/general"
@@ -113,8 +116,9 @@ class Runner:
     flight. `threads` and `post` are the saved-thread source and the note writer (the server
     passes its own chat_store copy)."""
 
-    def __init__(self, root, run_turn, stop_turn=None, threads=None, post=None, now=time.time):
+    def __init__(self, root, run_turn, stop_turn=None, threads=None, post=None, now=time.time, activity=None):
         self.root, self.run_turn, self.stop_turn = root, run_turn, stop_turn
+        self.activity = activity  # when the run in flight last did something (epoch), or None
         self.threads = threads or chat_store.records
         self.post = post or chat_store.post_note
         self.now = now
@@ -144,22 +148,27 @@ class Runner:
             return False
         if job is None:  # turned off while an earlier job ran
             return False
-        fired = threading.Event()
+        fired, ended = threading.Event(), threading.Event()
+        start = time.time()
 
-        def stop():
-            fired.set()
-            if self.stop_turn:
-                self.stop_turn()
-        timer = threading.Timer(JOB_TURN_SECONDS, stop)
-        timer.daemon = True
-        timer.start()
+        def watch():
+            while not ended.wait(WATCH_EVERY):
+                now = time.time()
+                last = max(start, float((self.activity() if self.activity else None) or 0))
+                if now - last >= IDLE_SECONDS or now - start >= MAX_TURN_SECONDS:
+                    fired.set()
+                    if self.stop_turn:
+                        self.stop_turn()
+                    return
+        watcher = threading.Thread(target=watch, name="job-watchdog", daemon=True)
+        watcher.start()
         try:
             out = self.run_turn(job) or {}
         except Exception:  # noqa: BLE001 - one job's failure never stops the others
             traceback.print_exc()
             out = {"status": "failed"}
         finally:
-            timer.cancel()
+            ended.set()
         status = "timeout" if fired.is_set() else out.get("status")
         jobs.mark_end(self.root, job["id"], status if status in jobs.STATUSES else "failed", chat=out.get("chat"))
         return True
