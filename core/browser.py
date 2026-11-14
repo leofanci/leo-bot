@@ -129,6 +129,7 @@ def set_site(host, mode, daily, root=bots.ROOT):
 _IGNORABLE = dict.fromkeys(
     [0x00AD, 0x034F, 0x180B, 0x180C, 0x180D, 0x180E, 0x180F, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xFEFF]
     + list(range(0x200B, 0x2010)) + list(range(0xFE00, 0xFE10)))
+_FORBIDDEN_HOST = frozenset(map(chr, range(0x20))) | frozenset(' #/:<>?@[\\]^|%\x7f')
 _DOTS = {0x3002: ".", 0xFF0E: ".", 0xFF61: "."}
 
 
@@ -170,8 +171,15 @@ def host_of(url):
         host = parts.hostname or ""
     except ValueError:
         return None
-    host = unicodedata.normalize("NFKC", unquote(host))
+    bracketed = parts.netloc.rpartition("@")[2].startswith("[")
+    forbidden = _FORBIDDEN_HOST - {":"} if bracketed else _FORBIDDEN_HOST
+    host = unquote(host)
+    if forbidden & set(host):
+        return None
+    host = unicodedata.normalize("NFKC", host)
     host = host.translate(_IGNORABLE).translate(_DOTS).lower().rstrip(".")
+    if forbidden & set(host):
+        return None
     if not host:
         return None
     try:

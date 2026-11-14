@@ -78,6 +78,16 @@ class Settings(unittest.TestCase):
         self.assertFalse(browser.is_web_url("file:" + "///etc"))
         self.assertFalse(browser.is_web_url(5))
 
+    def test_forbidden_host_code_points(self):
+        for rest in ("//linkedin.com%00.evil.example", "//linkedin.com%20.evil.example", "//linkedin.com%09",
+                     "//linkedin.com%0a.x", "//linkedin.com%7f", "//linkedin.com%2f.evil.example",
+                     "//linkedin.com%3a8", "//linkedin.com%40evil.example", "//linkedin.com%25"):
+            url = "https:" + rest
+            self.assertIsNone(browser.host_of(url), rest)
+            self.assertIsNone(browser.site_of(url, self.root), rest)
+        self.assertIsNotNone(browser.host_of("https:" + "//[::1]/"))
+        self.assertIsNone(browser.site_of("https:" + "//[::1]/", self.root))
+
     def test_wrong_shape_files_read_as_defaults(self):
         path = self.root / "team" / "browser.json"
         path.parent.mkdir(parents=True)
