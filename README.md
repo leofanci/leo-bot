@@ -191,8 +191,10 @@ change through a bot's card.
 - A job may have its own cap in dollars per 24 hours (none by default: leave it empty
   or set 0), and always counts against your workspace and owner caps. Generation an Auto job runs (`generate-*`, `revise-post`)
   counts against it too, and is checked against what the job's run has spent up to that
-  moment. A job runs only on an engine that reports cost, and consults
-  only teammates whose engine does too. At most 20 jobs exist at once.
+  moment. A job runs only on an engine that reports cost or token usage (Claude Code,
+  Codex, API providers; a model with no list price is counted at the costliest one, so a
+  cap is never exceeded), and consults only teammates whose engine does too. ACP agents
+  report neither, so they run no jobs. At most 20 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
   starts again, never once per missed slot. A run stops after 30 minutes, teammates included.
 - Each morning from 08:00 a digest thread in HQ's #general lists what ran, what it cost,

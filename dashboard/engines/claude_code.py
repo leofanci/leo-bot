@@ -389,6 +389,7 @@ class ClaudeCodeEngine(Engine):
     kind = "cli"
     shared_safe = True  # verified live: see tests/test_chat_session.py and PR #22
     supports = frozenset({"web", "apps", "folder_edit", "complete"})
+    reports_tokens = True
 
     def __init__(self, claude_bin="claude"):
         self.claude_bin = claude_bin

@@ -115,6 +115,7 @@ class Engine:
     shared_safe = False    # lockdown verified live for shared threads
     full_disk = False      # its shell and read tools reach any file (spec section 5a)
     supports = frozenset() # {"web", "apps", "folder_edit", "complete"}
+    reports_tokens = False # every run's done payload carries its token usage: cost can be estimated
 
     def resolve_model(self, model):
         """The server asks for a tier name (haiku, sonnet); map it to this engine's model."""

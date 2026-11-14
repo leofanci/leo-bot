@@ -72,6 +72,7 @@ class CodexEngine(Engine):
     shared_safe = False
     full_disk = True
     supports = frozenset()
+    reports_tokens = True  # turn.completed carries usage; the login's model is priced as UNKNOWN
 
     def __init__(self, codex_bin="codex"):
         self.codex_bin = codex_bin

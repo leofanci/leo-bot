@@ -254,9 +254,22 @@ class Metered(unittest.TestCase):
         self.assertTrue(registry.metered(ClaudeCodeEngine()))
         priced = {"id": "x", "models": {"fast": "claude-haiku-5-5", "strong": "claude-sonnet-5-5"}}
         self.assertTrue(registry.metered(ApiEngine(priced, "/nonexistent")))
+        # Tokens on every run: an unpriced model is counted at the costliest price, never skipped.
         half = {"id": "y", "models": {"fast": "claude-haiku-5-5", "strong": "some-other-model"}}
-        self.assertFalse(registry.metered(ApiEngine(half, "/nonexistent")))
-        self.assertFalse(registry.metered(CodexEngine()))
+        self.assertTrue(registry.metered(ApiEngine(half, "/nonexistent")))
+        self.assertTrue(registry.metered(CodexEngine()))
+        from dashboard.engines.acp import AcpEngine  # no usage reported: still no jobs
+        self.assertFalse(registry.metered(AcpEngine({"id": "a", "name": "A", "command": "a", "args": []})))
+
+    def test_unknown_model_priced_as_costliest(self):
+        from dashboard.engines import prices
+        parts = prices.usage(1_000_000, 0, 0, 1_000_000)
+        self.assertIsNone(prices.estimate("some-other-model", parts))
+        top = max(prices.estimate(m, parts) for m in prices.PRICES)
+        self.assertEqual(prices.estimate("some-other-model", parts, unknown_ok=True), top)
+        self.assertEqual(prices.estimate(None, parts, unknown_ok=True), top)
+        self.assertEqual(prices.estimate("claude-haiku-5-5", parts, unknown_ok=True),
+                         prices.estimate("claude-haiku-5-5", parts))
 
 
 if __name__ == "__main__":
