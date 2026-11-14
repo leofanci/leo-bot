@@ -51,7 +51,7 @@ from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
-from core import app_rules, composio, integrations, people, ws_logos  # noqa: E402
+from core import app_rules, browser, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
 import ws                # noqa: E402
@@ -4289,6 +4289,7 @@ class Handler(BaseHTTPRequestHandler):
                 out = fileops.delete_project(slug)
                 approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
+                browser.forget_workspace(out["slug"], ROOT)
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
                     runners.revoke_owner(ROOT, pid)
