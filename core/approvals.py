@@ -19,9 +19,10 @@ result and one evidence entry, exactly once.
 A fourth kind, `contradiction`, says new evidence breaks a memo's assumption; Approve marks
 the assumption contradicted, exactly once.
 
-A third kind, `job`, is a scheduled-job proposal (create, change or delete), built by
-the server from what a bot proposed (dashboard/job_cards.py). It is held like an app
-action: only its own card answers it, and Approve applies it exactly once.
+A third kind, `job`, is a scheduled-job change (create, change or delete) a bot made
+(dashboard/job_cards.py). The server applies it when the bot's turn ends and keeps a
+receipt row (status done, `undo`) that the thread shows with Undo; Undo runs once.
+Older rows may still be pending cards, answered by Approve exactly once.
 
 Stored in gitignored team/approvals.json (spans workspaces, so company bots
 are denied Read on team/).
@@ -40,7 +41,8 @@ SUMMARY_MAX = 200
 KEEP = 200
 AUTO_KEEP = 86400  # a bot's own app runs are kept at least this long (its daily limit counts them)
 STATUSES = {"pending", "approved", "rejected", "answered", "superseded",
-            "running", "done", "failed", "expired"}
+            "running", "done", "failed", "expired", "undone"}
+RECEIPT_TTL = 7 * 86400  # a job receipt offers Undo this long
 APP = "app_action"
 JOB = "job"
 CONTRA = "contradiction"
@@ -259,6 +261,45 @@ def add_job(root=bots.ROOT, *, ws, room, chat, bot, job, summary, preview):
         rows.append(rec)
         _save(root, rows)
     return rec
+
+
+def add_job_receipt(root=bots.ROOT, *, ws, room, chat, bot, job_id, summary, result, undo, preview=None):
+    """Record a job change a bot made and the server already applied: no card to answer, only
+    an Undo (`undo`, see job_cards.undo) the owner can run once."""
+    now = time.time()
+    rec = {"id": uuid.uuid4().hex[:12], "kind": JOB, "ws": ws, "room": room, "chat": chat,
+           "bot": bot, "status": "done", "created": now, "resolved": now, "receipt": True,
+           "job_id": job_id, "undo": undo, "summary": str(summary)[:SUMMARY_MAX],
+           "result": str(result)[:SUMMARY_MAX], "preview": preview}
+    with LOCK:
+        rows = load(root)
+        rows.append(rec)
+        _save(root, rows)
+    return rec
+
+
+def receipts(root=bots.ROOT, ws=None, now=None):
+    """Job receipts that still offer Undo, newest first; `ws` other than HQ narrows."""
+    now = time.time() if now is None else now
+    rows = [r for r in load(root) if r.get("kind") == JOB and r.get("receipt") and r.get("status") == "done"
+            and now - (r.get("created") or 0) <= RECEIPT_TTL and (not ws or ws == bots.HQ or r.get("ws") == ws)]
+    return sorted(rows, key=lambda r: r.get("created") or 0, reverse=True)
+
+
+def undo_receipt(aid, apply, root=bots.ROOT, now=None):
+    """Run a receipt's Undo once: `apply(undo)` returns the result line (ValueError: nothing
+    changes and the receipt keeps its Undo)."""
+    now = time.time() if now is None else now
+
+    def fn(r):
+        if not r.get("receipt"):
+            raise ValueError("no such receipt")
+        _need(r, "done")
+        if now - (r.get("created") or 0) > RECEIPT_TTL:
+            raise ValueError("too old to undo: change it on the Team screen")
+        line = apply(r.get("undo") or {})
+        r.update(status="undone", result=str(line)[:SUMMARY_MAX], undone=now)
+    return _mutate_held(aid, root, fn, kinds=(JOB,))
 
 
 def add_contradiction(root=bots.ROOT, *, ws, room, chat, bot, contra, summary, preview):

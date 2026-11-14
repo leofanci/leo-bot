@@ -453,16 +453,16 @@ def _build_parser():
         return {"context": text}
     p.set_defaults(_run=_code_context)
 
-    # -- scheduled jobs (core/jobs.py): a bot proposes, the owner approves -- #
-    p = sub.add_parser("propose-job", help="Propose a new job, a change or a deletion: the owner "
-                                           "gets a card in this thread; nothing is saved until they approve")
+    # -- scheduled jobs (core/jobs.py): a bot sets them up, the owner can Undo -- #
+    p = sub.add_parser("propose-job", help="Set up a new job, a change or a deletion: saved when your "
+                                           "reply ends (owner's private thread only), with Undo for the owner")
     p.add_argument("--job", help="the job to change or delete; omit for a new job")
     p.add_argument("--delete", action="store_true", help="with --job: propose deleting it")
     p.add_argument("--bot")
     p.add_argument("--skill")
     p.add_argument("--name")
     p.add_argument("--message")
-    p.add_argument("--schedule", help='"every 6h", "daily 09:00" or "mon,thu 09:00"')
+    p.add_argument("--schedule", help='"every 30m", "daily 09:00", "mon,thu 09:00" or "once 2026-12-01 09:00"')
     p.add_argument("--cap", help="dollars per 24 hours for this job; 0 or omit for no cap")
     p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
     p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
@@ -490,8 +490,8 @@ def _build_parser():
         except ValueError as e:
             raise fileops.ActionError(str(e)) from None
         return {"proposed": prop["summary"],
-                "note": "The owner sees a card in this thread when your reply ends; nothing is saved "
-                        "until they approve. Do not add an APPROVAL: line for it."}
+                "note": "Saved when your reply ends (only in the owner's private thread); the owner "
+                        "sees it with Undo and Pause. Do not add an APPROVAL: line for it."}
     p.set_defaults(_run=_propose_job)
 
     p = sub.add_parser("list-jobs", help="Scheduled jobs (this workspace's, or every one from HQ)")

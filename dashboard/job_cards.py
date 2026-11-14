@@ -1,13 +1,13 @@
-"""job_cards.py: scheduled-job proposals, from a bot's words to the owner's click.
+"""job_cards.py: scheduled jobs a bot sets up itself, with the owner's Undo.
 
-A bot never creates, changes or deletes a job. It runs `osctl propose-job`, which checks
-the proposal here and queues it in the outbox (core/jobs.py). When that turn ends the
-server checks it again, from the thread's own workspace, and holds it as a `job` card
-(core/approvals.py). Approve calls `apply`, which checks it a third time against the jobs
-and team as they are then, and only then writes the job.
+A bot runs `osctl propose-job`, which checks the change here and queues it in the outbox
+(core/jobs.py). When that turn ends the server checks it again, from the thread's own
+workspace, and applies it only in the owner's private thread (never a shared thread, an
+invited person's or a job's own run). `apply` checks it against the jobs and team as they
+are then, writes it, and returns the Undo the thread's receipt offers (core/approvals.py).
 
 A proposal is {"op": "create" | "update" | "delete", "job_id", "fields"}. Every field is
-untrusted text a bot wrote; the card shows exactly what Approve saves.
+untrusted text a bot wrote; the receipt shows exactly what was saved.
 """
 import time
 
@@ -135,8 +135,8 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
 
 
 def apply(root, rec, projects):
-    """Write what an approved card holds, after checking it again. The result line;
-    ValueError when it may no longer be saved."""
+    """Write what a proposal or approved card holds, after checking it again.
+    (result line, undo, job id); ValueError when it may no longer be saved."""
     stored = rec.get("job") or {}
     p = proposal(root, thread_ws=rec.get("ws") or bots.HQ, op=stored.get("op"),
                  job_id=stored.get("job_id"), fields=stored.get("fields"), projects=projects)
@@ -144,13 +144,39 @@ def apply(root, rec, projects):
     if p["op"] == "create":
         job = jobs.create(root, ws=f["workspace"], bot=f["bot"], skill=f["skill"], name=f["name"],
                           message=f["message"], schedule=f["schedule"], cap=f["cap"], mode=f["mode"])
-        return f"Job created: {job['name']}, next run {_when(jobs.next_due(job))}."
+        return (f"Job created: {job['name']}, next run {_when(jobs.next_due(job))}.",
+                {"op": "delete", "job_id": job["id"]}, job["id"])
+    before = jobs.get(root, p["job_id"])
+    if before is None:
+        raise ValueError(f"no job {p['job_id']}")
     if p["op"] == "update":
         try:
             job = jobs.update(root, p["job_id"], **f)
         except LookupError as e:
             raise ValueError(str(e)) from None
-        return f"Job changed: {job['name']}."
+        old = {k: (before.get(k) if k != "mode" else jobs.mode_of(before)) for k in f}
+        return f"Job changed: {job['name']}.", {"op": "update", "job_id": job["id"], "fields": old}, job["id"]
     if not jobs.delete(root, p["job_id"]):
         raise ValueError(f"no job {p['job_id']}")
-    return p["summary"].replace("Delete job", "Job deleted") + "."
+    return (p["summary"].replace("Delete job", "Job deleted") + ".",
+            {"op": "restore", "job": before}, before["id"])
+
+
+def undo(root, u):
+    """Run a receipt's Undo (from `apply`): the result line, or ValueError."""
+    op = (u or {}).get("op")
+    if op == "delete":
+        job = jobs.get(root, u.get("job_id"))
+        if job is None or not jobs.delete(root, u.get("job_id")):
+            raise ValueError("that job is gone already")
+        return f"Undone: job {job.get('name')} deleted."
+    if op == "update":
+        try:
+            job = jobs.update(root, u.get("job_id"), **(u.get("fields") or {}))
+        except LookupError:
+            raise ValueError("that job is gone") from None
+        return f"Undone: job {job['name']} is back as it was."
+    if op == "restore":
+        job = jobs.restore(root, u.get("job"))
+        return f"Undone: job {job.get('name')} is back."
+    raise ValueError("nothing to undo")

@@ -128,15 +128,32 @@ class Proposal(JobCardsBase):
 
 class Apply(JobCardsBase):
     def test_create_then_update_then_delete(self):
-        line = job_cards.apply(self.root, self.card(self.propose(**dict(NEW, mode="report"))), self.projects)
+        line, undo_create, jid = job_cards.apply(self.root, self.card(self.propose(**dict(NEW, mode="report"))),
+                                                 self.projects)
         self.assertTrue(line.startswith("Job created: weekly"), line)
         job = jobs.load(self.root)[0]
+        self.assertEqual(jid, job["id"])
         self.assertEqual((job["workspace"], job["mode"], job["cap"]), ("acme", "report", 0.5))
         upd = self.card(self.propose(op="update", job_id=job["id"], schedule="daily 08:00"))
-        self.assertEqual(job_cards.apply(self.root, upd, self.projects), "Job changed: weekly.")
+        line, undo_upd, _ = job_cards.apply(self.root, upd, self.projects)
+        self.assertEqual(line, "Job changed: weekly.")
         self.assertEqual(jobs.get(self.root, job["id"])["schedule"], "daily 08:00")
+        job_cards.undo(self.root, undo_upd)  # back as it was
+        self.assertEqual(jobs.get(self.root, job["id"])["schedule"], job["schedule"])
         gone = self.card(self.propose(op="delete", job_id=job["id"]))
-        self.assertEqual(job_cards.apply(self.root, gone, self.projects), "Job deleted: weekly.")
+        line, undo_del, _ = job_cards.apply(self.root, gone, self.projects)
+        self.assertEqual(line, "Job deleted: weekly.")
+        self.assertEqual(jobs.load(self.root), [])
+        job_cards.undo(self.root, undo_del)
+        self.assertEqual(jobs.load(self.root), [job])
+        job_cards.undo(self.root, undo_create)
+        self.assertEqual(jobs.load(self.root), [])
+        with self.assertRaises(ValueError):  # already gone
+            job_cards.undo(self.root, undo_create)
+        upd = self.card(self.propose(**NEW))
+        upd = self.card(self.propose(op="update", job_id=job_cards.apply(self.root, upd, self.projects)[2],
+                                     schedule="daily 08:00"))
+        jobs.delete(self.root, upd["job"]["job_id"])
         with self.assertRaises(ValueError):  # the job went between proposal and Approve
             job_cards.apply(self.root, upd, self.projects)
 

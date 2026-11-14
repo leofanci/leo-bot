@@ -2,8 +2,10 @@
 
 A job is one bot's recurring work: a skill plus a message, run on a schedule by the
 server (dashboard/job_runner.py) in its mode, with its own daily cap. The file spans
-workspaces like team/approvals.json, so company bots cannot read it. Only an owner action
-creates, changes or deletes a job: an Approve click on a job card, or the Team screen.
+workspaces like team/approvals.json, so company bots cannot read it. A bot schedules work
+itself from the owner's private thread (`osctl propose-job`, applied when its turn ends,
+with Undo and Pause on the receipt); the owner also changes jobs on the Team screen. A
+job's own run never schedules more.
 
 Record: id, name, workspace, bot, skill, message, schedule, cap (dollars per rolling
 24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat.
@@ -13,12 +15,13 @@ updates in Leo Bot by itself; deletes, memory and app writes still wait), `repor
 and reports, saves nothing). A missing or unknown mode reads as `approval`.
 
 The file also holds a proposal outbox: `osctl propose-job` drops a bot's proposal there,
-keyed by its thread, and the server turns it into a job card when that turn ends
-(dashboard/job_cards.py). Nothing in the outbox ever runs by itself.
+keyed by its thread, and the server applies it when that turn ends (dashboard/job_cards.py),
+only from the owner's private thread. Nothing in the outbox ever runs by itself.
 
 Schedule text, local time:
   every <N>m|h|d       an interval, at least MIN_EVERY
   <days> HH:MM         days = "daily" or a comma list of mon..sun
+  once YYYY-MM-DD HH:MM  one run, then the job turns itself off
 A run that was missed (server off) runs once on wake, never once per missed slot:
 the next one is counted from the last run.
 """
@@ -34,14 +37,15 @@ from core import bots, memory
 RELPATH = Path("team") / "jobs.json"
 LIVE_RELPATH = Path("team") / "job_live.json"  # the running job's spend so far (one at a time)
 LIVE_MAX_AGE = 2 * 3600  # older than any job turn: a crash's leftover, never counted
-MIN_EVERY = 3600
-MAX_JOBS = 20  # across workspaces: a runaway bot cannot pile up recurring spend
+MIN_EVERY = 300
+MAX_JOBS = 50  # across workspaces: a runaway bot cannot pile up recurring spend
 NAME_MAX = 60
 MESSAGE_MAX = 2000
 STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted"}
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _EVERY_RE = re.compile(r"^every\s+(\d{1,4})\s*([mhd])$")
 _WEEKLY_RE = re.compile(r"^([a-z,\s]+?)\s+(\d{1,2}):(\d{2})$")
+_ONCE_RE = re.compile(r"^once\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$")
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 MODES = ("approval", "auto", "report")
 _EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode"}
@@ -50,13 +54,23 @@ PROPOSAL_TTL = 86400  # a proposal no turn collected (crash, spoofed thread) is 
 
 
 def parse_schedule(text):
-    """{"every": seconds} or {"days": [0..6], "at": (hour, minute)}; ValueError otherwise."""
+    """{"every": seconds}, {"days": [0..6], "at": (hour, minute)} or {"once": epoch}; ValueError
+    otherwise."""
     t = " ".join(str(text or "").lower().split())
+    m = _ONCE_RE.match(t)
+    if m:
+        y, mo, d, hour, minute = (int(x) for x in m.groups())
+        if not (1 <= mo <= 12 and 1 <= d <= 31 and hour < 24 and minute < 60):
+            raise ValueError("once: a real date and time, YYYY-MM-DD HH:MM")
+        ts = time.mktime((y, mo, d, hour, minute, 0, 0, 0, -1))
+        if time.localtime(ts)[:3] != (y, mo, d):
+            raise ValueError("once: a real date and time, YYYY-MM-DD HH:MM")
+        return {"once": ts}
     m = _EVERY_RE.match(t)
     if m:
         every = int(m.group(1)) * _UNIT[m.group(2)]
         if every < MIN_EVERY:
-            raise ValueError("a job runs at most once an hour")
+            raise ValueError("a job runs at most once every 5 minutes")
         return {"every": every}
     m = _WEEKLY_RE.match(t)
     if m:
@@ -70,13 +84,17 @@ def parse_schedule(text):
             days = None
         if days is not None and hour < 24 and minute < 60:
             return {"days": days, "at": (hour, minute)}
-    raise ValueError('schedule: "every 6h", "daily 09:00" or "mon,thu 09:00"')
+    raise ValueError('schedule: "every 30m", "daily 09:00", "mon,thu 09:00" or "once 2026-12-01 09:00"')
 
 
 def next_due(job):
     """When the job runs next: the interval after its last run (or creation), or the first
     weekly slot strictly after it."""
     sched = parse_schedule(job.get("schedule"))
+    if "once" in sched:
+        if job.get("last_run"):
+            raise ValueError("ran already")
+        return sched["once"]
     base = float(job.get("last_run") or job.get("created") or 0)
     if "every" in sched:
         return base + sched["every"]
@@ -239,6 +257,22 @@ def update(root, job_id, **fields):
     return _change(root, fn)
 
 
+def restore(root, job):
+    """Put back a job deleted earlier (an Undo), as it was. ValueError when its id is taken or
+    the list is full."""
+    if not isinstance(job, dict) or not job.get("id"):
+        raise ValueError("nothing to restore")
+
+    def fn(data):
+        if any(j.get("id") == job["id"] for j in data["jobs"]):
+            raise ValueError("that job exists already")
+        if len(data["jobs"]) >= MAX_JOBS:
+            raise ValueError(f"at most {MAX_JOBS} jobs: delete one first")
+        data["jobs"].append(dict(job))
+    _change(root, fn)
+    return dict(job)
+
+
 def delete(root, job_id):
     def fn(data):
         before = len(data["jobs"])
@@ -256,6 +290,8 @@ def mark_start(root, job_id, now):
         if not job.get("enabled"):
             return None
         job.update(last_run=now, last_status="running")
+        if str(job.get("schedule") or "").startswith("once "):
+            job["enabled"] = False  # one run: off after it, kept for its record
         return dict(job)
     return _change(root, fn)
 

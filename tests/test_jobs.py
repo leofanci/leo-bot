@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import tempfile
 import time
 import unittest
@@ -33,9 +34,35 @@ class Schedule(unittest.TestCase):
         self.assertEqual(jobs.parse_schedule("Every 2d"), {"every": 172800})
         self.assertEqual(jobs.parse_schedule("daily 09:00"), {"days": list(range(7)), "at": (9, 0)})
         self.assertEqual(jobs.parse_schedule("mon,thu 18:30"), {"days": [0, 3], "at": (18, 30)})
-        for bad in ("every 30m", "tue 25:00", "someday 09:00", "", "every h", "mon 9", None):
+        self.assertEqual(jobs.parse_schedule("every 5m"), {"every": 300})
+        once = jobs.parse_schedule("once 2026-12-01 09:30")["once"]
+        self.assertEqual(time.localtime(once)[:5], (2026, 12, 1, 9, 30))
+        for bad in ("every 4m", "once 2026-02-30 09:00", "once 2026-12-01 25:00", "tue 25:00", "someday 09:00", "", "every h", "mon 9", None):
             with self.assertRaises(ValueError, msg=bad):
                 jobs.parse_schedule(bad)
+
+    def test_once_job_runs_once_then_turns_off(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        job = jobs.create(root, ws="acme", bot="cmo", skill="s", name="launch", message="m",
+                          schedule="once 2026-12-01 09:00", cap=None)
+        at = jobs.parse_schedule(job["schedule"])["once"]
+        self.assertFalse(jobs.is_due(job, at - 1))
+        self.assertTrue(jobs.is_due(job, at + 1))
+        ran = jobs.mark_start(root, job["id"], at + 1)
+        self.assertFalse(ran["enabled"])
+        self.assertFalse(jobs.is_due(dict(ran, enabled=True), at + 86400))  # ran already
+
+    def test_restore_puts_a_deleted_job_back(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        job = jobs.create(root, ws="acme", bot="cmo", skill="s", name="w", message="m",
+                          schedule="every 1h", cap=None)
+        jobs.delete(root, job["id"])
+        self.assertEqual(jobs.restore(root, job), job)
+        self.assertEqual(jobs.load(root), [job])
+        with self.assertRaises(ValueError):
+            jobs.restore(root, job)
 
     def test_missed_runs_run_once(self):
         now = time.time()

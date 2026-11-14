@@ -456,6 +456,7 @@ let _WS = "hq";
 try { _WS = localStorage.getItem("wsId") || "hq"; } catch {}
 let _ROOMS = [];   // current workspace's rooms: [{id, kind, name, members, lead}]
 let _APPROVALS = [];  // pending approvals visible here (HQ: every workspace)
+let _RECEIPTS = [];   // jobs bots set up lately: shown in their thread with Undo and Pause
 const fmtTokens = n => !n ? "" : n >= 1e6 ? `${(n/1e6).toFixed(1)}M tok` : n >= 1000 ? `${(n/1000).toFixed(1)}k tok` : `${n} tok`;
 const fmtCost = c => c ? `$${c < 0.01 ? c.toFixed(4) : c.toFixed(2)}` : "";
 const fmtUsage = (tokens, cost) => [fmtTokens(tokens), fmtCost(cost)].filter(Boolean).join(" · ");
@@ -549,7 +550,7 @@ async function renderRail(){
   [_BOTS, _ROOMS, _APPROVALS] = await Promise.all([
     api("/api/bots" + q).then(d => d.bots || []).catch(() => []),
     api("/api/rooms" + q).then(d => d.rooms || []).catch(() => []),
-    person ? [] : api("/api/approvals" + q).then(d => d.approvals || []).catch(() => []),
+    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; return d.approvals || []; }).catch(() => []),
   ]);
   renderWsBar();
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
@@ -1524,6 +1525,32 @@ function appCardHtml(a, n){
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
       ${edit}
       <button class="btn sm ghost" data-app="reject">No</button>${all}</div>`;
+}
+// A job a bot set up: what was saved, with Undo (once) and Pause.
+function receiptCardHtml(r){
+  const p = r.preview || { title: r.summary, fields: [] };
+  const pause = r.job_id && r.undo?.op !== "restore" ? `<button class="btn sm" data-r="pause">Pause</button>` : "";
+  return `<div class="app-card-h"><b>${esc(p.title || r.summary)}</b><small>${esc(r.result || "Saved.")}</small></div>
+    <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+    <div class="app-btns"><button class="btn sm" data-r="undo">Undo</button>${pause}</div>`;
+}
+function wireReceiptCard(el, r){
+  const lock = on => el.querySelectorAll("button").forEach(b => b.disabled = on);
+  const done = text => {
+    _RECEIPTS = _RECEIPTS.filter(x => x.id !== r.id);
+    el.innerHTML = `<div class="app-result">${esc(text)}</div>`;
+  };
+  el.querySelector('[data-r="undo"]').onclick = async () => {
+    lock(true);
+    try { const out = await jpost(`/api/approvals/${encodeURIComponent(r.id)}/undo`, {}); done(out.result || "Undone."); }
+    catch (e) { toast("✗ " + e.message); lock(false); }
+  };
+  const pause = el.querySelector('[data-r="pause"]');
+  if (pause) pause.onclick = async () => {
+    lock(true);
+    try { await jpost(`/api/jobs/${encodeURIComponent(r.job_id)}/enabled`, { ws: r.ws, enabled: false }); done("Paused. Turn it back on in Team, Background jobs."); }
+    catch (e) { toast("✗ " + e.message); lock(false); }
+  };
 }
 function wireAppCard(el, a){
   if (!el || !a) return;
@@ -4500,6 +4527,13 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       wireAppCard(el, a);
       stream.appendChild(el);
     });
+    _RECEIPTS.filter(r => r.chat && r.chat === activeChatId).slice().reverse().forEach(r => {
+      const el = document.createElement("div");
+      el.className = "approval-bar app-card job-receipt";
+      el.innerHTML = receiptCardHtml(r);
+      wireReceiptCard(el, r);
+      stream.appendChild(el);
+    });
   }
   function busyNote(){ statusEl.textContent = "Reply in progress · Esc to stop"; }
   // Bumped by every thread switch: a slow load drops out once you moved on.
@@ -5456,6 +5490,10 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.approval) {
               const r = replyAt(obj.msg);
               _APPROVALS.unshift(obj.approval); r.meta.approval = obj.approval; r.bubble.closest(".msg").hidden = false;
+            }
+            if (obj.job_receipts) {
+              obj.job_receipts.forEach(x => { if (!_RECEIPTS.some(y => y.id === x.id)) _RECEIPTS.unshift(x); });
+              renderAppCards();
             }
             if (obj.app_actions) {
               obj.app_actions.forEach(a => { if (!_APPROVALS.some(x => x.id === a.id)) _APPROVALS.unshift(a); });
