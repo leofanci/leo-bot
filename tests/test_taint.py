@@ -114,6 +114,29 @@ class Hook(StubGate):
                   {"tool_name": "Bash", "tool_input": {"command": "npm test"}})
         self.assertEqual(_Gate.asked, [("Bearer t1", {"tool": "Bash", "command": "npm test"})])
 
+    def test_a_file_tool_sends_its_path(self):
+        _Gate.answer = {"allow": True}
+        self.hook({"LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": self.url},
+                  {"tool_name": "Write", "tool_input": {"file_path": "/w/a.txt", "content": "x"}})
+        self.assertEqual(_Gate.asked, [("Bearer t1", {"tool": "Write", "path": "/w/a.txt"})])
+
+    def test_a_sandboxed_command_comes_back_rewritten(self):
+        _Gate.answer = {"allow": True, "command": "sandboxed npm test"}
+        out = self.hook({"LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": self.url},
+                        {"tool_name": "Bash", "tool_input": {"command": "npm test", "description": "d"}})
+        spec = json.loads(out)["hookSpecificOutput"]
+        self.assertEqual(spec["permissionDecision"], "allow")  # Claude Code's reviewer refuses a rewrite
+        self.assertEqual(spec["updatedInput"], {"command": "sandboxed npm test", "description": "d"})
+
+    def test_the_inline_command_engines_run_is_the_same_hook(self):
+        import shlex
+        _Gate.answer = {"allow": False, "reason": "no"}
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LEOBOT_GATE")} | {
+            "LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": self.url}
+        out = subprocess.run(shlex.split(claude_code.HOOK_COMMAND), input=json.dumps({"tool_name": "WebSearch"}),
+                             capture_output=True, text=True, env=env, timeout=30).stdout
+        self.assertTrue(self.denied(out.strip()))
+
     def test_fails_closed(self):
         for env in ({}, {"LEOBOT_GATE_TOKEN": "t1"},
                     {"LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": "http://127.0.0.1:9/api/internal/gate"},
@@ -159,8 +182,8 @@ class ClaudeCodeFlags(unittest.TestCase):
         self.assertIn("WebSearch", self.tools(cmd))
         hooks = json.loads(cmd[cmd.index("--settings") + 1])["hooks"]["PreToolUse"][0]
         self.assertEqual(hooks["matcher"], "WebSearch|WebFetch")
-        self.assertIn("turn_hook.py", hooks["hooks"][0]["command"])
-        self.assertIn(" -I ", hooks["hooks"][0]["command"])
+        self.assertEqual(hooks["hooks"][0]["command"], claude_code.HOOK_COMMAND)
+        self.assertIn(" -I -c ", hooks["hooks"][0]["command"])  # inline: a rewritten file changes nothing
 
     def shell_cmd(self, gate, edit=True, shared=False):
         d = str(Path.cwd())

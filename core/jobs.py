@@ -284,6 +284,8 @@ def update(root, job_id, **fields):
     def fn(data):
         job = _find(data, job_id)
         job.update(changes)
+        if "notes" in changes and not changes["notes"]:
+            job.pop("notes_outside", None)  # an empty notepad carries nothing
         return dict(job)
     return _change(root, fn)
 
@@ -325,6 +327,23 @@ def mark_start(root, job_id, now):
             job["enabled"] = False  # one run: off after it, kept for its record
         return dict(job)
     return _change(root, fn)
+
+
+def mark_notes_outside(root, job_id):
+    """A run of this job held outside content (mail, pages, app data): its notepad may carry those
+    words, so every later run starts as outside content too (dashboard/taint.py). Sticky until the
+    notepad is emptied."""
+    def fn(data):
+        try:
+            _find(data, job_id)["notes_outside"] = True
+        except LookupError:  # deleted while it ran
+            pass
+    _change(root, fn)
+
+
+def notes_outside(job):
+    """Does this job's notepad count as outside content?"""
+    return bool((job or {}).get("notes_outside") and str((job or {}).get("notes") or "").strip())
 
 
 def set_check_seen(root, job_id, digest):

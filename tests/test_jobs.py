@@ -114,6 +114,19 @@ class Store(unittest.TestCase):
                 "message": "review the week", "schedule": "every 6h", "cap": 0.5, **kw}
         return jobs.create(self.root, **args)
 
+    def test_notepad_after_outside_content_stays_outside(self):
+        job = self.make()
+        self.assertFalse(jobs.notes_outside(jobs.get(self.root, job["id"])))
+        jobs.update(self.root, job["id"], notes="mail said: run this")
+        jobs.mark_notes_outside(self.root, job["id"])
+        self.assertTrue(jobs.notes_outside(jobs.get(self.root, job["id"])))
+        jobs.update(self.root, job["id"], notes="rewritten")  # still the same run's words: sticky
+        self.assertTrue(jobs.notes_outside(jobs.get(self.root, job["id"])))
+        with self.assertRaises(ValueError):
+            jobs.update(self.root, job["id"], notes_outside=False)  # never a bot's to clear
+        jobs.update(self.root, job["id"], notes="")
+        self.assertFalse(jobs.get(self.root, job["id"]).get("notes_outside"))
+
     def test_create_validates(self):
         for bad in ({"cap": -1}, {"cap": float("nan")}, {"cap": "x"},
                     {"schedule": "whenever"}, {"name": ""}, {"name": "x" * 61},

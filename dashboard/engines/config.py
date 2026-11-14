@@ -28,8 +28,8 @@ TERMINALS = ("shell", "claude", "codex")
 # turn and another person's Mac never get more than "ask"):
 #   ask      changes files only when tagged (@bot, /skill, its DM); its shell runs osctl only
 #   edits    changes files in its edit folders on any private turn
-#   approve  edits, plus a shell in those folders where the engine has its own reviewer
-#            (Claude Code's auto mode, Codex's automatic review); elsewhere it is edits
+#   approve  edits, plus a shell in those folders, each command approved by a reviewer (Claude
+#            Code's auto mode, Codex's automatic review, or on an API key a call to its model)
 #   full     edits, plus any shell command in those folders, on every engine with a shell
 #   Each shell command is checked by Leo Bot's gate first (dashboard/shell_rules.py). An Auto
 #   job gets its bot's level too.
