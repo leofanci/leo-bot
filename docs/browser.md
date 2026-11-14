@@ -64,6 +64,28 @@ The four sets are disjoint. A tool in none of them is refused by the relay.
 
 Tool `agent_browser_get_url`: the reply text is the bare URL (`content[0].text`). Navigation replies (`open`) also carry the title in `content[0].text` and `url` plus `title` inside `structuredContent.response.data`. Tool results have `structuredContent: {exitCode, response: {data: {...}}}` and `isError`. CLI equivalent: `agent-browser --json get url`.
 
+### Snapshot format
+
+Probed on 0.41.0 against a local fixture page served on 127.0.0.1 only. `agent_browser_snapshot` returns the tree as text in `content[0].text` and again in `structuredContent.response.data.snapshot`; `data.refs` maps each ref to `{name, role}` only, with no field values. One line per element:
+
+```
+- textbox "Name" [ref=e3]: Alice
+- textbox "Empty" [ref=e4]
+- searchbox "Find" [ref=e5]: query
+- textbox "Msg" [ref=e6]: line one
+line two
+- generic "Editor" [ref=e1] editable [contenteditable]: Rich text
+- textbox "Pass" [ref=e7]: ••••••
+- combobox [expanded=false, ref=e4]: a
+  - option "a" [selected, ref=e7]
+- button "Send" [ref=e2]
+```
+
+- A field's current value follows `: ` after its attributes; an empty field has no `: `. A placeholder is shown as the name, never as the value.
+- `textarea` and `input type=text|email` are `textbox`; `type=search` is `searchbox`; a contenteditable element keeps its role (often `generic`) and carries `editable [contenteditable]`. A password value is masked as bullets.
+- A multi-line value continues on the next lines without a `- ` prefix. With `compact: true` only its first line is shown.
+- With no interactive element the text is `(no interactive elements)`.
+
 ### Per-call fields (relay must control them)
 
 Every core tool also accepts these inputs, so a bot could choose them unless the relay strips or overwrites them: `session`, `namespace`, `restore`, `restoreSave`, `restoreCheckUrl`, `restoreCheckText`, `restoreCheckFn`, `allowedDomains`, `extraArgs`, `caCert`, `clearCaCert`, `useSystemCa`, `idleTimeout`, `timeoutMs`. `extraArgs` is a raw argv list; the engine rejects the flags that change network, file, policy or host access (`--allowed-domains`, `--executable-path`, `--args`, `--config`), but the relay should drop it entirely. `open` also takes `headed`. `screenshot` takes `path` and `screenshotDir`. `restoreCheckFn` is script. The relay must set `session`, `namespace`, `restore` and `allowedDomains` itself and reject everything else it did not whitelist, with `additionalProperties: false` in the engine's schemas as the reference.
@@ -110,3 +132,12 @@ Yes, both exist and encryption is built in.
 ### Install in Leo Bot
 
 `core/browser_engine.py`: `resolve()` checks `LEOBOT_AGENT_BROWSER`, then `<data>/tools/agent-browser/0.41.0/node_modules/.bin/agent-browser`, then `PATH`. `install()` runs `npm install --prefix <that folder> agent-browser@0.41.0`, then `<binary> install`, with a 600 s timeout, and returns `status()`.
+
+## The gate (`dashboard/browser_relay.py`)
+
+- A send is a commit (click, select, check, uncheck, or `press` with Enter in the key) while text is typed. `press` passes otherwise only for Tab, Shift+Tab, arrows, Escape, PageUp, PageDown, Home and End: a printable key, a Control, Meta or Alt combo (paste included) or an unknown key name is refused. `fill` and `type` refuse text that is not a string or holds a line break or other control character.
+- Typed text is kept per bot browser in `<data>/run/browser_typed.json`, so a restart does not clear it.
+- On a listed site, a commit with nothing typed through the relay first takes a snapshot: any value in a text box or contenteditable element (search boxes, selects and masked passwords aside) counts as typed, and the send rules apply. A page with a prefilled field therefore needs a plan for any click.
+- `read` with a `url` is refused: the bot opens the page, then reads it. After every navigation, commit or call with a url the engine's own URL is checked; an unknown one fails closed (reply withheld, tab sent to about:blank).
+- The daily cap counts done, failed and running sends of the page's site across every bot and workspace, and the count and the new running record are written under one lock.
+- Residual risk: a send that needs no typing is not detected. A one-click canned reply, a "Like", "Connect" or "Accept" button, or a quick-reply chip goes out as a plain click, within the bot's level but without a plan or cap.

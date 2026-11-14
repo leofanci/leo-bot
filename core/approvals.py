@@ -252,15 +252,16 @@ def _norm(text):
 
 
 def _place(url):
-    """(host, path) of a page for matching a send to its plan; a trailing slash does not count."""
+    """(host, path, query) of a page for matching a send to its plan; a trailing slash on the
+    path and the fragment do not count."""
     host = browser.host_of(url)
     if not host:
         return None
     try:
-        path = urlsplit(url.strip()).path
+        parts = urlsplit(url.strip())
     except ValueError:
         return None
-    return host, path.rstrip("/") or "/"
+    return host, parts.path.rstrip("/") or "/", parts.query
 
 
 def add_send_plan(root=bots.ROOT, *, ws, room, chat, bot, person, items):
@@ -291,44 +292,82 @@ def approve_send(aid, root=bots.ROOT):
     return _mutate_held(aid, root, fn, kinds=(APP,))
 
 
-def take_send(root=bots.ROOT, *, ws, bot, url, text, now=None):
-    """Use one approved send of this bot whose page (host and path) and text (whitespace
-    aside) match, approved at most PLAN_TTL ago: approved -> done. None when none matches."""
+def _send_site(r, root):
+    """The listed site a send counts against, from its page address at count time."""
+    url = (r["action"].get("arguments") or {}).get("url")
+    return browser.site_of(url, root) or browser.host_of(url)
+
+
+def _count_sends(rows, site, root, now):
+    # A failed or running send may have gone out: it counts against the cap too.
+    return sum(1 for r in rows if _is_send(r) and r.get("status") in ("done", "failed", "running")
+               and 0 <= now - (r.get("resolved") or r.get("started") or 0) < DAY
+               and _send_site(r, root) == site)
+
+
+def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, url, text, daily=None,
+               planned, now=None):
+    """Start one browser send, atomically with the daily cap: ("capped" | "no_plan" | "ok", record).
+
+    Under one lock it counts today's sends of the page's site (every bot, every workspace)
+    against `daily`, then either moves this bot's matching approved plan item (same ws, page
+    by host, path and query, text whitespace aside, approved at most PLAN_TTL ago) to
+    `running` (`planned`), or writes a new `running` record (an act send). The caller sends,
+    then calls end_send. A second browser checking the cap meanwhile sees the running row."""
     now = time.time() if now is None else now
+    site = browser.site_of(url, root) or browser.host_of(url)
     place, want = _place(url), _norm(text)
-    if place is None or not want:
-        return None
     with LOCK:
         rows = load(root)
-        hits = [r for r in rows if _is_send(r) and r.get("status") == "approved"
+        _housekeep(rows)
+        if daily and _count_sends(rows, site, root, now) >= daily:
+            return "capped", None
+        if planned:
+            hits = [] if place is None or not want else [
+                r for r in rows if _is_send(r) and r.get("status") == "approved"
                 and r.get("ws") == ws and r.get("bot") == bot
                 and 0 <= now - (r.get("approved_at") or 0) <= PLAN_TTL
                 and _place((r["action"].get("arguments") or {}).get("url")) == place
                 and _norm((r["action"].get("arguments") or {}).get("text")) == want]
-        if not hits:
-            return None
-        rec = min(hits, key=lambda r: r.get("approved_at") or 0)
-        rec.update(status="done", result=SENT, resolved=now)
+            if not hits:
+                return "no_plan", None
+            rec = min(hits, key=lambda r: r.get("approved_at") or 0)
+            rec["action"]["arguments"] = {**(rec["action"].get("arguments") or {}), "site": site}
+        else:
+            rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=BROWSER,
+                              slug=BROWSER_SEND, arguments={"url": url, "text": text, "site": site}, account=None)
+            rec["auto"] = True
+            rows.append(rec)
+        rec.update(status="running", started=now)
         _save(root, rows)
-        return dict(rec)
+        return "ok", dict(rec)
 
 
-def fail_send(aid, result, root=bots.ROOT):
-    """A taken send whose click broke: done -> failed with the reason."""
+def end_send(aid, ok, root=bots.ROOT):
+    """running -> done (SENT) or failed (it may or may not have gone out)."""
     def fn(r):
-        _need(r, "done")
-        r.update(status="failed", result=result)
+        _need(r, "running")
+        r.update(status="done" if ok else "failed", result=SENT if ok else STALE_NOTE, resolved=time.time())
     return _mutate_held(aid, root, fn, kinds=(APP,))
 
 
+def take_send(root=bots.ROOT, *, ws, bot, url, text, now=None):
+    """Use one approved send of this bot that matches the page and text (see claim_send):
+    approved -> done, with its site rewritten from `url`. None when none matches."""
+    status, rec = claim_send(root, ws=ws, bot=bot, url=url, text=text, planned=True, now=now)
+    if status != "ok":
+        return None
+    return end_send(rec["id"], True, root)
+
+
 def sends_today(site, root=bots.ROOT, now=None):
-    """Browser sends done on `site` in the last 24 hours, by every bot in every workspace."""
+    """Browser sends of `site` in the last 24 hours, by every bot in every workspace: done,
+    failed or running (a failed click may have gone out). The site comes from each send's
+    page address now, so a site listed later counts its older sends."""
     if not site:
         return 0
     now = time.time() if now is None else now
-    return sum(1 for r in load(root) if _is_send(r) and r.get("status") == "done"
-               and (r["action"].get("arguments") or {}).get("site") == site
-               and 0 <= now - (r.get("resolved") or 0) < DAY)
+    return _count_sends(load(root), site, root, now)
 
 
 def batch_pending(batch, root=bots.ROOT):

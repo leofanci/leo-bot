@@ -17,10 +17,12 @@ def u(rest):  # built from parts so no literal URL host sits in a tracked file
 
 
 class FakeUpstream(browser_relay.Upstream):
-    def __init__(self, url=None, mode="bot", redirects=None):
+    def __init__(self, url=None, mode="bot", redirects=None, fields=""):
         self.url, self.mode, self.frames = url, mode, []
         self.redirects = redirects or {}
         self.history = []
+        self.fields = fields  # snapshot lines for the page's text fields (docs/browser.md format)
+        self.snapshot_fails = False
 
     def forward(self, frame, sid):
         self.frames.append(frame)
@@ -31,6 +33,13 @@ class FakeUpstream(browser_relay.Upstream):
             self.url = self.redirects.get(args["url"], args["url"])
         elif params.get("name") == P + "back" and self.history:
             self.url = self.history.pop()
+        if params.get("name") == P + "snapshot":
+            if self.snapshot_fails:
+                return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {"content": [], "isError": True}}, "m-1"
+            snap = (self.fields + "\n" if self.fields else "") + '- button "Send" [ref=e2]'
+            return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {
+                "content": [{"type": "text", "text": snap}], "isError": False,
+                "structuredContent": {"exitCode": 0, "response": {"data": {"snapshot": snap}}}}}, "m-1"
         if frame.get("method") == "tools/list":
             return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {"tools": [
                 {"name": P + "open", "inputSchema": {"type": "object", "required": ["session"],
@@ -41,8 +50,9 @@ class FakeUpstream(browser_relay.Upstream):
     def current_url(self):
         return self.url
 
-    def calls(self):
-        return [f["params"]["name"] for f in self.frames if f.get("method") == "tools/call"]
+    def calls(self, snapshots=False):
+        return [f["params"]["name"] for f in self.frames if f.get("method") == "tools/call"
+                and (snapshots or f["params"]["name"] != P + "snapshot")]
 
 
 def call(name, rid=7, **arguments):
@@ -102,7 +112,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames, [])
         self.handle(call(P + "snapshot"))
         self.handle(call(P + "back"))
-        self.assertEqual(self.up.calls(), [P + "snapshot", P + "back"])
+        self.assertEqual(self.up.calls(snapshots=True), [P + "snapshot", P + "back"])
 
     def test_click_without_typing_forwards(self):
         self.level("write")
@@ -141,7 +151,7 @@ class Gate(unittest.TestCase):
     def test_bound_site_other_mode_refused_before_forward(self):
         self.level("act")
         bound = u("www.demo.test/inbox")
-        for frame in (call(P + "open", url=bound), call(P + "read", url=bound), call(P + "tab_new", url=bound)):
+        for frame in (call(P + "open", url=bound), call(P + "tab_new", url=bound)):
             reply = self.handle(frame)
             self.assertEqual(text_of(reply), browser_relay.SITE_MODE.format(
                 site="demo.test", mode_label="the owner's Chrome", other_label="the bot browser"))
@@ -177,9 +187,9 @@ class Gate(unittest.TestCase):
         up.forward = lambda frame, sid, f=up.forward: (f(frame, sid) if (frame["params"]["arguments"].get("url")
                                                                          != "about:blank") else (None, sid))
         self.assertIn("demo.test is set", text_of(self.handle(call(P + "reload"), up=up)))
-        self.assertIn("demo.test is set", text_of(self.handle(call(P + "snapshot"), up=up)))
+        self.assertIn("demo.test is set", text_of(self.handle(call(P + "get_title"), up=up)))
         self.assertEqual(text_of(self.handle(call(P + "open", url=u("acme.test/a")), up=up)), "ok")
-        self.assertEqual(text_of(self.handle(call(P + "snapshot"), up=up)), "ok")
+        self.assertEqual(text_of(self.handle(call(P + "get_title"), up=up)), "ok")
 
     def test_engine_wide_args_stripped(self):
         self.level("act")
@@ -256,10 +266,11 @@ class Gate(unittest.TestCase):
         self.plan("Hello  there,\n friend")
         self.handle(call(P + "fill", text="Hello there, friend!"))
         self.assertEqual(text_of(self.handle(call(P + "click"))), browser_relay.NO_PLAN)
-        up = FakeUpstream(u("acme.test/messages/42/"))
+        up = FakeUpstream(self.page)
+        self.handle(call(P + "open", url=u("acme.test/messages/42/#top")), up=up)  # sets the old text aside
         self.handle(call(P + "fill", text=" Hello there,  friend "), up=up)
         self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
-        self.assertEqual(up.calls(), [P + "fill", P + "click"])
+        self.assertEqual(up.calls(), [P + "open", P + "fill", P + "click"])
 
     def test_plan_other_page_does_not_match(self):
         self.plan("Hi")
@@ -342,6 +353,158 @@ class Gate(unittest.TestCase):
         self.assertEqual(text_of(reply), browser_relay.SEND_BROKE)
         row = [r for r in approvals.load(self.root) if r["action"]["toolkit"] == approvals.BROWSER][0]
         self.assertEqual((row["status"], row["result"]), ("failed", approvals.STALE_NOTE))
+
+    # Fix round 1 regressions
+
+    def test_press_allows_only_keys_that_type_nothing(self):
+        self.level("act")
+        for key in ("H", "i", "a", " ", "Space", "Control+V", "Meta+v", "Alt+x", "Control+a", "Foo", "", None, 5):
+            self.assertEqual(text_of(self.handle(call(P + "press", key=key))), browser_relay.BAD_KEY, key)
+        self.assertEqual(self.up.frames, [])
+        for key in ("Tab", "Shift+Tab", "ArrowDown", "Escape", "PageUp", "End"):
+            self.assertEqual(text_of(self.handle(call(P + "press", key=key))), "ok", key)
+        self.assertEqual(self.up.calls(snapshots=True), [P + "press"] * 6)
+
+    def test_enter_is_a_send(self):
+        self.level("write")
+        self.assertEqual(text_of(self.handle(call(P + "press", key="H"))), browser_relay.BAD_KEY)
+        self.handle(call(P + "type", text="Hi"))
+        for key in ("Enter", "Shift+Enter", "Control+Enter", "NumpadEnter"):
+            self.assertEqual(text_of(self.handle(call(P + "press", key=key))), browser_relay.NO_PLAN, key)
+        self.assertEqual(self.up.calls(), [P + "type"])
+
+    def test_type_text_must_be_one_line_string(self):
+        self.level("act")
+        for text in ("a\nb", "a\rb", "a\x00", "a\tb", "a\u2028b", "\x1b[A"):
+            self.assertEqual(text_of(self.handle(call(P + "fill", text=text))), browser_relay.CONTROL_TEXT)
+        for text in (None, 5, ["a"]):
+            self.assertEqual(text_of(self.handle(call(P + "type", text=text))), browser_relay.BAD_TEXT)
+        self.assertEqual(text_of(self.handle(call(P + "fill", selector="@e1"))), browser_relay.BAD_TEXT)
+        self.assertEqual(self.up.frames, [])
+
+    def test_failed_and_running_sends_count(self):
+        def row(status):
+            approvals.log_app_run(self.root, ws="demo", room=None, chat=None, bot="b9", person="ceo",
+                                  toolkit=approvals.BROWSER, slug=approvals.BROWSER_SEND,
+                                  arguments={"url": self.page, "text": "x", "site": "acme.test"},
+                                  account=None, status=status, result="r")
+        row("done")
+        row("failed")
+        status, _ = approvals.claim_send(self.root, ws="demo", bot="b9", url=self.page, text="y", planned=False)
+        self.assertEqual(status, "ok")
+        self.assertEqual(approvals.sends_today("acme.test", self.root), 3)
+
+    def test_timeout_clamped_and_non_finite_dropped(self):
+        self.level("act")
+        for given, want in ((5, {"timeoutMs": 1000}), (50000, {"timeoutMs": 50000}), (10 ** 9, {"timeoutMs": 120000}),
+                            (float("nan"), {}), (float("inf"), {}), ("30", {}), (True, {})):
+            self.handle(call(P + "wait_ms", timeoutMs=given))
+            self.assertEqual(self.up.frames[-1]["params"]["arguments"], want, given)
+
+    def test_cap_counts_by_page_site_not_stored_site(self):
+        for i in range(20):
+            approvals.log_app_run(self.root, ws="demo", room=None, chat=None, bot="b%d" % i, person="ceo",
+                                  toolkit=approvals.BROWSER, slug=approvals.BROWSER_SEND,
+                                  arguments={"url": u("www.acme.test/m"), "text": "x", "site": "unlisted.test"},
+                                  account=None, status="done", result=approvals.SENT)
+        self.assertEqual(approvals.sends_today("acme.test", self.root), 20)
+        self.plan("Hi", url=u("www.acme.test/messages/42"))
+        status, _ = approvals.claim_send(self.root, ws="acme", bot="b1", url=u("www.acme.test/messages/42"),
+                                         text="Hi", daily=20, planned=True)
+        self.assertEqual(status, "capped")
+        rec = approvals.take_send(self.root, ws="acme", bot="b1", url=u("www.acme.test/messages/42"), text="Hi")
+        self.assertEqual(rec["action"]["arguments"]["site"], "acme.test")
+
+    def test_cap_and_record_are_atomic(self):
+        browser.set_site("acme.test", None, 1, self.root)
+        self.level("act")
+        other = FakeUpstream(self.page)
+        seen = []
+        real = self.up.forward
+
+        def forward(frame, sid):  # while the first send is in flight, a second browser tries
+            if frame["params"]["name"] == P + "click":
+                seen.append(approvals.sends_today("acme.test", self.root))
+                self.handle(call(P + "fill", text="Two"), up=other, bot="b2")
+                seen.append(text_of(self.handle(call(P + "click"), up=other, bot="b2")))
+            return real(frame, sid)
+        self.up.forward = forward
+        browser.set_bot("acme", "b2", "act", "bot", self.root)
+        self.handle(call(P + "fill", text="One"))
+        self.assertEqual(text_of(self.handle(call(P + "click"))), "ok")
+        self.assertEqual(seen, [1, browser_relay.CAPPED.format(site="acme.test", daily=1)])
+        rows = [r for r in approvals.load(self.root) if r["action"]["toolkit"] == approvals.BROWSER]
+        self.assertEqual([r["status"] for r in rows], ["done"])
+
+    def test_text_already_in_a_field_counts_as_typed_on_listed_site(self):
+        self.level("write")
+        up = FakeUpstream(self.page, fields='- textbox "Msg" [ref=e6]: Hello\nthere\n- searchbox "Find" [ref=e5]: q'
+                                          '\n- textbox "Pass" [ref=e7]: \u2022\u2022\u2022')
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), browser_relay.NO_PLAN)
+        self.assertEqual(up.calls(snapshots=True), [P + "snapshot"])
+        self.plan("Hello there")
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), "ok")
+        # contenteditable counts too
+        up2 = FakeUpstream(self.page, fields='- generic "Editor" [ref=e1] editable [contenteditable]: Rich')
+        self.assertEqual(text_of(self.handle(call(P + "check", selector="@e1"), up=up2)), browser_relay.NO_PLAN)
+        # an unlisted site is not snapshotted
+        up3 = FakeUpstream(u("other.test/x"), fields='- textbox "Msg" [ref=e6]: Hello')
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up3)), "ok")
+        self.assertEqual(up3.calls(snapshots=True), [P + "click"])
+
+    def test_unreadable_snapshot_refuses_click(self):
+        self.level("act")
+        self.up.snapshot_fails = True
+        self.assertEqual(text_of(self.handle(call(P + "click"))), browser_relay.NO_CHECK)
+        self.assertEqual(self.up.calls(), [])
+
+    def test_typed_survives_a_restart(self):
+        self.level("write")
+        self.handle(call(P + "fill", text="Hi"))
+        self.assertEqual(browser_relay.typed_state("acme", "b1", self.root), {"typed": "Hi", "aside": ""})
+        self.assertTrue((self.root / "run" / "browser_typed.json").is_file())
+        fresh = FakeUpstream(self.page)  # a new engine child after a restart
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=fresh)), browser_relay.NO_PLAN)
+
+    def test_read_with_url_refused(self):
+        self.level("read")
+        for url in (self.page, "about:blank", None):
+            self.assertEqual(text_of(self.handle(call(P + "read", url=url))), browser_relay.READ_URL)
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(text_of(self.handle(call(P + "read"))), "ok")
+
+    def test_unknown_page_after_navigation_fails_closed(self):
+        self.level("act")
+        target = u("acme.test/lost")
+        up = FakeUpstream(self.page, redirects={target: None, "about:blank": None})
+        self.assertEqual(text_of(self.handle(call(P + "open", url=target), up=up)), browser_relay.UNKNOWN_PAGE)
+        self.assertEqual(up.frames[-1]["params"]["arguments"], {"url": "about:blank"})
+        self.assertEqual(text_of(self.handle(call(P + "get_title"), up=up)), browser_relay.UNKNOWN_PAGE)
+        self.assertEqual(text_of(self.handle(call(P + "open", url=u("acme.test/a")), up=up)), "ok")
+        self.assertEqual(text_of(self.handle(call(P + "get_title"), up=up)), "ok")
+
+    def test_plan_matches_query_not_fragment(self):
+        self.plan("Hi", url=u("acme.test/m?to=1"))
+        up = FakeUpstream(u("acme.test/m?to=2"))
+        self.handle(call(P + "fill", text="Hi"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.NO_PLAN)
+        up2 = FakeUpstream(u("acme.test/m"))
+        self.handle(call(P + "open", url=u("acme.test/m?to=1#end")), up=up2)
+        self.handle(call(P + "fill", text="Hi"), up=up2)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up2)), "ok")
+        row = [r for r in approvals.load(self.root) if r["status"] == "done"][0]
+        self.assertEqual(row["preview"]["fields"][0], ["Page", u("acme.test/m?to=1")])
+
+    def test_method_not_a_string_is_invalid(self):
+        for method in (5, None, ["tools/call"]):
+            reply = self.handle({"jsonrpc": "2.0", "id": 3, "method": method})
+            self.assertEqual(reply["error"]["code"], -32600)
+        self.assertEqual(self.up.frames, [])
+
+    def test_nested_url_and_href_dropped(self):
+        self.level("act")
+        self.handle(call(P + "wait_for_selector", href="x", opts={"url": "y", "k": 1, "deep": [{"href": "z", "j": 2}]}))
+        self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"opts": {"k": 1, "deep": [{"j": 2}]}})
 
 
 class Preview(unittest.TestCase):
