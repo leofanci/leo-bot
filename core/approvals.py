@@ -292,17 +292,18 @@ def approve_send(aid, root=bots.ROOT):
     return _mutate_held(aid, root, fn, kinds=(APP,))
 
 
-def _send_site(r, root):
+def _send_site(r, root, listed):
     """The listed site a send counts against, from its page address at count time."""
     url = (r["action"].get("arguments") or {}).get("url")
-    return browser.site_of(url, root) or browser.host_of(url)
+    return browser.site_of(url, root, listed) or browser.host_of(url)
 
 
 def _count_sends(rows, site, root, now):
     # A failed or running send may have gone out: it counts against the cap too.
+    listed = browser.sites(root)
     return sum(1 for r in rows if _is_send(r) and r.get("status") in ("done", "failed", "running")
                and 0 <= now - (r.get("resolved") or r.get("started") or 0) < DAY
-               and _send_site(r, root) == site)
+               and _send_site(r, root, listed) == site)
 
 
 def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, url, text, daily=None,
@@ -344,9 +345,11 @@ def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, ur
 
 
 def end_send(aid, ok, root=bots.ROOT):
-    """running -> done (SENT) or failed (it may or may not have gone out)."""
+    """running -> done (SENT) or failed (it may or may not have gone out). A row no longer
+    running (housekept to failed while the click hung) keeps what it has."""
     def fn(r):
-        _need(r, "running")
+        if r.get("status") != "running":
+            return
         r.update(status="done" if ok else "failed", result=SENT if ok else STALE_NOTE, resolved=time.time())
     return _mutate_held(aid, root, fn, kinds=(APP,))
 

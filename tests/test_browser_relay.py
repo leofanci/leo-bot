@@ -17,8 +17,9 @@ def u(rest):  # built from parts so no literal URL host sits in a tracked file
 
 
 class FakeUpstream(browser_relay.Upstream):
-    def __init__(self, url=None, mode="bot", redirects=None, fields=""):
+    def __init__(self, url=None, mode="bot", redirects=None, fields="", browser_key=None):
         self.url, self.mode, self.frames = url, mode, []
+        self.browser_key = browser_key or "bot:fake-%d" % id(self)  # its own browser unless shared
         self.redirects = redirects or {}
         self.history = []
         self.fields = fields  # snapshot lines for the page's text fields (docs/browser.md format)
@@ -460,10 +461,11 @@ class Gate(unittest.TestCase):
 
     def test_typed_survives_a_restart(self):
         self.level("write")
-        self.handle(call(P + "fill", text="Hi"))
-        self.assertEqual(browser_relay.typed_state("acme", "b1", self.root), {"typed": "Hi", "aside": ""})
+        up = FakeUpstream(self.page, browser_key="bot:acme--b1")
+        self.handle(call(P + "fill", text="Hi"), up=up)
+        self.assertEqual(browser_relay.typed_state("bot:acme--b1", self.root), {"typed": "Hi", "aside": ""})
         self.assertTrue((self.root / "run" / "browser_typed.json").is_file())
-        fresh = FakeUpstream(self.page)  # a new engine child after a restart
+        fresh = FakeUpstream(self.page, browser_key="bot:acme--b1")  # a new engine child after a restart
         self.assertEqual(text_of(self.handle(call(P + "click"), up=fresh)), browser_relay.NO_PLAN)
 
     def test_read_with_url_refused(self):
@@ -505,6 +507,88 @@ class Gate(unittest.TestCase):
         self.level("act")
         self.handle(call(P + "wait_for_selector", href="x", opts={"url": "y", "k": 1, "deep": [{"href": "z", "j": 2}]}))
         self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"opts": {"k": 1, "deep": [{"j": 2}]}})
+
+    # Fix round 2 regressions
+
+    def snap(self, fields):
+        up = FakeUpstream(self.page, fields=fields)
+        return browser_relay._field_text(up.forward(call(P + "snapshot"), None)[0])
+
+    def test_snapshot_reads_odd_fields_or_fails_closed(self):
+        reads = {
+            '- textbox "Reply to Jo "X" Doe" [ref=e3]: EVIL': "EVIL",
+            '- textbox "Reply to\nJo" [ref=e3]: EVIL': "EVIL",
+            '- generic "Ed" [ref=e1] editable [contenteditable=plaintext-only]: EVIL': "EVIL",
+            '- combobox "Write a message" [ref=e4]: EVIL': "EVIL",
+            '- textbox "Msg" [ref=e6]: line one\nline two': "line one line two",
+            '- combobox [expanded=false, ref=e4]: a\n  - option "a" [selected, ref=e7]': "",
+            '- searchbox "Find" [ref=e5]: q': "",
+            '- button "Open the textbox "now"" [ref=e2]': "",
+            '- text: use the combobox below': "",
+            '- generic "Ed" contenteditable: EVIL': "EVIL",
+        }
+        for fields, want in reads.items():
+            self.assertEqual(self.snap(fields), want, fields)
+        for fields in ('- textbox "Odd" {ref=e3}: EVIL', '- textbox "a" [ref=e3] : EVIL',
+                       'textbox somewhere: EVIL', '- button "Go" [ref=e2]\ntextbox x: EVIL'):
+            self.assertIsNone(self.snap(fields), fields)
+        self.level("write")
+        up = FakeUpstream(self.page, fields='- textbox "Odd" {ref=e3}: EVIL')
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.NO_CHECK)
+        self.assertEqual(up.calls(), [])
+
+    def test_shared_owner_chrome_keeps_one_typed_record(self):
+        browser.set_bot("acme", "b1", "write", "my_chrome", self.root)
+        browser.set_bot("acme", "b2", "act", "my_chrome", self.root)
+        chrome = FakeUpstream(u("other.test/inbox"), mode="my_chrome",
+                              browser_key=browser_relay.browser_key_for("my_chrome", "acme", "b1"))
+        self.assertEqual(chrome.browser_key, browser_relay.browser_key_for("my_chrome", "demo", "b2"))
+        held = []
+        real = chrome.forward
+
+        def forward(frame, sid):
+            held.append(browser_relay._browser_lock("my_chrome").locked())
+            return real(frame, sid)
+        chrome.forward = forward
+        self.handle(call(P + "fill", text="Hi"), up=chrome)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=chrome)), browser_relay.NO_PLAN)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=chrome, bot="b2")), "ok")
+        self.assertEqual(approvals.sends_today("other.test", self.root), 1)
+        self.assertTrue(held and all(held))
+        # on a capped listed site b2's click is held to the cap like any send
+        browser.set_site("other.test", None, 1, self.root)
+        self.handle(call(P + "fill", text="Again"), up=chrome)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=chrome, bot="b2")),
+                         browser_relay.CAPPED.format(site="other.test", daily=1))
+
+    def test_corrupt_typed_file_refuses_sends_then_heals(self):
+        self.level("act")
+        path = self.root / "run" / "browser_typed.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{not json")
+        self.assertIsNone(browser_relay.typed_state(self.up.browser_key, self.root))
+        self.assertEqual(text_of(self.handle(call(P + "click"))), browser_relay.NO_CHECK)
+        self.assertEqual(self.up.calls(), [])
+        self.handle(call(P + "fill", text="Hi"))
+        self.assertEqual(browser_relay.typed_state(self.up.browser_key, self.root), {"typed": "Hi", "aside": ""})
+
+    def test_end_send_after_housekeeping_keeps_failed(self):
+        status, rec = approvals.claim_send(self.root, ws="acme", bot="b1", url=self.page, text="x", planned=False)
+        later = time.time() + approvals.RUNNING_STALE + 1
+        with mock.patch("core.approvals.time.time", return_value=later):
+            approvals.pending(self.root)  # housekeeping fails the stuck run
+        out = approvals.end_send(rec["id"], True, self.root)
+        self.assertEqual((out["status"], out["result"]), ("failed", approvals.STALE_NOTE))
+
+    def test_count_reads_sites_once(self):
+        for i in range(5):
+            approvals.log_app_run(self.root, ws="demo", room=None, chat=None, bot="b%d" % i, person="ceo",
+                                  toolkit=approvals.BROWSER, slug=approvals.BROWSER_SEND,
+                                  arguments={"url": self.page, "text": "x", "site": "acme.test"},
+                                  account=None, status="done", result=approvals.SENT)
+        with mock.patch("core.approvals.browser.sites", wraps=browser.sites) as spy:
+            self.assertEqual(approvals.sends_today("acme.test", self.root), 5)
+        self.assertEqual(spy.call_count, 1)
 
 
 class Preview(unittest.TestCase):

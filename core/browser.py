@@ -188,8 +188,9 @@ def host_of(url):
         return host
 
 
-def site_of(url, root=bots.ROOT):
-    """The listed site a URL belongs to, or None. Never raises.
+def site_of(url, root=bots.ROOT, listed=None):
+    """The listed site a URL belongs to, or None. Never raises. `listed` is a sites()
+    result to reuse when judging many URLs at once.
 
     It judges only the string it is given. The relay must deny a web URL (is_web_url)
     whose host_of is None, and must re-check the engine's resolved current URL after
@@ -198,7 +199,7 @@ def site_of(url, root=bots.ROOT):
     if not host:
         return None
     best = None
-    for site in sites(root):
+    for site in (sites(root) if listed is None else listed):
         if host == site or host.endswith("." + site):
             if best is None or len(site) > len(best):
                 best = site

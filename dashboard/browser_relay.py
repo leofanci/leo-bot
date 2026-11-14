@@ -17,8 +17,10 @@ agent-browser child for that bot. The relay decides what passes:
                checked again: a redirect onto a site bound to the other mode, or a page it cannot
                name, is hidden and left.
 
-What was typed belongs to the bot's browser, not to an MCP session, and is kept on disk
-(<root>/run/browser_typed.json) so a restart cannot clear it. Opening a page or a new tab
+What was typed belongs to the real browser (Upstream.browser_key: a bot's own browser, or
+the one owner Chrome all my_chrome bots share), not to an MCP session or a bot, and is
+kept on disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls on one
+browser run one at a time. Opening a page or a new tab
 sets the typed text aside; history, reload and tab moves bring it back, because the
 browser restores what was in those fields. A refused send keeps it too: the text is still
 in the field, so a second click is still a send. On a listed site a click with nothing
@@ -103,9 +105,17 @@ PLAN_SCHEMA = {
 _LOCK = threading.Lock()
 
 
+def browser_key_for(mode, ws, bot):
+    """Which real browser a bot drives: its own bot browser, or the one owner Chrome every
+    my_chrome bot shares. Typed text and the call lock follow this key."""
+    return "my_chrome" if mode == "my_chrome" else f"bot:{ws}--{bot}"
+
+
 class Upstream:
-    """The browser behind the gate. `mode` is "bot" or "my_chrome"."""
+    """The browser behind the gate. `mode` is "bot" or "my_chrome"; `browser_key` is
+    browser_key_for(mode, ws, bot)."""
     mode = "bot"
+    browser_key = None
 
     def forward(self, frame, mcp_session_id):
         """(JSON-RPC reply or None for a notification, mcp-session-id)."""
@@ -116,7 +126,7 @@ class Upstream:
         raise NotImplementedError
 
 
-_BOT_LOCKS = {}
+_BROWSER_LOCKS = {}
 
 
 def _state(upstream):
@@ -129,10 +139,16 @@ def _state(upstream):
         return st
 
 
-def _bot_lock(ws, bot):
-    """One call at a time per bot browser, so typing and its click never race."""
+def _browser_lock(key):
+    """One call at a time per real browser, so typing and its click never race, even
+    between two bots in the same owner Chrome."""
     with _LOCK:
-        return _BOT_LOCKS.setdefault((ws, bot), threading.Lock())
+        return _BROWSER_LOCKS.setdefault(key, threading.Lock())
+
+
+def _key_of(upstream, mode, ctx):
+    key = getattr(upstream, "browser_key", None)
+    return key if isinstance(key, str) and key else browser_key_for(mode, ctx["ws"], ctx["bot"])
 
 
 def _typed_path(root):
@@ -140,32 +156,34 @@ def _typed_path(root):
 
 
 def _typed_all(root):
+    """{browser key: {"typed", "aside"}}; None when the file exists but cannot be read."""
     try:
         data = json.loads(_typed_path(root).read_text())
-    except (OSError, ValueError):
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
-def typed_state(ws, bot, root=bots.ROOT):
-    """{"typed", "aside"} of one bot's browser, kept on disk so a restart does not clear it."""
-    row = _typed_all(root).get(ws)
-    row = row.get(bot) if isinstance(row, dict) else None
-    row = row if isinstance(row, dict) else {}
+def typed_state(key, root=bots.ROOT):
+    """{"typed", "aside"} of one browser, kept on disk so a restart does not clear it, or
+    None when the file is corrupt (the gate then refuses sends: it cannot tell)."""
+    data = _typed_all(root)
+    if data is None:
+        return None
+    row = data.get(key) if isinstance(data.get(key), dict) else {}
     return {k: row[k] if isinstance(row.get(k), str) else "" for k in ("typed", "aside")}
 
 
-def _save_typed(ws, bot, tt, root):
+def _save_typed(key, tt, root):
+    """Write one browser's typed text; a corrupt file is replaced by a clean one."""
     with _LOCK:
-        data = _typed_all(root)
-        if not isinstance(data.get(ws), dict):
-            data[ws] = {}
+        data = _typed_all(root) or {}
         if tt["typed"] or tt["aside"]:
-            data[ws][bot] = {"typed": tt["typed"], "aside": tt["aside"]}
+            data[key] = {"typed": tt["typed"], "aside": tt["aside"]}
         else:
-            data[ws].pop(bot, None)
-            if not data[ws]:
-                del data[ws]
+            data.pop(key, None)
         _typed_path(root).parent.mkdir(parents=True, exist_ok=True)
         bots._atomic_write(_typed_path(root), json.dumps(data, indent=2) + "\n")
 
@@ -229,12 +247,41 @@ def _has_control(text):
 
 # One snapshot line (docs/browser.md, "Snapshot format"): - role "name" [attrs] words: value
 _LINE = re.compile(r'^\s*- (?P<role>[\w-]+)(?: "(?:[^"\\]|\\.)*")?(?P<attrs>(?: \[[^\]]*\]| [\w-]+)*)(?:: (?P<val>.*))?$')
+_ELEMENT = re.compile(r'^(?P<indent>\s*)- (?P<role>[\w-]+)')
+_REF_BLOCK = re.compile(r'\[[^\[\]\n]*\bref=e\d+[^\[\]\n]*\]')
+_AFTER_REF = re.compile(r'^(?P<attrs>(?: [\w-]+| \[[^\[\]\n]*\])*)(?:: (?P<val>.*))?$', re.S)
+FIELD_ROLES = frozenset({"textbox", "textarea", "combobox"})
+FIELD_WORDS = ("textbox", "textarea", "combobox", "contenteditable")
+
+
+def _element(text):
+    """(role, indent, is a field, value or None) for one snapshot element (its line plus
+    any lines below it without "- "), or None when it may be a field but cannot be read."""
+    head = _ELEMENT.match(text)
+    if not head:
+        return None
+    role, indent = head.group("role").lower(), len(head.group("indent"))
+    m = _LINE.match(text) if "\n" not in text else None
+    if m:
+        attrs = m.group("attrs") or ""
+        return role, indent, role in FIELD_ROLES or "editable" in attrs, m.group("val")
+    # A quote or line break in the name, a multi-line value, odd attributes: the value is
+    # what follows the last ref block; anything that may be a field and does not read so fails.
+    if role not in FIELD_ROLES and not any(w in text.lower() for w in FIELD_WORDS):
+        return role, indent, False, None
+    refs = list(_REF_BLOCK.finditer(text))
+    tail = _AFTER_REF.match(text[refs[-1].end():]) if refs else None
+    if tail is None:
+        return None
+    field = role in FIELD_ROLES or "editable" in (tail.group("attrs") or "") or "contenteditable" in refs[-1].group(0)
+    return role, indent, field, tail.group("val")
 
 
 def _field_text(reply):
     """Text sitting in the page's text fields, from a snapshot reply ("" when none), or None
-    when the reply cannot be read. Text boxes and contenteditable elements count; search
-    boxes, selects and masked password values do not."""
+    when the reply, or any element that may be a field, cannot be read. Text boxes,
+    contenteditable elements and comboboxes without options (composers) count; search boxes,
+    selects and masked password values do not."""
     if not _ok(reply):
         return None
     res = reply["result"]
@@ -244,22 +291,28 @@ def _field_text(reply):
     if not isinstance(snap, str):
         parts = [c.get("text") for c in res.get("content") or [] if isinstance(c, dict)]
         snap = "\n".join(t for t in parts if isinstance(t, str))
-    values, current = [], None
+    chunks = []
     for line in snap.splitlines():
-        m = _LINE.match(line)
-        if not m:
-            if current is not None:  # a multi-line value goes on below its field
-                current.append(line)
-            continue
-        current = None
-        field = m.group("role") == "textbox" or "[contenteditable]" in (m.group("attrs") or "")
-        val = m.group("val")
-        if field and val is not None:
-            current = [val]
-            values.append(current)
+        if _ELEMENT.match(line):
+            chunks.append([line])
+        elif chunks:  # a multi-line name or value goes on below its element
+            chunks[-1].append(line)
+        elif any(w in line.lower() for w in FIELD_WORDS):
+            return None
+    elements = []
+    for chunk in chunks:
+        el = _element("\n".join(chunk))
+        if el is None:
+            return None
+        elements.append(el)
     out = []
-    for v in values:
-        text = " ".join(" ".join(v).split())
+    for i, (role, indent, field, val) in enumerate(elements):
+        if not field or val is None:
+            continue
+        if role == "combobox" and i + 1 < len(elements) and elements[i + 1][0] == "option" \
+                and elements[i + 1][1] > indent:
+            continue  # a select: its value is a picked option, not typed text
+        text = " ".join(val.split())
         if text and set(text) - {"\u2022", " "}:
             out.append(text)
     return " ".join(out)
@@ -353,7 +406,7 @@ def _plan(rid, arguments, ctx, setting, mode, root):
     return _text(rid, HELD_PLAN.format(n=len(held)), False)
 
 
-def _send(rid, name, arguments, sid, ctx, upstream, tt, typed, url, setting, mode, root):
+def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root):
     """A commit after typing: it would send `typed` from the page at `url`."""
     if ctx.get("report"):
         return _text(rid, REPORT_ONLY), sid
@@ -371,7 +424,7 @@ def _send(rid, name, arguments, sid, ctx, upstream, tt, typed, url, setting, mod
         return _text(rid, NO_PLAN), sid
     # From here the click is sent: whatever comes back, the typed text may have gone out.
     tt["typed"] = tt["aside"] = ""
-    _save_typed(ctx["ws"], ctx["bot"], tt, root)
+    _save_typed(bkey, tt, root)
     try:
         reply, sid = _forward(upstream, name, arguments, rid, sid, ctx)
     except Exception:
@@ -415,15 +468,21 @@ def _gate(frame, ctx, sid, upstream, root):
         if _has_control(args["text"]):
             return _text(rid, CONTROL_TEXT), sid
     sends = name in COMMIT_TOOLS and key != "safe"  # click, select, check, uncheck, Enter
-    with _bot_lock(ctx["ws"], ctx["bot"]):
+    bkey = _key_of(upstream, mode, ctx)
+    with _browser_lock(bkey):
         if "url" in args:
             refusal = _url_refusal(args["url"], mode, root)
             if refusal:
                 return _text(rid, refusal), sid
         if st["blocked"] and name not in NAV_TOOLS:
             return _text(rid, st["blocked"]), sid
-        tt = typed_state(ctx["ws"], ctx["bot"], root)
+        tt = typed_state(bkey, root)
+        unknown_typed = tt is None
+        if unknown_typed:  # a corrupt record: typing still works and writes a clean one
+            tt = {"typed": "", "aside": ""}
         if sends:
+            if unknown_typed:
+                return _text(rid, NO_CHECK), sid
             url = _current(upstream)
             if url is None:
                 return _text(rid, NO_PAGE if tt["typed"] else UNKNOWN_PAGE), sid
@@ -439,20 +498,20 @@ def _gate(frame, ctx, sid, upstream, root):
                 if typed is None:
                     return _text(rid, NO_CHECK), sid
             if typed:
-                reply, sid = _send(rid, name, args, sid, ctx, upstream, tt, typed, url, setting, mode, root)
+                reply, sid = _send(rid, name, args, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root)
                 refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _ok(reply) else None
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
         if name in TYPE_TOOLS:  # counted before it runs: a failed fill still leaves the field touched
             tt["typed"] = _join(tt["typed"], " ".join(args["text"].split()))
-            _save_typed(ctx["ws"], ctx["bot"], tt, root)
+            _save_typed(bkey, tt, root)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
         if name in (OPEN, NEW_TAB):
             tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
         elif name in RESTORES:
             tt["typed"], tt["aside"] = _join(tt["aside"], tt["typed"]), ""
         if tt != before and name not in TYPE_TOOLS:
-            _save_typed(ctx["ws"], ctx["bot"], tt, root)
+            _save_typed(bkey, tt, root)
         if name in NAV_TOOLS or name in COMMIT_TOOLS or "url" in args:
             refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root)
             if refusal:
