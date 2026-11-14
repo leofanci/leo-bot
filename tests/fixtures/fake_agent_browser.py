@@ -3,7 +3,8 @@
 
 It logs every start, call and close to $HOME/fake-log.jsonl (with its argv and AGENT_BROWSER_*
 environment) and reads $HOME/fake.json for what to do: {"crash_on": tool} exits mid-call,
-{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error. "settings" in a start record is
+{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error, {"tab_gone_on": tool} answers
+"tab_gone:" until agent_browser_tab_new runs. "settings" in a start record is
 what the real engine would use from its config files and environment.
 """
 import json
@@ -90,6 +91,12 @@ def main():
             log("call", name=name, args=args)
             if ctl.get("crash_on") == name:
                 os._exit(3)
+            if ctl.get("tab_gone_on") == name and not os.path.exists(os.path.join(HOME, "tab-new-done")):
+                result = {"content": [{"type": "text", "text": "tab_gone: bound tab is gone"}], "isError": True}
+                print(json.dumps({"jsonrpc": "2.0", "id": rid, "result": result}), flush=True)
+                continue
+            if name == "agent_browser_tab_new":
+                open(os.path.join(HOME, "tab-new-done"), "w").close()
             if ctl.get("hang_on") == name:
                 time.sleep(3600)
             if name == "agent_browser_open" and args.get("url"):

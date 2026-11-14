@@ -2,8 +2,12 @@
 import http.server
 import json
 import os
+import signal
 import socket
 import stat
+import struct
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -213,6 +217,19 @@ class Children(Base):
         self.assertEqual(len(self.log("close")), 1)
         self.assertEqual(self.log("start")[1]["env"]["AGENT_BROWSER_CDP"], CDP2)
 
+    def test_my_chrome_tab_gone_opens_a_new_tab_and_acts_on_nothing(self):
+        self.chrome(CDP)
+        self.control(tab_gone_on=P + "click")
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual(text(reply), bu.TAB_RESET)
+        self.assertEqual([c["name"] for c in self.log("call")], [P + "click", P + "tab_new"])
+        reply, _ = up.forward(call(2, P + "click", selector="@e1"), None)
+        self.assertFalse(reply["result"]["isError"])
+        bot = self.pool.get("acme", "b2", "bot", self.root)  # the bot browser passes it through
+        (self.home / "tab-new-done").unlink()
+        self.assertTrue(bot.forward(call(3, P + "click", selector="@e1"), None)[0]["result"]["isError"])
+
     def test_two_bots_share_my_chrome_each_own_tab(self):
         self.chrome(CDP)
         a = self.pool.get("acme", "b1", "my_chrome", self.root)
@@ -417,18 +434,90 @@ class Names(unittest.TestCase):
         self.assertNotEqual(bu.session_part("a--b"), bu.session_part("a-b"))
         self.assertNotEqual(bu.session_part("h0123abcd"), "h0123abcd")  # a real id never looks hashed
 
-    def test_long_names_fit_the_socket_path(self):
-        home = "/Users/" + "u" * 16
-        limit = bu._max_session(home)
-        self.assertEqual(bu.session_name("acme", "b1", "bot", home), "acme--b1")
-        long_bot, long_chrome = (bu.session_name("w" * 20, "b" * 20, m, home) for m in ("bot", "my_chrome"))
+    def test_long_names_hash_by_fixed_length(self):
+        self.assertEqual(bu.session_name("acme", "b1", "bot"), "acme--b1")
+        self.assertEqual(bu.session_name("acme", "b1", "my_chrome"), "acme--b1--chrome")
+        long_bot, long_chrome = (bu.session_name("w" * 20, "b" * 20, m) for m in ("bot", "my_chrome"))
         self.assertRegex(long_bot, r"^x[0-9a-f]{16}$")
         self.assertEqual(long_chrome, long_bot + "c")
-        self.assertLessEqual(len(long_chrome), limit)
-        # just at the limit stays plain
-        ws = "a" * (limit - len("--b1"))
-        self.assertEqual(bu.session_name(ws, "b1", "bot", home), ws + "--b1")
-        self.assertNotEqual(bu.session_name(ws, "b1", "my_chrome", home), ws + "--b1--chrome")
+        ws = "a" * (bu.MAX_SESSION - len("--b1"))  # just at the limit stays plain
+        self.assertEqual(bu.session_name(ws, "b1", "bot"), ws + "--b1")
+        self.assertNotEqual(bu.session_name(ws, "b1", "my_chrome"), ws + "--b1--chrome")
+
+    def test_socket_check_normalizes_home(self):
+        real = os.path.realpath("/nonexistent-leobot-home")  # realpath keeps a path that does not exist
+        budget = bu.SOCKET_MAX - bu.SOCKET_FIXED - len(bu.NAMESPACE) - len(real)
+        for home in (real, real + "/", real + "//"):
+            self.assertTrue(bu.session_fits("s" * budget, home), home)
+            self.assertFalse(bu.session_fits("s" * (budget + 1), home), home)
+        with tempfile.TemporaryDirectory() as d:  # a symlinked home counts by its real path
+            link = Path(d) / "h"
+            link.symlink_to(real)
+            self.assertTrue(bu.session_fits("s" * budget, str(link) + "/"))
+
+
+class LongHome(Base):
+    def test_long_home_refused_plainly(self):
+        deep = self.home / ("d" * 90)
+        deep.mkdir()
+        with mock.patch.object(bu, "SOCKET_MAX", 103), mock.patch.dict(os.environ, {"HOME": str(deep)}):
+            up = self.pool.get("acme", "b1", "bot", self.root)
+            reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual(text(reply), bu.LONG_HOME)
+        self.assertNotIn("\u2014", bu.LONG_HOME)
+        self.assertEqual(self.log(), [])
+
+
+class Shutdown(Base):
+    def test_kill_before_start_starts_nothing(self):
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        real = bu.engine_dirs
+
+        def racing(root):  # shutdown lands after the call passed its own closed check
+            up.kill()
+            return real(root)
+        with mock.patch.object(bu, "engine_dirs", racing):
+            reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual(text(reply), bu.STOPPING)
+        self.assertEqual(self.log("start"), [])
+
+    def test_kill_during_handshake_kills_the_new_child(self):
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        real = bu._Child.request
+        fired = []
+
+        def racing(child, method, params, timeout):
+            if not fired:
+                fired.append(1)
+                deadline = time.monotonic() + 5
+                while not (self.home / "fake-log.jsonl").exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                up.kill()
+            return real(child, method, params, timeout)
+        with mock.patch.object(bu._Child, "request", racing):
+            reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual(text(reply), bu.STOPPING)
+        pid = self.log("start")[0]["pid"]
+        self.assertFalse(self.alive(pid))
+        self.assertIsNone(up._child)
+        self.assertIsNone(up._pending)
+
+
+class Stop(unittest.TestCase):
+    def test_stop_returns_while_a_grandchild_holds_stdout(self):
+        script = ("import json, subprocess, sys\n"
+                  "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                  "print(json.dumps({'grandchild': g.pid}), flush=True)\n"
+                  "sys.stdin.read()\n")
+        proc = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        child = bu._Child(proc)
+        grand = child.lines.get(timeout=10)["grandchild"]
+        self.addCleanup(lambda: os.kill(grand, signal.SIGKILL))
+        started = time.monotonic()
+        child.stop()
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertIsNotNone(proc.poll())
 
 
 class Key(unittest.TestCase):
@@ -489,14 +578,52 @@ class ChromeUrl(unittest.TestCase):
             self._port_file(home, port)
             self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"))
 
-    def test_plain_listener_is_none(self):
+    def _raw_listener(self, answer):
+        """A loopback listener that answers each connection with `answer` (None: reset it)."""
+        srv = socket.socket()
+        srv.bind((LOOPBACK, 0))
+        srv.listen(8)
+        self.addCleanup(srv.close)
+
+        def serve():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                if answer is None:
+                    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                else:
+                    try:
+                        conn.recv(1024)
+                        conn.sendall(answer)
+                    except OSError:
+                        pass
+                conn.close()
+        threading.Thread(target=serve, daemon=True).start()
+        return srv.getsockname()[1]
+
+    def _falls_back(self, port):
+        with mock.patch.object(bu, "CONNECT_SECONDS", 0.3), tempfile.TemporaryDirectory() as home:
+            self._port_file(home, port)
+            self.assertEqual(bu.find_chrome_debug_url(home=home, platform="darwin"),
+                             "ws" + "://" + LOOPBACK + f":{port}/devtools/browser/abc-1")
+
+    def test_no_json_version_falls_back_to_tcp(self):
+        self._falls_back(self._raw_listener(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"))
+
+    def test_reset_falls_back_to_tcp(self):
+        self._falls_back(self._raw_listener(None))
+
+    def test_not_http_falls_back_to_tcp(self):
+        self._falls_back(self._raw_listener(b"garbage that is not http\n"))
+
+    def test_silent_listener_falls_back_to_tcp(self):
         srv = socket.socket()
         srv.bind((LOOPBACK, 0))
         srv.listen(1)
         self.addCleanup(srv.close)
-        with mock.patch.object(bu, "CONNECT_SECONDS", 0.3), tempfile.TemporaryDirectory() as home:
-            self._port_file(home, srv.getsockname()[1])
-            self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"))
+        self._falls_back(srv.getsockname()[1])
 
     def test_stale_file_is_none(self):
         srv = socket.socket()
