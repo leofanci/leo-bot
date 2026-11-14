@@ -128,11 +128,22 @@ Each workspace, HQ included, can link any number of folders on the machine runni
 bot can be limited to some folders or to read access. Bots read and search them on your
 private threads, and look up a folder's code index with `osctl code-context` when it has
 one. On Claude Code and API-key engines, a tagged message (@bot, /skill, a DM)
-can change files in Edit folders; an untagged one only reads. Bots never touch git, editor
-or secret files (`.git/`, `.claude/`, `.vscode/`, `.env` and the like), and they cannot run
-tests, builds or git: they name the files they changed and you review them in your own git.
-Codex and other CLIs stay read-only. Invited people, shared threads and runners never reach
-a linked folder or see its path.
+can change files in Edit folders; an untagged one only reads. Bots' file tools never touch
+git, editor or secret files (`.git/`, `.claude/`, `.vscode/`, `.env` and the like). Codex
+and other CLIs stay read-only. Invited people, shared threads and runners never reach a
+linked folder or see its path.
+
+Each bot has an **access level** (Settings, Bots), for your private threads only:
+
+- **Ask** (default): changes files only when you tag it; its shell runs `osctl` only.
+- **Auto-accept edits**: changes files in its Edit folders on any of your messages.
+- **Full access**: also runs any shell command in its Edit folders (Claude Code on your own
+  Mac; not on a server or a runner): build, test, install, commit. An Auto job on that bot
+  gets the shell too. Leo Bot checks each command as it runs: commands that could wreck the
+  machine (deleting the disk, the home folder or a system folder, formatting a disk, a fork
+  bomb, shutting down) never run, and once the conversation holds mail, pages or app data,
+  commands that send data out (curl, git push, ssh, a publish, gh) are refused. This is a
+  check on top of your choice, not a sandbox: the bot runs commands as you do.
 
 ### Reactions
 

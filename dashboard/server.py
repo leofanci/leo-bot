@@ -1498,6 +1498,14 @@ JOB_NOTES = {
         "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
         "line is ignored."),
 }
+SHELL_NOTE = (
+    "## Shell (Full access)\n"
+    "The owner gave you a full shell (Bash) for this work. Run commands inside your edit folders "
+    "({folders}): start each command with `cd <folder> &&`. Build, test, run scripts, install "
+    "packages, commit with git: do the work end to end, then say what you ran. Commands that could "
+    "wreck the machine are refused. Once this conversation holds outside content or app data, "
+    "commands that send things off this machine (curl, git push, ssh, a publish) are refused too: "
+    "tell the owner what to push or send.")
 JOB_NOTEPAD = (
     "## This job's notepad\n"
     "Your own notes from this job's earlier runs, kept with `osctl job-note --text \"...\"` (it replaces "
@@ -2520,7 +2528,8 @@ class Handler(BaseHTTPRequestHandler):
         tool = body.get("tool") if isinstance(body, dict) else None
         if not isinstance(tool, str):
             return self._send(400, {"allow": False, "reason": "bad request"})
-        allow, reason = turn.decide(tool)
+        command = body.get("command") if isinstance(body.get("command"), str) else None
+        allow, reason = turn.decide(tool, command)
         if not allow:
             self.log_message("gate deny tool=%s", tool[:40])
         return self._send(200, {"allow": allow, "reason": reason})
@@ -2666,13 +2675,13 @@ class Handler(BaseHTTPRequestHandler):
             engine_config.remove_acp(str(body.get("id") or ""), ROOT)
         elif path == "/api/engines/choice":
             name, value, scope = body.get("name"), body.get("value"), body.get("scope")
-            if value and name != "terminal":
+            if value and name not in ("terminal", "access"):
                 engine = engine_registry.get(str(value), ROOT)  # only an engine that exists
                 if name == "people" and engine.kind != "api":
                     raise ValueError("invited people run on an API key")
-            if name in ("workspaces", "bots"):  # a scope names a workspace (or workspace/bot) that exists
+            if name in ("workspaces", "bots", "access"):  # a scope names a workspace (or workspace/bot) that exists
                 ws_, _, bot_ = str(scope or "").partition("/")
-                if not _known_ws(ws_, db.tree()) or (name == "bots") != bool(bot_) \
+                if not _known_ws(ws_, db.tree()) or (name in ("bots", "access")) != bool(bot_) \
                         or (bot_ and bot_ not in bots.load_defs()):
                     raise ValueError("unknown workspace or bot")
             engine_config.set_choice(name, value, str(scope) if scope else None, ROOT)
@@ -3103,8 +3112,12 @@ class Handler(BaseHTTPRequestHandler):
             # change files in its edit folders; an untagged one reads and searches only.
             # A job runs the owner's approved message: an Auto job edits like a tagged chat turn;
             # Approval and Report only save nothing, so they read only.
+            # The bot's permission level (Settings, Bots): "edits" and "full" change files on any
+            # private turn; only the owner's own turns ever get more than "ask".
+            level = "ask" if shared or person else engine_config.access(ws, bot_id, ROOT)
             may_edit = False if not edit_ok else (job_mode == "auto" if job
-                                                  else routed or _may_edit(explicit, room, user_msg, team, sess))
+                                                  else routed or level != "ask"
+                                                  or _may_edit(explicit, room, user_msg, team, sess))
             # An app request is not a content write: decided before may_write, and
             # its only approval path is the held app action (no skill, no APPROVAL line).
             # A thread an invited person can see never reaches the owner's connected apps.
@@ -3145,6 +3158,10 @@ class Handler(BaseHTTPRequestHandler):
                 ws, room, bot_id, locked=locked, may_edit=may_edit,
                 drop_edit=bool(app_turn or mount or apps_used), engine=engine)
             sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
+            # Full access: any shell command in its edit folders (each checked by the gate), on an
+            # engine that can hold that wall, on this machine only (never a server or a runner).
+            sess.shell = bool(level == "full" and edit_dirs and not locked and "shell" in engine.supports
+                              and engine.kind != "runner" and DEPLOYMENT != "server")
 
             # Web search is on every private turn and every job until app data is in the conversation
             # (dashboard/taint.py: then no query may carry it out; mid-run the gate turns it off).
@@ -3228,6 +3245,9 @@ class Handler(BaseHTTPRequestHandler):
                 workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
             elif engine.full_disk:
                 workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
+            if getattr(sess, "shell", False):
+                workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
+                    folders=", ".join(f"`{d}`" for d in edit_dirs))) if x)
             if job:
                 workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"]),
                                                       _job_notepad(job)) if x)

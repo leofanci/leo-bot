@@ -1,4 +1,5 @@
-"""turn_hook.py — Claude Code PreToolUse hook: asks the server's gate before a web tool runs.
+"""turn_hook.py — Claude Code PreToolUse hook: asks the server's gate before a web tool or a
+Full access shell command runs.
 
 Run as `python3 -I turn_hook.py` (standard library only, nothing from the bot's folders).
 Claude Code waits for it, so the answer holds at the moment the tool would run. Any failure
@@ -26,7 +27,10 @@ def main():
         token, url = os.environ.get(TOKEN_ENV), os.environ.get(URL_ENV)
         if not (isinstance(tool, str) and token and url and url.startswith("http://127.0.0.1:")):
             return _deny("This tool is off: Leo Bot could not check it.")
-        req = urllib.request.Request(url, data=json.dumps({"tool": tool}).encode(), method="POST",
+        body = {"tool": tool}
+        if tool == "Bash":  # the gate reads the command itself (dashboard/shell_rules.py)
+            body["command"] = str((event.get("tool_input") or {}).get("command") or "")
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
                                      headers={"Authorization": f"Bearer {token}",
                                               "Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  (127.0.0.1 only, above)

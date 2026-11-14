@@ -5,7 +5,8 @@
  "people": "api:<id>" | "",                        invited people, and shared threads an engine cannot serve
  "workspaces": {slug: engine id}, "bots": {"slug/bot": engine id},
  "acp_agents": [{id, name, command, args}],
- "terminal": "shell" | "claude" | "codex"}
+ "terminal": "shell" | "claude" | "codex",
+ "access": {"slug/bot": "ask" | "edits" | "full"}}   a bot's permission level (ACCESS)
 
 Keys never leave this module except to the api driver: public() shows the last
 four characters only. team/ is already denied to bots and to osctl read-file.
@@ -23,6 +24,13 @@ from core import paths
 ROOT = paths.DATA
 FORMATS = ("anthropic", "openai")
 TERMINALS = ("shell", "claude", "codex")
+# A bot's permission level on the owner's private turns (a shared thread, an invited person's
+# turn and another person's Mac never get more than "ask"):
+#   ask    changes files only when tagged (@bot, /skill, its DM); its shell runs osctl only
+#   edits  changes files in its edit folders on any private turn
+#   full   edits, plus any shell command in those folders on Claude Code; each command is
+#          checked first (dashboard/shell_rules.py). An Auto job gets it too.
+ACCESS = ("ask", "edits", "full")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 # name: format, base url, needs a key, fast model, strong model
@@ -73,6 +81,8 @@ def load(root=ROOT):
     for key in ("workspaces", "bots"):
         raw = data.get(key) if isinstance(data.get(key), dict) else {}
         data[key] = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+    raw = data.get("access") if isinstance(data.get("access"), dict) else {}
+    data["access"] = {k: v for k, v in raw.items() if isinstance(k, str) and v in ACCESS and v != "ask"}
     for key in ("default", "people", "terminal"):
         if not isinstance(data.get(key), str):
             data.pop(key, None)
@@ -208,6 +218,7 @@ def forget_workspace(slug, root=ROOT):
     data = load(root)
     data["workspaces"].pop(slug, None)
     data["bots"] = {k: v for k, v in data["bots"].items() if not k.startswith(f"{slug}/")}
+    data["access"] = {k: v for k, v in data["access"].items() if not k.startswith(f"{slug}/")}
     save(data, root)
 
 
@@ -239,9 +250,23 @@ def set_choice(name, value, scope=None, root=ROOT):
             data[name][scope] = value
         else:
             data[name].pop(scope, None)
+    elif name == "access":
+        if not scope:
+            raise ValueError("scope required")
+        if value not in ("", *ACCESS):
+            raise ValueError(f"access: one of {', '.join(ACCESS)}")
+        if value in ("", "ask"):
+            data["access"].pop(scope, None)
+        else:
+            data["access"][scope] = value
     else:
         raise ValueError("unknown setting")
     save(data, root)
+
+
+def access(ws, bot, root=ROOT):
+    """A bot's permission level in a workspace (ACCESS): "ask" unless the owner set more."""
+    return load(root)["access"].get(f"{ws}/{bot}", "ask")
 
 
 def public(root=ROOT):
@@ -253,7 +278,7 @@ def public(root=ROOT):
         rows.append({**{k: p.get(k) for k in ("id", "name", "format", "base_url", "models")},
                      "key_hint": key[-4:] if key else "", "no_key": not key})
     return {"providers": rows, "default": data.get("default") or "", "people": data.get("people") or "",
-            "workspaces": data["workspaces"], "bots": data["bots"],
+            "workspaces": data["workspaces"], "bots": data["bots"], "access": data["access"],
             "terminal": data.get("terminal") or "shell", "acp_agents": data["acp_agents"],
             "acp_presets": ACP_PRESETS,
             "presets": {k: {f: v.get(f) for f in ("name", "format", "base_url", "models", "no_key")}
