@@ -1486,7 +1486,7 @@ function jobMetaText(j, wsName, now){
   return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, cap, next, last].filter(Boolean).join(" · ");
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
-const ACCESS_LEVELS = [["ask", "Ask"], ["edits", "Auto-accept edits"], ["full", "Full access"]];
+const ACCESS_LEVELS = [["ask", "Ask"], ["edits", "Auto-accept edits"], ["approve", "Approve for me"], ["full", "Full access"]];
 function isHeld(a){
   return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict");
 }
@@ -1768,7 +1768,9 @@ async function renderEngines(tab = "engines"){
     const rows = (d.engines || []).map(e => {
       const p = (d.providers || []).find(x => `api:${x.id}` === e.id);
       const models = p ? `<span class="eng-chip">fast · ${esc(p.models?.fast || "-")}</span><span class="eng-chip">strong · ${esc(p.models?.strong || "-")}</span>` : "";
-      const note = (e.folder_edit === false ? `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>` : "")
+      const note = (e.folder_edit === false ? (e.shell
+          ? `<span class="eng-chip warm" title="Bots on this engine change files in linked folders only on Approve for me or Full access, through its own sandbox and shell (Settings, Bots).">Edits linked folders on Approve for me or Full access</span>`
+          : `<span class="eng-chip warm" title="Bots on this engine can read your linked folders but never change files in them. Leo Bot can't enforce its never-touch list (git, editor and secret files) on this engine's own tools.">Can read linked folders, can't edit them</span>`) : "")
         + (e.own_context ? `<span class="eng-chip warm" title="${esc(e.own_context)}">Loads its own context files</span>` : "");
       return `<div class="eng-card">${engineLogo(e.id, 44)}
         <div class="eng-body"><div class="eng-name"><b>${esc(e.label)}</b><span class="eng-state ${e.ok ? "on" : "off"}">${e.ok ? "Ready" : "Not ready"}</span></div>
@@ -1810,7 +1812,7 @@ async function renderEngines(tab = "engines"){
         <h3 class="eng-sub">Connect another</h3>${form}</section>` : `
       <section class="integ-group"><h3>Defaults</h3>
         <p class="eng-hint">Most specific wins: a bot's own pick, then its workspace, then your default.</p>
-        <p class="eng-hint">Access, per bot: <b>Ask</b> changes files only when you tag it. <b>Auto-accept edits</b> changes files in its edit folders on any of your messages. <b>Full access</b> also runs any shell command there (Claude Code, this Mac only): build, test, commit. Commands that could wreck the machine never run, and after it reads mail, pages or app data nothing that sends data out runs.</p>
+        <p class="eng-hint">Access, per bot: <b>Ask</b> changes files only when you tag it. <b>Auto-accept edits</b> changes files in its edit folders on any of your messages. <b>Approve for me</b> also runs shell commands there, each one approved by the engine's own reviewer (Claude Code, Codex; on an API key it is Auto-accept edits). <b>Full access</b> runs any shell command there on every engine, this Mac only: build, test, commit. Commands that could wreck the machine never run, and after it reads mail, pages or app data nothing that sends data out runs.</p>
         <div class="eng-choice"><label><span>Your messages</span> <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>

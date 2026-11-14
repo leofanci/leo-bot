@@ -151,6 +151,34 @@ class JobTurn(unittest.TestCase):
         self.run_job(mode="auto")
         self.assertFalse(self.asks[3]["sess"].shell)
 
+    def test_approve_for_me_needs_an_engine_reviewer(self):
+        app = tempfile.TemporaryDirectory()
+        self.addCleanup(app.cleanup)
+        folders.add(WS, app.name, root=self.root)
+        server.engine_config.set_choice("access", "approve", f"{WS}/cmo", self.root)
+        plain, reviewed = _Engine(), _Engine()
+        plain.supports = _Engine.supports | {"shell"}  # an API key: no reviewer of its own
+        reviewed.supports = _Engine.supports | {"shell", "review"}
+        for eng in (plain, reviewed):
+            self.pick.return_value = eng
+            self.run_job(mode="auto")
+        self.assertEqual([(a["sess"].shell, a["sess"].level) for a in self.asks],
+                         [(False, "edits"), (True, "approve")])
+        self.assertIn("## Shell (Approve for me)", self.asks[1]["text"])
+        self.assertTrue(self.asks[0]["edit_dirs"])  # it still edits, like Auto-accept edits
+
+    def test_a_shell_engine_without_its_own_gate_still_gets_one(self):
+        app = tempfile.TemporaryDirectory()
+        self.addCleanup(app.cleanup)
+        folders.add(WS, app.name, root=self.root)
+        server.engine_config.set_choice("access", "full", f"{WS}/cmo", self.root)
+        cli = _Engine()
+        cli.id, cli.kind, cli.supports = "codex", "cli", frozenset({"shell", "review"})
+        self.pick.return_value = cli
+        self.run_job(mode="auto")
+        self.assertTrue(self.asks[0]["sess"].shell)
+        self.assertTrue(self.asks[0]["kw"].get("gate_token"))
+
     def test_access_level_lets_an_untagged_turn_edit(self):
         app = tempfile.TemporaryDirectory()
         self.addCleanup(app.cleanup)

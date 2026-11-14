@@ -910,14 +910,15 @@ def _layered_folders(ws, room, bot_id):
         return []
 
 
-def _turn_folders(ws, room, bot_id, *, locked, may_edit, drop_edit, engine):
+def _turn_folders(ws, room, bot_id, *, locked, may_edit, drop_edit, engine, shell=False):
     """(rows for the turn's block, read_dirs, edit_dirs). A locked turn (shared thread or
-    runner) gets nothing. edit_dirs needs a tagged turn, no app data in it, and an engine
-    that enforces per-folder edit limits (Codex and ACP do not)."""
+    runner) gets nothing. edit_dirs needs a turn that may edit and an engine that enforces
+    per-folder edit limits, or one on a shell level (Approve for me, Full access), whose
+    edit folders are its working folders."""
     if locked:
         return [], (), ()
     layered = _layered_folders(ws, room, bot_id)
-    supports = "folder_edit" in getattr(engine, "supports", ())
+    supports = "folder_edit" in getattr(engine, "supports", ()) or bool(shell)
     can_edit = bool(may_edit and not drop_edit and supports)
     rows = []
     for r in layered:
@@ -1503,13 +1504,16 @@ AGENTS_NOTE = ("## Sub-agents\nFor a big job with independent parts (research 30
                "parallel. Each gets your tools and rules; give each a complete brief and merge what they "
                "report. Small jobs: do them yourself.")
 SHELL_NOTE = (
-    "## Shell (Full access)\n"
-    "The owner gave you a full shell (Bash) for this work. Run commands inside your edit folders "
-    "({folders}): start each command with `cd <folder> &&`. Build, test, run scripts, install "
-    "packages, commit with git: do the work end to end, then say what you ran. Commands that could "
-    "wreck the machine are refused. Once this conversation holds outside content or app data, "
-    "commands that send things off this machine (curl, git push, ssh, a publish) are refused too: "
-    "tell the owner what to push or send.")
+    "## Shell ({level})\n"
+    "The owner gave you a shell for this work, in your edit folders ({folders}): your shell tool, or "
+    "`run_command`. Work inside those folders (on Claude Code, start a command with `cd <folder> &&`). "
+    "Build, test, run scripts, install packages, commit with git: do the work end to end, then say what "
+    "you ran.{review} Commands that could wreck the machine are refused. Once this conversation holds "
+    "outside content or app data, commands that send things off this machine (curl, git push, ssh, a "
+    "publish) are refused too: tell the owner what to push or send.")
+SHELL_LEVELS = {"full": ("Full access", ""),
+                "approve": ("Approve for me", " Your engine's reviewer approves each command; one it "
+                                              "refuses, do not try another way: say what you needed.")}
 JOB_NOTEPAD = (
     "## This job's notepad\n"
     "Your own notes from this job's earlier runs, kept with `osctl job-note --text \"...\"` (it replaces "
@@ -3173,14 +3177,20 @@ class Handler(BaseHTTPRequestHandler):
             # reach only typed hosts, and a Full access shell sends nothing out after outside content).
             mount = bool(app_grant) and not app_turn and not locked \
                 and "apps" in engine.supports and not engine.full_disk
+            # A shell level, the same on every engine that has a shell: Full access (any command,
+            # each checked by Leo Bot's gate first) or Approve for me (the engine's own reviewer
+            # decides, Leo Bot's gate still refuses the worst; an engine with no reviewer falls
+            # back to Auto-accept edits). This machine only: never a server or a runner.
+            supports = getattr(engine, "supports", ())
+            shell_level = (level if not locked and engine.kind != "runner" and DEPLOYMENT != "server"
+                           and "shell" in supports
+                           and (level == "full" or (level == "approve" and "review" in supports)) else None)
             folder_rows, read_dirs, edit_dirs = _turn_folders(
                 ws, room, bot_id, locked=locked, may_edit=may_edit,
-                drop_edit=False, engine=engine)
+                drop_edit=False, engine=engine, shell=bool(shell_level))
             sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
-            # Full access: any shell command in its edit folders (each checked by the gate), on an
-            # engine that can hold that wall, on this machine only (never a server or a runner).
-            sess.shell = bool(level == "full" and edit_dirs and not locked and "shell" in engine.supports
-                              and engine.kind != "runner" and DEPLOYMENT != "server")
+            sess.shell = bool(shell_level and edit_dirs)
+            sess.level = shell_level if sess.shell else ("edits" if level != "ask" and not locked else "ask")
 
             # Web search is on every private turn and every job, app data or not. A fetch only reaches
             # hosts the owner typed (a job's message grants none). Asking for it
@@ -3264,8 +3274,9 @@ class Handler(BaseHTTPRequestHandler):
             if not locked and engine.id == chat_session.ClaudeCodeEngine.id:
                 workspace = "\n\n".join(x for x in (workspace, AGENTS_NOTE) if x)
             if getattr(sess, "shell", False):
+                lvl, rv = SHELL_LEVELS.get(sess.level, SHELL_LEVELS["full"])
                 workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
-                    folders=", ".join(f"`{d}`" for d in edit_dirs))) if x)
+                    level=lvl, review=rv, folders=", ".join(f"`{d}`" for d in edit_dirs))) if x)
             if job:
                 workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"]),
                                                       _job_notepad(job)) if x)
@@ -3400,11 +3411,13 @@ class Handler(BaseHTTPRequestHandler):
             # web (or its own full-disk tools) counts as outside content up front, and an Auto job
             # on it saves only through an approval card.
             gated = bool(eng) and (eng.kind == "api" or eng.id == chat_session.ClaudeCodeEngine.id)
+            # Another engine on a shell level still gets a gate: its shell hook asks it (Codex).
+            hooked = bool(eng) and not gated and bool(getattr(s_, "shell", False))
             gate_kw, mode_was = {}, getattr(s_, "job_mode", None)
             port = (getattr(getattr(self, "server", None), "server_address", None) or (None, None))[1]
-            if gated and isinstance(port, int):
+            if (gated or hooked) and isinstance(port, int):
                 gate_kw = {"gate_token": taint.GATES.mint(turn), "gate_port": port}
-            elif web_ or (eng and eng.full_disk):
+            if (not gated or not gate_kw) and (web_ or (eng and eng.full_disk)):
                 turn.saw_outside()
                 if mode_was == "auto":
                     s_.job_mode = "approval"

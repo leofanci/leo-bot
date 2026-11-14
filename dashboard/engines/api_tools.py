@@ -107,6 +107,16 @@ EDIT_SPEC = {
                                                       "new_text": {"type": "string"}},
                      "required": ["path", "old_text", "new_text"], "additionalProperties": False},
 }
+RUN_SPEC = {
+    "name": "run_command",
+    "description": ("Run one shell command (bash) in one of your edit folders (`folder`, default the first): "
+                    "build, test, install, git. Returns its exit code and output. Commands that could wreck "
+                    "the machine are refused; after outside content, so are commands that send data out."),
+    "input_schema": {"type": "object", "properties": {"command": {"type": "string"}, "folder": {"type": "string"}},
+                     "required": ["command"], "additionalProperties": False},
+}
+RUN_TIMEOUT = 600
+RUN_OUT_CHARS = 20_000
 FETCH_SPEC = {
     "name": "web_fetch",
     "description": "Fetch one web page as text. Only hosts the user named in their message are reachable.",
@@ -505,6 +515,30 @@ def _page_text(raw, ctype):
     return " ".join(text.split())
 
 
+def run_command(command, folder, policy, turn):
+    """(text, is_error) for one Full access shell command: Leo Bot's gate decides first
+    (dashboard/shell_rules.py), then bash runs it in an edit folder with no turn tokens."""
+    if not isinstance(command, str) or not command.strip():
+        raise ToolError("command is empty")
+    dirs = [str(d) for d in policy.edit_dirs]
+    cwd = dirs[0] if not folder else next((d for d in dirs if str(Path(d)) == str(Path(str(folder)))), None)
+    if cwd is None:
+        raise ToolError("folder must be one of your edit folders: " + ", ".join(dirs))
+    allow, reason = turn.decide("Bash", command)
+    if not allow:
+        return reason, True
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LEOBOT_")}
+    try:
+        out = subprocess.run(["/bin/bash", "-lc", command], cwd=cwd, env=env, capture_output=True, text=True,
+                             timeout=RUN_TIMEOUT, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return f"stopped after {RUN_TIMEOUT}s", True
+    text = (out.stdout or "") + (("\n[stderr]\n" + out.stderr) if out.stderr else "")
+    if len(text) > RUN_OUT_CHARS:
+        text = "[...cut...]\n" + text[-RUN_OUT_CHARS:]
+    return f"exit {out.returncode}\n{text}", out.returncode != 0
+
+
 class ToolBox:
     """The tools one turn may use, and how to run them."""
 
@@ -520,6 +554,8 @@ class ToolBox:
                 self.specs.append(SEARCH_SPEC)
             if policy.edit_dirs:
                 self.specs += [WRITE_SPEC, EDIT_SPEC]
+            if getattr(policy, "shell", False) and policy.edit_dirs and self.turn is not None:
+                self.specs.append(RUN_SPEC)
         if policy.web and policy.web_domains:
             self.specs.append(FETCH_SPEC)
         if policy.apps and not policy.shared and tokens.apps_token and backends.get("apps_list"):
@@ -569,6 +605,8 @@ class ToolBox:
             if name == "edit_file" and not self.policy.shared and self.policy.edit_dirs:
                 return edit_file(args.get("path"), args.get("old_text"), args.get("new_text"),
                                  self.root, self.policy), False
+            if name == "run_command" and any(s is RUN_SPEC for s in self.specs):
+                return run_command(args.get("command"), args.get("folder"), self.policy, self.turn)
             if name == "web_fetch" and self.policy.web:
                 if not self.web_open():
                     return taint.WEB_OFF, True

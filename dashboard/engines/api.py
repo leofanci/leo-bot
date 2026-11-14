@@ -123,7 +123,7 @@ def _without_web(messages):
 class ApiEngine(Engine):
     kind = "api"
     shared_safe = True  # a shared turn is only ever offered osctl (plus web when allowed)
-    supports = frozenset({"web", "apps", "folder_edit", "complete"})
+    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell"})
     reports_tokens = True
 
     def __init__(self, provider, root):

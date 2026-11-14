@@ -6,7 +6,7 @@
  "workspaces": {slug: engine id}, "bots": {"slug/bot": engine id},
  "acp_agents": [{id, name, command, args}],
  "terminal": "shell" | "claude" | "codex",
- "access": {"slug/bot": "ask" | "edits" | "full"}}   a bot's permission level (ACCESS)
+ "access": {"slug/bot": "ask" | "edits" | "approve" | "full"}}   a bot's permission level (ACCESS)
 
 Keys never leave this module except to the api driver: public() shows the last
 four characters only. team/ is already denied to bots and to osctl read-file.
@@ -26,11 +26,14 @@ FORMATS = ("anthropic", "openai")
 TERMINALS = ("shell", "claude", "codex")
 # A bot's permission level on the owner's private turns (a shared thread, an invited person's
 # turn and another person's Mac never get more than "ask"):
-#   ask    changes files only when tagged (@bot, /skill, its DM); its shell runs osctl only
-#   edits  changes files in its edit folders on any private turn
-#   full   edits, plus any shell command in those folders on Claude Code; each command is
-#          checked first (dashboard/shell_rules.py). An Auto job gets it too.
-ACCESS = ("ask", "edits", "full")
+#   ask      changes files only when tagged (@bot, /skill, its DM); its shell runs osctl only
+#   edits    changes files in its edit folders on any private turn
+#   approve  edits, plus a shell in those folders where the engine has its own reviewer
+#            (Claude Code's auto mode, Codex's automatic review); elsewhere it is edits
+#   full     edits, plus any shell command in those folders, on every engine with a shell
+#   Each shell command is checked by Leo Bot's gate first (dashboard/shell_rules.py). An Auto
+#   job gets its bot's level too.
+ACCESS = ("ask", "edits", "approve", "full")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 # name: format, base url, needs a key, fast model, strong model
