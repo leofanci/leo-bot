@@ -13,8 +13,9 @@ A file of the wrong shape reads as defaults and is overwritten by the next write
 """
 import json
 import threading
+import unicodedata
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from core import bots
 
@@ -125,24 +126,67 @@ def set_site(host, mode, daily, root=bots.ROOT):
     return dict(row)
 
 
+_IGNORABLE = dict.fromkeys(
+    [0x00AD, 0x034F, 0x180B, 0x180C, 0x180D, 0x180E, 0x180F, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xFEFF]
+    + list(range(0x200B, 0x2010)) + list(range(0xFE00, 0xFE10)))
+_DOTS = {0x3002: ".", 0xFF0E: ".", 0xFF61: "."}
+
+
 def _browser_normalize(url):
-    """Parse a URL the way a browser does: trim C0 controls and spaces, drop tab and
-    newlines anywhere, read a backslash as a slash."""
+    """Shape a URL the way a browser reads it: trim C0 controls and spaces, drop tab and
+    newlines anywhere, read a backslash as a slash, and for http(s) force "scheme://"
+    whatever run of slashes follows the colon."""
     url = url.strip("".join(chr(i) for i in range(0x21)))
-    return url.replace("\t", "").replace("\n", "").replace("\r", "").replace("\\", "/")
+    url = url.replace("\t", "").replace("\n", "").replace("\r", "").replace("\\", "/")
+    scheme, colon, rest = url.partition(":")
+    if colon and scheme.lower() in ("http", "https"):
+        url = scheme + "://" + rest.lstrip("/")
+    return url
+
+
+def _split(url):
+    if not isinstance(url, str):
+        return None
+    try:
+        parts = urlsplit(_browser_normalize(url))
+    except ValueError:
+        return None
+    return parts if parts.scheme.lower() in ("http", "https") else None
+
+
+def is_web_url(url):
+    """True when the URL is http or https once read like a browser reads it."""
+    return _split(url) is not None
+
+
+def host_of(url):
+    """The fully normalized host of a web URL (percent-decoded, NFKC, ignorables dropped,
+    dots mapped, lowercase, IDNA ascii when it converts), or None when there is no usable
+    host or the URL is not http(s). Never raises."""
+    parts = _split(url)
+    if parts is None:
+        return None
+    try:
+        host = parts.hostname or ""
+    except ValueError:
+        return None
+    host = unicodedata.normalize("NFKC", unquote(host))
+    host = host.translate(_IGNORABLE).translate(_DOTS).lower().rstrip(".")
+    if not host:
+        return None
+    try:
+        return host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return host
 
 
 def site_of(url, root=bots.ROOT):
-    """The listed site a URL belongs to, or None. Never raises."""
-    try:
-        if not isinstance(url, str):
-            return None
-        parts = urlsplit(_browser_normalize(url))
-        if parts.scheme.lower() not in ("http", "https"):
-            return None
-        host = (parts.hostname or "").rstrip(".")
-    except ValueError:
-        return None
+    """The listed site a URL belongs to, or None. Never raises.
+
+    It judges only the string it is given. The relay must deny a web URL (is_web_url)
+    whose host_of is None, and must re-check the engine's resolved current URL after
+    navigation, because a redirect or script can land elsewhere."""
+    host = host_of(url)
     if not host:
         return None
     best = None

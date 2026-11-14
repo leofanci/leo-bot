@@ -50,6 +50,34 @@ class Settings(unittest.TestCase):
         self.assertEqual(browser.site_of(u("linkedin.com\t.evil.example/"), self.root), None)
         self.assertEqual(browser.site_of("  \x01" + u("www.linkedin.com") + " \r\n", self.root), "linkedin.com")
 
+    def test_site_of_matches_chromium_forms(self):
+        def u(rest):
+            return "https:" + rest
+        hit = ("linkedin.com", "/linkedin.com", "//linkedin.com", "///linkedin.com", "////www.linkedin.com/in",
+               "//%6Cinkedin.com/", "//linkedin%2Ecom/", "//linkedin\u3002com", "//linkedin\uff0ecom",
+               "//linkedin\uff61com", "//\uff4c\uff49\uff4e\uff4b\uff45\uff44\uff49\uff4e.com",
+               "//link\u00adedin.com", "//link\u200bedin.com", "//link\u200dedin.com",
+               "//link\u2060edin.com", "//\ufefflinkedin.com", "//LINKEDIN.COM.")
+        for rest in hit:
+            self.assertEqual(browser.site_of(u(rest), self.root), "linkedin.com", repr(rest))
+        self.assertEqual(browser.site_of("HTTP:\\\\linkedin.com", self.root), "linkedin.com")
+        miss = ("//evil.example/linkedin.com", "//linkedin.com.evil.example", "//xn--80ak6aa92e.com",
+                "//evil%2Elinkedin.example", "//linkedin\u3002com.evil.example")
+        for rest in miss:
+            self.assertIsNone(browser.site_of(u(rest), self.root), repr(rest))
+
+    def test_host_of_and_is_web_url(self):
+        self.assertIsNone(browser.host_of("https:" + "///"))
+        self.assertIsNone(browser.host_of("https:" + "//"))
+        self.assertIsNone(browser.host_of("ftp:" + "//a.test"))
+        self.assertIsNone(browser.host_of(None))
+        self.assertEqual(browser.host_of("https:" + "//Www.Acme.TEST:81/x"), "www.acme.test")
+        self.assertEqual(browser.host_of("https:" + "//b\u00fccher.test"), "xn--bcher-kva.test")
+        self.assertTrue(browser.is_web_url("HTTPS:" + "/a.test"))
+        self.assertTrue(browser.is_web_url("https:" + "///"))
+        self.assertFalse(browser.is_web_url("file:" + "///etc"))
+        self.assertFalse(browser.is_web_url(5))
+
     def test_wrong_shape_files_read_as_defaults(self):
         path = self.root / "team" / "browser.json"
         path.parent.mkdir(parents=True)
