@@ -15,6 +15,7 @@ stream_event/content_block_start/tool_use, each model call's tokens as
 stream_event/message_start (input) and message_delta (output), and the turn ends with
 a top-level `result` line. A plain-text stdin turn (no positional prompt) is accepted.
 """
+import ast
 import json
 import os
 import re
@@ -349,16 +350,28 @@ def remove_bot_tmpdir():
 
 
 HOOK_PATH = Path(__file__).resolve().parent.parent / "turn_hook.py"
+# The hook's source, read once when the server starts and run inline (`-I -c`): a bot's shell
+# command that rewrites turn_hook.py changes nothing a later command asks.
+def _hook_source():
+    tree = ast.parse(HOOK_PATH.read_text(encoding="utf-8"))
+    if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(getattr(tree.body[0], "value", None), ast.Constant):
+        tree.body = tree.body[1:]  # the docstring: the command stays short
+    return ast.unparse(tree)
 
 
-def gate_settings(shell=False):
+HOOK_COMMAND = f"{shlex.quote(sys.executable)} -I -c {shlex.quote(_hook_source())}"
+
+
+def gate_settings(shell=False, review=False):
     """Claude Code settings holding one PreToolUse hook on the web tools (and Bash on a Full
     access turn): it asks the server's gate (dashboard/turn_hook.py) and denies when it cannot.
     Verified live (2.1.325): a hook passed with --settings runs under --setting-sources "", and
     its deny is final."""
-    cmd = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(HOOK_PATH))}"
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "WebSearch|WebFetch" + ("|Bash" if shell else ""),
-                                                 "hooks": [{"type": "command", "command": cmd}]}]}})
+    # Approve for me (auto mode): file tools ask too, so a write outside the edit folders is refused
+    # as on every other level instead of going to Claude Code's reviewer.
+    matcher = "WebSearch|WebFetch" + ("|Bash" if shell else "") + ("|Edit|Write|MultiEdit|NotebookEdit" if review else "")
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": matcher,
+                                                 "hooks": [{"type": "command", "command": HOOK_COMMAND}]}]}})
 
 
 def _mcp_server(port, path, env):
@@ -521,7 +534,7 @@ class ClaudeCodeEngine(Engine):
                "--setting-sources", "",
                # The taint gate (dashboard/taint.py): a web tool asks it first. A run without one
                # (a runner on another Mac) has no apps; with apps and no gate, web is off above.
-               *(["--settings", gate_settings(shell)] if (with_web or shell) and gate else []),
+               *(["--settings", gate_settings(shell, review)] if (with_web or shell) and gate else []),
                "--restricted",
                "--permission-mode", "auto" if review else "default",
                # Nobody answers a prompt in a bot's run: whatever would ask is refused.

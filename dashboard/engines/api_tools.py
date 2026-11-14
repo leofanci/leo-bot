@@ -18,10 +18,12 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -515,28 +517,71 @@ def _page_text(raw, ctype):
     return " ".join(text.split())
 
 
-def run_command(command, folder, policy, turn):
-    """(text, is_error) for one Full access shell command: Leo Bot's gate decides first
-    (dashboard/shell_rules.py), then bash runs it in an edit folder with no turn tokens."""
+def run_command(command, folder, policy, turn, review=None, box=None):
+    """(text, is_error) for one shell-level command: Leo Bot's gate decides first
+    (dashboard/shell_rules.py; after outside content the command runs sandboxed), then on
+    Approve for me the engine's reviewer (`review(command, cwd)` -> (allow, reason)), then bash
+    runs it in an edit folder with no turn tokens, in its own process group: a timeout or a
+    stop ends the command and everything it started."""
     if not isinstance(command, str) or not command.strip():
         raise ToolError("command is empty")
     dirs = [str(d) for d in policy.edit_dirs]
     cwd = dirs[0] if not folder else next((d for d in dirs if str(Path(d)) == str(Path(str(folder)))), None)
     if cwd is None:
         raise ToolError("folder must be one of your edit folders: " + ", ".join(dirs))
-    allow, reason = turn.decide("Bash", command)
+    allow, reason, run = turn.shell(command, dirs)
     if not allow:
         return reason, True
+    if review is not None:
+        ok, why = review(command, cwd)
+        if not ok:
+            return f"Your reviewer refused this command: {why}", True
     env = {k: v for k, v in os.environ.items() if not k.startswith("LEOBOT_")}
-    try:
-        out = subprocess.run(["/bin/bash", "-lc", command], cwd=cwd, env=env, capture_output=True, text=True,
-                             timeout=RUN_TIMEOUT, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        return f"stopped after {RUN_TIMEOUT}s", True
-    text = (out.stdout or "") + (("\n[stderr]\n" + out.stderr) if out.stderr else "")
+    argv = ["/bin/bash", "-c", run] if run else ["/bin/bash", "-lc", command]
+    # Output goes to files, not pipes: a server the command leaves running in the background
+    # would hold a pipe open and the turn would wait for it.
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out_f,
+                                stderr=err_f, start_new_session=True)
+        if box is not None:
+            box.child = proc
+        timed_out = False
+        try:
+            proc.wait(timeout=RUN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            _kill_group(proc)  # on a timeout or a stop, and anything it left running
+            if box is not None:
+                box.child = None
+        if timed_out:
+            return f"stopped after {RUN_TIMEOUT}s", True
+        if box is not None and box.stopped:
+            return "stopped", True
+        out, err = _tail(out_f), _tail(err_f)
+    text = out + (("\n[stderr]\n" + err) if err else "")
     if len(text) > RUN_OUT_CHARS:
         text = "[...cut...]\n" + text[-RUN_OUT_CHARS:]
-    return f"exit {out.returncode}\n{text}", out.returncode != 0
+    return f"exit {proc.returncode}\n{text}", proc.returncode != 0
+
+
+def _tail(f):
+    """The end of a command's output file (it can be far longer than a reply may hold)."""
+    size = f.seek(0, os.SEEK_END)
+    f.seek(max(0, size - 4 * RUN_OUT_CHARS))
+    text = f.read().decode("utf-8", errors="replace")
+    return ("[...cut...]\n" + text) if size > 4 * RUN_OUT_CHARS else text
+
+
+def _kill_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 class ToolBox:
@@ -548,6 +593,10 @@ class ToolBox:
         # This request's taint (dashboard/taint.py). Without one, web and apps never share a turn.
         self.turn = taint.GATES.lookup(tokens.gate_token) if getattr(tokens, "gate_token", None) else None
         self.specs, self._apps = [OSCTL_SPEC], set()
+        self.review = None   # Approve for me: the engine's reviewer, (command, cwd) -> (allow, reason)
+        self.child = None    # the shell command running now (stop() ends it)
+        self.stopped = False
+        self.spent = {}      # tokens the reviewer used, folded into the turn's usage
         if not policy.shared:
             self.specs.append(READ_SPEC)
             if policy.read_dirs:
@@ -563,6 +612,19 @@ class ToolBox:
                 self.specs.append({"name": tool["name"], "description": tool.get("description") or "",
                                    "input_schema": tool.get("inputSchema") or {"type": "object", "properties": {}}})
                 self._apps.add(tool["name"])
+
+    def add_spent(self, usage):
+        """Fold the reviewer's tokens into the turn's `usage` (same provider, same model)."""
+        for k, v in self.spent.items():
+            usage[k] = usage.get(k, 0) + v
+        self.spent = {}
+
+    def stop(self):
+        """The turn was stopped: end the running shell command and everything it started."""
+        self.stopped = True
+        child = self.child
+        if child is not None:
+            _kill_group(child)
 
     def web_open(self):
         """May web search or fetch be offered now? Yes with a gate watching the turn (app data no
@@ -606,7 +668,8 @@ class ToolBox:
                 return edit_file(args.get("path"), args.get("old_text"), args.get("new_text"),
                                  self.root, self.policy), False
             if name == "run_command" and any(s is RUN_SPEC for s in self.specs):
-                return run_command(args.get("command"), args.get("folder"), self.policy, self.turn)
+                return run_command(args.get("command"), args.get("folder"), self.policy, self.turn,
+                                   review=self.review, box=self)
             if name == "web_fetch" and self.policy.web:
                 if not self.web_open():
                     return taint.WEB_OFF, True

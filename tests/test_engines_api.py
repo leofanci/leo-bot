@@ -139,6 +139,38 @@ class Anthropic(Base):
         self.assertEqual(second[2]["content"][0]["tool_use_id"], "tu_1")
         self.assertEqual(second[2]["content"][0]["content"], "osctl says ok")
 
+    def approve_turn(self, verdict):
+        import os
+        from dashboard import taint
+        work = os.path.realpath(self.tmp.name)
+        tok = taint.GATES.mint(taint.Turn(), writable=(work,))
+        self.addCleanup(taint.GATES.revoke, tok)
+        self.fake.replies = [anthropic_tool("run_command", {"command": "echo hi > made.txt"}),
+                             anthropic_text(verdict), anthropic_text("done")]
+        sess = self.session(shell=True, level="approve")
+        ev = list(sess.ask("## Request\nmake the file", model="haiku", read_dirs=(work,), edit_dirs=(work,),
+                           gate_token=tok, gate_port=8765))
+        return work, ev
+
+    def test_approve_for_me_asks_the_model_as_reviewer_and_counts_its_tokens(self):
+        import os
+        work, ev = self.approve_turn("ALLOW")
+        review = self.fake.requests[1]["body"]
+        self.assertNotIn("tools", review)  # a one-shot outside the conversation
+        self.assertIn("ALLOW", review["system"])
+        self.assertIn("make the file", review["messages"][0]["content"])
+        self.assertIn("echo hi > made.txt", review["messages"][0]["content"])
+        self.assertTrue(os.path.exists(os.path.join(work, "made.txt")))
+        self.assertEqual(ev[-1][1]["tokens"], 45)  # the turn's two calls plus the review
+
+    def test_approve_for_me_refused_by_the_reviewer_runs_nothing(self):
+        import os
+        work, ev = self.approve_turn("DENY: not asked for")
+        self.assertFalse(os.path.exists(os.path.join(work, "made.txt")))
+        result = self.fake.requests[2]["body"]["messages"][-1]["content"][0]
+        self.assertIn("not asked for", result["content"])
+        self.assertTrue(result.get("is_error"))
+
     def test_spend_so_far_is_reported_before_the_tools_run(self):
         self.fake.replies = [anthropic_tool("osctl", {"args": ["get-project"]}), anthropic_text("done")]
         spent = []

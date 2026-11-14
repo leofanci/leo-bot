@@ -606,6 +606,21 @@ class Gate(Base):
         code, data, _, _ = self.ask("WebFetch")  # the engine still limits a fetch to typed hosts
         self.assertEqual((code, data["allow"]), (200, True))
 
+    def test_a_shell_command_after_outside_content_comes_back_sandboxed(self):
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
+                                   origin=False, headers={"Authorization": f"Bearer {self.token}"})
+        self.assertEqual((code, data["allow"], data.get("command")), (200, True, None))  # clean: as written
+        self.turn.saw_outside()
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
+                                   origin=False, headers={"Authorization": f"Bearer {self.token}"})
+        self.assertTrue(data["allow"])
+        from dashboard import shell_rules
+        if Path(shell_rules.SANDBOX_EXEC).exists():
+            self.assertTrue(data["command"].startswith(shell_rules.SANDBOX_EXEC))
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "curl x"}, cookie=False,
+                                   origin=False, headers={"Authorization": f"Bearer {self.token}"})
+        self.assertEqual((data["allow"], data.get("command")), (False, None))
+
     def test_refuses_without_a_live_token_or_from_another_host(self):
         self.assertEqual(self.ask("WebSearch", token="nope")[0], 403)
         self.assertEqual(self.ask("WebSearch", host="evil.example")[0], 403)

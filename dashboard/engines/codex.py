@@ -9,8 +9,9 @@ Every turn: read-only sandbox, no user config, shell tool off, connectors and
 sub-agents off, osctl through Leo Bot's own MCP relay. On a shell level (the bot's Approve
 for me or Full access, server.py) the turn works in its first edit folder instead: a
 workspace-write sandbox over its edit folders, the shell tool on, and Leo Bot's PreToolUse
-hook (turn_hook.py, passed with -c) asking the gate before each command. Full access runs
-with network and no approvals; Approve for me routes approvals to Codex's automatic review
+hook (turn_hook.py, passed with -c) asking the gate before each command. Neither level has
+network: every Codex run counts as outside content, so nothing may go out. Full access runs
+with no approvals; Approve for me routes approvals to Codex's automatic review
 (--approve-for-me). Verified live with codex-cli 0.167.2: a -c hook fires under `exec` with
 --dangerously-bypass-hook-trust and its deny holds; --approve-for-me runs non-interactively. Codex still keeps tools of its
 own that no flag lists (a live probe in the PR shows them), so this is a full-disk
@@ -20,16 +21,14 @@ osctl's), with the same rules as on any engine.
 """
 import json
 import os
-import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from dashboard.engines import prices
 from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, gate_vars, stop_child, turn_vars
 from dashboard.engines.claude_code import (
-    APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, HOOK_PATH, OS_MCP_PATH, OS_TOKEN_ENV,
+    APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, ENGINE_ENV, HOOK_COMMAND, OS_MCP_PATH, OS_TOKEN_ENV,
     RUNNER_TOKEN_ENV,
 )
 
@@ -81,6 +80,7 @@ class CodexEngine(Engine):
     kind = "cli"
     shared_safe = False
     full_disk = True
+    own_sandbox = True  # a shell level runs in Codex's sandbox: Leo Bot's gate does not rewrite commands
     supports = frozenset({"shell", "review", "apps"})
     reports_tokens = True  # turn.completed carries usage; the login's model is priced as UNKNOWN
 
@@ -108,7 +108,6 @@ class CodexEngine(Engine):
         review = bool(dirs) and getattr(policy, "level", "") == "approve"
         cmd = [self.codex_bin, "exec"]
         if dirs:
-            hook = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(HOOK_PATH))}"
             cmd += ["--dangerously-bypass-hook-trust", *(["--approve-for-me"] if review else [])]
         if not self.is_fresh(session):
             cmd += ["resume", state["session"]]
@@ -116,10 +115,13 @@ class CodexEngine(Engine):
         if dirs:
             cmd += ["-c", 'sandbox_mode="workspace-write"',
                     "-c", f"sandbox_workspace_write.writable_roots={_toml(list(dirs))}",
-                    "-c", f"sandbox_workspace_write.network_access={'false' if review else 'true'}",
+                    # No network on either level: every Codex run counts as outside content (its
+                    # own tools cannot be watched mid-run), and after outside content nothing goes
+                    # out. Its sandbox enforces that for every program, not only the named ones.
+                    "-c", "sandbox_workspace_write.network_access=false",
                     "-c", "features.shell_tool=true",
                     "-c", "hooks.PreToolUse=[{matcher=" + _toml("^Bash$") + ",hooks=[{type=\"command\",command="
-                    + _toml(hook) + ",timeout=30}]}]"]
+                    + _toml(HOOK_COMMAND) + ",timeout=30}]}]"]
             if not review:
                 cmd += ["-c", 'approval_policy="never"']
         else:

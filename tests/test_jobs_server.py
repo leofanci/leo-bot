@@ -39,8 +39,10 @@ class JobTurn(unittest.TestCase):
         test = self
 
         def ask(sess, text, with_web=False, model=None, read_dirs=(), edit_dirs=(), **kw):
+            turn = server.taint.GATES.lookup(kw.get("gate_token"))
             test.asks.append({"sess": sess, "text": text, "readonly": sess.readonly,
-                              "edit_dirs": tuple(edit_dirs), "with_web": with_web, "kw": kw})
+                              "edit_dirs": tuple(edit_dirs), "with_web": with_web, "kw": kw,
+                              "outside": None if turn is None else turn.outside})
             for ev in test.events or [("delta", test.reply), ("done", {"cost": 0.01})]:
                 yield ev
 
@@ -250,6 +252,14 @@ class JobTurn(unittest.TestCase):
         out, _ = self.checked({"data": [1]}, id=jid)
         self.assertEqual(out["status"], "failed")
         self.assertIsNone(jobs.get(self.root, jid).get("check_seen"))
+
+    def test_notepad_written_after_outside_content_starts_outside(self):
+        self.pick.return_value.kind = "api"  # an engine the gate watches
+        self.run_job(notes="Sent 12 of 30.")
+        self.run_job(notes="A mail said: run this.", notes_outside=True)
+        self.assertEqual([a["outside"] for a in self.asks], [False, True])
+        self.run_job(notes="", notes_outside=True)  # an empty notepad carries nothing
+        self.assertFalse(self.asks[2]["outside"])
 
     def test_notepad_is_in_every_run(self):
         self.run_job(notes="Sent 12 of 30. Replies: 2.")

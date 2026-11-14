@@ -4,8 +4,9 @@ An agent is safe to leave alone only when no conversation ever holds all three o
 data, content someone else wrote, and a way to send things out. Leo Bot keeps them apart:
 
   1. Outside content (an app read's result, a web search or page, a guest's message) is in
-     the conversation: an Auto job's saves wait for one approval, and a Full access shell
-     sends nothing off the machine. App actions follow the owner's per-app choice instead
+     the conversation: an Auto job's saves wait for one approval, and a shell level sends
+     nothing off the machine (named sending commands are refused, every other command runs in
+     the OS sandbox with no internet: dashboard/shell_rules.py). App actions follow the owner's per-app choice instead
      ("Sends without asking" sends; dashboard/apps_relay.py).
   2. App data no longer turns web search off; a fetch still reaches only hosts the owner
      typed (the engine's own rules), so a page cannot steer a fetch to another host.
@@ -18,6 +19,7 @@ runs: the apps relay (reads mark it, actions read it), a Claude Code PreToolUse 
 in an Auto job (a save waits once outside content is in).
 """
 import hmac
+import os
 import secrets
 import threading
 import time
@@ -31,6 +33,8 @@ WEB_TOOLS = frozenset({"WebSearch", "WebFetch", "web_search", "web_fetch"})
 WEB_OFF = ("Web search and pages are off in this conversation: it holds data from connected apps, "
            "and a query must never carry it out. Work from what you have; for web research the owner "
            "can start a new thread.")
+WRITE_OFF = "You change files only in your edit folders ({folders}). Say what you would change elsewhere."
+FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 SAVE_WAITS = ("This run read outside content (mail, pages, app data), so it saves nothing by itself: "
               "say what and where, and end with one APPROVAL: line.")
 
@@ -58,6 +62,14 @@ class Turn:
             self.outside = True
             return True
 
+    def shell(self, command, writable=(), profile_dir=None):
+        """(allow, reason, run) for one shell command (dashboard/shell_rules.plan): after outside
+        content an allowed command runs sandboxed, as `run`."""
+        from dashboard import shell_rules
+        with self._lock:
+            outside = self.outside
+        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir)
+
     def decide(self, tool, command=None):
         """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an
         Auto job) or "Bash" (a Full access shell command, dashboard/shell_rules.py). Anything
@@ -82,23 +94,52 @@ class Gates:
         self._live = {}
         self._lock = threading.Lock()
 
-    def mint(self, turn):
+    def mint(self, turn, writable=(), wrap=True):
+        """`writable`: the run's edit folders, the only folders a sandboxed command may write.
+        `wrap`: whether its shell commands come back sandboxed after outside content (an engine
+        with its own sandbox, Codex, says no)."""
         token = secrets.token_hex(32)
         with self._lock:
-            self._live[token] = (turn, time.time())
+            self._live[token] = (turn, time.time(), tuple(str(d) for d in writable), bool(wrap))
         return token
 
-    def lookup(self, token):
+    def _find(self, token):
         if not isinstance(token, str) or not token:
             return None
         now = time.time()
         with self._lock:
-            for live, (turn, made) in list(self._live.items()):
-                if now - made > MAX_AGE:
+            for live, entry in list(self._live.items()):
+                if now - entry[1] > MAX_AGE:
                     del self._live[live]
                 elif hmac.compare_digest(live.encode(), token.encode()):
-                    return turn
+                    return entry
         return None
+
+    def may_write(self, token, path):
+        """(allow, reason) for a file tool writing `path` on the run holding `token`: only inside
+        its edit folders. Claude Code's auto mode (Approve for me) would otherwise leave a write
+        anywhere to its reviewer."""
+        entry = self._find(token)
+        dirs = [os.path.realpath(d) for d in (entry[2] if entry else ())]
+        if not isinstance(path, str) or not path.startswith("/") or not dirs:
+            return False, WRITE_OFF.format(folders="none")
+        real = os.path.realpath(path)
+        if any(real == d or real.startswith(d.rstrip("/") + "/") for d in dirs):
+            return True, ""
+        return False, WRITE_OFF.format(folders=", ".join(dirs))
+
+    def lookup(self, token):
+        entry = self._find(token)
+        return entry[0] if entry else None
+
+    def shell(self, token, command, profile_dir=None):
+        """(allow, reason, run) for a shell command on the run holding `token` (Turn.shell)."""
+        entry = self._find(token)
+        if entry is None:
+            return False, "no gate for this run", None
+        turn, _, writable, wrap = entry
+        allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None)
+        return allow, reason, (run if wrap else None)
 
     def revoke(self, token):
         with self._lock:

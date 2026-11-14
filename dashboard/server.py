@@ -1462,14 +1462,16 @@ AGENTS_NOTE = ("## Sub-agents\nFor a big job with independent parts (research 30
 SHELL_NOTE = (
     "## Shell ({level})\n"
     "The owner gave you a shell for this work, in your edit folders ({folders}): your shell tool, or "
-    "`run_command`. Work inside those folders (on Claude Code, start a command with `cd <folder> &&`). "
-    "Build, test, run scripts, install packages, commit with git: do the work end to end, then say what "
-    "you ran.{review} Commands that could wreck the machine are refused. Once this conversation holds "
-    "outside content or app data, commands that send things off this machine (curl, git push, ssh, a "
-    "publish) are refused too: tell the owner what to push or send.")
+    "`run_command`. Commands start in the first one; work inside those folders. Build, test, run "
+    "scripts, install packages, commit with git: do the work end to end, then say what you ran.{review} "
+    "Commands that could wreck the machine are refused. Once this conversation holds outside content or "
+    "app data, commands that send things off this machine (curl, git push, ssh, a publish) are refused, "
+    "and every other command runs in a sandbox with no internet that writes only in your edit folders "
+    "and temp folders: tell the owner what to push, send or install.{net}")
+SHELL_NET_OFF = " Your engine's sandbox has no internet on any command."
 SHELL_LEVELS = {"full": ("Full access", ""),
-                "approve": ("Approve for me", " Your engine's reviewer approves each command; one it "
-                                              "refuses, do not try another way: say what you needed.")}
+                "approve": ("Approve for me", " A reviewer approves each command; one it refuses, do "
+                                              "not try another way: say what you needed.")}
 JOB_NOTEPAD = (
     "## This job's notepad\n"
     "Your own notes from this job's earlier runs, kept with `osctl job-note --text \"...\"` (it replaces "
@@ -2507,10 +2509,20 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(tool, str):
             return self._send(400, {"allow": False, "reason": "bad request"})
         command = body.get("command") if isinstance(body.get("command"), str) else None
-        allow, reason = turn.decide(tool, command)
+        run = None
+        if tool in taint.FILE_TOOLS:  # Approve for me on Claude Code: a file tool writes in the edit folders only
+            allow, reason = taint.GATES.may_write(auth[7:], body.get("path"))
+            if not allow:
+                self.log_message("gate deny tool=%s", tool[:40])
+            return self._send(200, {"allow": allow, "reason": reason})
+        if tool == "Bash":  # a shell command: after outside content it runs sandboxed (shell_rules.plan)
+            # The sandbox profile goes in Leo Bot's data folder, which a sandboxed command cannot write.
+            allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"))
+        else:
+            allow, reason = turn.decide(tool, command)
         if not allow:
             self.log_message("gate deny tool=%s", tool[:40])
-        return self._send(200, {"allow": allow, "reason": reason})
+        return self._send(200, {"allow": allow, "reason": reason, **({"command": run} if run else {})})
 
     def _runner_from(self, token):
         """The runner behind a token, while its person still belongs here."""
@@ -3122,9 +3134,9 @@ class Handler(BaseHTTPRequestHandler):
             # reach only typed hosts, and a Full access shell sends nothing out after outside content).
             mount = bool(app_grant) and not locked and "apps" in getattr(engine, "supports", ())
             # A shell level, the same on every engine that has a shell: Full access (any command,
-            # each checked by Leo Bot's gate first) or Approve for me (the engine's own reviewer
-            # decides, Leo Bot's gate still refuses the worst; an engine with no reviewer falls
-            # back to Auto-accept edits). This machine only: never a server or a runner.
+            # each checked by Leo Bot's gate first) or Approve for me (a reviewer decides too: the
+            # engine's own, or on an API key one call to its model; Leo Bot's gate still refuses the
+            # worst). This machine only: never a server or a runner.
             supports = getattr(engine, "supports", ())
             shell_level = (level if not locked and engine.kind != "runner" and DEPLOYMENT != "server"
                            and "shell" in supports
@@ -3219,7 +3231,8 @@ class Handler(BaseHTTPRequestHandler):
             if getattr(sess, "shell", False):
                 lvl, rv = SHELL_LEVELS.get(sess.level, SHELL_LEVELS["full"])
                 workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
-                    level=lvl, review=rv, folders=", ".join(f"`{d}`" for d in edit_dirs))) if x)
+                    level=lvl, review=rv, folders=", ".join(f"`{d}`" for d in edit_dirs),
+                    net=SHELL_NET_OFF if getattr(engine, "own_sandbox", False) else "")) if x)
             if job:
                 workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"]),
                                                       _job_notepad(job)) if x)
@@ -3234,9 +3247,11 @@ class Handler(BaseHTTPRequestHandler):
         # every run in it. A guest's message or a thread invited people can see is outside content.
         # Saved files that came from outside content and the owner has not trusted yet count too
         # (core/provenance.py): a clean thread that reads them reads outside words.
+        # A job's notepad written on a run that held outside content counts too (jobs.notes_outside).
         turn = taint.Turn(app_data=getattr(sess, "app_data", False),
                           outside=getattr(sess, "outside", False) or bool(person) or bool(shared)
-                          or bool(provenance.pending(ROOT, ws)))
+                          or bool(provenance.pending(ROOT, ws))
+                          or bool(job and jobs.notes_outside(jobs.get(ROOT, job["id"]) or job)))
         files_scan = provenance.scan(ROOT, ws)  # what this request changes is labeled if it is tainted
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
@@ -3359,7 +3374,9 @@ class Handler(BaseHTTPRequestHandler):
             gate_kw, mode_was = {}, getattr(s_, "job_mode", None)
             port = (getattr(getattr(self, "server", None), "server_address", None) or (None, None))[1]
             if (gated or hooked) and isinstance(port, int):
-                gate_kw = {"gate_token": taint.GATES.mint(turn), "gate_port": port}
+                gate_kw = {"gate_token": taint.GATES.mint(turn, writable=(kw.get("edit_dirs") or () if getattr(s_, "shell", False) else ()),
+                                                          wrap=not getattr(eng, "own_sandbox", False)),
+                           "gate_port": port}
             if (not gated or not gate_kw) and (web_ or (eng and eng.full_disk)):
                 turn.saw_outside()
                 if mode_was == "auto":
@@ -3391,6 +3408,11 @@ class Handler(BaseHTTPRequestHandler):
                 # The thread keeps what its context now holds: taint only ever grows.
                 sess.app_data = bool(getattr(sess, "app_data", False) or turn.app_data)
                 sess.outside = bool(getattr(sess, "outside", False) or turn.outside)
+                if job and turn.outside:  # what it wrote in the notepad may carry outside words
+                    try:
+                        jobs.mark_notes_outside(ROOT, job["id"])
+                    except OSError:
+                        traceback.print_exc()
             usage = fin.get("usage") if isinstance(fin.get("usage"), dict) else None
             cost = fin.get("cost")
             runner = bool(eng and eng.kind == "runner")

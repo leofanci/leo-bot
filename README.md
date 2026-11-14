@@ -139,19 +139,22 @@ none, Leo Bot's own checks do it:
 
 - **Ask** (default): changes files only when you tag it; its shell runs `osctl` only.
 - **Auto-accept edits**: changes files in its Edit folders on any of your messages.
-- **Approve for me**: also runs shell commands in its Edit folders, each one approved by the
-  engine's own reviewer (Claude Code's auto mode, Codex's automatic review). An API key has
-  no reviewer, so there it works as Auto-accept edits.
+- **Approve for me**: also runs shell commands in its Edit folders, each one approved by a
+  reviewer: the engine's own (Claude Code's auto mode, Codex's automatic review), or on an API
+  key one short call to the same model that judges the command against your request.
 - **Full access**: runs any shell command in its Edit folders on every engine with a shell
-  (Claude Code, Codex, API keys): build, test, install, commit. Codex works in a
-  workspace-write sandbox over those folders.
+  (Claude Code, Codex, API keys): build, test, install, commit.
 
 Shell levels run on your own Mac only, never on a server or a runner, and an Auto job on
 that bot gets them too. Leo Bot checks each command as it runs, on every engine: commands
 that could wreck the machine (deleting the disk, the home folder or a system folder,
-formatting a disk, a fork bomb, shutting down) never run, and once the conversation holds
-mail, pages or app data, commands that send data out (curl, git push, ssh, a publish, gh)
-are refused. This is a check on top of your choice, not a sandbox: the bot runs commands as
+formatting a disk, a fork bomb, shutting down) never run. Once the conversation holds mail,
+pages or app data, commands that send data out (curl, git push, ssh, a publish, gh) are
+refused, and every other command runs in macOS's sandbox: no internet, writes only in the
+bot's Edit folders and temp folders (never a git hook), and no handing work to another app.
+Codex runs in its own sandbox with no internet on either level, since Leo Bot cannot watch
+its own tools mid-run. A job's notepad written after outside content counts as outside
+content on its later runs. Before any outside content, a Full access bot runs commands as
 you do.
 
 ### Reactions
