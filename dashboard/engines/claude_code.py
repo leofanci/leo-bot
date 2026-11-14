@@ -331,12 +331,13 @@ def remove_bot_tmpdir():
 HOOK_PATH = Path(__file__).resolve().parent.parent / "turn_hook.py"
 
 
-def gate_settings():
-    """Claude Code settings holding one PreToolUse hook on the web tools: it asks the server's
-    gate (dashboard/turn_hook.py) and denies when it cannot. Verified live (2.1.325): a hook
-    passed with --settings runs under --setting-sources "", and its deny is final."""
+def gate_settings(shell=False):
+    """Claude Code settings holding one PreToolUse hook on the web tools (and Bash on a Full
+    access turn): it asks the server's gate (dashboard/turn_hook.py) and denies when it cannot.
+    Verified live (2.1.325): a hook passed with --settings runs under --setting-sources "", and
+    its deny is final."""
     cmd = f"{shlex.quote(sys.executable)} -I {shlex.quote(str(HOOK_PATH))}"
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "WebSearch|WebFetch",
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "WebSearch|WebFetch" + ("|Bash" if shell else ""),
                                                  "hooks": [{"type": "command", "command": cmd}]}]}})
 
 
@@ -388,7 +389,7 @@ class ClaudeCodeEngine(Engine):
     label = "Claude Code"
     kind = "cli"
     shared_safe = True  # verified live: see tests/test_chat_session.py and PR #22
-    supports = frozenset({"web", "apps", "folder_edit", "complete"})
+    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell"})
     reports_tokens = True
 
     def __init__(self, claude_bin="claude"):
@@ -440,6 +441,9 @@ class ClaudeCodeEngine(Engine):
             apps_port = None
         if with_web and apps_port and not gate:  # app data and web with nothing between them: never
             with_web = False
+        # Full access: any command, each one checked by the gate (dashboard/shell_rules.py) as it
+        # runs. No gate, or no edit folder to work in: the osctl-only shell of every other turn.
+        shell = bool(getattr(policy, "shell", False)) and gate and bool(edit_dirs) and not shared
         tools = ((WEB_TOOLS if with_web else []) if shared else
                  (list(BASE_TOOLS)
                   + (APP_TOOLS if read_dirs else [])
@@ -451,7 +455,8 @@ class ClaudeCodeEngine(Engine):
                          + (WEB_ALLOWED_TOOLS if with_web else [])
                          + (web_fetch_rules(web_domains) if with_web else [])
                          + (["mcp__apps"] if apps_port else [])
-                         + (["mcp__os"] if shared and (os_port or os_url) else []))
+                         + (["mcp__os"] if shared and (os_port or os_url) else [])
+                         + (["Bash"] if shell else []))
         mcp = (apps_mcp_config(apps_port) if apps_port
                else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
         # Claude Code matches these across letter case, dot-dot and NFC/NFD spellings of the path
@@ -483,7 +488,7 @@ class ClaudeCodeEngine(Engine):
                "--setting-sources", "",
                # The taint gate (dashboard/taint.py): a web tool asks it first. A run without one
                # (a runner on another Mac) has no apps; with apps and no gate, web is off above.
-               *(["--settings", gate_settings()] if with_web and gate else []),
+               *(["--settings", gate_settings(shell)] if (with_web or shell) and gate else []),
                "--restricted",
                "--permission-mode", "default"]
         for d in read_dirs:

@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from dashboard import osctl, taint
+from dashboard import osctl, shell_rules, taint
 from dashboard.engines import api, api_tools, claude_code
 from dashboard.engines.base import TurnPolicy, TurnTokens, gate_vars
 
@@ -33,6 +33,14 @@ class Rules(unittest.TestCase):
         self.assertEqual(t.decide("osctl-write"), (True, ""))
         t.saw_outside()
         self.assertEqual(t.decide("osctl-write"), (False, taint.SAVE_WAITS))
+
+    def test_shell_commands_follow_the_shell_rules(self):
+        turn = taint.Turn()
+        self.assertEqual(turn.decide("Bash", "git push"), (True, ""))
+        self.assertFalse(turn.decide("Bash", "rm -rf ~")[0])
+        turn.saw_outside()
+        self.assertEqual(turn.decide("Bash", "git push"), (False, shell_rules.SENDS_OFF))
+        self.assertEqual(turn.decide("Bash", "npm test"), (True, ""))
 
     def test_taint_from_the_thread_and_app_data_implies_outside(self):
         self.assertTrue(taint.Turn(app_data=True).outside)
@@ -100,6 +108,12 @@ class Hook(StubGate):
         self.assertTrue(self.denied(out))
         self.assertIn("off in this conversation", out)
 
+    def test_a_shell_command_goes_to_the_gate(self):
+        _Gate.answer = {"allow": True}
+        self.hook({"LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": self.url},
+                  {"tool_name": "Bash", "tool_input": {"command": "npm test"}})
+        self.assertEqual(_Gate.asked, [("Bearer t1", {"tool": "Bash", "command": "npm test"})])
+
     def test_fails_closed(self):
         for env in ({}, {"LEOBOT_GATE_TOKEN": "t1"},
                     {"LEOBOT_GATE_TOKEN": "t1", "LEOBOT_GATE_URL": "http://127.0.0.1:9/api/internal/gate"},
@@ -147,6 +161,27 @@ class ClaudeCodeFlags(unittest.TestCase):
         self.assertEqual(hooks["matcher"], "WebSearch|WebFetch")
         self.assertIn("turn_hook.py", hooks["hooks"][0]["command"])
         self.assertIn(" -I ", hooks["hooks"][0]["command"])
+
+    def shell_cmd(self, gate, edit=True, shared=False):
+        d = str(Path.cwd())
+        sess = SimpleNamespace(rail="r", model="haiku", repo_dir=d, _started=False,
+                               session_id="00000000-0000-0000-0000-000000000000", engine_state={})
+        policy = TurnPolicy(shell=True, shared=shared, read_dirs=(d,), edit_dirs=(d,) if edit else ())
+        return claude_code.ClaudeCodeEngine().build_cmd(sess, policy, "haiku", gate=gate)
+
+    def allowed(self, cmd):
+        i = cmd.index("--allowedTools") + 1
+        return cmd[i:cmd.index("--disallowedTools")]
+
+    def test_full_access_shell_needs_the_gate_and_an_edit_folder(self):
+        cmd = self.shell_cmd(gate=True)
+        self.assertIn("Bash", self.allowed(cmd))
+        hooks = json.loads(cmd[cmd.index("--settings") + 1])["hooks"]["PreToolUse"][0]
+        self.assertEqual(hooks["matcher"], "WebSearch|WebFetch|Bash")
+        for cmd in (self.shell_cmd(gate=False), self.shell_cmd(gate=True, edit=False),
+                    self.shell_cmd(gate=True, shared=True)):
+            self.assertNotIn("Bash", self.allowed(cmd))
+            self.assertNotIn("--settings", cmd)
 
     def test_apps_without_a_gate_never_get_web(self):
         cmd = self.cmd(gate=False, apps_port=8765)

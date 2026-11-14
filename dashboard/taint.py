@@ -58,9 +58,15 @@ class Turn:
             self.outside = True
             return True
 
-    def decide(self, tool):
-        """(allow, reason) for one tool about to run: a web tool, or "osctl-write" (a save in an
-        Auto job). Anything else is not this gate's business."""
+    def decide(self, tool, command=None):
+        """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an
+        Auto job) or "Bash" (a Full access shell command, dashboard/shell_rules.py). Anything
+        else is not this gate's business."""
+        if tool == "Bash":
+            from dashboard import shell_rules
+            with self._lock:
+                outside = self.outside
+            return shell_rules.decide(command, outside=outside)
         if tool in WEB_TOOLS:
             return (True, "") if self.web() else (False, WEB_OFF)
         if tool == "osctl-write":

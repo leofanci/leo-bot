@@ -130,6 +130,50 @@ class JobTurn(unittest.TestCase):
         self.assertEqual([bool(a["edit_dirs"]) for a in self.asks], [True, False, False])
         self.assertIn("edit folders", self.asks[0]["text"])
 
+    def test_full_access_gives_an_auto_job_a_shell(self):
+        app = tempfile.TemporaryDirectory()
+        self.addCleanup(app.cleanup)
+        folders.add(WS, app.name, root=self.root)
+        shelled = _Engine()
+        shelled.supports = _Engine.supports | {"shell"}
+        self.pick.return_value = shelled
+        server.engine_config.set_choice("access", "full", f"{WS}/cmo", self.root)
+        self.run_job(mode="auto")
+        self.run_job(mode="approval")
+        self.assertEqual([a["sess"].shell for a in self.asks], [True, False])
+        self.assertIn("## Shell (Full access)", self.asks[0]["text"])
+        self.assertNotIn("## Shell (Full access)", self.asks[1]["text"])
+        self.pick.return_value = _Engine()  # an engine that cannot hold the shell's wall
+        self.run_job(mode="auto")
+        self.assertFalse(self.asks[2]["sess"].shell)
+        server.engine_config.set_choice("access", "ask", f"{WS}/cmo", self.root)
+        self.pick.return_value = shelled
+        self.run_job(mode="auto")
+        self.assertFalse(self.asks[3]["sess"].shell)
+
+    def test_access_level_lets_an_untagged_turn_edit(self):
+        app = tempfile.TemporaryDirectory()
+        self.addCleanup(app.cleanup)
+        folders.add(WS, app.name, root=self.root)
+        seen = []
+
+        def ask(sess, text, edit_dirs=(), **kw):
+            seen.append(bool(edit_dirs))
+            yield ("delta", "ok")
+            yield ("done", {"cost": 0.01})
+        h = server.Handler.__new__(server.Handler)
+        h.wfile = io.BytesIO()
+        h.server = self.srv
+        h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask), \
+                mock.patch.object(server, "get_chat_session",
+                                  side_effect=lambda *a, **k: server.chat_session.ChatSession(repo_dir=".", rail="")):
+            for level in ("ask", "edits"):
+                server.engine_config.set_choice("access", level, f"{WS}/cos", self.root)
+                h._handle_ask({"messages": [{"role": "user", "content": "tidy the readme in the app folder"}],
+                               "room_id": f"{WS}/general"})
+        self.assertEqual(seen, [False, True])
+
     def test_job_gets_its_granted_apps_and_keeps_its_skill(self):
         # Like a private chat turn: a granted bot always has its apps; the job's skill stays.
         minted = []

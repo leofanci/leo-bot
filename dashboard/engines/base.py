@@ -36,6 +36,7 @@ class TurnPolicy:
     job: str = None                # LEOBOT_JOB: a scheduled job's turn (its id)
     job_mode: str = None           # LEOBOT_JOB_MODE: approval, auto or report
     code_folder: str = None        # LEOBOT_CODE_FOLDER: this turn's indexed folder (osctl code-context)
+    shell: bool = False            # Full access: any shell command, each checked by the gate first
 
 
 # osctl reads these from its environment; a child never inherits the server's own copy.

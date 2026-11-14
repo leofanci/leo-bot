@@ -106,7 +106,8 @@ class ChatSession:
                           deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used),
                           chat=self.session_id, job=self.job_id, job_mode=self.job_mode,
-                          code_folder=getattr(self, "code_folder", None))
+                          code_folder=getattr(self, "code_folder", None),
+                          shell=bool(getattr(self, "shell", False)) and not self.shared)
 
     def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
                   web_domains=(), apps_port=None, os_port=None):

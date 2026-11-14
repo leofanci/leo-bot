@@ -1486,6 +1486,7 @@ function jobMetaText(j, wsName, now){
   return [`${wsName} · @${j.bot} /${j.skill}`, j.schedule, cap, next, last].filter(Boolean).join(" · ");
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
+const ACCESS_LEVELS = [["ask", "Ask"], ["edits", "Auto-accept edits"], ["full", "Full access"]];
 function isHeld(a){
   return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict");
 }
@@ -1801,13 +1802,15 @@ async function renderEngines(tab = "engines"){
     const wsCards = (d.bot_list || []).filter(g => g.bots.length).map(g => `<section class="eng-ws"><h4>${esc(g.ws_name)}</h4>
         ${g.ws === "hq" ? "" : `<div class="eng-choice eng-ws-all"><label><span>Whole workspace</span> <select data-choice="workspaces" data-scope="${esc(g.ws)}">${opts(d.workspaces?.[g.ws], usable, "Same as your messages")}</select></label></div>`}
         ${g.bots.map(b => `<div class="eng-choice"><label><span>${esc(b.icon || "")} ${esc(b.name)}</span>
-          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label></div>`).join("")}</section>`).join("");
+          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label>
+          <select data-choice="access" data-scope="${esc(g.ws)}/${esc(b.id)}" aria-label="${esc(b.name)} access" title="What this bot may do on its own in your private threads">${ACCESS_LEVELS.map(([v, t]) => `<option value="${v}"${(d.access?.[`${g.ws}/${b.id}`] || "ask") === v ? " selected" : ""}>${t}</option>`).join("")}</select></div>`).join("")}</section>`).join("");
     box.innerHTML = tab === "engines" ? `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
         <p>Every bot can think with a different model. Connect a provider here, then choose who uses it in Bots.</p></section>
       <section class="integ-group"><h3>Your engines</h3><div class="eng-list">${rows}</div>
         <h3 class="eng-sub">Connect another</h3>${form}</section>` : `
       <section class="integ-group"><h3>Defaults</h3>
         <p class="eng-hint">Most specific wins: a bot's own pick, then its workspace, then your default.</p>
+        <p class="eng-hint">Access, per bot: <b>Ask</b> changes files only when you tag it. <b>Auto-accept edits</b> changes files in its edit folders on any of your messages. <b>Full access</b> also runs any shell command there (Claude Code, this Mac only): build, test, commit. Commands that could wreck the machine never run, and after it reads mail, pages or app data nothing that sends data out runs.</p>
         <div class="eng-choice"><label><span>Your messages</span> <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>

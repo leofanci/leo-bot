@@ -602,6 +602,24 @@ class Config(unittest.TestCase):
         self.assertEqual((view["default"], view["people"], view["workspaces"], view["bots"]), ("", "", {}, {}))
 
 
+    def test_access_level_per_bot(self):
+        self.assertEqual(config.access("acme", "cmo", self.root), "ask")
+        config.set_choice("access", "full", "acme/cmo", self.root)
+        config.set_choice("access", "edits", "demo/cto", self.root)
+        self.assertEqual(config.access("acme", "cmo", self.root), "full")
+        self.assertEqual(config.public(self.root)["access"], {"acme/cmo": "full", "demo/cto": "edits"})
+        for bad, scope in (("root", "acme/cmo"), ("full", None)):
+            with self.assertRaises(ValueError):
+                config.set_choice("access", bad, scope, self.root)
+        config.set_choice("access", "ask", "demo/cto", self.root)  # the default is not stored
+        config.forget_workspace("acme", self.root)
+        self.assertEqual(config.public(self.root)["access"], {})
+        data = config.load(self.root)  # a hand-edited file
+        data["access"] = {"acme/cmo": "god", "acme/cos": "full"}
+        config.save(data, self.root)
+        self.assertEqual(config.load(self.root)["access"], {"acme/cos": "full"})
+
+
 class Pick(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
