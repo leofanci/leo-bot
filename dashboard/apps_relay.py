@@ -27,9 +27,6 @@ import time
 from core import app_rules, approvals, bots, composio, integrations
 
 MAX_AGE = 1800  # hard cap; a token normally dies with its chat request
-# Calls one bot may run on its own ("act" grant) per workspace in 24 hours; past it they are held.
-# A runaway loop or an injected "email everyone" stops here, well above a 30-person outreach.
-MAX_AUTO_RUNS = 100
 METHODS = ("initialize", "ping", "tools/list", "tools/call")
 PASS_THROUGH = ("COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS")
 HELD = "Held for approval ({id}): {title}. It has not run. Tell the user it is waiting in Approvals."
@@ -41,12 +38,7 @@ CONNECT = ('"{slug}": you have no {toolkit} access in this workspace. Ask the ow
 READ_GRANT = ('"{slug}": you have read-only access to {toolkit}. If the job needs this, ask the owner to set '
               '{toolkit} to "Read + write" or "Acts on its own" for you in Team, then stop. '
               'This call was not performed.')
-LIMIT = ("You reached today's limit of {n} actions on your own, so the rest wait in Approvals like any "
-         "held action (daily limit). Tell the user.")
 NOT_SENT = "Did not go out: {title} ({why})."
-OUTSIDE = ("This conversation holds outside content (mail, pages or app data someone else wrote, or saved "
-           "files made from it that the owner has not trusted yet), so your actions wait for one approval "
-           "instead of running on their own. Tell the user.")
 REFUSED = '"{slug}" is not available to this bot. This call was not performed.'
 REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This call was not performed.'
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
@@ -170,10 +162,10 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         paid, holds = composio.paid_read_toolkits(items), composio.act_hold_toolkits(items)
     reads, notes, hold, runs = [], [], [], []
     read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
-    room = None  # how many more calls this bot may run on its own today (read once, when needed)
-    # dashboard/taint.py: after outside content, nothing runs on its own. No taint record: the same.
+    # "Send without asking" (an act grant) sends on the owner's say-so, whatever the conversation
+    # read: the owner chose it per bot and app. What always asks (payments, ads, deletes...) is
+    # held by app_rules. Reads still mark the turn (dashboard/taint.py: web off after app data).
     turn = ctx.get("taint")
-    outside = turn is None or turn.outside
     for c in calls:
         verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid, holds)
         if verdict == "refuse":
@@ -184,17 +176,6 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
                          REFUSED.format(slug=c["tool_slug"]))
             continue
         account, refusal = pick_account(c, tk, picks, root)
-        if verdict == "run" and not refusal and not ctx.get("report") and outside:
-            verdict = "hold"
-            if OUTSIDE not in notes:
-                notes.append(OUTSIDE)
-        if verdict == "run" and not refusal and not ctx.get("report"):
-            if room is None:
-                room = MAX_AUTO_RUNS - approvals.auto_runs(ctx["ws"], ctx["bot"], time.time() - 86400, root)
-            if len(runs) >= room:
-                verdict = "hold"
-                if LIMIT.format(n=MAX_AUTO_RUNS) not in notes:
-                    notes.append(LIMIT.format(n=MAX_AUTO_RUNS))
         if refusal:
             notes.append(refusal)
         elif verdict == "read" or (verdict == "run" and not ctx.get("report")):

@@ -225,11 +225,6 @@ def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, a
     return rec
 
 
-def auto_runs(ws, bot, since, root=bots.ROOT):
-    """How many app calls this bot ran on its own in this workspace since `since` (epoch)."""
-    return sum(1 for r in load(root) if r.get("kind") == APP and r.get("auto") and r.get("ws") == ws
-               and r.get("bot") == bot and (r.get("resolved") or 0) >= since)
-
 
 def batch_pending(batch, root=bots.ROOT):
     """The pending app actions held together under one batch id."""

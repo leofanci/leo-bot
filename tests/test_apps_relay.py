@@ -222,35 +222,24 @@ class Gate(unittest.TestCase):
         self.assertEqual([r["status"] for r in rows], ["failed"])
         self.assertNotIn("Ran on its own", text_of(reply))
 
-    def test_act_grant_has_a_daily_limit_then_holds(self):
-        self.acts()
-        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
-        with mock.patch.object(apps_relay, "MAX_AUTO_RUNS", 2):
-            self.handle(multi(send, send))
-            reply = self.handle(multi(send))
-        self.assertEqual(len(self.up.frames), 1)  # the third send did not go out
-        self.assertEqual(len(approvals.pending(self.root)), 1)
-        self.assertIn("daily limit", text_of(reply))
-
-    def test_after_outside_content_an_act_grant_waits_for_approval(self):
-        # The lethal trifecta: once someone else's words are in the conversation, nothing goes out alone.
+    def test_send_without_asking_also_sends_after_outside_content(self):
+        # The owner's per-app choice: "Sends without asking" sends whatever the conversation read.
         self.acts()
         self.turn.saw_outside()
         send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
         reply = self.handle(multi(send, send))
-        self.assertEqual(self.up.frames, [])
-        self.assertEqual(len(approvals.pending(self.root)), 2)
-        self.assertIn("outside content", text_of(reply))
-        self.assertIn("wait for one approval", text_of(reply))
+        self.assertEqual(len(self.up.frames), 1)
+        self.assertEqual(approvals.pending(self.root), [])
+        self.assertIn("Ran on its own", text_of(reply))
 
-    def test_a_read_marks_the_conversation_and_later_sends_wait(self):
+    def test_a_read_marks_the_conversation_and_web_goes_off(self):
         self.acts()
         self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
         self.assertTrue(self.turn.app_data and self.turn.outside)
         self.assertFalse(self.turn.web())  # no web query may carry the mail out now
         self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))
-        self.assertEqual(len(self.up.frames), 1)  # only the read went out
-        self.assertEqual(len(approvals.pending(self.root)), 1)
+        self.assertEqual(len(self.up.frames), 2)  # the owner chose "Sends without asking"
+        self.assertEqual(approvals.pending(self.root), [])
 
     def test_a_send_beside_a_read_in_one_call_runs(self):
         # Written before the read's result existed: the owner's words alone decided it.
@@ -260,12 +249,12 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(self.up.frames[-1]["params"]["arguments"]["tools"]), 2)
         self.assertEqual(approvals.pending(self.root), [])
 
-    def test_no_taint_record_means_nothing_runs_alone(self):
+    def test_send_without_asking_needs_no_taint_record(self):
         self.acts()
         send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
         reply, _ = apps_relay.handle(multi(send), CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
-        self.assertEqual(self.up.frames, [])
-        self.assertEqual(len(approvals.pending(self.root)), 1)
+        self.assertEqual(len(self.up.frames), 1)
+        self.assertEqual(approvals.pending(self.root), [])
 
     def test_writes_held_together_share_one_batch(self):
         sends = [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": f"p{i}@example.com"}}
