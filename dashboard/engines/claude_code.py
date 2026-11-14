@@ -409,7 +409,7 @@ class ClaudeCodeEngine(Engine):
     label = "Claude Code"
     kind = "cli"
     shared_safe = True  # verified live: see tests/test_chat_session.py and PR #22
-    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell"})
+    supports = frozenset({"web", "apps", "folder_edit", "complete", "shell", "review"})
     reports_tokens = True
 
     def __init__(self, claude_bin="claude"):
@@ -461,9 +461,12 @@ class ClaudeCodeEngine(Engine):
             apps_port = None
         if with_web and apps_port and not gate:  # app data and web with nothing between them: never
             with_web = False
-        # Full access: any command, each one checked by the gate (dashboard/shell_rules.py) as it
-        # runs. No gate, or no edit folder to work in: the osctl-only shell of every other turn.
+        # A shell level: commands checked by the gate (dashboard/shell_rules.py) as they run. Full
+        # access allows every command; Approve for me leaves each one to Claude Code's own reviewer
+        # (permission mode auto, verified live with 2.1.325). No gate, or no edit folder to work
+        # in: the osctl-only shell of every other turn.
         shell = bool(getattr(policy, "shell", False)) and gate and bool(edit_dirs) and not shared
+        review = shell and getattr(policy, "level", "") == "approve"
         tools = ((WEB_TOOLS if with_web else []) if shared else
                  (list(BASE_TOOLS) + AGENT_TOOLS
                   + (APP_TOOLS if read_dirs else [])
@@ -476,7 +479,7 @@ class ClaudeCodeEngine(Engine):
                          + (web_fetch_rules(web_domains) if with_web else [])
                          + (["mcp__apps"] if apps_port else [])
                          + (["mcp__os"] if shared and (os_port or os_url) else [])
-                         + (["Bash"] if shell else []))
+                         + (["Bash"] if shell and not review else []))
         mcp = (apps_mcp_config(apps_port) if apps_port
                else os_mcp_config(os_port, os_url) if shared and (os_port or os_url) else None)
         # Claude Code matches these across letter case, dot-dot and NFC/NFD spellings of the path
@@ -510,7 +513,9 @@ class ClaudeCodeEngine(Engine):
                # (a runner on another Mac) has no apps; with apps and no gate, web is off above.
                *(["--settings", gate_settings(shell)] if (with_web or shell) and gate else []),
                "--restricted",
-               "--permission-mode", "default"]
+               "--permission-mode", "auto" if review else "default",
+               # Nobody answers a prompt in a bot's run: whatever would ask is refused.
+               *(["--permission-prompts", "none"] if review else [])]
         for d in read_dirs:
             cmd += ["--add-dir", str(d)]
         sid = self.session_of(session)

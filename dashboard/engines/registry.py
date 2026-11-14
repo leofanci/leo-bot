@@ -104,8 +104,10 @@ def statuses(root=config.ROOT):
         engines.append(CodexEngine())
         engines += [AcpEngine(a) for a in data["acp_agents"]]
     engines += [ApiEngine(p, root) for p in data["providers"]]
-    # folder_edit: whether bots on it may change files in linked folders (Codex and ACP: never).
-    return [{**e.status(), "folder_edit": "folder_edit" in e.supports} for e in engines]
+    # folder_edit: whether bots on it may change files in linked folders on any level; shell: on
+    # Approve for me / Full access (Codex edits only there; ACP never).
+    return [{**e.status(), "folder_edit": "folder_edit" in e.supports, "shell": "shell" in e.supports}
+            for e in engines]
 
 
 def terminal_cmd(root=config.ROOT):
