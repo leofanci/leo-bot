@@ -24,17 +24,24 @@ A third kind, `job`, is a scheduled-job change (create, change or delete) a bot 
 receipt row (status done, `undo`) that the thread shows with Undo; Undo runs once.
 Older rows may still be pending cards, answered by Approve exactly once.
 
+Browser send plans are app actions too (toolkit `browser`, slug `BROWSER_SEND`): a bot
+plans its sends, the owner approves them (pending -> approved), and the browser relay
+takes one when the bot types the same text on the same page (approved -> done). They are
+never run from the card: only the bot's own click in its browser sends.
+
 Stored in gitignored team/approvals.json (spans workspaces, so company bots
 are denied Read on team/).
 """
 import json
 import re
+import secrets
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from core import app_preview, bots, integrations
+from core import app_preview, bots, browser, integrations
 
 MARKER_RE = re.compile(r"^[ \t>*_-]*APPROVAL:[*_ \t]*(.+?)[ \t*_]*$", re.M)
 SUMMARY_MAX = 200
@@ -49,6 +56,11 @@ CONTRA = "contradiction"
 VERDICT = "verdict"
 HELD = (APP, JOB, CONTRA, VERDICT)  # answered only through their own card
 APP_TTL = 7 * 86400
+PLAN_TTL = 7 * 86400  # an approved browser send can be used this long after its approval
+BROWSER = "browser"
+BROWSER_SEND = "BROWSER_SEND"
+SENT = "Sent from the browser."
+DAY = 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
 JOB_STALE_NOTE = "May or may not be saved. Check Team, Scheduled jobs."
@@ -82,10 +94,18 @@ def _is_held(r):
     return r.get("kind") in HELD
 
 
+def _is_send(r):
+    return r.get("kind") == APP and isinstance(r.get("action"), dict) and r["action"].get("toolkit") == BROWSER
+
+
 def _protected(r):
     # A bot's own runs of the last day stay too: they are its daily limit and the owner's record.
+    # So do browser sends of the last day (the site's daily cap counts them) and approved plans.
+    now = time.time()
     return (_is_held(r) and r.get("status") in ("pending", "running")) or \
-        (r.get("auto") and time.time() - (r.get("resolved") or 0) < AUTO_KEEP)
+        (r.get("auto") and now - (r.get("resolved") or 0) < AUTO_KEEP) or \
+        (_is_send(r) and (r.get("status") == "approved"
+                          or (r.get("status") in ("done", "failed") and now - (r.get("resolved") or 0) < AUTO_KEEP)))
 
 
 def _save(root, rows):
@@ -181,6 +201,8 @@ def _housekeep(rows):
             continue
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
+        elif r.get("status") == "approved" and _is_send(r) and now - (r.get("approved_at") or 0) > PLAN_TTL:
+            r["status"], r["resolved"], changed = "expired", now, True
         elif r.get("status") == "running" and now - (r.get("started") or 0) > RUNNING_STALE:
             r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") in (JOB, CONTRA, VERDICT) else STALE_NOTE,
                      resolved=now)
@@ -224,6 +246,89 @@ def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, a
         _save(root, rows)
     return rec
 
+
+def _norm(text):
+    return " ".join(text.split()) if isinstance(text, str) else ""
+
+
+def _place(url):
+    """(host, path) of a page for matching a send to its plan; a trailing slash does not count."""
+    host = browser.host_of(url)
+    if not host:
+        return None
+    try:
+        path = urlsplit(url.strip()).path
+    except ValueError:
+        return None
+    return host, path.rstrip("/") or "/"
+
+
+def add_send_plan(root=bots.ROOT, *, ws, room, chat, bot, person, items):
+    """Hold a bot's planned browser sends ({"url", "text", "site"} each) under one batch:
+    one Approve all approves them. Approving does not send: the bot's own click does."""
+    batch = secrets.token_hex(6)
+    recs = []
+    for it in items:
+        rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=BROWSER,
+                          slug=BROWSER_SEND, arguments={"url": it["url"], "text": it["text"], "site": it["site"]},
+                          account=None)
+        rec["batch"] = batch
+        recs.append(rec)
+    with LOCK:
+        rows = load(root)
+        rows.extend(recs)
+        _save(root, rows)
+    return recs
+
+
+def approve_send(aid, root=bots.ROOT):
+    """pending -> approved for one planned browser send, once."""
+    def fn(r):
+        if not _is_send(r):
+            raise ValueError("not a browser send")
+        _need(r, "pending")
+        r.update(status="approved", approved_at=time.time())
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def take_send(root=bots.ROOT, *, ws, bot, url, text, now=None):
+    """Use one approved send of this bot whose page (host and path) and text (whitespace
+    aside) match, approved at most PLAN_TTL ago: approved -> done. None when none matches."""
+    now = time.time() if now is None else now
+    place, want = _place(url), _norm(text)
+    if place is None or not want:
+        return None
+    with LOCK:
+        rows = load(root)
+        hits = [r for r in rows if _is_send(r) and r.get("status") == "approved"
+                and r.get("ws") == ws and r.get("bot") == bot
+                and 0 <= now - (r.get("approved_at") or 0) <= PLAN_TTL
+                and _place((r["action"].get("arguments") or {}).get("url")) == place
+                and _norm((r["action"].get("arguments") or {}).get("text")) == want]
+        if not hits:
+            return None
+        rec = min(hits, key=lambda r: r.get("approved_at") or 0)
+        rec.update(status="done", result=SENT, resolved=now)
+        _save(root, rows)
+        return dict(rec)
+
+
+def fail_send(aid, result, root=bots.ROOT):
+    """A taken send whose click broke: done -> failed with the reason."""
+    def fn(r):
+        _need(r, "done")
+        r.update(status="failed", result=result)
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def sends_today(site, root=bots.ROOT, now=None):
+    """Browser sends done on `site` in the last 24 hours, by every bot in every workspace."""
+    if not site:
+        return 0
+    now = time.time() if now is None else now
+    return sum(1 for r in load(root) if _is_send(r) and r.get("status") == "done"
+               and (r["action"].get("arguments") or {}).get("site") == site
+               and 0 <= now - (r.get("resolved") or 0) < DAY)
 
 
 def batch_pending(batch, root=bots.ROOT):
