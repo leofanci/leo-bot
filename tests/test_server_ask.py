@@ -637,9 +637,9 @@ class TurnFolders(unittest.TestCase):
         lead = self.turn("@cto refactor the docs folder")["lead"]
         self.assertNotIn(str(self.b), lead["edit_dirs"])
 
-    def test_app_turn_and_apps_used_thread_drop_edit(self):
+    def test_app_turn_keeps_its_edits(self):
         lead = self.turn("@cto check my inbox and fix the login", apps=True)["lead"]
-        self.assertEqual(lead["edit_dirs"], ())
+        self.assertNotEqual(lead["edit_dirs"], ())
 
     def test_web_turn_keeps_edit(self):
         # A fetched page could carry instructions: accepted (spec), fetches reach only typed hosts.
@@ -1133,8 +1133,8 @@ class Taint(_Turns, unittest.TestCase):
         self.assertEqual(sess.seen[0]["gate_port"], 8765)
         self.assertIsNone(taint.GATES.lookup(sess.seen[0]["gate_token"]))  # revoked when the run ends
         self.assertTrue(sess.app_data and sess.outside)
-        self._turn(sess)  # the next turn: app data in the context, so no web at all
-        self.assertFalse(sess.seen[1]["with_web"])
+        self._turn(sess)  # the next turn: app data in the context, web search stays on
+        self.assertTrue(sess.seen[1]["with_web"])
 
     def test_a_clean_thread_keeps_its_web(self):
         sess = self._session(lambda kw: None)

@@ -622,14 +622,13 @@ class Gate(Base):
         return request("POST", self.PATH, {"tool": tool}, cookie=False, origin=False,
                        headers={"Authorization": f"Bearer {token or self.token}"}, **kw)
 
-    def test_web_allowed_then_off_after_app_data(self):
+    def test_web_stays_on_after_app_data(self):
         code, data, _, _ = self.ask("WebSearch")
         self.assertEqual((code, data["allow"]), (200, True))
         self.assertTrue(self.turn.outside)
         self.turn.saw_app_data()
-        code, data, _, _ = self.ask("WebFetch")
-        self.assertEqual((code, data["allow"]), (200, False))
-        self.assertIn("off in this conversation", data["reason"])
+        code, data, _, _ = self.ask("WebFetch")  # the engine still limits a fetch to typed hosts
+        self.assertEqual((code, data["allow"]), (200, True))
 
     def test_refuses_without_a_live_token_or_from_another_host(self):
         self.assertEqual(self.ask("WebSearch", token="nope")[0], 403)

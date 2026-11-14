@@ -232,11 +232,10 @@ class Gate(unittest.TestCase):
         self.assertEqual(approvals.pending(self.root), [])
         self.assertIn("Ran on its own", text_of(reply))
 
-    def test_a_read_marks_the_conversation_and_web_goes_off(self):
+    def test_a_read_marks_the_conversation(self):
         self.acts()
         self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
         self.assertTrue(self.turn.app_data and self.turn.outside)
-        self.assertFalse(self.turn.web())  # no web query may carry the mail out now
         self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))
         self.assertEqual(len(self.up.frames), 2)  # the owner chose "Sends without asking"
         self.assertEqual(approvals.pending(self.root), [])

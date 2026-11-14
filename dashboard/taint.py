@@ -7,8 +7,8 @@ data, content someone else wrote, and a way to send things out. Leo Bot keeps th
      the conversation: an Auto job's saves wait for one approval, and a Full access shell
      sends nothing off the machine. App actions follow the owner's per-app choice instead
      ("Sends without asking" sends; dashboard/apps_relay.py).
-  2. App data is in the conversation: web search and fetch are off. A query or a URL can no
-     longer carry it to another host.
+  2. App data no longer turns web search off; a fetch still reaches only hosts the owner
+     typed (the engine's own rules), so a page cannot steer a fetch to another host.
 
 A `Turn` is one owner request, shared by every run in it (the lead, teammates it consults,
 its follow-up, a handoff), since each run's reply reaches the others. It starts from the
@@ -52,10 +52,9 @@ class Turn:
             self.outside = True
 
     def web(self):
-        """May a web search or fetch run now? Yes marks the turn (its results are outside content)."""
+        """A web search or fetch runs now: it marks the turn (its results are outside content).
+        App data no longer turns web off; a fetch still reaches only hosts the owner typed."""
         with self._lock:
-            if self.app_data:
-                return False
             self.outside = True
             return True
 
