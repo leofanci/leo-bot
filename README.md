@@ -162,12 +162,13 @@ under the bot's Memory, or let a bot save one with `osctl remember --type ...`.
 
 ### Scheduled jobs
 
-A job is one bot's recurring work: a skill plus a message, on a schedule such as
-`every 6h`, `daily 09:00` or `mon,thu 09:00` (local time). Ask a bot for one: it proposes
-the job (`osctl propose-job`) and you get a card in that thread with everything Approve
-will save: bot, skill, schedule, next run, mode, cap (or no cap) and message. Edit it, approve it or
-say no. A change or a deletion a bot proposes comes as the same kind of card. No bot
-creates, changes or deletes a job by itself.
+A job is one bot's later or recurring work: a skill plus a message, on a schedule such as
+`every 30m`, `daily 09:00`, `mon,thu 09:00` or `once 2026-12-01 09:00` (local time; at
+most every 5 minutes; a `once` job turns itself off after its run). A bot sets one up
+itself when the work needs it (`osctl propose-job`), in your private threads only: the
+job is saved when its reply ends, and the thread shows a receipt with what was saved
+(bot, skill, schedule, next run, mode, cap and message), Undo and Pause. Changes and
+deletions work the same way. A job's own run never sets up more jobs.
 
 Each job has a mode:
 
@@ -195,7 +196,7 @@ change through a bot's card.
   moment. A job runs only on an engine that reports cost or token usage (Claude Code,
   Codex, API providers; a model with no list price is counted at the costliest one, so a
   cap is never exceeded), and consults only teammates whose engine does too. ACP agents
-  report neither, so they run no jobs. At most 20 jobs exist at once.
+  report neither, so they run no jobs. At most 50 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
   starts again, never once per missed slot. A run stops after 30 minutes, teammates included.
 - Each morning from 08:00 a digest thread in HQ's #general lists what ran, what it cost,

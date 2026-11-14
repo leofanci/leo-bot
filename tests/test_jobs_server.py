@@ -303,7 +303,7 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(out["status"], "waiting")
 
 
-    # -- proposals: a bot's propose-job becomes a card; only Approve writes the job ------- #
+    # -- proposals: a bot's propose-job is saved at turn end, with the owner's Undo ------- #
     def owner_ask(self, msg="@cmo /positioning set up a weekly review job", room=f"{WS}/dm-cmo", propose=None,
                   fail=False):
         """An owner turn whose bot ran `osctl propose-job` (simulated: an outbox row for its thread)."""
@@ -341,60 +341,65 @@ class JobTurn(unittest.TestCase):
         h._jobs_post(path, body)
         return sent[-1]
 
-    def test_proposal_becomes_a_card_and_approve_writes_once(self):
+    def receipts(self):
+        return approvals.receipts(self.root, WS)
+
+    def test_proposal_is_saved_at_turn_end_with_an_undo(self):
         chat, out = self.owner_ask(propose=[self.NEW])
-        cards = [r for r in approvals.pending(self.root, WS) if r.get("kind") == approvals.JOB]
-        self.assertEqual(len(cards), 1)
-        card = cards[0]
-        self.assertEqual((card["chat"], card["bot"], card["room"], card["summary"]),
-                         (chat, "cmo", f"{WS}/dm-cmo", "New job: weekly"))
-        self.assertIn('"app_actions"', out)
-        self.assertEqual(jobs.load(self.root), [])  # nothing saved before the click
-        self.assertEqual(jobs.take_proposals(self.root, chat), [])  # the outbox was emptied
-        done = server._approve_job_card(card["id"])
-        self.assertEqual(done["status"], "done", done)
-        self.assertTrue(done["result"].startswith("Job created: weekly"))
+        self.assertEqual(approvals.pending(self.root, WS), [])  # no card to answer
         got = jobs.load(self.root)
         self.assertEqual([(j["name"], j["mode"], j["workspace"]) for j in got], [("weekly", "auto", WS)])
-        with self.assertRaises(server._AppRefused):  # a second click (another tab)
-            server._approve_job_card(card["id"])
-        self.assertEqual(len(jobs.load(self.root)), 1)
-        note = server.chat_store.load(chat)["messages"][-1]
-        self.assertIn("Job created", note["content"])
+        self.assertEqual(jobs.take_proposals(self.root, chat), [])  # the outbox was emptied
+        [rec] = self.receipts()
+        self.assertEqual((rec["chat"], rec["bot"], rec["room"], rec["summary"], rec["job_id"]),
+                         (chat, "cmo", f"{WS}/dm-cmo", "New job: weekly", got[0]["id"]))
+        self.assertTrue(rec["result"].startswith("Job created: weekly"))
+        self.assertIn('"job_receipts"', out)
+        undone = approvals.undo_receipt(rec["id"], lambda u: server.job_cards.undo(self.root, u), self.root)
+        self.assertEqual(undone["status"], "undone")
+        self.assertEqual(jobs.load(self.root), [])
+        self.assertEqual(self.receipts(), [])
+        with self.assertRaises(ValueError):  # Undo runs once
+            approvals.undo_receipt(rec["id"], lambda u: server.job_cards.undo(self.root, u), self.root)
 
-    def test_failed_turn_still_shows_its_card(self):
+    def test_failed_turn_still_saves_its_job(self):
         chat, out = self.owner_ask(propose=[self.NEW], fail=True)
-        self.assertEqual([r["summary"] for r in approvals.pending(self.root, WS)], ["New job: weekly"])
-        self.assertIn('"app_actions"', out)
+        self.assertEqual([r["summary"] for r in self.receipts()], ["New job: weekly"])
+        self.assertEqual(len(jobs.load(self.root)), 1)
         self.assertEqual(jobs.take_proposals(self.root, chat), [])
 
-    def test_edited_card_saves_the_edit(self):
+    def test_change_and_delete_undo_to_what_was(self):
         self.owner_ask(propose=[self.NEW])
-        card = approvals.pending(self.root, WS)[0]
-        fields = dict(card["job"]["fields"], cap=2, mode="report")
-        server._approve_job_card(card["id"], fields)
-        self.assertEqual((jobs.load(self.root)[0]["cap"], jobs.load(self.root)[0]["mode"]), (2.0, "report"))
-
-    def test_bad_edit_and_stale_card_stay_pending(self):
-        self.owner_ask(propose=[self.NEW])
-        card = approvals.pending(self.root, WS)[0]
-        with self.assertRaises(server._AppRefused):
-            server._approve_job_card(card["id"], dict(card["job"]["fields"], schedule="whenever"))
-        bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})
-        with self.assertRaises(server._AppRefused):
-            server._approve_job_card(card["id"])
-        self.assertEqual(approvals.get(card["id"], self.root)["status"], "pending")
+        jid = jobs.load(self.root)[0]["id"]
+        self.owner_ask(propose=[{"op": "update", "job_id": jid, "fields": {"schedule": "every 30m"}}])
+        self.assertEqual(jobs.get(self.root, jid)["schedule"], "every 30m")
+        change = self.receipts()[0]
+        approvals.undo_receipt(change["id"], lambda u: server.job_cards.undo(self.root, u), self.root)
+        self.assertEqual(jobs.get(self.root, jid)["schedule"], "mon 09:00")
+        before = jobs.get(self.root, jid)
+        self.owner_ask(propose=[{"op": "delete", "job_id": jid}])
         self.assertEqual(jobs.load(self.root), [])
+        gone = self.receipts()[0]
+        approvals.undo_receipt(gone["id"], lambda u: server.job_cards.undo(self.root, u), self.root)
+        self.assertEqual(jobs.load(self.root), [before])
+
+    def test_old_pending_card_still_approves(self):
+        card = approvals.add_job(self.root, ws=WS, room=f"{WS}/dm-cmo", chat="c1", bot="cmo",
+                                 job={"op": "create", "job_id": None, "fields": dict(self.NEW["fields"])},
+                                 summary="New job: weekly", preview={})
+        done = server._approve_job_card(card["id"], dict(self.NEW["fields"], cap=2, mode="report"))
+        self.assertEqual(done["status"], "done", done)
+        self.assertEqual((jobs.load(self.root)[0]["cap"], jobs.load(self.root)[0]["mode"]), (2.0, "report"))
 
     def test_invalid_proposal_is_dropped_with_a_notice(self):
         chat, out = self.owner_ask(propose=[{"op": "create", "fields": dict(self.NEW["fields"], workspace="demo")}])
-        self.assertEqual(approvals.pending(self.root), [])
-        self.assertIn("Job proposal dropped", out)
+        self.assertEqual((approvals.pending(self.root), self.receipts(), jobs.load(self.root)), ([], [], []))
+        self.assertIn("Job not saved", out)
 
     def test_shared_thread_proposals_are_discarded(self):
         with mock.patch.object(server, "_shared_room", return_value=True):
             chat, _ = self.owner_ask(msg="@cmo hello", room=f"{WS}/general", propose=[self.NEW])
-        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual((approvals.pending(self.root), self.receipts(), jobs.load(self.root)), ([], [], []))
         self.assertEqual(jobs.take_proposals(self.root, chat), [])
 
     def test_job_turn_proposals_are_discarded(self):
@@ -406,7 +411,7 @@ class JobTurn(unittest.TestCase):
             yield ("done", {"cost": 0.01})
         with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
             out = self.run_job(mode="auto")
-        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual((approvals.pending(self.root), self.receipts(), jobs.load(self.root)), ([], [], []))
         self.assertEqual(jobs.take_proposals(self.root, out["chat"]), [])
 
     def test_team_endpoints(self):

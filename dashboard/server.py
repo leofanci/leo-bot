@@ -1985,8 +1985,9 @@ def _jobs_view(ws):
 
 
 def _job_cards_for_turn(chat, ws, room, bot_id, allowed, notice):
-    """Take this thread's job proposals; when `allowed`, hold each that still checks out as a
-    card (the turn's own workspace, room and bot, never the proposal's), else drop them."""
+    """Take this thread's job proposals; when `allowed`, apply each that still checks out (the
+    turn's own workspace, room and bot, never the proposal's) and return its receipt, with
+    Undo. Else drop them."""
     if not isinstance(chat, str) or not chat:
         return []
     try:
@@ -2002,12 +2003,14 @@ def _job_cards_for_turn(chat, ws, room, bot_id, allowed, notice):
             ok = job_cards.proposal(ROOT, thread_ws=ws, op=prop.get("op"), job_id=prop.get("job_id"),
                                     fields=prop.get("fields") if isinstance(prop.get("fields"), dict) else {},
                                     projects=projects)
+            line, undo, job_id = job_cards.apply(ROOT, {"ws": ws, "job": {k: ok[k] for k in ("op", "job_id", "fields")}},
+                                                 projects)
         except ValueError as e:
-            notice(f"Job proposal dropped: {e}")
+            notice(f"Job not saved: {e}")
             continue
-        cards.append(approvals.add_job(ROOT, ws=ws, room=(room or {}).get("id"), chat=chat, bot=bot_id,
-                                       job={k: ok[k] for k in ("op", "job_id", "fields")},
-                                       summary=ok["summary"], preview=ok["preview"]))
+        cards.append(approvals.add_job_receipt(ROOT, ws=ws, room=(room or {}).get("id"), chat=chat, bot=bot_id,
+                                               job_id=job_id, summary=ok["summary"], result=line, undo=undo,
+                                               preview=ok["preview"]))
     return cards
 
 
@@ -2152,7 +2155,7 @@ def _approve_job_card(aid, fields=None):
     if claimed.get("job") != rec.get("job"):
         return approvals.finish(aid, "failed", "Changed while it was being approved; nothing was saved.", ROOT)
     try:
-        status, line = "done", job_cards.apply(ROOT, claimed, projects)
+        status, line = "done", job_cards.apply(ROOT, claimed, projects)[0]
     except ValueError as e:
         status, line = "failed", f"Not saved: {e}"
     out = approvals.finish(aid, status, line, ROOT)
@@ -3631,20 +3634,23 @@ class Handler(BaseHTTPRequestHandler):
             elif isinstance(getattr(sess, "session_id", None), str):
                 skill_loads.clear(ROOT, sess.session_id)  # a stopped run: its loads never reach the next turn
             # Jobs this turn proposed (osctl propose-job), even when it failed or the client left:
-            # checked again from this thread's workspace, then held as cards. Never from a shared
-            # thread or a job's own turn.
+            # checked again from this thread's workspace, then applied with a receipt (Undo).
+            # Never from a shared thread, an invited person's or a job's own turn.
             def _quiet(fn, *a):
                 try:
                     fn(*a)
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # the client left; the card is saved in the thread
             try:
-                cards = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
-                                            allowed=not job and not shared and not person,
-                                            notice=lambda t: _quiet(notice, t))
+                receipts = _job_cards_for_turn(getattr(sess, "session_id", None), ws, room, bot_id,
+                                               allowed=not job and not shared and not person,
+                                               notice=lambda t: _quiet(notice, t))
             except Exception:  # noqa: BLE001 - the turn is still saved
                 traceback.print_exc()
-                cards = []
+                receipts = []
+            if receipts:
+                _quiet(emit, {"job_receipts": receipts, "msg": len(msgs) - 1})
+            cards = []
             try:
                 cards += _contradiction_cards_for_turn(
                     getattr(sess, "session_id", None), ws, room, bot_id,
@@ -3950,7 +3956,8 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
                 if path == "/api/approvals":
-                    return self._send(200, {"ws": ws, "approvals": approvals.pending(ROOT, ws)})
+                    return self._send(200, {"ws": ws, "approvals": approvals.pending(ROOT, ws),
+                                            "receipts": approvals.receipts(ROOT, ws)})
                 if path == "/api/costs":
                     return self._send(200, {"ws": ws, **_costs(ws, db.tree())})
                 bot_id = (qs.get("bot") or [""])[0]
@@ -4365,7 +4372,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(403, {"error": "forbidden"})
                 return self._runners_post(path, body, "owner")
             if path.startswith("/api/integrations/") or (
-                    path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject"))):
+                    path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject", "/undo"))):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 if path == "/api/integrations/key":
@@ -4437,6 +4444,11 @@ class Handler(BaseHTTPRequestHandler):
                 if path.startswith("/api/approvals/"):
                     aid = path[len("/api/approvals/"):].rsplit("/", 1)[0]
                     try:
+                        if path.endswith("/undo"):  # a job a bot set up: put it back as it was
+                            out = approvals.undo_receipt(aid, lambda u: job_cards.undo(ROOT, u), ROOT)
+                            if out.get("chat"):
+                                chat_store.append_note(out["chat"], out["bot"], out["result"])
+                            return self._send(200, out)
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
                         held = approvals.get(aid, ROOT) or {}
