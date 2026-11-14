@@ -183,6 +183,23 @@ class ClaudeCodeFlags(unittest.TestCase):
             self.assertNotIn("Bash", self.allowed(cmd))
             self.assertNotIn("--settings", cmd)
 
+    def test_sub_agents_on_private_turns_only(self):
+        cmd = self.cmd(gate=True)
+        self.assertIn("Task", self.tools(cmd))
+        self.assertIn("Task", self.allowed(cmd))
+        self.assertNotIn("Task", self.allowed(self.shell_cmd(gate=True, shared=True)))
+
+    def test_sub_agent_spend_is_counted_once_per_message(self):
+        run = {}
+        msg = {"id": "m1", "model": "claude-haiku-5-5",
+               "usage": {"input_tokens": 1000, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                         "output_tokens": 1000}}
+        sub = {"type": "assistant", "parent_tool_use_id": "t1", "message": msg}
+        self.assertTrue(claude_code.call_usage(sub, run, "haiku"))
+        self.assertFalse(claude_code.call_usage(sub, run, "haiku"))  # the same message's next block
+        self.assertAlmostEqual(run["cost"], (1000 * 0.10 + 1000 * 0.50) / 1_000_000)
+        self.assertFalse(claude_code.call_usage({"type": "assistant", "message": msg}, {}, "haiku"))  # the lead's
+
     def test_apps_without_a_gate_never_get_web(self):
         cmd = self.cmd(gate=False, apps_port=8765)
         self.assertNotIn("WebSearch", self.tools(cmd))

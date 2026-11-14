@@ -1498,6 +1498,10 @@ JOB_NOTES = {
         "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
         "line is ignored."),
 }
+AGENTS_NOTE = ("## Sub-agents\nFor a big job with independent parts (research 30 people, check several sites, "
+               "build and test separate pieces), start sub-agents with the Task tool so the parts run in "
+               "parallel. Each gets your tools and rules; give each a complete brief and merge what they "
+               "report. Small jobs: do them yourself.")
 SHELL_NOTE = (
     "## Shell (Full access)\n"
     "The owner gave you a full shell (Bash) for this work. Run commands inside your edit folders "
@@ -3259,6 +3263,8 @@ class Handler(BaseHTTPRequestHandler):
                 workspace = "\n\n".join(x for x in (workspace, API_NOTE) if x)
             elif engine.full_disk:
                 workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
+            if not locked and engine.id == chat_session.ClaudeCodeEngine.id:
+                workspace = "\n\n".join(x for x in (workspace, AGENTS_NOTE) if x)
             if getattr(sess, "shell", False):
                 workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
                     folders=", ".join(f"`{d}`" for d in edit_dirs))) if x)

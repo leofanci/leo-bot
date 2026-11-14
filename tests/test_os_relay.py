@@ -139,7 +139,7 @@ class SharedCommand(unittest.TestCase):
     def test_owner_threads_unchanged(self):
         s = chat_session.ChatSession(repo_dir=str(ROOT), rail="r")
         cmd = s._base_cmd(os_port=8765)
-        self.assertEqual(self.flag(cmd, "--tools"), ["Bash", "Read"])
+        self.assertEqual(self.flag(cmd, "--tools"), ["Bash", "Read", "Task"])
         self.assertNotIn("--mcp-config", cmd)
 
 
