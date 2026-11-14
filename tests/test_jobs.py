@@ -64,6 +64,17 @@ class Schedule(unittest.TestCase):
         with self.assertRaises(ValueError):
             jobs.restore(root, job)
 
+    def test_check_field(self):
+        ok = jobs.clean("check", '{"app": "Gmail", "action": "GMAIL_FETCH_EMAILS"}')
+        self.assertEqual(ok, {"app": "gmail", "action": "GMAIL_FETCH_EMAILS", "args": {}})
+        for empty in (None, "", {}):
+            self.assertIsNone(jobs.clean("check", empty))
+        for bad in ({"app": "gmail"}, {"app": "gmail", "action": "x"}, {"app": "g", "action": "A_B", "args": []},
+                    {"app": "g", "action": "A_B", "run": 1}, "not json",
+                    {"app": "g", "action": "A_B", "args": {"q": "x" * jobs.CHECK_MAX}}):
+            with self.assertRaises(ValueError, msg=bad):
+                jobs.clean("check", bad)
+
     def test_missed_runs_run_once(self):
         now = time.time()
         job = {"enabled": True, "schedule": "every 6h", "created": now - 10 * 86400,
@@ -297,6 +308,33 @@ class Osctl(unittest.TestCase):
         return self.run_osctl("propose-job", "--bot", bot, "--skill", skill, "--name", "weekly",
                               "--message", "review the week", "--schedule", "mon 09:00", "--cap", "0.5",
                               *extra, env=env)
+
+    def test_propose_job_with_a_check(self):
+        out = self.propose("--check-app", "gmail", "--check-action", "GMAIL_FETCH_EMAILS",
+                           "--check-args", '{"query": "is:unread"}')
+        self.assertTrue(out["ok"], out)
+        prop = jobs.take_proposals(self.root, "c1")[0]
+        self.assertEqual(prop["fields"]["check"], {"app": "gmail", "action": "GMAIL_FETCH_EMAILS",
+                                                   "args": {"query": "is:unread"}})
+        for extra in (("--check-app", "gmail"), ("--check-action", "send email"),
+                      ("--check-action", "GMAIL_FETCH_EMAILS", "--check-args", "[1]")):
+            self.assertFalse(self.propose(*extra)["ok"], extra)
+
+    def test_job_note_only_in_a_job_run(self):
+        job = jobs.create(self.root, ws="acme", bot="cmo", skill="positioning", name="w", message="m",
+                          schedule="every 1h", cap=None)
+        self.assertFalse(self.run_osctl("job-note", "--text", "x", env={"LEOBOT_WORKSPACE": "acme"})["ok"])
+        for mode in ("approval", "report", "auto"):  # any mode keeps its notepad
+            env = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_JOB": job["id"], "LEOBOT_JOB_MODE": mode,
+                   **({"LEOBOT_READONLY": "1"} if mode != "auto" else {})}
+            out = self.run_osctl("job-note", "--text", f"sent 3, {mode}", env=env)
+            self.assertTrue(out["ok"], out)
+            self.assertEqual(jobs.get(self.root, job["id"])["notes"], f"sent 3, {mode}")
+        big = "x" * (jobs.NOTES_MAX + 1)
+        self.assertFalse(self.run_osctl("job-note", "--text", big, env={"LEOBOT_JOB": job["id"]})["ok"])
+        self.assertFalse(self.run_osctl("job-note", "--text", "x", env={"LEOBOT_WORKSPACE": "acme",
+                                                                       "LEOBOT_SHARED": "1",
+                                                                       "LEOBOT_JOB": job["id"]})["ok"])
 
     def test_job_writes_are_gone(self):
         for cmd in ("create-job", "update-job", "delete-job"):

@@ -8,7 +8,11 @@ with Undo and Pause on the receipt); the owner also changes jobs on the Team scr
 job's own run never schedules more.
 
 Record: id, name, workspace, bot, skill, message, schedule, cap (dollars per rolling
-24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat.
+24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat; optional
+`check` ({"app", "action", "args"}: a connected-app read the server runs before the model;
+the run goes ahead only when its answer changed since `check_seen`, else it ends `quiet`
+at no cost) and `notes` (the job's notepad: the bot keeps it with `osctl job-note`, and
+every run's prompt carries it).
 
 Modes: `approval` (reads and drafts; every save waits for Approve), `auto` (creates and
 updates in Leo Bot by itself; deletes, memory and app writes still wait), `report` (reads
@@ -41,14 +45,18 @@ MIN_EVERY = 300
 MAX_JOBS = 50  # across workspaces: a runaway bot cannot pile up recurring spend
 NAME_MAX = 60
 MESSAGE_MAX = 2000
-STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted"}
+STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted", "quiet"}
+NOTES_MAX = 16000
+CHECK_MAX = 2000  # the check's JSON, args included
+_ACTION_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,99}$")
+_APP_RE = re.compile(r"^[a-z0-9_]{1,60}$")
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _EVERY_RE = re.compile(r"^every\s+(\d{1,4})\s*([mhd])$")
 _WEEKLY_RE = re.compile(r"^([a-z,\s]+?)\s+(\d{1,2}):(\d{2})$")
 _ONCE_RE = re.compile(r"^once\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$")
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 MODES = ("approval", "auto", "report")
-_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode"}
+_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode", "check", "notes"}
 PROPOSALS_PER_CHAT = 5
 PROPOSAL_TTL = 86400  # a proposal no turn collected (crash, spoofed thread) is dropped
 
@@ -217,14 +225,37 @@ def clean(field, value):
         if v not in MODES:
             raise ValueError(f"mode: one of {', '.join(MODES)}")
         return v
+    if field == "notes":
+        v = str(value or "").strip()
+        if len(v) > NOTES_MAX:
+            raise ValueError(f"notes: at most {NOTES_MAX} characters")
+        return v
+    if field == "check":  # optional: None or "" means no check (runs on its schedule alone)
+        if value is None or value == "" or value == {}:
+            return None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except ValueError:
+                raise ValueError("check: JSON {\"app\", \"action\", \"args\"}") from None
+        if not isinstance(value, dict) or set(value) - {"app", "action", "args"}:
+            raise ValueError("check: {\"app\", \"action\", \"args\"} only")
+        app, action = str(value.get("app") or "").strip().lower(), str(value.get("action") or "").strip()
+        args = value.get("args") if value.get("args") is not None else {}
+        if not _APP_RE.match(app) or not _ACTION_RE.match(action) or not isinstance(args, dict):
+            raise ValueError("check: an app slug, a READ action slug (e.g. GMAIL_FETCH_EMAILS) and args as an object")
+        v = {"app": app, "action": action, "args": args}
+        if len(json.dumps(v)) > CHECK_MAX:
+            raise ValueError(f"check: at most {CHECK_MAX} characters")
+        return v
     raise ValueError(f"unknown field {field}")
 
 
-def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", now=None):
+def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", check=None, now=None):
     job = {"id": uuid.uuid4().hex[:8], "name": clean("name", name), "workspace": clean("workspace", ws),
            "bot": clean("bot", bot), "skill": clean("skill", skill), "message": clean("message", message),
            "schedule": clean("schedule", schedule), "cap": clean("cap", cap),
-           "mode": clean("mode", mode), "enabled": True,
+           "mode": clean("mode", mode), "enabled": True, "check": clean("check", check), "notes": "",
            "created": time.time() if now is None else now, "last_run": None, "last_status": None,
            "last_chat": None}
 
@@ -294,6 +325,17 @@ def mark_start(root, job_id, now):
             job["enabled"] = False  # one run: off after it, kept for its record
         return dict(job)
     return _change(root, fn)
+
+
+def set_check_seen(root, job_id, digest):
+    """What the job's check answered on the run that just went through: the next run waits
+    for something different."""
+    def fn(data):
+        try:
+            _find(data, job_id)["check_seen"] = str(digest)
+        except LookupError:  # deleted while it ran
+            pass
+    _change(root, fn)
 
 
 def mark_end(root, job_id, status, chat=None):

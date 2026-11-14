@@ -186,6 +186,12 @@ The Team screen lists every job: where and when it runs, how the last run went (
 link to its thread), and its mode, cap, on/off and delete. Schedule, message and skill
 change through a bot's card.
 
+- A job may have a check: a read of one of the bot's connected apps (say, unread mail)
+  that the server runs before each run. The model runs only when the answer changed since
+  the last run that went through; otherwise the run ends `quiet` and costs nothing.
+- Each job has a notepad the bot keeps itself (`osctl job-note`): every run's prompt
+  carries it, so work spread over days (sent 12 of 30, who replied) continues where it
+  stopped.
 - Each run is its own thread in the bot's DM, titled `Job: <name>`. It gets the same tools
   as a private chat turn: web search, the bot's connected apps, its linked folders.
 - A job's message was written by a bot, so a site named in it is never opened: a job
