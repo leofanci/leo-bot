@@ -30,8 +30,10 @@ needs no typing (a one-click canned reply) is not detected, nor text in cross-or
 frames or closed shadow roots.
 """
 import copy
+import hashlib
 import json
 import math
+import re
 import threading
 import unicodedata
 from pathlib import Path
@@ -114,6 +116,10 @@ BAD_KEY = ("This key could type or act on the page, so it was not pressed. Keys 
 BAD_TEXT = 'fill and type need "text": plain text on one line. This call was not performed.'
 CONTROL_TEXT = ("Text with a line break or another control character is not typed, because it could press Enter. "
                 "Type it as one line. This call was not performed.")
+# In the owner's Chrome the engine sees every tab: a bot keeps to its own pinned tab.
+CHROME_TAB_TOOLS = frozenset("agent_browser_" + n for n in ("tab_list", "tab_switch", "tab_close", "tab_new"))
+CHROME_TABS = ("Tab tools are off in the owner's Chrome, so other tabs stay private. Use agent_browser_open in "
+               "this bot's own tab. This call was not performed.")
 READ_URL = "Open the page first with agent_browser_open, then read it without a url. This call was not performed."
 UNKNOWN_PAGE = "The browser could not tell which page it is on, so the result was withheld. Open a page to go on."
 NO_CHECK = "The page could not be checked for typed text, so nothing was clicked."
@@ -143,6 +149,32 @@ PLAN_SCHEMA = {
 _LOCK = threading.Lock()
 
 
+MAX_SESSION = 24
+_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # no "--" and no dash at either end
+_HASHED = re.compile(r"h[0-9a-f]{8}")  # the shape of a hashed part: such an id is hashed too
+
+
+def session_part(value):
+    """A workspace or bot id as one part of a session name: itself when it is a plain slug,
+    else "h" + 8 hex of its sha256, so "<ws>--<bot>" always names one pair."""
+    text = value if isinstance(value, str) else str(value)
+    if _SLUG.fullmatch(text) and not _HASHED.fullmatch(text):
+        return text
+    return "h" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+
+
+def session_name(ws, bot, mode):
+    """bot: "<ws>--<bot>"; my_chrome: "<ws>--<bot>--chrome". A name over MAX_SESSION characters
+    becomes "x" + 16 hex of its sha256 (+ "c" for my_chrome): no "--" in it, so it never equals
+    a plain name, and the two modes still differ. The name does not depend on HOME."""
+    base = f"{session_part(ws)}--{session_part(bot)}"
+    name = base if mode == "bot" else base + "--chrome"
+    if len(name) <= MAX_SESSION:
+        return name
+    short = "x" + hashlib.sha256(base.encode()).hexdigest()[:16]
+    return short if mode == "bot" else short + "c"
+
+
 def browser_key_for(mode, ws, bot):
     """Which real browser a bot drives: its own bot browser, or the one owner Chrome every
     my_chrome bot shares. The call lock follows this key (lock_key)."""
@@ -154,7 +186,7 @@ def typed_key_for(mode, ws, bot, session=None):
     Chrome ("my_chrome:<session>"), so another bot's tab never moves it."""
     if mode != "my_chrome":
         return browser_key_for(mode, ws, bot)
-    return f"my_chrome:{session or f'{ws}--{bot}'}"
+    return f"my_chrome:{session or session_name(ws, bot, mode)}"
 
 
 class Upstream:
@@ -462,6 +494,8 @@ def _gate(frame, ctx, sid, upstream, root):
     if level == "read" and name not in READ_TOOLS and name not in NAV_TOOLS:
         return _text(rid, READ_LEVEL.format(name=name)), sid
     mode = _mode_of(upstream, setting)
+    if mode == "my_chrome" and name in CHROME_TAB_TOOLS:
+        return _text(rid, CHROME_TABS), sid
     if name == PLAN_TOOL:
         return _plan(rid, arguments, ctx, setting, mode, root), sid
     if name == READ and "url" in arguments:  # a fetch of another page is a hidden navigation
@@ -575,6 +609,9 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT):
     if method == "tools/list" and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         tools = reply["result"].get("tools") or []
         schemas = _state(upstream)["schemas"]  # the engine's own inputs per tool, for _clean
+        hidden = CHROME_TAB_TOOLS if _mode_of(upstream, browser.bot_setting(ctx["ws"], ctx["bot"], root)) == "my_chrome" \
+            else frozenset()
         reply["result"]["tools"] = [_strip_schema(t, schemas) for t in tools
-                                    if isinstance(t, dict) and t.get("name") in KNOWN] + [dict(PLAN_SCHEMA)]
+                                    if isinstance(t, dict) and t.get("name") in KNOWN and t["name"] not in hidden] \
+            + [dict(PLAN_SCHEMA)]
     return reply, sid

@@ -468,6 +468,47 @@ class SharedChrome(Base):
         self.assertEqual(text(self.relay(self.b, "b2", P + "get_text", selector="@e1")), bu.TAB_RESET)
         self.assertEqual(browser_relay.typed_state(self.a.typed_key, self.root), {"typed": "mine", "aside": ""})
 
+    def test_tab_tools_refused_and_hidden_in_my_chrome(self):
+        ctx = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}
+        listed, _ = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, ctx, "s-1", self.a, self.root)
+        names = [t["name"] for t in listed["result"]["tools"]]
+        self.assertTrue(names)
+        self.assertFalse(set(names) & browser_relay.CHROME_TAB_TOOLS)
+        before = len(self.log("call"))
+        for name in sorted(browser_relay.CHROME_TAB_TOOLS):
+            reply = self.relay(self.a, "b1", name, tabId="t1")
+            self.assertEqual(text(reply), browser_relay.CHROME_TABS, name)
+            self.assertNotIn("\u2014", text(reply))
+        self.assertEqual(len(self.log("call")), before)  # nothing reached the engine
+
+    def test_bot_mode_keeps_tab_tools(self):
+        from core import browser
+        browser.set_bot("demo", "b3", "act", "bot", self.root)
+        up = self.pool.get("demo", "b3", "bot", self.root)
+        ctx = {"ws": "demo", "bot": "b3", "chat": "c1", "room": "demo/general", "person": "ceo"}
+        listed, _ = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, ctx, "s-1", up, self.root)
+        self.assertTrue(browser_relay.CHROME_TAB_TOOLS <= {t["name"] for t in listed["result"]["tools"]})
+        reply = browser_relay.handle(call(2, P + "tab_list"), ctx, "s-1", up, self.root)[0]
+        self.assertNotEqual(text(reply), browser_relay.CHROME_TABS)
+        self.assertIn(P + "tab_list", [c["name"] for c in self.log("call")])
+
+    def test_tab_reset_still_works_with_tab_tools_off(self):
+        self.relay(self.a, "b1", P + "open", url=self.page)
+        self.control(tab_gone_on=P + "get_text")
+        self.assertEqual(text(self.relay(self.a, "b1", P + "get_text", selector="@e1")), bu.TAB_RESET)
+        self.assertIn(P + "tab_new", [c["name"] for c in self.log("call")])
+
+    def test_fallback_typed_key_matches_upstream(self):
+        ws, bot = "acme-workspace-long", "social-media-bot"
+        up = bu.BrowserUpstream(ws, bot, "my_chrome", self.root)
+        self.assertRegex(up.session, r"^x[0-9a-f]{16}c$")
+        self.assertEqual(browser_relay.typed_key_for("my_chrome", ws, bot), up.typed_key)
+
+        class Bare(browser_relay.Upstream):
+            mode = "my_chrome"
+        self.assertEqual(browser_relay._keys_of(Bare(), "my_chrome", {"ws": ws, "bot": bot}),
+                         ("my_chrome", up.typed_key))
+
     def test_two_bots_still_one_call_at_a_time(self):
         held = []
         for up in (self.a, self.b):

@@ -28,7 +28,6 @@ inside the dashboard server. The server starts POOL's sweeper (idle children clo
 IDLE_SECONDS) and closes them all when it stops.
 """
 import copy
-import hashlib
 import http.client
 import json
 import os
@@ -46,6 +45,7 @@ from urllib.parse import urlparse
 
 from core import bots, browser_engine
 from dashboard import browser_relay
+from dashboard.browser_relay import MAX_SESSION, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
 
 NAMESPACE = "leobot"
@@ -57,7 +57,6 @@ CONNECT_SECONDS = 0.5
 POLL_SECONDS = 0.25
 STATE_EXPIRE_DAYS = 365
 SOCKET_MAX, SOCKET_FIXED = 103, 37
-MAX_SESSION = 24
 PROTOCOL = "2024-11-05"
 KEY_NAME = "browser-engine-key"
 CONFIG_NAME = "agent-browser.json"
@@ -67,8 +66,6 @@ CONFIG = {"headed": False, "autoConnect": False}
 # Server variables the child may see. Nothing else passes: no AGENT_BROWSER_* setting, no token.
 PARENT_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG",
               "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT")
-_SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # no "--" and no dash at either end
-_HASHED = re.compile(r"h[0-9a-f]{8}")  # the shape of a hashed part: such an id is hashed too
 _HEX_KEY = re.compile(r"[0-9a-f]{64}")
 _WS_PATH = re.compile(r"/devtools/browser/[A-Za-z0-9-]+")
 # Chrome's user data dirs that hold DevToolsActivePort (docs/browser.md, "Attach to a running Chrome").
@@ -123,14 +120,6 @@ def _read_key(root):
     return key if _HEX_KEY.fullmatch(key) else None
 
 
-def session_part(value):
-    """A workspace or bot id as one part of a session name: itself when it is a plain slug,
-    else "h" + 8 hex of its sha256, so "<ws>--<bot>" always names one pair."""
-    text = value if isinstance(value, str) else str(value)
-    if _SLUG.fullmatch(text) and not _HASHED.fullmatch(text):
-        return text
-    return "h" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
-
 
 def _home(home=None):
     """HOME as the engine's socket path starts: real path, no trailing slash."""
@@ -144,17 +133,6 @@ def session_fits(session, home=None):
     used = SOCKET_FIXED + len(NAMESPACE.encode()) + len(_home(home).encode()) + len(session.encode())
     return used <= SOCKET_MAX
 
-
-def session_name(ws, bot, mode):
-    """bot: "<ws>--<bot>"; my_chrome: "<ws>--<bot>--chrome". A name over MAX_SESSION characters
-    becomes "x" + 16 hex of its sha256 (+ "c" for my_chrome): no "--" in it, so it never equals
-    a plain name, and the two modes still differ. The name does not depend on HOME."""
-    base = f"{session_part(ws)}--{session_part(bot)}"
-    name = base if mode == "bot" else base + "--chrome"
-    if len(name) <= MAX_SESSION:
-        return name
-    short = "x" + hashlib.sha256(base.encode()).hexdigest()[:16]
-    return short if mode == "bot" else short + "c"
 
 
 def engine_dirs(root):
