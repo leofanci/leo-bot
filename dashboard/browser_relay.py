@@ -29,6 +29,7 @@ is the send text whatever was typed, more than one is refused. Residual risk: a 
 needs no typing (a one-click canned reply) is not detected, nor text in cross-origin
 frames or closed shadow roots.
 """
+import copy
 import json
 import math
 import threading
@@ -518,6 +519,15 @@ def _strip_schema(tool, schemas):
         if isinstance(schema.get("required"), list):
             schema["required"] = [k for k in schema["required"] if k in schema["properties"]]
     return tool
+
+
+def learn_schemas(upstream, tools):
+    """Fill the per-tool input allowlist from an engine tools/list, before any bot asks for
+    one (the upstream calls it when its child starts)."""
+    schemas = _state(upstream)["schemas"]
+    for tool in tools:
+        if isinstance(tool, dict) and isinstance(tool.get("name"), str):
+            _strip_schema(copy.deepcopy(tool), schemas)
 
 
 def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT):

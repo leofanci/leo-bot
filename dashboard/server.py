@@ -58,6 +58,7 @@ import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard import taint  # noqa: E402
+from dashboard import browser_upstream  # noqa: E402
 from core import provenance  # noqa: E402  (one registry: the API engine imports it by this name)
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
 from dashboard.engines.base import EngineRefused  # noqa: E402
@@ -4691,6 +4692,10 @@ def main():
                 live.close()
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            browser_upstream.POOL.close_all()  # engine children; the owner's Chrome stays open
+        except Exception:  # noqa: BLE001
+            pass
         remove_uploads()
         chat_session.remove_bot_tmpdir()
         remove_token_file()
@@ -4709,7 +4714,8 @@ def main():
     # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
     job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
                       threads=chat_store.records, post=chat_store.post_note,
-                      activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
+                      activity=lambda: (_JOB_RUN["live"] or {}).get("active"),
+                      every_tick=(browser_upstream.POOL.sweep,)).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).
