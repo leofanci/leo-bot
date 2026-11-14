@@ -105,17 +105,37 @@ class Tick(Base):
         self.assertEqual(jobs.get(self.root, job["id"])["last_status"], "interrupted")
         self.assertEqual(r.tick(), [])
 
-    def test_timeout_stops_the_turn(self):
+    def test_an_idle_run_is_stopped(self):
         job = self.make()
         stopped = threading.Event()
 
         def run_turn(j):
             stopped.wait(5)
             return {"status": "failed"}
-        with mock.patch.object(job_runner, "JOB_TURN_SECONDS", 0.05):
+        with mock.patch.object(job_runner, "IDLE_SECONDS", 0.05), mock.patch.object(job_runner, "WATCH_EVERY", 0.01):
             self.runner(run_turn, stop_turn=stopped.set).tick()
         self.assertTrue(stopped.is_set())
         self.assertEqual(jobs.get(self.root, job["id"])["last_status"], "timeout")
+
+    def test_a_working_run_keeps_going_past_the_idle_limit(self):
+        job = self.make()
+        stopped = threading.Event()
+
+        def run_turn(j):
+            time.sleep(0.3)  # six idle limits long, busy all along
+            return {"status": "done"}
+        r = self.runner(run_turn, stop_turn=stopped.set)
+        r.activity = time.time  # an event just now, every time it is asked
+        with mock.patch.object(job_runner, "IDLE_SECONDS", 0.05), mock.patch.object(job_runner, "WATCH_EVERY", 0.01):
+            r.tick()
+        self.assertFalse(stopped.is_set())
+        self.assertEqual(jobs.get(self.root, job["id"])["last_status"], "done")
+        with mock.patch.object(job_runner, "MAX_TURN_SECONDS", 0.1), mock.patch.object(job_runner, "IDLE_SECONDS", 60), \
+                mock.patch.object(job_runner, "WATCH_EVERY", 0.01):
+            jobs.update(self.root, job["id"], enabled=True)
+            r.now = lambda: self.clock() + 86400
+            r.tick()
+        self.assertTrue(stopped.is_set())  # the backstop
 
     def test_exception_is_failed_and_others_still_run(self):
         bad = self.make(name="bad", ago=9 * 3600)

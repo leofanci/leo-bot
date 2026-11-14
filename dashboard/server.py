@@ -1565,6 +1565,20 @@ def _score_job(job):
     return {**out, "status": status}
 
 
+class _Activity(io.BytesIO):
+    """A job turn's unread SSE stream: every event written to it (text, a tool, spend) is
+    activity for the job watchdog (job_runner.IDLE_SECONDS)."""
+
+    def __init__(self, live):
+        super().__init__()
+        self.live = live
+        live["active"] = time.time()
+
+    def write(self, data):
+        self.live["active"] = time.time()
+        return super().write(data)
+
+
 def run_job(job, srv):
     """One run of a scheduled job (core/jobs.py) through the normal ask path, on a handler
     with no socket: `@bot /skill message` in the bot's DM, a fresh thread with chat's tools.
@@ -1584,7 +1598,7 @@ def run_job(job, srv):
     live = {}
     _JOB_RUN["live"] = live
     h = Handler.__new__(Handler)
-    h.wfile = io.BytesIO()  # the SSE stream nobody reads: the thread is saved as usual
+    h.wfile = _Activity(live)  # the SSE stream nobody reads (the thread is saved as usual): its writes are activity
     h.client_address = ("job", 0)
     h.server = srv
     h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
@@ -1632,7 +1646,7 @@ def _job_check(job):
 
 
 def stop_job():
-    """JOB_TURN_SECONDS passed: stop the job turn in flight (the lead and any teammate). No
+    """The job watchdog fired (no activity for IDLE_SECONDS, or the backstop): stop the job turn in flight (the lead and any teammate). No
     teammate or follow-up run starts after it."""
     live = _JOB_RUN["live"]
     if live is not None:
@@ -4712,7 +4726,8 @@ def main():
     _start_update_checker()
     # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
     job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
-                      threads=chat_store.records, post=chat_store.post_note).start()
+                      threads=chat_store.records, post=chat_store.post_note,
+                      activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

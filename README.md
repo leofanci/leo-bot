@@ -215,7 +215,9 @@ change through a bot's card.
   cap is never exceeded), and consults only teammates whose engine does too. ACP agents
   report neither, so they run no jobs. At most 50 jobs exist at once.
 - One job runs at a time. A run that was missed while Leo Bot was off runs once when it
-  starts again, never once per missed slot. A run stops after 30 minutes, teammates included.
+  starts again, never once per missed slot. A run goes on as long as it keeps working (no
+  step limit); it is stopped after 10 minutes with no activity, teammates included, and
+  after 6 hours in any case.
 - Each morning from 08:00 a digest thread in HQ's #general lists what ran, what it cost,
   which memory lists were tidied and what waits for your approval. It costs nothing.
 

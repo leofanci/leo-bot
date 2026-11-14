@@ -321,6 +321,20 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(out["status"], "failed")
         self.assertEqual(out["detail"], "boom")
 
+    def test_every_event_of_a_job_run_is_activity(self):
+        seen = []
+        test = self
+
+        def ask(sess, text, **kw):
+            seen.append(server._JOB_RUN["live"]["active"])
+            time.sleep(0.01)
+            yield ("delta", "working")
+            seen.append(server._JOB_RUN["live"]["active"])
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            test.run_job(mode="auto")
+        self.assertGreater(seen[1], seen[0])
+
     def test_stop_job_closes_the_turn_in_flight(self):
         closed = []
         test = self
