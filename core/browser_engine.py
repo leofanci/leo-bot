@@ -25,7 +25,8 @@ INSTALL_TIMEOUT = 600
 _INSTALL_HINT = "Install it from Settings, or run: npm install --prefix {dir} agent-browser@{v}"
 
 _P = "agent_browser_"
-# Reads that change nothing on the page. screenshot writes a file under the engine's own folder.
+# Reads that change nothing on the page. screenshot writes an image file, and its path and
+# screenshotDir inputs are caller-controlled: the relay must strip them.
 READ_TOOLS = frozenset(_P + n for n in (
     "read", "snapshot", "screenshot", "scroll", "get_text", "get_url", "get_title",
     "wait_ms", "wait_for_selector", "wait_for_text", "wait_for_load"))
@@ -51,7 +52,9 @@ def _usable(p):
 
 
 def resolve(env=os.environ):
-    """The engine binary to run, or None. Env override, then the pinned data-dir copy, then PATH."""
+    """The engine binary to run, or None. Env override, then the pinned data-dir copy, then PATH.
+
+    A set but unusable LEOBOT_AGENT_BROWSER returns None and does not fall through."""
     given = env.get(ENV_VAR)
     if given:
         p = Path(given).expanduser()
@@ -76,19 +79,30 @@ def install():
     folder = _tool_dir()
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        steps = [["npm", "install", "--prefix", str(folder), f"{BINARY_NAME}@{VERSION}"],
-                 [str(_pinned_binary()), "install"]]
-        for argv in steps:
-            r = subprocess.run(argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
-            if r.returncode != 0:
-                tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
-                return {"state": "missing", "detail": f"{argv[0]} failed: " + " ".join(tail)}
-    except FileNotFoundError:
-        return {"state": "missing", "detail": "npm not found. Install Node.js, then try again."}
-    except subprocess.TimeoutExpired:
-        return {"state": "missing", "detail": f"install timed out after {INSTALL_TIMEOUT}s"}
     except OSError as e:
         return {"state": "missing", "detail": f"install failed: {e}"}
+    for step in ("npm", "engine"):
+        if step == "npm":
+            argv = ["npm", "install", "--prefix", str(folder), f"{BINARY_NAME}@{VERSION}"]
+        else:
+            if not _usable(_pinned_binary()):
+                return {"state": "missing", "detail": "npm installed but the engine binary is missing"}
+            argv = [str(_pinned_binary()), "install"]
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
+        except FileNotFoundError:
+            what = "npm not found. Install Node.js, then try again." if step == "npm" \
+                else f"engine binary could not be launched: {argv[0]}"
+            return {"state": "missing", "detail": what}
+        except subprocess.TimeoutExpired:
+            return {"state": "missing", "detail": f"{step} install timed out after {INSTALL_TIMEOUT}s"}
+        except OSError as e:
+            return {"state": "missing", "detail": f"{step} install failed: {e}"}
+        if r.returncode != 0:
+            tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+            return {"state": "missing", "detail": f"{step} failed: " + " ".join(tail)}
+    if not _usable(_pinned_binary()):
+        return {"state": "missing", "detail": "npm installed but the engine binary is missing"}
     return status()
 
 

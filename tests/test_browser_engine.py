@@ -84,5 +84,58 @@ class ToolSets(unittest.TestCase):
             self.assertIn("agent_browser_" + t, be.TYPE_TOOLS)
 
 
+class Install(unittest.TestCase):
+    def _run(self, side_effect, make_binary=True):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        data = Path(d.name) / "data"
+        binary = data / "tools" / "agent-browser" / be.VERSION / "node_modules" / ".bin" / "agent-browser"
+        calls = []
+
+        def fake(argv, **kw):
+            calls.append(argv)
+            if make_binary and argv[0] == "npm":
+                _exe(binary)
+            if isinstance(side_effect, BaseException):
+                raise side_effect
+            return side_effect
+
+        with mock.patch.object(paths, "DATA", data), mock.patch("subprocess.run", fake), \
+                mock.patch("shutil.which", return_value=None):
+            return be.install(), calls
+
+    def test_npm_missing(self):
+        st, _ = self._run(FileNotFoundError())
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("npm not found", st["detail"])
+
+    def test_timeout(self):
+        import subprocess
+        st, _ = self._run(subprocess.TimeoutExpired("npm", 1))
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("timed out", st["detail"])
+
+    def test_nonzero_exit(self):
+        r = mock.Mock(returncode=1, stderr="boom\n", stdout="")
+        st, calls = self._run(r)
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("boom", st["detail"])
+        self.assertEqual(len(calls), 1)
+
+    def test_binary_missing_after_npm(self):
+        r = mock.Mock(returncode=0, stderr="", stdout="")
+        st, calls = self._run(r, make_binary=False)
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("engine binary is missing", st["detail"])
+        self.assertEqual(len(calls), 1)
+
+    def test_success_runs_npm_then_engine_install(self):
+        r = mock.Mock(returncode=0, stderr="", stdout="")
+        st, calls = self._run(r)
+        self.assertEqual(st["state"], "ready")
+        self.assertEqual([c[0] == "npm" for c in calls], [True, False])
+        self.assertEqual(calls[1][1:], ["install"])
+
+
 if __name__ == "__main__":
     unittest.main()
