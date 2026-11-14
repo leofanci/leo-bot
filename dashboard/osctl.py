@@ -44,7 +44,9 @@ _BLOCKED_IN_WORKSPACE = {"create-project"}
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
                    "resolve-id", "get-memory", "recall", "get-busy", "get-subsections",
-                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions", "get-skill", "code-context"}
+                   "get-brief-spec", "get-voice", "research-signal", "list-assumptions", "get-skill", "code-context",
+                   # A job run's own notepad (core/jobs.py): no content changes, so any mode keeps it.
+                   "job-note"}
 # Commands that send text off the machine: off in a thread that read an app,
 # like WebSearch (chat_session.APPS_USED_ENV). That thread runs an ALLOWLIST: a new command
 # is refused there until it is added to _LOCAL_CMDS (tests/test_jobs.py fails on any
@@ -58,7 +60,7 @@ _LOCAL_CMDS = frozenset({
     "delete-experiment", "delete-feature", "delete-memo", "delete-phase", "delete-strategy",
     "delete-voice", "generate-brief", "generate-plan", "get-brief-spec", "get-busy",
     "get-id-catalog", "get-memory", "get-posts", "get-project", "get-skill", "get-subsections", "get-voice",
-    "extract-assumptions", "list-assumptions", "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
+    "extract-assumptions", "job-note", "list-assumptions", "list-jobs", "mark-done", "propose-job", "read-file", "recall", "remember", "resolve-id",
     "revise-post", "set-metric", "set-status", "tree", "update-brief", "update-brief-spec",
     "update-channel", "update-experiment", "update-feature", "update-intake", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-roadmap",
@@ -77,7 +79,7 @@ _SHARED_BLOCKED = {"remember", "research-signal", "extract-assumptions",  # rese
                    # A guest's question must not steer a read of the owner's code.
                    "code-context",
                    # Scheduled jobs: proposed from the owner's own threads only, never a job turn.
-                   "propose-job", "list-jobs",
+                   "propose-job", "list-jobs", "job-note",
                    # Picks which connected app a scoring job reads: the owner's call, not a guest's.
                    "set-metric"}
 # An Auto job (LEOBOT_JOB set, not read-only) creates and updates by itself: an ALLOWLIST
@@ -96,7 +98,7 @@ _AUTO_ALLOWED = frozenset({
     "create-milestone", "create-phase", "create-product", "create-profile", "create-project",
     "create-strategy", "create-technical", "create-voice", "generate-brief", "generate-plan",
     "get-brief-spec", "get-busy", "get-id-catalog", "get-memory", "get-posts", "get-project",
-    "get-skill", "get-subsections", "get-voice", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
+    "get-skill", "get-subsections", "get-voice", "job-note", "list-assumptions", "list-jobs", "mark-done", "read-file", "recall",
     "research-signal", "resolve-id", "revise-post", "set-status", "tree", "update-brief",
     "update-channel", "update-experiment", "update-feature", "update-memo", "update-milestone",
     "update-phase", "update-post", "update-profile", "update-project", "update-strategy",
@@ -466,6 +468,10 @@ def _build_parser():
     p.add_argument("--cap", help="dollars per 24 hours for this job; 0 or omit for no cap")
     p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
     p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
+    p.add_argument("--check-app", help="run only when this connected app has something new (with --check-action)")
+    p.add_argument("--check-action", help="a READ action slug of that app, e.g. GMAIL_FETCH_EMAILS; "
+                                          "'none' on a change: run on the schedule alone")
+    p.add_argument("--check-args", help="that action's arguments as a JSON object")
 
     def _propose_job(a):
         chat = (os.environ.get("LEOBOT_CHAT") or "").strip()
@@ -480,6 +486,17 @@ def _build_parser():
         names = ("name", "message", "schedule", "cap", "skill", "mode") if op == "update" else (
             ("bot", "skill", "name", "message", "schedule", "cap", "mode") if op == "create" else ())
         fields = {k: getattr(a, k) for k in names if getattr(a, k) is not None}
+        if a.check_action and op != "delete":
+            if a.check_action.lower() == "none":
+                fields["check"] = ""
+            else:
+                try:
+                    args = json.loads(a.check_args) if a.check_args else {}
+                except ValueError:
+                    raise fileops.ActionError("--check-args must be a JSON object") from None
+                fields["check"] = {"app": a.check_app or "", "action": a.check_action, "args": args}
+        elif a.check_app or a.check_args:
+            raise fileops.ActionError("--check-app and --check-args need --check-action")
         if op == "create" and a.project:
             fields["workspace"] = a.project
         try:
@@ -493,6 +510,22 @@ def _build_parser():
                 "note": "Saved when your reply ends (only in the owner's private thread); the owner "
                         "sees it with Undo and Pause. Do not add an APPROVAL: line for it."}
     p.set_defaults(_run=_propose_job)
+
+    p = sub.add_parser("job-note", help="In a scheduled job's run: replace this job's notepad (what the "
+                                        "next run should know: progress, who answered, what is left)")
+    p.add_argument("--text", help="the whole notepad; stdin when omitted")
+
+    def _job_note(a):
+        jid = (os.environ.get("LEOBOT_JOB") or "").strip()
+        if not jid:
+            raise fileops.ActionError("job-note works only inside a scheduled job's run")
+        text = a.text if a.text is not None else sys.stdin.read()
+        try:
+            job = jobs.update(bots.ROOT, jid, notes=text)
+        except (LookupError, ValueError) as e:
+            raise fileops.ActionError(str(e)) from None
+        return {"saved": len(job.get("notes") or ""), "max": jobs.NOTES_MAX}
+    p.set_defaults(_run=_job_note)
 
     p = sub.add_parser("list-jobs", help="Scheduled jobs (this workspace's, or every one from HQ)")
     p.set_defaults(_run=lambda a: {"jobs": [jobs.view(j) for j in jobs.load(bots.ROOT)

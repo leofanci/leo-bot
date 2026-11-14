@@ -143,6 +143,50 @@ class JobTurn(unittest.TestCase):
         rec = server.chat_store.load(out["chat"])
         self.assertEqual(rec["messages"][-1].get("skill"), "positioning")
 
+    def checked(self, answer, **kw):
+        job = self.job(check={"app": "gmail", "action": "GMAIL_FETCH_EMAILS", "args": {}}, **kw)
+        side = answer if isinstance(answer, Exception) else None
+        with mock.patch.object(server.composio, "read_metric", return_value=answer, side_effect=side) as read:
+            out = server.run_job(job, self.srv)
+        return out, read
+
+    def test_check_runs_the_model_only_on_something_new(self):
+        jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="inbox", message="m",
+                    schedule="every 5m", cap=None)
+        jid = jobs.load(self.root)[0]["id"]
+        out, read = self.checked({"data": [{"id": "m1"}]}, id=jid)
+        self.assertEqual(out["status"], "waiting")
+        self.assertEqual(read.call_args.args[:5], ("gmail", "GMAIL_FETCH_EMAILS", {}, WS, "cmo"))
+        self.assertIn("answered something new", self.asks[0]["text"])
+        seen = jobs.get(self.root, jid)["check_seen"]
+        out, _ = self.checked({"data": [{"id": "m1"}]}, id=jid, check_seen=seen)
+        self.assertEqual((out["status"], out["cost"], len(self.asks)), ("quiet", 0.0, 1))  # no model turn
+        out, _ = self.checked({"data": [{"id": "m2"}]}, id=jid, check_seen=seen)
+        self.assertEqual((out["status"], len(self.asks)), ("waiting", 2))
+        self.assertNotEqual(jobs.get(self.root, jid)["check_seen"], seen)
+
+    def test_failed_check_runs_nothing(self):
+        out, _ = self.checked(server.composio.ComposioError("no gmail account is connected for acme"))
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("no gmail account", out["detail"])
+        self.assertEqual(self.asks, [])
+
+    def test_failed_run_keeps_the_news_for_next_time(self):
+        jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="inbox", message="m",
+                    schedule="every 5m", cap=None)
+        jid = jobs.load(self.root)[0]["id"]
+        self.events = [("error", "boom")]
+        out, _ = self.checked({"data": [1]}, id=jid)
+        self.assertEqual(out["status"], "failed")
+        self.assertIsNone(jobs.get(self.root, jid).get("check_seen"))
+
+    def test_notepad_is_in_every_run(self):
+        self.run_job(notes="Sent 12 of 30. Replies: 2.")
+        self.run_job()
+        self.assertIn("Sent 12 of 30. Replies: 2.", self.asks[0]["text"])
+        self.assertIn("job-note", self.asks[0]["text"])
+        self.assertIn("first run", self.asks[1]["text"])
+
     def test_report_job_drops_the_approval_line(self):
         out = self.run_job(mode="report")
         self.assertEqual(out["status"], "done")

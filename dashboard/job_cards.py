@@ -15,9 +15,9 @@ from core import bots, jobs
 
 OPS = ("create", "update", "delete")
 _CREATE_NEEDS = ("bot", "skill", "name", "message", "schedule")
-_UPDATABLE = ("name", "message", "schedule", "cap", "skill", "mode")
+_UPDATABLE = ("name", "message", "schedule", "cap", "skill", "mode", "check")
 _LABELS = {"name": "Name", "message": "Message", "schedule": "Schedule", "cap": "Cap",
-           "skill": "Skill", "mode": "Mode"}
+           "skill": "Skill", "mode": "Mode", "check": "Runs when"}
 MODE_TEXT = {"approval": "Approval: saves wait for your click",
              "auto": "Auto: saves by itself; deletes, whole-document replaces, memory and app actions wait for you",
              "report": "Report only: reads and reports, saves nothing"}
@@ -62,6 +62,8 @@ def _show(field, value):
         return MODE_TEXT[value]
     if field == "skill":
         return f"/{value}"
+    if field == "check":
+        return f"{value['app']} {value['action']} shows something new" if value else "every time"
     return str(value)
 
 
@@ -94,6 +96,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
             raise ValueError("a workspace thread proposes jobs for its own workspace only")
         clean = {k: jobs.clean(k, fields.get(k)) for k in ("bot", "skill", "name", "message", "schedule", "cap")}
         clean["mode"] = jobs.clean("mode", fields.get("mode") or "approval")
+        clean["check"] = jobs.clean("check", fields.get("check"))
         clean["workspace"] = ws
         check_target(root, ws, clean["bot"], clean["skill"], projects)
         existing = jobs.load(root)
@@ -105,6 +108,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
         rows = [["Bot", f"@{clean['bot']} /{clean['skill']}"], ["Workspace", _ws_name(ws)],
                 ["Schedule", clean["schedule"]], ["Next run", _when(next_run)],
                 ["Mode", MODE_TEXT[clean["mode"]]], ["Cap", _show("cap", clean["cap"])],
+                ["Runs when", _show("check", clean["check"])],
                 ["Message", clean["message"]]]
         return {"op": op, "job_id": None, "fields": clean, "summary": f"New job: {name}",
                 "preview": {"title": f"New job: {name}", "fields": rows}}
@@ -119,9 +123,9 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
     if unknown:
         raise ValueError(f"not changeable here: {', '.join(unknown)}")
     # An empty field is no change, except the cap: "" or 0 there means no cap.
-    clean = {k: jobs.clean(k, v) for k, v in fields.items() if v is not None and (v != "" or k == "cap")}
+    clean = {k: jobs.clean(k, v) for k, v in fields.items() if v is not None and (v != "" or k in ("cap", "check"))}
     if not clean:
-        raise ValueError("say what changes: name, message, schedule, cap, skill or mode")
+        raise ValueError("say what changes: name, message, schedule, cap, skill, mode or check")
     if "name" in clean:
         _name_free(jobs.load(root), job.get("workspace"), clean["name"], skip=job["id"])
     if "skill" in clean:
@@ -143,7 +147,8 @@ def apply(root, rec, projects):
     f = p["fields"]
     if p["op"] == "create":
         job = jobs.create(root, ws=f["workspace"], bot=f["bot"], skill=f["skill"], name=f["name"],
-                          message=f["message"], schedule=f["schedule"], cap=f["cap"], mode=f["mode"])
+                          message=f["message"], schedule=f["schedule"], cap=f["cap"], mode=f["mode"],
+                          check=f.get("check"))
         return (f"Job created: {job['name']}, next run {_when(jobs.next_due(job))}.",
                 {"op": "delete", "job_id": job["id"]}, job["id"])
     before = jobs.get(root, p["job_id"])
