@@ -124,6 +124,7 @@ class ApiEngine(Engine):
     kind = "api"
     shared_safe = True  # a shared turn is only ever offered osctl (plus web when allowed)
     supports = frozenset({"web", "apps", "folder_edit", "complete"})
+    reports_tokens = True
 
     def __init__(self, provider, root):
         self.provider = provider
@@ -347,7 +348,7 @@ class ApiEngine(Engine):
             split = prices.usage(usage.get("input_tokens"), usage.get("cache_creation_input_tokens"),
                                  usage.get("cache_read_input_tokens"), usage.get("output_tokens"))
         cost = usage.get("cost")
-        return split, (prices.estimate(model, split) if cost is None else cost)
+        return split, (prices.estimate(model, split, unknown_ok=True) if cost is None else cost)
 
     def _spent(self, usage, model):
         """This run's spend so far, before its tools run (a job's cap counts it)."""

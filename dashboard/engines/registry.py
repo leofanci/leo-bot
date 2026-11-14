@@ -7,9 +7,8 @@ from dashboard import deployment
 from dashboard.engines import config
 from dashboard.engines.acp import AcpEngine
 from dashboard.engines.api import ApiEngine
-from dashboard.engines import prices
 from dashboard.engines.base import EngineRefused
-from dashboard.engines.claude_code import CHAT_MODEL, ENGINE_ENV, ENGINE_ID, ESCALATED_MODEL, ClaudeCodeEngine
+from dashboard.engines.claude_code import ENGINE_ENV, ENGINE_ID, ClaudeCodeEngine
 from dashboard.engines.codex import ENGINE_ID as CODEX_ID, CodexEngine
 
 NO_PEOPLE_ENGINE = ("This workspace has no API key for invited people yet, so bots can't answer here. "
@@ -77,12 +76,9 @@ def pick(root, ws, bot, invited=False, shared=False, apps=False):
 
 
 def metered(engine):
-    """Whether every run on `engine` reports its cost or can have it estimated: Claude Code,
-    or an API provider whose fast and strong models are both priced. A scheduled job needs one."""
-    if engine.id == ENGINE_ID:
-        return True
-    return engine.kind == "api" and all(engine.resolve_model(m) in prices.PRICES
-                                        for m in (CHAT_MODEL, ESCALATED_MODEL))
+    """Whether every run on `engine` reports its cost or can have it estimated: any engine whose
+    runs report token usage (an unpriced model counts at prices.UNKNOWN). A scheduled job needs one."""
+    return engine.id == ENGINE_ID or bool(getattr(engine, "reports_tokens", False))
 
 
 def for_job(root=config.ROOT):

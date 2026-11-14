@@ -13,6 +13,9 @@ PRICES = {"claude-haiku-5-5": (0.10, 0.50, 0.01), "claude-sonnet-5-5": (2.0, 10.
 TIERS = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 CACHE_WRITE_FACTOR = 1.25
 CACHE_WRITE_1H_FACTOR = 2.0
+# A model not on the list (a Codex login's default, an API provider's own model): priced as the
+# costliest one, so a cap counted on it never lets more through than it says.
+UNKNOWN = max(PRICES.values(), key=lambda p: (p[1], p[0]))
 
 
 def usage(fresh=0, cache_write=0, cache_read=0, out=0):
@@ -21,9 +24,10 @@ def usage(fresh=0, cache_write=0, cache_read=0, out=0):
             "cache_read": max(0, int(cache_read or 0)), "out": max(0, int(out or 0))}
 
 
-def estimate(model, parts):
-    """Estimated USD for one reply, or None when the model is unpriced or usage is missing."""
-    price = PRICES.get(TIERS.get(model, model) or "")
+def estimate(model, parts, unknown_ok=False):
+    """Estimated USD for one reply, or None when usage is missing or the model is unpriced.
+    `unknown_ok`: an unpriced model is counted at the UNKNOWN (upper bound) price instead."""
+    price = PRICES.get(TIERS.get(model, model) or "") or (UNKNOWN if unknown_ok else None)
     if not price or not isinstance(parts, dict):
         return None
     p_in, p_out, p_cache = price

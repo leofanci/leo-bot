@@ -3300,6 +3300,9 @@ class Handler(BaseHTTPRequestHandler):
             parts, fin, failed = [], {}, False
             eng = getattr(s_, "engine", None)
             model_ = eng.resolve_model(model_) if eng else model_
+            # An engine that reports tokens on every run (registry.metered): an unpriced model of its
+            # own is counted at prices.UNKNOWN, so its spend never escapes a cap.
+            priced_any = bool(getattr(eng, "reports_tokens", False))
             job_live(msg, 0.0)
             # The taint gate (dashboard/taint.py): this machine's Claude Code and API engines ask it
             # as each web tool or Auto save runs. Any other engine cannot be watched mid-run, so its
@@ -3320,7 +3323,7 @@ class Handler(BaseHTTPRequestHandler):
                     if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
                         so_far = payload.get("cost")
                         if so_far is None:
-                            so_far = prices.estimate(model_, payload.get("usage"))
+                            so_far = prices.estimate(model_, payload.get("usage"), unknown_ok=priced_any)
                         job_live(msg, so_far)
                     elif kind == "delta":
                         parts.append(payload)
@@ -3345,7 +3348,7 @@ class Handler(BaseHTTPRequestHandler):
             cost = fin.get("cost")
             runner = bool(eng and eng.kind == "runner")
             if cost is None and not runner:
-                cost = prices.estimate(model_, usage)
+                cost = prices.estimate(model_, usage, unknown_ok=priced_any)
             context = fin.get("context")  # a runner's comes from another Mac: a plain int or nothing
             context = context if type(context) is int and 0 <= context < 10**8 else None
             msg.update(tokens=fin.get("tokens") or None, cost=cost, model=model_, usage=usage, context=context,
