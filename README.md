@@ -273,13 +273,13 @@ the channel's lead, and that bot decides what it needs:
   only on what you wrote.
 - **Saved from outside content.** Whatever a bot saves after reading outside content (a memo,
   a memory, a doc) keeps that label, so it cannot pass someone else's words to a later, clean
-  conversation. While a workspace holds a labeled file you have not trusted, its bots do not
-  act on their own. Approvals lists each one: read the whole file, then Trust it, or delete it.
+  conversation. While a workspace holds a labeled file you have not trusted, its Auto jobs
+  save only through your click and a Full access shell sends nothing off the machine. Approvals lists each one: read the whole file, then Trust it, or delete it.
   Trust covers the version you read; a later change is labeled again.
-- **Apps.** Each bot gets each app per workspace as Read, Read + write (anything that is not
-  a read waits for your click), or Acts on its own (it sends, posts and messages without
-  asking while the conversation holds only your words; deletes, payments, ads, databases,
-  code, sharing and paid lookups still wait, and past 100 actions a day the rest wait too). Each action it runs shows in Approvals as done or
+- **Apps (sending on your behalf).** Each bot gets each app per workspace as Read, Asks
+  every time (anything that is not a read waits for your click), or Sends without asking
+  (it sends, posts and messages on its own, also after reading mail or pages; deletes,
+  payments, ads, databases, code, sharing and paid lookups still wait). Each action it runs shows in Approvals as done or
   failed. Actions held together in one call wait for one Approve all. A bot that needs an app,
   an account or more access asks you for it.
 - **Working alone.** Given a job, a bot checks memory, files, apps and the web first, and

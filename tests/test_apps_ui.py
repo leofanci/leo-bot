@@ -41,7 +41,7 @@ class Helpers(unittest.TestCase):
 
     def test_grant_label(self):
         self.assertEqual(_run(["grantLabel"], '[grantLabel(undefined), grantLabel("read"), grantLabel("write"), grantLabel("act")]'),
-                         ["Off", "Read", "Read + write, asks first", "Acts on its own"])
+                         ["Off", "Read", "Asks every time", "Sends without asking"])
 
     def test_batch_card_offers_approve_all(self):
         self.assertEqual(_run(["batchSize", "appCardHtml"],

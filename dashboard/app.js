@@ -1272,7 +1272,7 @@ async function renderTeam(){
             const scope = grantsOf(b)[slug];
             return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(appName(slug))} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
               ${["", "read", "write", "act"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
-          }).join("")}</div><small>Read + write asks you before anything that isn't a read. Acts on its own sends, posts and messages without asking (up to 100 a day) while the thread holds only your words; once it has read mail, pages or app data, it asks once (Approve all). Deletes, payments, ads, databases, code, sharing and paid lookups always ask.</small></div>` : ""}
+          }).join("")}</div><small>Sending on your behalf. Asks every time: anything that isn't a read waits for your click. Sends without asking: it sends, posts and messages on its own, even after reading mail or pages, and each one shows in Approvals as done or failed. Deletes, payments, ads, databases, code, sharing and paid lookups always ask.</small></div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;
@@ -1495,7 +1495,7 @@ function heldEditable(a){
   return a?.kind === "job" ? { key: "fields", values: a.job?.fields || {} } : { key: "arguments", values: a?.action?.arguments || {} };
 }
 function grantLabel(scope){
-  return scope === "act" ? "Acts on its own" : scope === "write" ? "Read + write, asks first" : scope === "read" ? "Read" : "Off";
+  return scope === "act" ? "Sends without asking" : scope === "write" ? "Asks every time" : scope === "read" ? "Read" : "Off";
 }
 function appStatusLabel(app, connected){
   const n = connected === true ? 1 : +connected || 0;

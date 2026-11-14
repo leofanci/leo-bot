@@ -4,8 +4,9 @@ An agent is safe to leave alone only when no conversation ever holds all three o
 data, content someone else wrote, and a way to send things out. Leo Bot keeps them apart:
 
   1. Outside content (an app read's result, a web search or page, a guest's message) is in
-     the conversation: every app action waits for one approval (Approve all). A bot that
-     acts on its own does so only from what the owner wrote, never after reading a stranger.
+     the conversation: an Auto job's saves wait for one approval, and a Full access shell
+     sends nothing off the machine. App actions follow the owner's per-app choice instead
+     ("Sends without asking" sends; dashboard/apps_relay.py).
   2. App data is in the conversation: web search and fetch are off. A query or a URL can no
      longer carry it to another host.
 
