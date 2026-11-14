@@ -656,6 +656,26 @@ class Gate(unittest.TestCase):
         up = FakeUpstream(self.page, values=["\u200b\u200d\u00ad\ufeff\u2060", "\u200c "])
         self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
 
+    # Fix round 5
+
+    def test_typed_in_parts_matches_the_field(self):
+        self.plan("Hello")
+        up = FakeUpstream(self.page)
+        self.handle(call(P + "type", selector="@e1", text="Hel"), up=up)
+        self.handle(call(P + "type", selector="@e1", text="lo"), up=up)
+        self.assertEqual(up.values, ["Hello"])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
+
+    def test_fill_after_unseen_type_still_refused(self):
+        self.plan("hello")
+        up = FakeUpstream(self.page, typing=False)
+        self.handle(call(P + "type", selector="@hidden", text="EVIL"), up=up)  # into a field the read cannot see
+        up.typing = True
+        self.handle(call(P + "fill", selector="@e1", text="hello"), up=up)
+        self.assertEqual(up.values, ["hello"])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.TYPED_MISMATCH)
+        self.assertEqual(up.calls(), [P + "type", P + "fill"])
+
 
 class Preview(unittest.TestCase):
     def test_send_preview_shows_page_and_full_text(self):

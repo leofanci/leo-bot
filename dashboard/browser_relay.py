@@ -469,7 +469,7 @@ def _gate(frame, ctx, sid, upstream, root):
             url = _current(upstream)
             if url is None:
                 return _text(rid, NO_PAGE if tt["typed"] else UNKNOWN_PAGE), sid
-            typed = tt["typed"]
+            typed = " ".join(tt["typed"].split())  # kept raw, compared normalized
             if browser.site_of(url, root):
                 # On a listed site the page's own fields decide: text can sit there without a
                 # type call (prefilled, restored, typed onto), so it is what would go out.
@@ -492,7 +492,7 @@ def _gate(frame, ctx, sid, upstream, root):
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
         if name in TYPE_TOOLS:  # counted before it runs: a failed fill still leaves the field touched
-            tt["typed"] = _join(tt["typed"], " ".join(args["text"].split()))
+            tt["typed"] += args["text"]  # raw and unseparated: two parts of one word stay one word
             _save_typed(bkey, tt, root)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
         if name in (OPEN, NEW_TAB):
