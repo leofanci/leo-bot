@@ -1484,9 +1484,9 @@ JOB_NOTES = {
         "should be saved, say what and where, and end with one APPROVAL: line. The owner approves it in "
         "this thread. App actions that are not reads wait for the owner's click."),
     "auto": _JOB_HEAD + (
-        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans) for what this "
-        "job's message asks: the owner approved that message, so a skill's write gate is already "
-        "answered for it. An experiment, calendar activity, milestone or plan the message does not ask "
+        "Mode: Auto. Create and update with osctl yourself (memos, briefs, posts, plans) and change "
+        "files in this workspace's edit folders for what this job's message asks: the owner approved "
+        "that message, so a skill's write gate is already answered for it. An experiment, calendar activity, milestone or plan the message does not ask "
         "for is not: propose it. Deletes, whole-document replaces (update-intake, update-technical, "
         "update-roadmap, update-subsections, update-validation-tab, update-brief-spec, update-voice) "
         "and memory (remember) are refused: "
@@ -1539,7 +1539,7 @@ def _score_job(job):
 
 def run_job(job, srv):
     """One run of a scheduled job (core/jobs.py) through the normal ask path, on a handler
-    with no socket: `@bot /skill message` in the bot's DM, a fresh read-only thread.
+    with no socket: `@bot /skill message` in the bot's DM, a fresh thread with chat's tools.
     Returns {"status", "chat", "cost", "detail"}; job_runner.py writes the job's state."""
     problem = _job_problem(job, db.tree())
     if problem:
@@ -2984,7 +2984,7 @@ class Handler(BaseHTTPRequestHandler):
         if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
         person = viewer if viewer.get("kind") == "person" else None
-        # A scheduled job: its own fresh thread every run, read-only; `live` tells run_job
+        # A scheduled job: its own fresh thread every run, writes by its mode; `live` tells run_job
         # how it went. The owner's open thread (_CHAT) is never touched.
         job = viewer.get("job") if viewer.get("kind") == "job" else None
         live = viewer.setdefault("live", {}) if job else {}
@@ -3053,15 +3053,19 @@ class Handler(BaseHTTPRequestHandler):
             may_write = (not shared and not job) or bool(explicit) or _continuation_allowed(sess, user_msg)
             # Separate from may_write: a tagged turn (any @bot, /skill, DM, continuation) may
             # change files in its edit folders; an untagged one reads and searches only.
-            may_edit = False if job or not edit_ok else (routed or _may_edit(explicit, room, user_msg, team, sess))
+            # A job runs the owner's approved message: an Auto job edits like a tagged chat turn;
+            # Approval and Report only save nothing, so they read only.
+            may_edit = False if not edit_ok else (job_mode == "auto" if job
+                                                  else routed or _may_edit(explicit, room, user_msg, team, sess))
             # An app request is not a content write: decided before may_write, and
             # its only approval path is the held app action (no skill, no APPROVAL line).
             # A thread an invited person can see never reaches the owner's connected apps.
             app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
                          if integrations.api_key(ROOT) and not shared else {})
-            app_turn = _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
+            # A job keeps its skill and gets its apps mounted like any private turn (below).
+            app_turn = False if job else _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
             # A short follow-up ("yes", "go ahead") in a thread that already used apps stays an app turn.
-            if (not app_turn and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
+            if (not app_turn and not job and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
                     and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
                 app_turn = True
             if app_turn:
@@ -3087,7 +3091,7 @@ class Handler(BaseHTTPRequestHandler):
             # A bot with a connected-app grant always has its apps on a private turn (the engine can use
             # them), so the owner never has to word a message for them: the bot decides. Reading app data
             # still costs the turn its folder edits, and the thread its web search once it has read any.
-            mount = bool(app_grant) and not app_turn and not job and not locked \
+            mount = bool(app_grant) and not app_turn and not locked \
                 and "apps" in engine.supports and not engine.full_disk
             folder_rows, read_dirs, edit_dirs = _turn_folders(
                 ws, room, bot_id, locked=locked, may_edit=may_edit,

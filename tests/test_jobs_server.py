@@ -120,6 +120,29 @@ class JobTurn(unittest.TestCase):
         self.assertIn("Auto", a["text"])
         self.assertIn("APPROVAL", a["text"])  # deletes and memory still go through one
 
+    def test_auto_job_edits_linked_folders_like_a_tagged_turn(self):
+        app = tempfile.TemporaryDirectory()
+        self.addCleanup(app.cleanup)
+        folders.add(WS, app.name, root=self.root)
+        self.run_job(mode="auto")
+        self.run_job(mode="approval")
+        self.run_job(mode="report")
+        self.assertEqual([bool(a["edit_dirs"]) for a in self.asks], [True, False, False])
+        self.assertIn("edit folders", self.asks[0]["text"])
+
+    def test_job_gets_its_granted_apps_and_keeps_its_skill(self):
+        # Like a private chat turn: a granted bot always has its apps; the job's skill stays.
+        minted = []
+        real = server.apps_relay.TOKENS.mint
+        with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}):
+            out = self.run_job(mode="auto", message="review the week")
+        self.assertEqual(len(minted), 1)
+        self.assertEqual(self.pick.call_args.kwargs.get("apps"), False)
+        rec = server.chat_store.load(out["chat"])
+        self.assertEqual(rec["messages"][-1].get("skill"), "positioning")
+
     def test_report_job_drops_the_approval_line(self):
         out = self.run_job(mode="report")
         self.assertEqual(out["status"], "done")

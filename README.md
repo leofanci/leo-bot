@@ -173,8 +173,8 @@ Each job has a mode:
 
 - **Approval** (default): reads and drafts. Every save waits for your click in the job's
   thread.
-- **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans), for
-  what the job's message asks. Deletes, replacing a whole document (intake, technical,
+- **Auto**: creates and updates in Leo Bot by itself (memos, briefs, posts, plans) and
+  changes files in the workspace's edit folders, for what the job's message asks. Deletes, replacing a whole document (intake, technical,
   roadmap, section lists, a brief spec or voice) and bot memory still wait for your click, and so does every app
   action that is not a read (posting, sending email). A run that loads a skill other than
   the job's own (`osctl get-skill`) saves nothing more by itself: the rest of that run
@@ -185,7 +185,8 @@ The Team screen lists every job: where and when it runs, how the last run went (
 link to its thread), and its mode, cap, on/off and delete. Schedule, message and skill
 change through a bot's card.
 
-- Each run is its own thread in the bot's DM, titled `Job: <name>`.
+- Each run is its own thread in the bot's DM, titled `Job: <name>`. It gets the same tools
+  as a private chat turn: web search, the bot's connected apps, its linked folders.
 - A job's message was written by a bot, so a site named in it is never opened: a job
   can search the web, not fetch a page.
 - A job may have its own cap in dollars per 24 hours (none by default: leave it empty
