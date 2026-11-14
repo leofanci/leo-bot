@@ -676,6 +676,16 @@ class Gate(unittest.TestCase):
         self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.TYPED_MISMATCH)
         self.assertEqual(up.calls(), [P + "type", P + "fill"])
 
+    def test_typing_past_the_limit_refused(self):
+        self.level("act")
+        chunk = "x" * 4000
+        for i, want in enumerate(("ok", "ok", browser_relay.TOO_LONG)):
+            self.assertEqual(text_of(self.handle(call(P + "type", text=chunk))), want, i)
+        self.assertEqual(self.up.calls(), [P + "type", P + "type"])
+        typed = browser_relay.typed_state(self.up.browser_key, self.root)["typed"]
+        self.assertEqual(len(typed), 8000)
+        self.assertLessEqual(len(typed), browser_relay.MAX_TEXT)
+
 
 class Preview(unittest.TestCase):
     def test_send_preview_shows_page_and_full_text(self):

@@ -492,6 +492,8 @@ def _gate(frame, ctx, sid, upstream, root):
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
         if name in TYPE_TOOLS:  # counted before it runs: a failed fill still leaves the field touched
+            if len(tt["typed"]) + len(args["text"]) > MAX_TEXT:  # more than any send could check
+                return _text(rid, TOO_LONG), sid
             tt["typed"] += args["text"]  # raw and unseparated: two parts of one word stay one word
             _save_typed(bkey, tt, root)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
