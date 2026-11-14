@@ -527,6 +527,7 @@ class BrowserUpstream(browser_relay.Upstream):
                     except _Failed:
                         self._drop()
                         raise
+                    browser_relay.set_aside(self.browser_key, self.root)  # a new page, as after open
                     raise _Failed(TAB_RESET)
                 reply = dict(reply)
                 reply["id"] = rid

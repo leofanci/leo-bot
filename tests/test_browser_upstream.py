@@ -230,6 +230,28 @@ class Children(Base):
         (self.home / "tab-new-done").unlink()
         self.assertTrue(bot.forward(call(3, P + "click", selector="@e1"), None)[0]["result"]["isError"])
 
+    def test_tab_reset_sets_typed_aside_like_open(self):
+        from core import browser
+        page = "https" + "://" + "acme.test/messages/42"
+        browser.set_site("acme.test", None, 20, self.root)
+        browser.set_bot("acme", "b1", "write", "my_chrome", self.root)
+        self.chrome(CDP)
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        ctx = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}
+
+        def relay(rid, name, **args):
+            return browser_relay.handle(call(rid, name, **args), ctx, "s-1", up, self.root)[0]
+        self.assertFalse(relay(1, P + "open", url=page)["result"]["isError"])
+        relay(2, P + "type", selector="@e1", text="hello")
+        self.assertEqual(browser_relay.typed_state(up.browser_key, self.root)["typed"], "hello")
+        self.control(tab_gone_on=P + "get_text")
+        self.assertEqual(text(relay(3, P + "get_text", selector="@e1")), bu.TAB_RESET)
+        self.assertEqual(browser_relay.typed_state(up.browser_key, self.root),
+                         {"typed": "", "aside": "hello"})
+        reply = relay(4, P + "click", selector="@e2")  # listed site, no filled field: a plain click
+        self.assertFalse(reply["result"]["isError"], reply)
+        self.assertIn(P + "click", [c["name"] for c in self.log("call")])
+
     def test_two_bots_share_my_chrome_each_own_tab(self):
         self.chrome(CDP)
         a = self.pool.get("acme", "b1", "my_chrome", self.root)

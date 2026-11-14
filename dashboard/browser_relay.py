@@ -226,6 +226,16 @@ def _save_typed(key, tt, root):
         bots._atomic_write(_typed_path(root), json.dumps(data, indent=2) + "\n")
 
 
+def set_aside(key, root=bots.ROOT):
+    """A new tab the gate did not see (the upstream's tab_gone recovery): the typed text is set
+    aside as for agent_browser_open. Called inside that browser's call, so it takes no browser lock."""
+    tt = typed_state(key, root)
+    if tt is None or not tt["typed"]:
+        return
+    tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
+    _save_typed(key, tt, root)
+
+
 def _join(a, b):
     return (a + " " + b).strip() if a and b else a or b
 
@@ -498,6 +508,9 @@ def _gate(frame, ctx, sid, upstream, root):
             tt["typed"] += args["text"]  # raw and unseparated: two parts of one word stay one word
             _save_typed(bkey, tt, root)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
+        fresh = typed_state(bkey, root)  # the upstream may have set it aside (set_aside)
+        if fresh is not None:
+            tt, before = fresh, dict(fresh)
         if name in (OPEN, NEW_TAB):
             tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
         elif name in RESTORES:

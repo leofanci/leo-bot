@@ -103,6 +103,9 @@ def main():
                 url = args["url"]
             text = url if name == "agent_browser_get_url" else "ok"
             result = {"content": [{"type": "text", "text": text}], "isError": False}
+            if name == "agent_browser_eval":  # the relay's field read: no field holds text
+                result["structuredContent"] = {"exitCode": 0, "response": {"success": True, "data": {
+                    "origin": url, "result": {"fields": []}}}}
         else:
             print(json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"code": -32601, "message": "no"}}), flush=True)
             continue
