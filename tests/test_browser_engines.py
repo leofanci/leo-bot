@@ -5,6 +5,9 @@ child's env, never in argv, and the endpoint answers only a live browser token f
 """
 import io
 import json
+import os
+import threading
+import time
 import tempfile
 import unittest
 from email.message import Message
@@ -413,14 +416,21 @@ if __name__ == "__main__":
 
 
 class Up:
-    """A pooled child that records its close."""
+    """A pooled child that records its kill and its engine close (slow ones overlap in parallel)."""
 
-    def __init__(self, ws, bot):
+    def __init__(self, ws, bot, slow=0.0, log=None):
         self.ws, self.bot, self.closed, self.mode, self.root = ws, bot, False, "bot", None
-        self._done = None
+        self.slow, self.log, self.killed = slow, log if log is not None else [], False
+        self._done = threading.Event()
+        self._closed_line = None
 
-    def close(self):
+    def kill(self):
+        self.killed = True
+
+    def _engine_close(self):
+        time.sleep(self.slow)
         self.closed = True
+        self.log.append(self.bot)
 
 
 class WorkspaceDelete(Root):
@@ -429,10 +439,44 @@ class WorkspaceDelete(Root):
         a, b, c = Up("acme", "b1"), Up("acme", "b2"), Up("acme-2", "b1")
         pool._items.update({("acme", "b1"): a, ("acme", "b2"): b, ("acme-2", "b1"): c})
         self.assertEqual(sorted(pool.close_where("acme")), ["b1", "b2"])
-        self.assertTrue(a.closed and b.closed)
-        self.assertFalse(c.closed)
+        self.assertTrue(a.closed and b.closed and a.killed and b.killed and a._done.is_set())
+        self.assertFalse(c.closed or c.killed)
         self.assertEqual(list(pool._items), [("acme-2", "b1")])
-        self.assertEqual(pool._closing, {})
+
+    def test_close_where_closes_in_parallel_within_one_bound(self):
+        pool = browser_upstream.Pool()
+        ups = [Up("acme", f"b{i}", slow=0.3) for i in range(4)]
+        pool._items.update({("acme", u.bot): u for u in ups})
+        started = time.monotonic()
+        pool.close_where("acme", bound=5)
+        self.assertLess(time.monotonic() - started, 1.0)  # four 0.3 s closes overlap
+        self.assertTrue(all(u.closed for u in ups))
+        hung = Up("demo", "b1", slow=3)
+        pool._items[("demo", "b1")] = hung
+        started = time.monotonic()
+        pool.close_where("demo", bound=0.2)
+        self.assertLess(time.monotonic() - started, 1.5)  # the bound holds
+        self.assertTrue(hung._done.is_set())
+
+    def test_no_browser_starts_between_close_and_forget(self):
+        pool = browser_upstream.Pool()
+        with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
+            pool.get("acme", "b1", "bot", self.root)
+            pool.close_where("acme")
+            mid = pool.get("acme", "b1", "bot", self.root)
+            other = pool.get("acme-2", "b1", "bot", self.root)
+        self.assertTrue(mid.closed)
+        with mock.patch.object(browser_upstream.BrowserUpstream, "_start") as start:
+            reply, _ = mid.forward({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                    "params": {"name": P + "open", "arguments": {}}}, None)
+        start.assert_not_called()
+        self.assertIn(browser_upstream.WS_CLOSING, json.dumps(reply))
+        self.assertNotIn(("acme", "b1"), pool._items)
+        self.assertFalse(other.closed)  # another workspace is not held
+        pool.reopen("acme")
+        after = pool.get("acme", "b1", "bot", self.root)
+        self.assertFalse(after.closed)
+        self.assertIs(pool.get("acme", "b1", "bot", self.root), after)
 
     def test_recreated_slug_gets_a_new_child(self):
         pool = browser_upstream.Pool()
@@ -440,6 +484,7 @@ class WorkspaceDelete(Root):
             old = pool.get("acme", "b1", "bot", self.root)
             self.assertIs(pool.get("acme", "b1", "bot", self.root), old)
             pool.close_where("acme")
+            pool.reopen("acme")
             new = pool.get("acme", "b1", "bot", self.root)
         self.assertIsNot(new, old)
         self.assertTrue(old.closed)
@@ -453,24 +498,54 @@ class WorkspaceDelete(Root):
         mine = [n for ws in ("acme",) for n in browser_upstream.state_files(ws, "b1")]
         hashed = browser_upstream.state_files(long_ws, "b1")
         theirs = browser_upstream.state_files("acme-2", "b1") + browser_upstream.state_files("demo", "b1")
-        for name in mine + hashed + theirs + ["acme--b1-extra.json.enc"]:
+        custom = ["acme--side-bot-acme--side-bot.json.enc", "leobot-acme--side-bot--chrome.json"]
+        theirs += ["acme-2--side-bot-acme-2--side-bot.json.enc", "x-acme--b1.json.enc"]
+        for name in mine + hashed + theirs + custom + ["acme--b1-extra.json.enc"]:
             (folder / name).write_text("x")
         removed = browser_upstream.forget_state("acme", {"b1", "b2"}, home=home)
-        self.assertEqual(sorted(p.name for p in removed), sorted(mine))
+        self.assertEqual(sorted(p.name for p in removed), sorted(mine + custom))  # a bot no list names too
         browser_upstream.forget_state(long_ws, {"b1"}, home=home)
         left = sorted(p.name for p in folder.iterdir())
         self.assertEqual(left, sorted(theirs + ["acme--b1-extra.json.enc"]))
         self.assertTrue(any(n.startswith("x") for n in hashed))
 
+    def test_home_unset_uses_the_account_home(self):
+        account = str(self.root / "acct")
+        os.makedirs(account)
+        env = {k: v for k, v in os.environ.items() if k != "HOME"}
+        with mock.patch.dict(os.environ, env, clear=True), \
+                mock.patch.object(browser_upstream.pwd, "getpwuid",
+                                  return_value=SimpleNamespace(pw_dir=account)):
+            self.assertEqual(browser_upstream.state_dir(),
+                             Path(os.path.realpath(account)) / ".agent-browser" / "namespaces" / "leobot"
+                             / "state" / "sessions")
+            up = browser_upstream.BrowserUpstream("acme", "b1", "bot", self.root)
+            self.assertEqual(up._env("0" * 64, "cfg")["HOME"], os.path.realpath(account))
+        with mock.patch.dict(os.environ, {"HOME": account}):
+            self.assertEqual(up._env("0" * 64, "cfg")["HOME"], account)  # a set HOME passes as is
+
     def test_delete_closes_browsers_and_forgets_their_state(self):
         browser.set_bot("acme", "growth", "write", "bot", self.root)
-        with mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme"}), \
-                mock.patch.object(server.browser_upstream.POOL, "close_where", return_value=["b9"]) as close, \
-                mock.patch.object(server.browser_upstream, "forget_state") as forget:
+        server.integrations.set_grant("acme", "outreach", {"gmail": "read"}, self.root)
+        team = self.root / "projects" / "acme" / "team"
+        team.mkdir(parents=True)
+        (team / "state.json").write_text(json.dumps({"active": {"side-bot": True}}))
+        order = []
+        with mock.patch.object(server.fileops, "delete_project",
+                               side_effect=lambda slug: order.append("files") or {"slug": "acme"}), \
+                mock.patch.object(server.browser_upstream.POOL, "close_where",
+                                  side_effect=lambda ws: order.append("close") or ["b9"]) as close, \
+                mock.patch.object(server.browser_upstream.POOL, "reopen",
+                                  side_effect=lambda ws: order.append("reopen")) as reopen, \
+                mock.patch.object(server.browser_upstream, "forget_state",
+                                  side_effect=lambda ws, ids: order.append("forget")) as forget:
             code = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)[0]
         self.assertEqual(code, 200)
         close.assert_called_once_with("acme")
+        reopen.assert_called_once_with("acme")
+        self.assertEqual(order, ["files", "close", "forget", "reopen"])
         ws, ids = forget.call_args.args
         self.assertEqual(ws, "acme")
-        self.assertTrue({"b9", "growth", "cos"} <= ids)
+        # Shipped bots, its browser setting, its app grant and its team state (a non-shipped id).
+        self.assertTrue({"b9", "growth", "outreach", "side-bot", "cos"} <= ids)
         self.assertEqual(browser.bot_setting("acme", "growth", self.root)["level"], "off")

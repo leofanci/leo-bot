@@ -31,6 +31,7 @@ import copy
 import http.client
 import json
 import os
+import pwd
 import queue
 import re
 import secrets
@@ -88,6 +89,7 @@ TIMED_OUT = ("The browser did not answer within {s} seconds and was restarted, s
              "finished. The next call starts it fresh.")
 CLOSED = "This browser was closed after a while without use. Ask again to start it fresh."
 STOPPING = "Leo Bot is stopping, so the browser did not start."
+WS_CLOSING = "This workspace is being deleted, so the browser did not start."
 TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the tab was closed), so a new empty "
              "tab was opened. This call was not performed. Open the page again.")
 LONG_HOME = ("The home folder path is too long for the browser engine, so the browser did not start. Ask the "
@@ -121,9 +123,18 @@ def _read_key(root):
 
 
 
+def _account_home():
+    """The home the engine falls back to when HOME is unset: the account's own (passwd)."""
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir or ""
+    except (KeyError, OSError):
+        return ""
+
+
 def _home(home=None):
-    """HOME as the engine's socket path starts: real path, no trailing slash."""
-    home = os.environ.get("HOME", "") if home is None else str(home)
+    """HOME as the engine's socket path starts: real path, no trailing slash. HOME unset (or
+    empty): the account's home, as the engine itself does."""
+    home = (os.environ.get("HOME") or _account_home()) if home is None else str(home)
     return os.path.realpath(home).rstrip("/") if home else ""
 
 
@@ -316,7 +327,7 @@ class BrowserUpstream(browser_relay.Upstream):
     """The engine child of one bot in one mode. Calls run one at a time. `after` is the
     upstream it replaces for the same bot: no child starts before that one has closed."""
 
-    def __init__(self, ws, bot, mode, root, after=None, stopped=False):
+    def __init__(self, ws, bot, mode, root, after=None, stopped=False, stopped_line=STOPPING):
         if mode not in ("bot", "my_chrome"):
             raise ValueError(f"unknown browser mode: {mode}")
         self.ws, self.bot, self.mode, self.root = ws, bot, mode, root
@@ -327,7 +338,7 @@ class BrowserUpstream(browser_relay.Upstream):
         self.typed_key = browser_relay.typed_key_for(mode, ws, bot, self.session)
         self.last_used = time.time()
         self.closed = stopped
-        self._closed_line = STOPPING if stopped else CLOSED
+        self._closed_line = stopped_line if stopped else CLOSED
         self._after = after
         self._done = threading.Event()
         self._lock = threading.Lock()
@@ -343,6 +354,8 @@ class BrowserUpstream(browser_relay.Upstream):
 
     def _env(self, key, config, cdp=None):
         env = {k: os.environ[k] for k in PARENT_ENV if k in os.environ}
+        if not env.get("HOME") and _home():  # the same home state_dir and session_fits measure
+            env["HOME"] = _home()
         # No AGENT_BROWSER_AUTO_CONNECT: the engine turns auto-connect on when it is set at all,
         # even to "false" (probed on 0.41.0). Leo Bot's config file sets it off.
         env.update({"AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
@@ -578,6 +591,13 @@ class BrowserUpstream(browser_relay.Upstream):
             child.stop()  # reaps it; a call in flight then sees it exit
 
 
+def _close_session(up):
+    try:
+        up._engine_close()
+    except Exception:  # noqa: BLE001 - a close that breaks never stops the workspace delete
+        traceback.print_exc()
+
+
 class Pool:
     """One BrowserUpstream per (ws, bot). The pool lock only guards the table: closing runs
     outside it, and a replacement waits for its predecessor to close before it starts."""
@@ -585,7 +605,7 @@ class Pool:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
-        self._closing = {}  # (ws, bot) -> an upstream close_where took out and is closing now
+        self._deleting = set()  # workspaces close_where is closing: no browser starts there till reopen
         self._stopping = False
         self._halt = threading.Event()
 
@@ -594,35 +614,50 @@ class Pool:
         with self._lock:
             if self._stopping:
                 return BrowserUpstream(ws, bot, mode, root, stopped=True)
+            if ws in self._deleting:
+                return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=WS_CLOSING)
             up = self._items.get((ws, bot))
             if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed):
                 old, up = up, None
             if up is None:
-                # A predecessor still closing (close_where) is waited for, like a replaced one.
-                up = BrowserUpstream(ws, bot, mode, root, after=old or self._closing.get((ws, bot)))
+                up = BrowserUpstream(ws, bot, mode, root, after=old)
                 self._items[(ws, bot)] = up
         if old is not None:
             old.close()
         return up
 
-    def close_where(self, ws):
-        """A deleted workspace: take its children out of the table and close them (each saves its
-        state as it closes; forget_state removes that after). Returns the bot ids closed."""
+    def close_where(self, ws, bound=CLOSE_SECONDS + 5):
+        """A deleted workspace: mark it (get starts nothing there until reopen), take its children
+        out of the table, kill them and close their engine sessions in parallel within `bound`
+        seconds, as close_all does. Closing saves state, so forget_state runs after this.
+        Returns the bot ids closed."""
         with self._lock:
+            self._deleting.add(ws)
             items = [(k, up) for k, up in self._items.items() if k[0] == ws]
-            for k, up in items:
+            for k, _ in items:
                 del self._items[k]
-                self._closing[k] = up
-        for k, up in items:
+        ups = [up for _, up in items]
+        for up in ups:
             try:
-                up.close()
-            except Exception:  # noqa: BLE001 - one child that fails to close never stops the rest
+                up.kill()
+                up._closed_line = WS_CLOSING
+            except Exception:  # noqa: BLE001 - one child that fails to stop never stops the rest
                 traceback.print_exc()
-            finally:
-                with self._lock:
-                    if self._closing.get(k) is up:
-                        del self._closing[k]
+        threads = [threading.Thread(target=_close_session, args=(up,), name="browser-close", daemon=True)
+                   for up in ups]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + bound
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        for up in ups:
+            up._done.set()
         return [k[1] for k, _ in items]
+
+    def reopen(self, ws):
+        """After forget_state: browsers may start in this workspace again (a reused slug)."""
+        with self._lock:
+            self._deleting.discard(ws)
 
     def sweep(self, now=None):
         """Close children with no call for IDLE_SECONDS. A call in flight is left alone."""
@@ -686,20 +721,56 @@ def state_files(ws, bot):
     return names
 
 
+_PART = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # one session part (a slug, or a hashed "h" + 8 hex)
+
+
+def plain_state_names(ws, names):
+    """Of these file names, the state files of plain (unhashed) sessions in `ws`, whichever bot:
+    "<key>-<s>.json[.enc]" with <s> = "<ws part>--<bot part>[--chrome]" and <key> the session
+    name or the namespace. The ws part must match exactly, so "acme" never reaches "acme-2"."""
+    wsp = session_part(ws)
+    found = []
+    for name in names:
+        stem = next((name[:-len(x)] for x in (".json.enc", ".json") if name.endswith(x)), None)
+        if not stem:
+            continue
+        start = 0
+        while True:
+            i = stem.find(f"-{wsp}--", start)
+            if i < 0:
+                break
+            key, sess = stem[:i], stem[i + 1:]
+            parts = sess.split("--")
+            if (key in (sess, NAMESPACE) and len(sess) <= MAX_SESSION and parts[0] == wsp
+                    and (len(parts) == 2 or (len(parts) == 3 and parts[2] == "chrome"))
+                    and _PART.fullmatch(parts[1])):
+                found.append(name)
+                break
+            start = i + 1
+    return found
+
+
 def forget_state(ws, bot_ids, home=None):
     """A deleted workspace: remove its bots' saved logins, so a reused slug starts with none.
-    Returns the files removed."""
+    Exact names only: each known bot's computed names (hashed ones too), plus any plain-named
+    session of this workspace found in the folder (a bot no list knows). Returns the files removed."""
     folder = state_dir(home)
-    removed = []
+    names = []
     for bot in sorted({b for b in bot_ids if isinstance(b, str) and b}):
-        for name in state_files(ws, bot):
-            path = folder / name
-            try:
-                if path.is_symlink() or path.is_file():  # a link is removed, never followed
-                    path.unlink()
-                    removed.append(path)
-            except OSError:
-                traceback.print_exc()
+        names += state_files(ws, bot)
+    try:
+        names += plain_state_names(ws, sorted(os.listdir(folder)))
+    except OSError:
+        pass
+    removed = []
+    for name in dict.fromkeys(names):
+        path = folder / name
+        try:
+            if path.is_symlink() or path.is_file():  # a link is removed, never followed
+                path.unlink()
+                removed.append(path)
+        except OSError:
+            traceback.print_exc()
     return removed
 
 

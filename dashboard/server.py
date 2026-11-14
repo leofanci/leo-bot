@@ -1407,11 +1407,26 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
-def _browser_bots_of(ws):
-    """The bot ids with a browser setting in `ws` (core/browser.py's store)."""
-    rows = browser.load(ROOT).get("bots")
-    rows = rows.get(ws) if isinstance(rows, dict) else None
-    return {b for b in rows if isinstance(b, str)} if isinstance(rows, dict) else set()
+def _bots_known_in(ws):
+    """Every bot id any store names for workspace `ws`: the shipped definitions, its browser
+    settings, app grants, engine picks and access levels, and its team state file. Read before
+    the workspace is removed, so forget_state can name each bot's saved browser state."""
+    def keys(d):
+        return {k for k in d if isinstance(k, str)} if isinstance(d, dict) else set()
+
+    def dget(d, k):
+        return d.get(k) if isinstance(d, dict) else None
+    ids = set(bots.load_defs())
+    for read in (lambda: keys(dget(browser.load(ROOT).get("bots"), ws)),
+                 lambda: keys(dget(integrations.all_grants(ROOT), ws)),
+                 lambda: {k.split("/", 1)[1] for d in (engine_config.load(ROOT).get(n) for n in ("bots", "access"))
+                          for k in keys(d) if k.startswith(f"{ws}/")},
+                 lambda: keys(dget(json.loads((bots.ws_dir(ws, ROOT) / "state.json").read_text()), "active"))):
+        try:
+            ids |= read()
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return {b for b in ids if b}
 
 
 def _browser_rpc(token, method, params):
@@ -4409,11 +4424,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, **fileops.update_project(slug, body)})
             if path.startswith("/api/project/") and path.endswith("/delete"):
                 slug = path[len("/api/project/"):-len("/delete")]
+                browsed = _bots_known_in(slug)  # before its files go: they name its bots
                 out = fileops.delete_project(slug)
                 approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
-                # Which bots had a browser there, read before its settings go: their saved logins go too.
-                browsed = _browser_bots_of(out["slug"])
                 browser.forget_workspace(out["slug"], ROOT)
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
@@ -4424,8 +4438,12 @@ class Handler(BaseHTTPRequestHandler):
                 BROWSER_TOKENS.revoke_where(ws=out["slug"])
                 # Its browsers close (saving state as they do), then that state is removed: a reused
                 # slug starts with a fresh browser and no logins.
-                closed = browser_upstream.POOL.close_where(out["slug"])
-                browser_upstream.forget_state(out["slug"], set(closed) | browsed | set(bots.load_defs()))
+                # No browser starts there from close_where until reopen, after the state is gone.
+                try:
+                    closed = browser_upstream.POOL.close_where(out["slug"])
+                    browser_upstream.forget_state(out["slug"], set(closed) | browsed)
+                finally:
+                    browser_upstream.POOL.reopen(out["slug"])
                 runners.HUB.drop_workspace(out["slug"])  # queued or running runner turns there, anyone's
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])
