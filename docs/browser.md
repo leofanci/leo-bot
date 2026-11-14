@@ -58,7 +58,7 @@ The four sets are disjoint. A tool in none of them is refused by the relay.
 - `TYPE_TOOLS`: `fill`, `type`. They only put text into a field. Nothing leaves the page until a commit tool runs, so they stay cheap.
 - `COMMIT_TOOLS`: `click`, `press`, `select`, `check`, `uncheck`. Any of them can submit a form or trigger a purchase, send or delete after text was typed (a click on Send, Enter in a field, a changed select, a toggled consent box). The relay gates these after a type tool ran.
 - `NAV_TOOLS`: `open`, `back`, `forward`, `reload`, `tab_new`, `tab_list`, `tab_switch`, `tab_close`. They move between pages or tabs. `tab_list` only lists, but belongs with tab handling.
-- Refused (in no set): `eval` (arbitrary script, can read cookies and tokens, bypasses every other gate), `close` (ends the shared session; Leo Bot owns the lifecycle), `tools_profiles` (engine admin). Also refused by absence, since the `core` profile does not load them: every file, upload, download, pdf, cookie, storage, header, network and state tool.
+- Refused (in no set): `eval` (arbitrary script, can read cookies and tokens, bypasses every other gate; only the relay calls it, with one fixed script, to read field values), `close` (ends the shared session; Leo Bot owns the lifecycle), `tools_profiles` (engine admin). Also refused by absence, since the `core` profile does not load them: every file, upload, download, pdf, cookie, storage, header, network and state tool.
 
 ### Reading the current URL
 
@@ -66,7 +66,7 @@ Tool `agent_browser_get_url`: the reply text is the bare URL (`content[0].text`)
 
 ### Snapshot format
 
-Probed on 0.41.0 against a local fixture page served on 127.0.0.1 only. `agent_browser_snapshot` returns the tree as text in `content[0].text` and again in `structuredContent.response.data.snapshot`; `data.refs` maps each ref to `{name, role}` only, with no field values. One line per element:
+Probed on 0.41.0 against a local fixture page served on 127.0.0.1 only. The gate does not parse it for field values (a value can hold text that reads as more tree; see "Reading field values"). `agent_browser_snapshot` returns the tree as text in `content[0].text` and again in `structuredContent.response.data.snapshot`; `data.refs` maps each ref to `{name, role}` only, with no field values. One line per element:
 
 ```
 - textbox "Name" [ref=e3]: Alice
@@ -85,6 +85,14 @@ line two
 - `textarea` and `input type=text|email` are `textbox`; `type=search` is `searchbox`; a contenteditable element keeps its role (often `generic`) and carries `editable [contenteditable]`. A password value is masked as bullets.
 - A multi-line value continues on the next lines without a `- ` prefix. With `compact: true` only its first line is shown.
 - With no interactive element the text is `(no interactive elements)`.
+
+### Reading field values
+
+Probed on 0.41.0 against a 127.0.0.1 fixture page (prefilled input, email, password, hidden, checkbox, empty search, multi-line textarea, nested contenteditable, an open shadow root with an input and a `plaintext-only` element, a same-origin iframe). `agent_browser_eval` takes `script` (required) and `timeoutMs`.
+
+- Success: `isError: false`; the returned value, serialized by value (objects, arrays, strings, numbers; a Promise is awaited), is `structuredContent.response.data.result`, next to `data.origin` (the page URL). `content[0].text` holds the same value as pretty JSON.
+- Script error: `isError: true`, `content[0].text` and `response.error` start with `Evaluation error:`, `response.success: false`, `data: {}`.
+- The relay's `FIELDS_SCRIPT` returns `{fields: [...]}`. On the fixture it read `["pre filled", <the email value>, "line one\nline two", "Rich bold\ninner", "in shadow", "plain only", "in frame"]`: password, hidden, checkbox and empty fields left out, a nested contenteditable read once through its root, the shadow root and the iframe walked. A live run of the relay's own reader through the engine returned the same list, and after `type` into a prefilled textarea it read the combined value.
 
 ### Per-call fields (relay must control them)
 
@@ -137,7 +145,7 @@ Yes, both exist and encryption is built in.
 
 - A send is a commit (click, select, check, uncheck, or `press` with Enter in the key) while text is typed. `press` passes otherwise only for Tab, Shift+Tab, arrows, Escape, PageUp, PageDown, Home and End: a printable key, a Control, Meta or Alt combo (paste included) or an unknown key name is refused. `fill` and `type` refuse text that is not a string or holds a line break or other control character.
 - Typed text is kept per real browser (`Upstream.browser_key`: `bot:<ws>--<bot>` for a bot's own browser, `my_chrome` for the one owner Chrome every my_chrome bot shares) in `<data>/run/browser_typed.json`, so a restart does not clear it and one bot cannot click away what another typed. Calls on one browser run one at a time. A corrupt file refuses every commit until the next typing writes a clean one.
-- On a listed site, a commit with nothing typed through the relay first takes a snapshot: any value in a text box or contenteditable element (search boxes, selects and masked passwords aside) counts as typed, and the send rules apply. A page with a prefilled field therefore needs a plan for any click. The snapshot is read strictly: an element that may be a field (textbox, textarea, combobox, contenteditable) and does not parse refuses the click. A combobox counts unless option children follow it (a select). At `act`, a click on a listed site with any filled field is a send and claims a cap slot, even when it only submits a prefilled form: a known cost of failing closed.
+- On a listed site, before every commit the relay reads the page's text field values with its own fixed script (`FIELDS_SCRIPT`, see "Reading field values"); the bot never gets `eval`. A read that fails, times out or comes back in another shape refuses the click. Two or more filled fields refuse it too (the bot clears the others with `fill`). Exactly one filled field is the send text, whatever was typed, so text typed onto a prefilled field is checked whole. No filled field: the typed rules apply. Unlisted sites keep the typed rules only. At `act`, a click on a listed site with a filled field is a send and claims a cap slot, even when it only submits a prefilled form: a known cost of failing closed.
 - `read` with a `url` is refused: the bot opens the page, then reads it. After every navigation, commit or call with a url the engine's own URL is checked; an unknown one fails closed (reply withheld, tab sent to about:blank).
 - The daily cap counts done, failed and running sends of the page's site across every bot and workspace, and the count and the new running record are written under one lock. That lock (`approvals.LOCK`) is in-process: the gate runs only inside the dashboard server process; runners forward to it and never run their own gate.
-- Residual risk: a send that needs no typing is not detected. A one-click canned reply, a "Like", "Connect" or "Accept" button, or a quick-reply chip goes out as a plain click, within the bot's level but without a plan or cap.
+- Residual risk: a send that needs no typing is not detected. A one-click canned reply, a "Like", "Connect" or "Accept" button, or a quick-reply chip goes out as a plain click, within the bot's level but without a plan or cap. Text in cross-origin frames and closed shadow roots is not seen by the field read. The script runs in the page, so a page that rewrites built-in DOM methods could hide its fields.

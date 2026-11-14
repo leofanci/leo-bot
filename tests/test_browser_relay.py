@@ -17,13 +17,14 @@ def u(rest):  # built from parts so no literal URL host sits in a tracked file
 
 
 class FakeUpstream(browser_relay.Upstream):
-    def __init__(self, url=None, mode="bot", redirects=None, fields="", browser_key=None):
+    def __init__(self, url=None, mode="bot", redirects=None, values=None, browser_key=None, typing=False):
         self.url, self.mode, self.frames = url, mode, []
         self.browser_key = browser_key or "bot:fake-%d" % id(self)  # its own browser unless shared
         self.redirects = redirects or {}
         self.history = []
-        self.fields = fields  # snapshot lines for the page's text fields (docs/browser.md format)
-        self.snapshot_fails = False
+        self.values = list(values or [])  # what the relay's field eval sees on the page
+        self.typing = typing  # fill and type change values[0] like a real field
+        self.eval_reply = None  # a raw eval reply to answer instead (errors, odd shapes)
 
     def forward(self, frame, sid):
         self.frames.append(frame)
@@ -34,13 +35,17 @@ class FakeUpstream(browser_relay.Upstream):
             self.url = self.redirects.get(args["url"], args["url"])
         elif params.get("name") == P + "back" and self.history:
             self.url = self.history.pop()
-        if params.get("name") == P + "snapshot":
-            if self.snapshot_fails:
-                return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {"content": [], "isError": True}}, "m-1"
-            snap = (self.fields + "\n" if self.fields else "") + '- button "Send" [ref=e2]'
+        if self.typing and params.get("name") in (P + "fill", P + "type"):
+            before = self.values[0] if self.values else ""
+            self.values[:1] = [args["text"] if params["name"] == P + "fill" else before + args["text"]]
+        if params.get("name") == P + "eval":
+            assert args == {"script": browser_relay.FIELDS_SCRIPT, "timeoutMs": browser_relay.EVAL_TIMEOUT_MS}
+            if self.eval_reply is not None:
+                return {"jsonrpc": "2.0", "id": frame.get("id"), "result": self.eval_reply}, "m-1"
             return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {
-                "content": [{"type": "text", "text": snap}], "isError": False,
-                "structuredContent": {"exitCode": 0, "response": {"data": {"snapshot": snap}}}}}, "m-1"
+                "content": [{"type": "text", "text": "{}"}], "isError": False,
+                "structuredContent": {"exitCode": 0, "response": {"success": True, "error": None, "data": {
+                    "origin": self.url, "result": {"fields": list(self.values)}}}}}}, "m-1"
         if frame.get("method") == "tools/list":
             return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {"tools": [
                 {"name": P + "open", "inputSchema": {"type": "object", "required": ["session"],
@@ -51,9 +56,9 @@ class FakeUpstream(browser_relay.Upstream):
     def current_url(self):
         return self.url
 
-    def calls(self, snapshots=False):
+    def calls(self, evals=False):
         return [f["params"]["name"] for f in self.frames if f.get("method") == "tools/call"
-                and (snapshots or f["params"]["name"] != P + "snapshot")]
+                and (evals or f["params"]["name"] != P + "eval")]
 
 
 def call(name, rid=7, **arguments):
@@ -113,7 +118,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames, [])
         self.handle(call(P + "snapshot"))
         self.handle(call(P + "back"))
-        self.assertEqual(self.up.calls(snapshots=True), [P + "snapshot", P + "back"])
+        self.assertEqual(self.up.calls(evals=True), [P + "snapshot", P + "back"])
 
     def test_click_without_typing_forwards(self):
         self.level("write")
@@ -347,8 +352,12 @@ class Gate(unittest.TestCase):
         self.plan("Hi")
         self.handle(call(P + "fill", text="Hi"))
 
-        def boom(frame, sid):
-            raise OSError("engine gone")
+        real = self.up.forward
+
+        def boom(frame, sid):  # the field check answers; the click itself breaks
+            if frame["params"]["name"] == P + "click":
+                raise OSError("engine gone")
+            return real(frame, sid)
         self.up.forward = boom
         reply = self.handle(call(P + "click"))
         self.assertEqual(text_of(reply), browser_relay.SEND_BROKE)
@@ -364,7 +373,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames, [])
         for key in ("Tab", "Shift+Tab", "ArrowDown", "Escape", "PageUp", "End"):
             self.assertEqual(text_of(self.handle(call(P + "press", key=key))), "ok", key)
-        self.assertEqual(self.up.calls(snapshots=True), [P + "press"] * 6)
+        self.assertEqual(self.up.calls(evals=True), [P + "press"] * 6)
 
     def test_enter_is_a_send(self):
         self.level("write")
@@ -437,28 +446,6 @@ class Gate(unittest.TestCase):
         rows = [r for r in approvals.load(self.root) if r["action"]["toolkit"] == approvals.BROWSER]
         self.assertEqual([r["status"] for r in rows], ["done"])
 
-    def test_text_already_in_a_field_counts_as_typed_on_listed_site(self):
-        self.level("write")
-        up = FakeUpstream(self.page, fields='- textbox "Msg" [ref=e6]: Hello\nthere\n- searchbox "Find" [ref=e5]: q'
-                                          '\n- textbox "Pass" [ref=e7]: \u2022\u2022\u2022')
-        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), browser_relay.NO_PLAN)
-        self.assertEqual(up.calls(snapshots=True), [P + "snapshot"])
-        self.plan("Hello there")
-        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), "ok")
-        # contenteditable counts too
-        up2 = FakeUpstream(self.page, fields='- generic "Editor" [ref=e1] editable [contenteditable]: Rich')
-        self.assertEqual(text_of(self.handle(call(P + "check", selector="@e1"), up=up2)), browser_relay.NO_PLAN)
-        # an unlisted site is not snapshotted
-        up3 = FakeUpstream(u("other.test/x"), fields='- textbox "Msg" [ref=e6]: Hello')
-        self.assertEqual(text_of(self.handle(call(P + "click"), up=up3)), "ok")
-        self.assertEqual(up3.calls(snapshots=True), [P + "click"])
-
-    def test_unreadable_snapshot_refuses_click(self):
-        self.level("act")
-        self.up.snapshot_fails = True
-        self.assertEqual(text_of(self.handle(call(P + "click"))), browser_relay.NO_CHECK)
-        self.assertEqual(self.up.calls(), [])
-
     def test_typed_survives_a_restart(self):
         self.level("write")
         up = FakeUpstream(self.page, browser_key="bot:acme--b1")
@@ -509,33 +496,6 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"opts": {"k": 1, "deep": [{"j": 2}]}})
 
     # Fix round 2 regressions
-
-    def snap(self, fields):
-        up = FakeUpstream(self.page, fields=fields)
-        return browser_relay._field_text(up.forward(call(P + "snapshot"), None)[0])
-
-    def test_snapshot_reads_odd_fields_or_fails_closed(self):
-        reads = {
-            '- textbox "Reply to Jo "X" Doe" [ref=e3]: EVIL': "EVIL",
-            '- textbox "Reply to\nJo" [ref=e3]: EVIL': "EVIL",
-            '- generic "Ed" [ref=e1] editable [contenteditable=plaintext-only]: EVIL': "EVIL",
-            '- combobox "Write a message" [ref=e4]: EVIL': "EVIL",
-            '- textbox "Msg" [ref=e6]: line one\nline two': "line one line two",
-            '- combobox [expanded=false, ref=e4]: a\n  - option "a" [selected, ref=e7]': "",
-            '- searchbox "Find" [ref=e5]: q': "",
-            '- button "Open the textbox "now"" [ref=e2]': "",
-            '- text: use the combobox below': "",
-            '- generic "Ed" contenteditable: EVIL': "EVIL",
-        }
-        for fields, want in reads.items():
-            self.assertEqual(self.snap(fields), want, fields)
-        for fields in ('- textbox "Odd" {ref=e3}: EVIL', '- textbox "a" [ref=e3] : EVIL',
-                       'textbox somewhere: EVIL', '- button "Go" [ref=e2]\ntextbox x: EVIL'):
-            self.assertIsNone(self.snap(fields), fields)
-        self.level("write")
-        up = FakeUpstream(self.page, fields='- textbox "Odd" {ref=e3}: EVIL')
-        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.NO_CHECK)
-        self.assertEqual(up.calls(), [])
 
     def test_shared_owner_chrome_keeps_one_typed_record(self):
         browser.set_bot("acme", "b1", "write", "my_chrome", self.root)
@@ -589,6 +549,77 @@ class Gate(unittest.TestCase):
         with mock.patch("core.approvals.browser.sites", wraps=browser.sites) as spy:
             self.assertEqual(approvals.sends_today("acme.test", self.root), 5)
         self.assertEqual(spy.call_count, 1)
+
+    # Fix round 3: the relay reads field values with its own fixed eval
+
+    def test_prefilled_field_and_plain_click_is_a_send(self):
+        self.level("write")
+        up = FakeUpstream(self.page, values=["Hello there"])
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), browser_relay.NO_PLAN)
+        self.assertEqual(up.calls(evals=True), [P + "eval"])
+        self.plan("Hello  there")
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"), up=up)), "ok")
+        self.assertEqual(up.calls(evals=True), [P + "eval", P + "eval", P + "click"])
+
+    def test_type_onto_prefill_sends_the_whole_field(self):
+        self.plan("hello")
+        up = FakeUpstream(self.page, values=["EVIL"], typing=True)
+        self.handle(call(P + "type", selector="@e1", text="hello"), up=up)
+        self.assertEqual(up.values, ["EVILhello"])
+        self.assertEqual(text_of(self.handle(call(P + "press", key="Enter"), up=up)), browser_relay.NO_PLAN)
+        self.assertEqual(up.calls(), [P + "type"])
+        # the plan matches once the field holds exactly the planned text
+        self.handle(call(P + "fill", selector="@e1", text="hello"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
+
+    def test_two_filled_fields_refused(self):
+        self.level("act")
+        up = FakeUpstream(self.page, values=["to someone", "the message"])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.MANY_FIELDS)
+        self.assertEqual(up.calls(), [])
+        self.assertEqual(approvals.sends_today("acme.test", self.root), 0)
+
+    def test_field_check_that_fails_refuses(self):
+        self.level("act")
+        bad = [{"content": [{"type": "text", "text": "Evaluation error: Error: boom"}], "isError": True,
+                "structuredContent": {"exitCode": 1, "response": {"success": False, "error": "boom", "data": {}}}},
+               {"content": [{"type": "text", "text": "2"}], "isError": False,
+                "structuredContent": {"response": {"data": {"result": 2}}}},
+               {"content": [{"type": "text", "text": "x"}], "isError": False},
+               {"content": [], "isError": False, "structuredContent": {"response": {"data": {"result": {"fields": [1]}}}}},
+               {"content": [], "isError": False,
+                "structuredContent": {"response": {"data": {"result": '{"fields": ["x"]}'}}}}]
+        for reply in bad:
+            up = FakeUpstream(self.page)
+            up.eval_reply = reply
+            self.assertEqual(text_of(self.handle(call(P + "check", selector="@e1"), up=up)), browser_relay.NO_CHECK)
+            self.assertEqual(up.calls(), [])
+
+        def boom(frame, sid):
+            raise OSError("engine gone")
+        up = FakeUpstream(self.page)
+        up.forward = boom
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.NO_CHECK)
+
+    def test_field_value_is_taken_whole(self):
+        for value in ("hello [ref=e9]: EVIL", "hello\n- x\n- button [ref=e9]"):
+            self.plan("hello")
+            up = FakeUpstream(self.page, values=[value])
+            self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), browser_relay.NO_PLAN, value)
+            self.plan(value)
+            self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok", value)
+
+    def test_unlisted_site_keeps_typed_rules(self):
+        self.level("write")
+        up = FakeUpstream(u("other.test/x"), values=["prefilled"])
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
+        self.assertEqual(up.calls(evals=True), [P + "click"])
+
+    def test_eval_never_offered_to_the_bot(self):
+        self.level("act")
+        self.assertIn("not available", text_of(self.handle(call(P + "eval", script="1"))))
+        tools = self.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+        self.assertNotIn(P + "eval", [t["name"] for t in tools])
 
 
 class Preview(unittest.TestCase):

@@ -23,13 +23,14 @@ kept on disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls
 browser run one at a time. Opening a page or a new tab
 sets the typed text aside; history, reload and tab moves bring it back, because the
 browser restores what was in those fields. A refused send keeps it too: the text is still
-in the field, so a second click is still a send. On a listed site a click with nothing
-typed first reads the page's text fields (snapshot): text already there counts as typed.
-Residual risk: a send that needs no typing (a one-click canned reply) is not detected.
+in the field, so a second click is still a send. On a listed site every commit first reads
+the page's text field values (the relay's own fixed eval, FIELDS_SCRIPT): one filled field
+is the send text whatever was typed, more than one is refused. Residual risk: a send that
+needs no typing (a one-click canned reply) is not detected, nor text in cross-origin
+frames or closed shadow roots.
 """
 import json
 import math
-import re
 import threading
 import unicodedata
 from pathlib import Path
@@ -52,7 +53,34 @@ OPEN = "agent_browser_open"
 NEW_TAB = "agent_browser_tab_new"
 READ = "agent_browser_read"
 PRESS = "agent_browser_press"
-SNAPSHOT = "agent_browser_snapshot"
+EVAL = "agent_browser_eval"  # the relay's own field check only: no bot ever gets eval
+EVAL_TIMEOUT_MS = 10000
+# The page's text field values, for the relay alone (docs/browser.md, "Reading field values").
+# Text-like inputs, textareas and contenteditable roots, through open shadow roots and
+# same-origin frames. Fixed text: nothing from the bot or the page is ever put into it.
+FIELDS_SCRIPT = """(() => {
+  const TEXT = new Set(["text", "email", "search", "tel", "url", "number"]);
+  const out = [];
+  const walk = (root) => {
+    for (const el of root.querySelectorAll("*")) {
+      const tag = el.tagName;
+      if (tag === "INPUT") {
+        if (TEXT.has(String(el.type).toLowerCase()) && el.value && el.value.trim()) out.push(String(el.value));
+      } else if (tag === "TEXTAREA") {
+        if (el.value && el.value.trim()) out.push(String(el.value));
+      } else if (el.isContentEditable && !(el.parentElement && el.parentElement.isContentEditable)) {
+        const v = el.innerText;
+        if (v && v.trim()) out.push(String(v));
+      }
+      if (el.shadowRoot) walk(el.shadowRoot);
+      if (tag === "IFRAME" || tag === "FRAME") {
+        try { const d = el.contentDocument; if (d) walk(d); } catch (e) {}
+      }
+    }
+  };
+  walk(document);
+  return {fields: out};
+})()"""
 # Keys that move focus or scroll and type nothing. Enter (alone or in a combo) is a send.
 SAFE_KEYS = frozenset({"tab", "shift+tab", "arrowup", "arrowdown", "arrowleft", "arrowright",
                        "escape", "esc", "pageup", "pagedown", "home", "end"})
@@ -88,6 +116,8 @@ CONTROL_TEXT = ("Text with a line break or another control character is not type
 READ_URL = "Open the page first with agent_browser_open, then read it without a url. This call was not performed."
 UNKNOWN_PAGE = "The browser could not tell which page it is on, so the result was withheld. Open a page to go on."
 NO_CHECK = "The page could not be checked for typed text, so nothing was clicked."
+MANY_FIELDS = ("More than one field on this page holds text, so this could send any of it. Clear the other "
+               "fields with fill and an empty text, keep only the message, then try again. Nothing was clicked.")
 
 PLAN_SCHEMA = {
     "name": PLAN_TOOL,
@@ -245,77 +275,23 @@ def _has_control(text):
     return any(unicodedata.category(c) == "Cc" or c in "\u2028\u2029" for c in text)
 
 
-# One snapshot line (docs/browser.md, "Snapshot format"): - role "name" [attrs] words: value
-_LINE = re.compile(r'^\s*- (?P<role>[\w-]+)(?: "(?:[^"\\]|\\.)*")?(?P<attrs>(?: \[[^\]]*\]| [\w-]+)*)(?:: (?P<val>.*))?$')
-_ELEMENT = re.compile(r'^(?P<indent>\s*)- (?P<role>[\w-]+)')
-_REF_BLOCK = re.compile(r'\[[^\[\]\n]*\bref=e\d+[^\[\]\n]*\]')
-_AFTER_REF = re.compile(r'^(?P<attrs>(?: [\w-]+| \[[^\[\]\n]*\])*)(?:: (?P<val>.*))?$', re.S)
-FIELD_ROLES = frozenset({"textbox", "textarea", "combobox"})
-FIELD_WORDS = ("textbox", "textarea", "combobox", "contenteditable")
-
-
-def _element(text):
-    """(role, indent, is a field, value or None) for one snapshot element (its line plus
-    any lines below it without "- "), or None when it may be a field but cannot be read."""
-    head = _ELEMENT.match(text)
-    if not head:
-        return None
-    role, indent = head.group("role").lower(), len(head.group("indent"))
-    m = _LINE.match(text) if "\n" not in text else None
-    if m:
-        attrs = m.group("attrs") or ""
-        return role, indent, role in FIELD_ROLES or "editable" in attrs, m.group("val")
-    # A quote or line break in the name, a multi-line value, odd attributes: the value is
-    # what follows the last ref block; anything that may be a field and does not read so fails.
-    if role not in FIELD_ROLES and not any(w in text.lower() for w in FIELD_WORDS):
-        return role, indent, False, None
-    refs = list(_REF_BLOCK.finditer(text))
-    tail = _AFTER_REF.match(text[refs[-1].end():]) if refs else None
-    if tail is None:
-        return None
-    field = role in FIELD_ROLES or "editable" in (tail.group("attrs") or "") or "contenteditable" in refs[-1].group(0)
-    return role, indent, field, tail.group("val")
-
-
-def _field_text(reply):
-    """Text sitting in the page's text fields, from a snapshot reply ("" when none), or None
-    when the reply, or any element that may be a field, cannot be read. Text boxes,
-    contenteditable elements and comboboxes without options (composers) count; search boxes,
-    selects and masked password values do not."""
+def _read_fields(upstream, rid, sid, ctx):
+    """(non-empty field values or None when they cannot be read, sid): one eval of
+    FIELDS_SCRIPT. An error, a timeout or any other reply shape is None."""
+    try:
+        reply, sid = _forward(upstream, EVAL, {"script": FIELDS_SCRIPT, "timeoutMs": EVAL_TIMEOUT_MS}, rid, sid, ctx)
+    except Exception:
+        return None, sid
     if not _ok(reply):
-        return None
-    res = reply["result"]
-    data = ((res.get("structuredContent") or {}).get("response") or {}).get("data") \
-        if isinstance(res.get("structuredContent"), dict) else None
-    snap = data.get("snapshot") if isinstance(data, dict) else None
-    if not isinstance(snap, str):
-        parts = [c.get("text") for c in res.get("content") or [] if isinstance(c, dict)]
-        snap = "\n".join(t for t in parts if isinstance(t, str))
-    chunks = []
-    for line in snap.splitlines():
-        if _ELEMENT.match(line):
-            chunks.append([line])
-        elif chunks:  # a multi-line name or value goes on below its element
-            chunks[-1].append(line)
-        elif any(w in line.lower() for w in FIELD_WORDS):
-            return None
-    elements = []
-    for chunk in chunks:
-        el = _element("\n".join(chunk))
-        if el is None:
-            return None
-        elements.append(el)
-    out = []
-    for i, (role, indent, field, val) in enumerate(elements):
-        if not field or val is None:
-            continue
-        if role == "combobox" and i + 1 < len(elements) and elements[i + 1][0] == "option" \
-                and elements[i + 1][1] > indent:
-            continue  # a select: its value is a picked option, not typed text
-        text = " ".join(val.split())
-        if text and set(text) - {"\u2022", " "}:
-            out.append(text)
-    return " ".join(out)
+        return None, sid
+    sc = reply["result"].get("structuredContent")
+    resp = sc.get("response") if isinstance(sc, dict) else None
+    data = resp.get("data") if isinstance(resp, dict) else None
+    result = data.get("result") if isinstance(data, dict) else None
+    fields = result.get("fields") if isinstance(result, dict) else None
+    if not isinstance(fields, list) or not all(isinstance(f, str) for f in fields):
+        return None, sid
+    return [v for v in (" ".join(f.split()) for f in fields) if v], sid
 
 
 def _mode_of(upstream, setting):
@@ -487,16 +463,16 @@ def _gate(frame, ctx, sid, upstream, root):
             if url is None:
                 return _text(rid, NO_PAGE if tt["typed"] else UNKNOWN_PAGE), sid
             typed = tt["typed"]
-            if not typed and browser.site_of(url, root):
-                # Text can sit in a field without a type call (restored, or put there by the
-                # page): on a listed site, what the page holds counts as typed.
-                try:
-                    snap, sid = _forward(upstream, SNAPSHOT, {}, rid, sid, ctx)
-                except Exception:
-                    snap = None
-                typed = _field_text(snap)
-                if typed is None:
+            if browser.site_of(url, root):
+                # On a listed site the page's own fields decide: text can sit there without a
+                # type call (prefilled, restored, typed onto), so it is what would go out.
+                fields, sid = _read_fields(upstream, rid, sid, ctx)
+                if fields is None:
                     return _text(rid, NO_CHECK), sid
+                if len(fields) > 1:
+                    return _text(rid, MANY_FIELDS), sid
+                if fields:
+                    typed = fields[0]
             if typed:
                 reply, sid = _send(rid, name, args, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root)
                 refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _ok(reply) else None
