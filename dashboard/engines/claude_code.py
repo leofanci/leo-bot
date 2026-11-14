@@ -70,6 +70,22 @@ def call_usage(obj, run, model=None):
     """Add one model call's tokens to `run` (this run's totals so far, with "cost": each call
     priced by the model it names, else `model`); True once a call's output is counted
     (message_delta), when the run's spend so far can be reported."""
+    if obj.get("type") == "assistant" and obj.get("parent_tool_use_id"):
+        # A sub-agent's call (the Task tool): it streams no usage events, only its messages, one
+        # per content block with the same id. Verified live with 2.1.325. Counted once per id.
+        msg = obj.get("message") or {}
+        usage, mid = msg.get("usage") or {}, msg.get("id")
+        seen = run.setdefault("sub_seen", set())
+        if not usage or not mid or mid in seen:
+            return False
+        seen.add(mid)
+        parts = {**prices.usage(*(usage.get(k) for k in _IN_KEYS), usage.get("output_tokens")),
+                 "cache_write_1h": int((usage.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0)}
+        for k in _IN_KEYS:
+            run[k] = run.get(k, 0) + int(usage.get(k) or 0)
+        run["output_tokens"] = run.get("output_tokens", 0) + int(usage.get("output_tokens") or 0)
+        run["cost"] = run.get("cost", 0.0) + (prices.estimate(msg.get("model") or model, parts, unknown_ok=True) or 0.0)
+        return True
     ev = (obj.get("event") or {}) if obj.get("type") == "stream_event" else {}
     if ev.get("type") == "message_start":
         msg = ev.get("message") or {}
@@ -176,6 +192,10 @@ BASE_TOOLS = ["Bash", "Read"]
 APP_TOOLS = ["Glob", "Grep"]
 # File changes load only on a turn with edit folders, and are allowed only inside them.
 EDIT_TOOLS = ["Edit", "Write"]
+# Sub-agents (parallel work) on every private turn. A sub-agent gets this turn's tools, rules and
+# gate hook: verified live with 2.1.325 (its Read went through the PreToolUse hook, and a
+# denied path stayed denied). Its spend is counted from its messages (call_usage).
+AGENT_TOOLS = ["Task"]
 
 
 def never_write_rules(folder):
@@ -445,11 +465,11 @@ class ClaudeCodeEngine(Engine):
         # runs. No gate, or no edit folder to work in: the osctl-only shell of every other turn.
         shell = bool(getattr(policy, "shell", False)) and gate and bool(edit_dirs) and not shared
         tools = ((WEB_TOOLS if with_web else []) if shared else
-                 (list(BASE_TOOLS)
+                 (list(BASE_TOOLS) + AGENT_TOOLS
                   + (APP_TOOLS if read_dirs else [])
                   + (EDIT_TOOLS if edit_dirs else [])
                   + (WEB_TOOLS if with_web else [])))
-        allowed_tools = (([] if shared else list(BASE_ALLOWED_TOOLS))
+        allowed_tools = (([] if shared else list(BASE_ALLOWED_TOOLS) + AGENT_TOOLS)
                          + (APP_ALLOWED_TOOLS if read_dirs else [])
                          + [f"{t}(/{d}/**)" for d in edit_dirs for t in EDIT_TOOLS]
                          + (WEB_ALLOWED_TOOLS if with_web else [])
@@ -555,6 +575,8 @@ class ClaudeCodeEngine(Engine):
                 if kind == "done":
                     said = payload.get("result") or said
                     payload["context"] = context
+                    if run_usage.get("sub_seen"):  # sub-agents ran: never report less than counted
+                        payload["cost"] = max(float(payload.get("cost") or 0), run_usage.get("cost", 0.0))
                 if kind:
                     yield (kind, payload)
             proc.wait()

@@ -286,6 +286,9 @@ the channel's lead, and that bot decides what it needs:
   an account or more access asks you for it.
 - **Working alone.** Given a job, a bot checks memory, files, apps and the web first, and
   asks only when it is blocked.
+- **Sub-agents.** On Claude Code, a bot splits a big job with independent parts into
+  sub-agents that run in parallel (the Task tool). Each gets the bot's own tools, rules and
+  checks, and its spend counts toward the same caps.
 - **Teammates.** A bot ends its reply with `HANDOFF @handle: <task>` to pass the work on:
   that teammate answers next in the same message with its own skills and apps, and the
   thread's next message goes to it. One handoff per message. `CONSULT @handle: <question>`

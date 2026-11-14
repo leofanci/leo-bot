@@ -39,7 +39,7 @@ class ClaudeCodeFolders(unittest.TestCase):
     def test_no_folders_no_file_tools(self):
         cmd = self.cmd()
         self.assertNotIn("--add-dir", cmd)
-        self.assertEqual(self.flag_values(cmd, "--tools"), ["Bash", "Read"])
+        self.assertEqual(self.flag_values(cmd, "--tools"), ["Bash", "Read", "Task"])
 
     def test_read_folder_gets_add_dir_and_no_edit_tools(self):
         cmd = self.cmd(read_dirs=("/w/a",))
