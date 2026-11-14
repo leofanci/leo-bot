@@ -609,9 +609,11 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT):
     if method == "tools/list" and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
         tools = reply["result"].get("tools") or []
         schemas = _state(upstream)["schemas"]  # the engine's own inputs per tool, for _clean
-        hidden = CHROME_TAB_TOOLS if _mode_of(upstream, browser.bot_setting(ctx["ws"], ctx["bot"], root)) == "my_chrome" \
-            else frozenset()
+        setting = browser.bot_setting(ctx["ws"], ctx["bot"], root)
+        hidden = CHROME_TAB_TOOLS if _mode_of(upstream, setting) == "my_chrome" else frozenset()
+        # The plan tool only where a send can happen: at read (or off) it is refused anyway.
+        plan = [dict(PLAN_SCHEMA)] if setting["level"] in ("write", "act") else []
         reply["result"]["tools"] = [_strip_schema(t, schemas) for t in tools
                                     if isinstance(t, dict) and t.get("name") in KNOWN and t["name"] not in hidden] \
-            + [dict(PLAN_SCHEMA)]
+            + plan
     return reply, sid

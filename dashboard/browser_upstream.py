@@ -43,7 +43,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import bots, browser_engine
+from core import bots, browser, browser_engine
 from dashboard import browser_relay
 from dashboard.browser_relay import MAX_SESSION, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
@@ -585,6 +585,7 @@ class Pool:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
+        self._closing = {}  # (ws, bot) -> an upstream close_where took out and is closing now
         self._stopping = False
         self._halt = threading.Event()
 
@@ -597,11 +598,31 @@ class Pool:
             if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed):
                 old, up = up, None
             if up is None:
-                up = BrowserUpstream(ws, bot, mode, root, after=old)
+                # A predecessor still closing (close_where) is waited for, like a replaced one.
+                up = BrowserUpstream(ws, bot, mode, root, after=old or self._closing.get((ws, bot)))
                 self._items[(ws, bot)] = up
         if old is not None:
             old.close()
         return up
+
+    def close_where(self, ws):
+        """A deleted workspace: take its children out of the table and close them (each saves its
+        state as it closes; forget_state removes that after). Returns the bot ids closed."""
+        with self._lock:
+            items = [(k, up) for k, up in self._items.items() if k[0] == ws]
+            for k, up in items:
+                del self._items[k]
+                self._closing[k] = up
+        for k, up in items:
+            try:
+                up.close()
+            except Exception:  # noqa: BLE001 - one child that fails to close never stops the rest
+                traceback.print_exc()
+            finally:
+                with self._lock:
+                    if self._closing.get(k) is up:
+                        del self._closing[k]
+        return [k[1] for k, _ in items]
 
     def sweep(self, now=None):
         """Close children with no call for IDLE_SECONDS. A call in flight is left alone."""
@@ -646,6 +667,40 @@ class Pool:
             t.join(max(0.0, deadline - time.monotonic()))
         for up in items:
             up._done.set()
+
+
+def state_dir(home=None):
+    """Where the engine saves this namespace's session state (docs/browser.md)."""
+    return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "state" / "sessions"
+
+
+def state_files(ws, bot):
+    """The exact state file names one bot's sessions in `ws` can have, in both modes: the restore key
+    is the session name (<key>-<session>), or the namespace when the engine picks it. Exact names,
+    never a prefix: "acme" must not reach "acme-2", and a hashed name is computed, not guessed."""
+    names = []
+    for mode in browser.MODES:
+        s = session_name(ws, bot, mode)
+        for key in (s, NAMESPACE):
+            names += [f"{key}-{s}.json.enc", f"{key}-{s}.json"]
+    return names
+
+
+def forget_state(ws, bot_ids, home=None):
+    """A deleted workspace: remove its bots' saved logins, so a reused slug starts with none.
+    Returns the files removed."""
+    folder = state_dir(home)
+    removed = []
+    for bot in sorted({b for b in bot_ids if isinstance(b, str) and b}):
+        for name in state_files(ws, bot):
+            path = folder / name
+            try:
+                if path.is_symlink() or path.is_file():  # a link is removed, never followed
+                    path.unlink()
+                    removed.append(path)
+            except OSError:
+                traceback.print_exc()
+    return removed
 
 
 POOL = Pool()

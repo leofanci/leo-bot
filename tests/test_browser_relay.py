@@ -223,10 +223,17 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.up.frames[-1]["params"]["arguments"], {"surprise": 1})
 
     def test_tools_list_filters_and_adds_plan(self):
+        self.level("write")
         reply = self.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tools = reply["result"]["tools"]
         self.assertEqual([t["name"] for t in tools], [P + "open", P + "click", browser_relay.PLAN_TOOL])
         self.assertEqual(tools[0]["inputSchema"], {"type": "object", "required": [], "properties": {"url": {}}})
+
+    def test_plan_tool_listed_only_where_a_send_can_happen(self):
+        for level, listed in (("off", False), ("read", False), ("write", True), ("act", True)):
+            self.level(level)
+            names = [t["name"] for t in self.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]]
+            self.assertEqual(browser_relay.PLAN_TOOL in names, listed, level)
 
     def test_cap_counts_all_workspaces(self):
         for i in range(20):

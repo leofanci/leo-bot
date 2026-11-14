@@ -15,7 +15,7 @@ from unittest import mock
 import dashboard.chat_session as cs
 import dashboard.server as server
 from core import approvals, browser
-from dashboard import browser_relay
+from dashboard import browser_relay, browser_upstream
 from dashboard.engines import acp, api, api_tools, codex, runner
 from dashboard.engines.base import EngineRefused, TurnPolicy, TurnTokens
 
@@ -25,7 +25,7 @@ P = "agent_browser_"
 CHAT = "11111111-2222-3333-4444-555555555555"
 
 
-def request(method, path, body=None, *, host=f"127.0.0.1:{PORT}", headers=None, cookie=False):
+def request(method, path, body=None, *, host=f"127.0.0.1:{PORT}", headers=None, cookie=False, origin=False):
     h = server.Handler.__new__(server.Handler)
     out = {"headers": {}}
     h.wfile = io.BytesIO()
@@ -41,6 +41,8 @@ def request(method, path, body=None, *, host=f"127.0.0.1:{PORT}", headers=None, 
     msg["Content-Length"] = str(len(raw))
     if cookie:
         msg["Cookie"] = f"{server.AUTH_COOKIE}={server.AUTH_TOKEN}"
+    if origin:
+        msg["Origin"] = f"http://127.0.0.1:{PORT}"
     for k, v in (headers or {}).items():
         msg[k] = v
     h.headers, h.rfile, h.path = msg, io.BytesIO(raw), path
@@ -228,6 +230,33 @@ class ApiEngine(Root):
         with self.assertRaises(ValueError):
             server._browser_rpc(tok, "tools/list", {})
 
+    def test_browser_that_will_not_list_leaves_the_turn_without_it(self):
+        def broken(token):
+            raise RuntimeError("engine gone")
+        box = api_tools.ToolBox(TurnPolicy(browser=True), self.root, TurnTokens(browser_token=TOKEN), "api",
+                                {"browser_list": broken})
+        self.assertEqual([s["name"] for s in box.specs if s["name"].startswith(P)], [])
+        self.assertIn("osctl", [s["name"] for s in box.specs])
+
+    def test_api_session_initialized_once_even_without_a_session_id(self):
+        browser.set_bot("hq", "cos", "write", "bot", self.root)
+        up = FakeUpstream()
+        tok = server.BROWSER_TOKENS.mint({"ws": "hq", "bot": "cos", "person": "ceo"})
+        self.addCleanup(server.BROWSER_TOKENS.revoke, tok)
+        self.addCleanup(server._API_BROWSER_SESSIONS.pop, tok, None)
+        seen = []
+        real = server.browser_relay.handle
+
+        def handle(frame, ctx, sid, upstream, root):
+            seen.append(frame.get("method"))
+            reply, _ = real(frame, ctx, sid, upstream, root)
+            return reply, None  # an upstream that names no MCP session
+        with mock.patch.object(server.browser_upstream.POOL, "get", return_value=up), \
+                mock.patch.object(server.browser_relay, "handle", side_effect=handle):
+            server._browser_list(tok)
+            server._browser_call(tok, P + "read", {})
+        self.assertEqual(seen.count("initialize"), 1)
+
 
 class Endpoint(Root):
     PATH = "/api/internal/browser/mcp"
@@ -260,7 +289,7 @@ class Endpoint(Root):
         self.assertEqual(self.up.frames, [])  # nothing reached the browser
         code, data, hdrs = self.post(self.token)
         self.assertEqual(code, 200)
-        self.assertEqual([t["name"] for t in data["result"]["tools"]], [P + "open", P + "read", browser_relay.PLAN_TOOL])
+        self.assertEqual([t["name"] for t in data["result"]["tools"]], [P + "open", P + "read"])  # read: no plan tool
         self.assertEqual(hdrs.get("mcp-session-id"), "m-1")
         self.get.assert_called_with("hq", "cos", "bot", self.root)
         server.BROWSER_TOKENS.revoke(self.token)
@@ -284,7 +313,7 @@ class Endpoint(Root):
 class Turn(Root):
     """A chat turn: the token minted per bot run, only when the level is on and the thread is private."""
 
-    def run_turn(self, shared=False, plan=False):
+    def run_turn(self, shared=False, plan=False, fail=False):
         seen, root = [], self.root
 
         class S:
@@ -313,6 +342,8 @@ class Turn(Root):
             def ask(self, prompt, **kw):
                 tok = kw.get("browser_token")
                 seen.append({"prompt": prompt, "ctx": server.BROWSER_TOKENS.lookup(tok) if tok else None, **kw})
+                if fail:
+                    raise RuntimeError("the engine broke")
                 if tok and plan:  # what the relay does when the bot plans a send
                     approvals.add_send_plan(root, ws="hq", room=None, chat=CHAT, bot="cos", person="ceo",
                                             items=[{"url": "https" + "://acme.example/inbox", "text": "Hello",
@@ -347,6 +378,13 @@ class Turn(Root):
         note = kw["prompt"].split("## Browser")[1].split("\n## ")[0]
         self.assertNotIn(chr(0x2014), note)  # no em dash in what the bot reads
 
+    def test_token_revoked_when_the_run_fails(self):
+        browser.set_bot("hq", "cos", "act", "bot", self.root)
+        with mock.patch.object(server.traceback, "print_exc"):
+            kw = self.run_turn(fail=True)[0]
+        self.assertEqual(len(kw["browser_token"]), 64)
+        self.assertIsNone(server.BROWSER_TOKENS.lookup(kw["browser_token"]))
+
     def test_held_send_plan_streamed_to_thread(self):
         browser.set_bot("hq", "cos", "write", "bot", self.root)
         self.run_turn(plan=True)
@@ -372,3 +410,67 @@ class Turn(Root):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Up:
+    """A pooled child that records its close."""
+
+    def __init__(self, ws, bot):
+        self.ws, self.bot, self.closed, self.mode, self.root = ws, bot, False, "bot", None
+        self._done = None
+
+    def close(self):
+        self.closed = True
+
+
+class WorkspaceDelete(Root):
+    def test_close_where_closes_only_that_workspace(self):
+        pool = browser_upstream.Pool()
+        a, b, c = Up("acme", "b1"), Up("acme", "b2"), Up("acme-2", "b1")
+        pool._items.update({("acme", "b1"): a, ("acme", "b2"): b, ("acme-2", "b1"): c})
+        self.assertEqual(sorted(pool.close_where("acme")), ["b1", "b2"])
+        self.assertTrue(a.closed and b.closed)
+        self.assertFalse(c.closed)
+        self.assertEqual(list(pool._items), [("acme-2", "b1")])
+        self.assertEqual(pool._closing, {})
+
+    def test_recreated_slug_gets_a_new_child(self):
+        pool = browser_upstream.Pool()
+        with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
+            old = pool.get("acme", "b1", "bot", self.root)
+            self.assertIs(pool.get("acme", "b1", "bot", self.root), old)
+            pool.close_where("acme")
+            new = pool.get("acme", "b1", "bot", self.root)
+        self.assertIsNot(new, old)
+        self.assertTrue(old.closed)
+        self.assertFalse(new.closed)
+
+    def test_state_files_of_that_workspace_removed_others_kept(self):
+        home = self.root / "home"
+        folder = browser_upstream.state_dir(home)
+        folder.mkdir(parents=True)
+        long_ws = "acme-" + "x" * 30  # a hashed session name: computed, never guessed
+        mine = [n for ws in ("acme",) for n in browser_upstream.state_files(ws, "b1")]
+        hashed = browser_upstream.state_files(long_ws, "b1")
+        theirs = browser_upstream.state_files("acme-2", "b1") + browser_upstream.state_files("demo", "b1")
+        for name in mine + hashed + theirs + ["acme--b1-extra.json.enc"]:
+            (folder / name).write_text("x")
+        removed = browser_upstream.forget_state("acme", {"b1", "b2"}, home=home)
+        self.assertEqual(sorted(p.name for p in removed), sorted(mine))
+        browser_upstream.forget_state(long_ws, {"b1"}, home=home)
+        left = sorted(p.name for p in folder.iterdir())
+        self.assertEqual(left, sorted(theirs + ["acme--b1-extra.json.enc"]))
+        self.assertTrue(any(n.startswith("x") for n in hashed))
+
+    def test_delete_closes_browsers_and_forgets_their_state(self):
+        browser.set_bot("acme", "growth", "write", "bot", self.root)
+        with mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme"}), \
+                mock.patch.object(server.browser_upstream.POOL, "close_where", return_value=["b9"]) as close, \
+                mock.patch.object(server.browser_upstream, "forget_state") as forget:
+            code = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)[0]
+        self.assertEqual(code, 200)
+        close.assert_called_once_with("acme")
+        ws, ids = forget.call_args.args
+        self.assertEqual(ws, "acme")
+        self.assertTrue({"b9", "growth", "cos"} <= ids)
+        self.assertEqual(browser.bot_setting("acme", "growth", self.root)["level"], "off")

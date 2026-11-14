@@ -616,7 +616,11 @@ class ToolBox:
         if getattr(policy, "browser", False) and not policy.shared and getattr(tokens, "browser_token", None) \
                 and backends.get("browser_list"):
             taken = {s["name"] for s in self.specs}
-            for tool in backends["browser_list"](tokens.browser_token):
+            try:
+                listed = backends["browser_list"](tokens.browser_token)
+            except Exception:  # noqa: BLE001 - a browser that will not list leaves this turn without it
+                listed = []
+            for tool in listed if isinstance(listed, list) else []:
                 if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or tool["name"] in taken:
                     continue
                 self.specs.append({"name": tool["name"], "description": tool.get("description") or "",

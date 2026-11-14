@@ -1368,7 +1368,7 @@ def _apps_rpc(token, method, params):
         raise ValueError("this turn's apps access has ended")
     upstream = apps_relay.ComposioUpstream(ctx["person"], ctx["ws"], ROOT)
     sid = _API_APP_SESSIONS.get(token)
-    if sid is None:
+    if token not in _API_APP_SESSIONS:  # initialized once per token, even when it names no session
         _, sid = apps_relay.handle(
             {"jsonrpc": "2.0", "id": 0, "method": "initialize",
              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -1407,13 +1407,20 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
+def _browser_bots_of(ws):
+    """The bot ids with a browser setting in `ws` (core/browser.py's store)."""
+    rows = browser.load(ROOT).get("bots")
+    rows = rows.get(ws) if isinstance(rows, dict) else None
+    return {b for b in rows if isinstance(b, str)} if isinstance(rows, dict) else set()
+
+
 def _browser_rpc(token, method, params):
     """The browser relay for the api engine: same gate as a bot's MCP call."""
     ctx = BROWSER_TOKENS.lookup(token)
     if ctx is None:
         raise ValueError("this turn's browser access has ended")
     sid = _API_BROWSER_SESSIONS.get(token)
-    if sid is None:
+    if token not in _API_BROWSER_SESSIONS:  # initialized once per token, even when it names no session
         _, sid = browser_relay.handle(
             {"jsonrpc": "2.0", "id": 0, "method": "initialize",
              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -1423,7 +1430,7 @@ def _browser_rpc(token, method, params):
         # A turn whose thread died before its finally never pops its row: drop rows of dead tokens.
         for old in [t for t in _API_BROWSER_SESSIONS if BROWSER_TOKENS.lookup(t) is None]:
             _API_BROWSER_SESSIONS.pop(old, None)
-        _API_BROWSER_SESSIONS[token] = sid
+        _API_BROWSER_SESSIONS[token] = sid  # may be None: the upstream keeps no session id
     reply, sid = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                                       ctx, sid, _browser_upstream(ctx), ROOT)
     return reply or {}
@@ -3606,43 +3613,43 @@ class Handler(BaseHTTPRequestHandler):
             """The tokens one bot's run gets: the apps relay (its own grant), plus the osctl relay
             on a locked or full-disk engine (a locked turn has no apps). Revoked in the finally below."""
             kw = {}
+            minted.append(kw)  # listed before any token exists: the finally revokes what was made
             if st_.mount:
-                kw = {"apps_token": apps_relay.TOKENS.mint(
+                kw.update({"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
                            "report": job_mode == "report",
                            "taint": turn,  # reads mark it; actions wait once it holds outside content
                            # the first app call marks the thread: no web search after app data
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
-                      "apps_port": self.server.server_address[1]}
+                           "apps_port": self.server.server_address[1]})
             if st_.browse and not st_.locked:  # its own token: pages it reads mark the turn as outside content
-                kw = {**kw, "browser_token": BROWSER_TOKENS.mint(
+                kw.update({"browser_token": BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
                            "report": job_mode == "report",
                            "taint": turn}),
-                      "browser_port": self.server.server_address[1]}
+                           "browser_port": self.server.server_address[1]})
             if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
-                kw = {**kw, "os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
+                kw.update({"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                         "apps_used": st_.apps_used,
                                                         "engine": st_.engine.id, "runner_owner": sender,
                                                         "shared": shared, "chat": getattr(sess, "session_id", None),
                                                         "job": job["id"] if job else None,
                                                         "job_mode": job_mode,
                                                         "code_folder": None if st_.locked else st_.graph_folder}),
-                      "os_port": self.server.server_address[1]}
-            minted.append(kw)
+                           "os_port": self.server.server_address[1]})
             return kw
 
         # The turn token lives for this request: the lead and its follow-up run
         # get it, a consulted teammate never does; revoked in the finally below.
         minted = []
         turn_started = time.time()
-        apps_kw = _mint(st)
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
         try:
+            apps_kw = _mint(st)  # inside: a failed mint still reaches the finally that revokes
             # Tell the client which saved chat this turn belongs to (a scope
             # change or first turn may have started a new one).
             if isinstance(getattr(sess, "session_id", None), str):
@@ -4405,6 +4412,8 @@ class Handler(BaseHTTPRequestHandler):
                 out = fileops.delete_project(slug)
                 approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
+                # Which bots had a browser there, read before its settings go: their saved logins go too.
+                browsed = _browser_bots_of(out["slug"])
                 browser.forget_workspace(out["slug"], ROOT)
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
@@ -4413,6 +4422,10 @@ class Handler(BaseHTTPRequestHandler):
                 os_relay.TOKENS.revoke_where(ws=out["slug"])
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
                 BROWSER_TOKENS.revoke_where(ws=out["slug"])
+                # Its browsers close (saving state as they do), then that state is removed: a reused
+                # slug starts with a fresh browser and no logins.
+                closed = browser_upstream.POOL.close_where(out["slug"])
+                browser_upstream.forget_state(out["slug"], set(closed) | browsed | set(bots.load_defs()))
                 runners.HUB.drop_workspace(out["slug"])  # queued or running runner turns there, anyone's
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])
