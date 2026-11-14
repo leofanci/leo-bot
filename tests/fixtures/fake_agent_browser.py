@@ -3,7 +3,8 @@
 
 It logs every start, call and close to $HOME/fake-log.jsonl (with its argv and AGENT_BROWSER_*
 environment) and reads $HOME/fake.json for what to do: {"crash_on": tool} exits mid-call,
-{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error.
+{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error. "settings" in a start record is
+what the real engine would use from its config files and environment.
 """
 import json
 import os
@@ -35,12 +36,39 @@ TOOLS = [
 ]
 
 
+def _load(path):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def effective():
+    """The settings the real engine would use: AGENT_BROWSER_CONFIG replaces the user and
+    project files; env overrides; AGENT_BROWSER_AUTO_CONNECT turns auto-connect on when set at
+    all, even to "false" (as probed on the real engine)."""
+    given = os.environ.get("AGENT_BROWSER_CONFIG")
+    if given:
+        cfg = _load(given)
+    else:
+        cfg = {**_load(os.path.join(HOME, ".agent-browser", "config.json")), **_load("agent-browser.json")}
+    if "AGENT_BROWSER_AUTO_CONNECT" in os.environ:
+        cfg["autoConnect"] = True
+    if "AGENT_BROWSER_HEADED" in os.environ:
+        cfg["headed"] = os.environ["AGENT_BROWSER_HEADED"] not in ("false", "0", "")
+    if "AGENT_BROWSER_CDP" in os.environ:
+        cfg["cdp"] = os.environ["AGENT_BROWSER_CDP"]
+    return {k: cfg.get(k) for k in ("autoConnect", "headed", "cdp", "proxy", "plugins")}
+
+
 def main():
     env = {k: v for k, v in os.environ.items() if k.startswith("AGENT_BROWSER_")}
     if sys.argv[-1] == "close":
         log("close", argv=sys.argv[1:], env=env)
         return 0
-    log("start", argv=sys.argv[1:], env=env, keys=sorted(os.environ))
+    log("start", argv=sys.argv[1:], env=env, keys=sorted(os.environ), cwd=os.getcwd(), settings=effective())
     url = "about:blank"
     for raw in sys.stdin:
         msg = json.loads(raw)

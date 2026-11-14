@@ -5,23 +5,31 @@ One child per (workspace, bot), started on the first call and kept in POOL. It r
 JSON-RPC over stdin and stdout; stderr is drained so a chatty child never blocks.
 
   bot        the bot's own headless browser. Session "<ws>--<bot>" in namespace "leobot",
-             logins saved and restored (encrypted with key_file's key, kept 365 days).
+             logins saved and restored under the session's own name (encrypted with
+             key_file's key, kept 365 days).
   my_chrome  the owner's running Chrome, attached over its remote debugging port
-             (find_chrome_debug_url), each bot in its own pinned tab. Session
-             "<ws>--<bot>--chrome", so it never shares a daemon with the bot browser.
-             Leo Bot never closes this Chrome. Chrome off: every call answers CHROME_OFF
-             and nothing starts.
+             (find_chrome_debug_url, checked again on every call), each bot in its own pinned
+             tab. Session "<ws>--<bot>--chrome", so it never shares a daemon with the bot
+             browser. Chrome off: every call answers CHROME_OFF and nothing starts. Chrome
+             quit or restarted: the session is closed and, when Chrome is back, started again.
+             The engine's close leaves an attached Chrome running.
 
-The child's environment is built from an allowlist of the server's variables plus the ones
-set here, so a server-wide AGENT_BROWSER_HEADED (or any other engine setting) never reaches
-it. A call that takes longer than CALL_SECONDS stops the child; so does a crash. Either is
+The engine reads ~/.agent-browser/config.json and ./agent-browser.json on its own, and its
+environment only overrides keys that are set. So the child gets Leo Bot's own config file
+(AGENT_BROWSER_CONFIG, which replaces both), headed and auto-connect set off explicitly, an
+empty working folder, and an environment built from an allowlist of the server's variables:
+no server-wide AGENT_BROWSER_* setting reaches it.
+
+A call that takes longer than CALL_SECONDS stops the child; so does a crash. Either is
 answered once as an MCP error and the next call starts a fresh child.
 
 The gate (dashboard/browser_relay.py, approvals.LOCK) is in-process: this module runs only
-inside the dashboard server. The server sweeps idle children every minute and closes them
-all when it stops.
+inside the dashboard server. The server starts POOL's sweeper (idle children closed after
+IDLE_SECONDS) and closes them all when it stops.
 """
 import copy
+import hashlib
+import http.client
 import json
 import os
 import queue
@@ -32,25 +40,36 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
+from urllib.parse import urlparse
 
-from core import browser_engine
+from core import bots, browser_engine
 from dashboard import browser_relay
 from dashboard.engines.base import drain, stop_child
 
 NAMESPACE = "leobot"
 IDLE_SECONDS = 600
+SWEEP_SECONDS = 60
 CALL_SECONDS = 120
 CLOSE_SECONDS = 15
 CONNECT_SECONDS = 0.5
+POLL_SECONDS = 0.25
 STATE_EXPIRE_DAYS = 365
+SOCKET_MAX, SOCKET_FIXED = 103, 37
 PROTOCOL = "2024-11-05"
 KEY_NAME = "browser-engine-key"
+CONFIG_NAME = "agent-browser.json"
+CWD_NAME = "engine-cwd"
+# Leo Bot's engine config: replaces ~/.agent-browser/config.json and ./agent-browser.json.
+CONFIG = {"headed": False, "autoConnect": False}
 # Server variables the child may see. Nothing else passes: no AGENT_BROWSER_* setting, no token.
 PARENT_ENV = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TMP", "TEMP", "LANG",
               "LC_ALL", "LC_CTYPE", "TZ", "SYSTEMROOT")
 _SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # no "--" and no dash at either end
+_HASHED = re.compile(r"h[0-9a-f]{8}")  # the shape of a hashed part: such an id is hashed too
 _HEX_KEY = re.compile(r"[0-9a-f]{64}")
+_WS_PATH = re.compile(r"/devtools/browser/[A-Za-z0-9-]+")
 # Chrome's user data dirs that hold DevToolsActivePort (docs/browser.md, "Attach to a running Chrome").
 CHROME_DIRS = {
     "darwin": ("Library/Application Support/Google/Chrome",
@@ -63,8 +82,6 @@ CHROME_DIRS = {
 CHROME_OFF = ("Chrome is not open with remote debugging on, so this bot cannot use your Chrome. Open Chrome and "
               "turn on remote debugging (Settings, Browser shows how), then ask again.")
 NO_ENGINE = "The browser engine is not installed. Ask the owner to install it in Settings, Browser, then stop."
-BAD_NAME = ("This workspace or bot name cannot name a browser session (only lowercase letters, digits and single "
-            "dashes), so the browser did not start.")
 NO_KEY = ("The browser's saved-login key could not be read, so the browser did not start. Ask the owner to "
           "check the run folder in the data folder.")
 NO_START = "The browser engine did not start. Try again; if it keeps failing, ask the owner to check Settings, Browser."
@@ -72,6 +89,7 @@ CRASHED = "The browser stopped during this call, so it may not have finished. Th
 TIMED_OUT = ("The browser did not answer within {s} seconds and was restarted, so this call may not have "
              "finished. The next call starts it fresh.")
 CLOSED = "This browser was closed after a while without use. Ask again to start it fresh."
+STOPPING = "Leo Bot is stopping, so the browser did not start."
 
 _KEY_LOCK = threading.Lock()
 _TOOLS = {}  # engine binary -> its last tools/list result: Chrome off still lists the tools
@@ -100,25 +118,92 @@ def _read_key(root):
     return key if _HEX_KEY.fullmatch(key) else None
 
 
+def session_part(value):
+    """A workspace or bot id as one part of a session name: itself when it is a plain slug,
+    else "h" + 8 hex of its sha256, so "<ws>--<bot>" always names one pair."""
+    text = value if isinstance(value, str) else str(value)
+    if _SLUG.fullmatch(text) and not _HASHED.fullmatch(text):
+        return text
+    return "h" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+
+
+def _max_session(home=None):
+    """The longest session name whose engine socket path fits the OS limit (103 bytes):
+    <home>/.agent-browser/namespaces/<namespace>/<session> plus the engine's own suffix
+    (37 bytes of fixed path measured on 0.41.0)."""
+    home = os.environ.get("HOME", "") if home is None else home
+    return SOCKET_MAX - SOCKET_FIXED - len(NAMESPACE.encode()) - len(home.encode())
+
+
+def session_name(ws, bot, mode, home=None):
+    """bot: "<ws>--<bot>"; my_chrome: "<ws>--<bot>--chrome". A name too long for the engine's
+    socket path becomes "x" + 16 hex of its sha256 (+ "c" for my_chrome): no "--" in it, so it
+    never equals a plain name, and the two modes still differ."""
+    base = f"{session_part(ws)}--{session_part(bot)}"
+    name = base if mode == "bot" else base + "--chrome"
+    if len(name) <= _max_session(home):
+        return name
+    short = "x" + hashlib.sha256(base.encode()).hexdigest()[:16]
+    return short if mode == "bot" else short + "c"
+
+
+def engine_dirs(root):
+    """(config file, working folder) owned by Leo Bot, written before every child start."""
+    run = Path(root) / "run"
+    config, cwd = run / CONFIG_NAME, run / CWD_NAME
+    cwd.mkdir(parents=True, exist_ok=True)
+    for stray in (cwd / CONFIG_NAME,):  # an auto-discovered project config must never exist here
+        try:
+            stray.unlink()
+        except FileNotFoundError:
+            pass
+    bots._atomic_write(config, json.dumps(CONFIG, indent=2) + "\n")
+    os.chmod(config, 0o600)
+    return config, cwd
+
+
+def _debug_path(port):
+    """The WebSocket path Chrome itself reports on its port, or None."""
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=CONNECT_SECONDS)
+    try:
+        conn.request("GET", "/json/version")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None
+        data = json.loads(resp.read(65536))
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    finally:
+        conn.close()
+    url = data.get("webSocketDebuggerUrl") if isinstance(data, dict) else None
+    return urlparse(url).path if isinstance(url, str) else None
+
+
 def find_chrome_debug_url(home=None, platform=sys.platform):
     """The WebSocket URL of a running Chrome with remote debugging on, or None. Chrome leaves
-    DevToolsActivePort behind when it quits, so the port must also accept a connection."""
+    DevToolsActivePort behind when it quits, so the port must accept a connection and report
+    the same browser path on /json/version."""
     home = Path.home() if home is None else Path(home)
     key = "darwin" if platform == "darwin" else "linux" if platform.startswith("linux") else None
     for rel in CHROME_DIRS.get(key, ()):
         try:
             lines = (home / rel / "DevToolsActivePort").read_text().splitlines()
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError, ValueError):
             continue
-        if len(lines) < 2 or not lines[0].strip().isdigit():
+        if len(lines) < 2:
             continue
-        port, ws_path = int(lines[0].strip()), lines[1].strip()
-        if not 0 < port < 65536 or not re.fullmatch(r"/devtools/browser/[A-Za-z0-9-]+", ws_path):
+        first, ws_path = lines[0].strip(), lines[1].strip()
+        if not (first.isascii() and first.isdecimal()) or not _WS_PATH.fullmatch(ws_path):
+            continue
+        port = int(first)
+        if not 0 < port < 65536:
             continue
         try:
             socket.create_connection(("127.0.0.1", port), timeout=CONNECT_SECONDS).close()
         except OSError:
             continue  # stale file: Chrome quit
+        if _debug_path(port) != ws_path:
+            continue  # another program on the port, or another Chrome run
         return f"ws://127.0.0.1:{port}{ws_path}"
     return None
 
@@ -160,6 +245,22 @@ class _Child:
         self.proc.stdin.write((json.dumps(msg) + "\n").encode())
         self.proc.stdin.flush()
 
+    def _next(self, deadline):
+        """The child's next message; None when it ended. A child that exited while a process it
+        started still holds its stdout gives no end of stream, so its exit counts too."""
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError
+            try:
+                return self.lines.get(timeout=min(left, POLL_SECONDS))
+            except queue.Empty:
+                if self.proc.poll() is not None:
+                    try:
+                        return self.lines.get(timeout=POLL_SECONDS)
+                    except queue.Empty:
+                        return None
+
     def request(self, method, params, timeout):
         """The child's reply to one request (own id), or raises _Failed on a crash or timeout."""
         self.next_id += 1
@@ -170,13 +271,10 @@ class _Child:
             raise _Failed(CRASHED)
         deadline = time.monotonic() + timeout
         while True:
-            left = deadline - time.monotonic()
-            if left <= 0:
-                raise _Failed(TIMED_OUT.format(s=int(timeout)))
             try:
-                msg = self.lines.get(timeout=left)
-            except queue.Empty:
-                continue
+                msg = self._next(deadline)
+            except TimeoutError:
+                raise _Failed(TIMED_OUT.format(s=int(timeout)))
             if msg is None:
                 raise _Failed(CRASHED)
             if "method" in msg:  # the child asks or tells something: no request of ours
@@ -197,65 +295,87 @@ class _Child:
                 stream.close()
             except (OSError, ValueError):
                 pass
-        tail = self.stderr().strip()
-        if tail and self.proc.returncode not in (0, -15, None):
-            print("browser engine: " + tail.splitlines()[-1][:300], file=sys.stderr)
+        code = self.proc.returncode
+
+        def report():  # off the caller's locks: the stream may stay open in the engine's daemon
+            tail = self.stderr().strip()
+            if tail and code not in (0, -15, -9, None):
+                print("browser engine: " + tail.splitlines()[-1][:300], file=sys.stderr)
+        threading.Thread(target=report, name="browser-engine-err", daemon=True).start()
+
+    def kill(self):
+        try:
+            self.proc.kill()
+        except OSError:
+            pass
 
 
 class BrowserUpstream(browser_relay.Upstream):
-    """The engine child of one bot in one mode. Calls run one at a time."""
+    """The engine child of one bot in one mode. Calls run one at a time. `after` is the
+    upstream it replaces for the same bot: no child starts before that one has closed."""
 
-    def __init__(self, ws, bot, mode, root):
+    def __init__(self, ws, bot, mode, root, after=None, stopped=False):
         if mode not in ("bot", "my_chrome"):
             raise ValueError(f"unknown browser mode: {mode}")
         self.ws, self.bot, self.mode, self.root = ws, bot, mode, root
         self.browser_key = browser_relay.browser_key_for(mode, ws, bot)
-        self.named = all(isinstance(p, str) and _SLUG.fullmatch(p) for p in (ws, bot))
-        self.session = (f"{ws}--{bot}" if mode == "bot" else f"{ws}--{bot}--chrome") if self.named else None
+        self.session = session_name(ws, bot, mode)
         self.last_used = time.time()
-        self.closed = False
+        self.closed = stopped
+        self._closed_line = STOPPING if stopped else CLOSED
+        self._after = after
+        self._done = threading.Event()
         self._lock = threading.Lock()
+        self._end_lock = threading.Lock()
         self._child = None
         self._binary = None
+        self._cdp = None
+        self._started = False  # a child ran since the engine session was last closed
 
     # -- the child --------------------------------------------------------------------------
 
-    def _env(self, key, cdp=None):
+    def _env(self, key, config, cdp=None):
         env = {k: os.environ[k] for k in PARENT_ENV if k in os.environ}
-        env.update({"AGENT_BROWSER_SESSION": self.session, "AGENT_BROWSER_NAMESPACE": NAMESPACE,
+        # No AGENT_BROWSER_AUTO_CONNECT: the engine turns auto-connect on when it is set at all,
+        # even to "false" (probed on 0.41.0). Leo Bot's config file sets it off.
+        env.update({"AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
+                    "AGENT_BROWSER_SESSION": self.session, "AGENT_BROWSER_NAMESPACE": NAMESPACE,
                     "AGENT_BROWSER_ENCRYPTION_KEY": key,
                     "AGENT_BROWSER_IDLE_TIMEOUT_MS": str(IDLE_SECONDS * 1000),
                     "AGENT_BROWSER_STATE_EXPIRE_DAYS": str(STATE_EXPIRE_DAYS)})
         if self.mode == "bot":
-            env["AGENT_BROWSER_RESTORE"] = "1"
+            env["AGENT_BROWSER_RESTORE"] = self.session  # its own saved state, never another's
         else:
-            env.update({"AGENT_BROWSER_CDP": cdp, "AGENT_BROWSER_PIN_TAB": "1"})
+            env["AGENT_BROWSER_PIN_TAB"] = "1"
+            if cdp:
+                env["AGENT_BROWSER_CDP"] = cdp
         return env
 
-    def _start(self):
+    def _start(self, cdp=None):
         """A running child, started with the handshake and tools/list. Raises _Failed."""
         if self._child is not None and self._child.proc.poll() is None:
             return self._child
         self._drop()
-        if not self.named:
-            raise _Failed(BAD_NAME)
+        if self._after is not None:  # the bot's previous browser must be closed first
+            self._after._done.wait(CALL_SECONDS + 2 * CLOSE_SECONDS)
+            self._after = None
         binary = browser_engine.resolve()
         if binary is None:
             raise _Failed(NO_ENGINE)
-        cdp = None
-        if self.mode == "my_chrome":
-            cdp = find_chrome_debug_url()
-            if cdp is None:
-                raise _Failed(CHROME_OFF)
         key = _read_key(self.root)
         if key is None:
             raise _Failed(NO_KEY)
         try:
-            proc = subprocess.Popen(browser_engine.mcp_argv(binary), stdin=subprocess.PIPE,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    env=self._env(key, cdp), cwd=str(Path(self.root)))
+            config, cwd = engine_dirs(self.root)
         except OSError:
             raise _Failed(NO_START)
+        try:
+            proc = subprocess.Popen(browser_engine.mcp_argv(binary), stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    env=self._env(key, config, cdp), cwd=str(cwd))
+        except OSError:
+            raise _Failed(NO_START)
+        self._binary, self._started, self._cdp = binary, True, cdp
         child = _Child(proc)
         try:
             init = child.request("initialize", {"protocolVersion": PROTOCOL, "capabilities": {},
@@ -271,13 +391,49 @@ class BrowserUpstream(browser_relay.Upstream):
             raise _Failed(NO_START)
         _TOOLS[str(binary)] = {"tools": tools}
         browser_relay.learn_schemas(self, tools)  # the relay's per-tool input allowlist
-        self._child, self._binary = child, binary
+        self._child = child
         return child
 
     def _drop(self):
         if self._child is not None:
             self._child.stop()
             self._child = None
+
+    def _engine_close(self):
+        """`<binary> --session <s> --namespace leobot close`, once per started session. The bot
+        browser saves its logins on close; an attached Chrome keeps running. Skipped when no
+        child ran or the key cannot be read (never an empty key)."""
+        with self._end_lock:
+            if not self._started:
+                return
+            self._started = False
+            binary = self._binary or browser_engine.resolve()
+            key = _read_key(self.root)
+            if binary is None or key is None:
+                return
+            try:
+                config, cwd = engine_dirs(self.root)
+                subprocess.run([str(binary), "--session", self.session, "--namespace", NAMESPACE, "close"],
+                               env=self._env(key, config), cwd=str(cwd), capture_output=True,
+                               timeout=CLOSE_SECONDS)
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def _end_session(self):
+        self._drop()
+        self._engine_close()
+
+    def _chrome(self):
+        """my_chrome: Chrome's URL now. Gone: the session ends and CHROME_OFF. Another Chrome
+        run (new port or browser id): the old session ends and a new one starts."""
+        cdp = find_chrome_debug_url()
+        if cdp is None:
+            self._end_session()
+            raise _Failed(CHROME_OFF)
+        if self._cdp is not None and cdp != self._cdp:
+            self._end_session()
+            self._cdp = None
+        return cdp
 
     def _cached_tools(self):
         binary = self._binary or browser_engine.resolve()
@@ -306,9 +462,9 @@ class BrowserUpstream(browser_relay.Upstream):
             self.last_used = time.time()
             try:
                 if self.closed:
-                    raise _Failed(CLOSED)
+                    raise _Failed(self._closed_line)
                 try:
-                    child = self._start()
+                    child = self._start(self._chrome() if self.mode == "my_chrome" else None)
                 except _Failed as e:
                     listed = self._cached_tools() if method == "tools/list" else None
                     if listed is not None:  # the tools are known: the call then says what is wrong
@@ -349,64 +505,111 @@ class BrowserUpstream(browser_relay.Upstream):
         text = content[0].get("text")
         return text.strip() if isinstance(text, str) and text.strip() else None
 
-    def close(self):
-        """Stop the child. The bot browser's engine session is closed too (its logins are saved
-        on close); the owner's Chrome is never closed."""
-        with self._lock:
+    def _close_locked(self):
+        try:
             self.closed = True
-            self._drop()
-            binary = self._binary or browser_engine.resolve()
-            if self.mode != "bot" or not self.named or binary is None:
-                return
-            key = _read_key(self.root) or ""
-            try:
-                subprocess.run([str(binary), "--session", self.session, "--namespace", NAMESPACE, "close"],
-                               env=self._env(key), cwd=str(Path(self.root)), capture_output=True,
-                               timeout=CLOSE_SECONDS)
-            except (OSError, subprocess.SubprocessError):
-                pass
+            self._end_session()
+        finally:
+            self._done.set()
 
-    def busy(self):
-        return self._lock.locked()
+    def close(self):
+        """Stop the child and close its engine session (the bot browser saves its logins; an
+        attached Chrome keeps running). Idempotent."""
+        with self._lock:
+            self._close_locked()
+
+    def close_if_idle(self, now):
+        """Close when no call ran for IDLE_SECONDS, checked under this upstream's own lock; a
+        call in flight leaves it open. True when it is closed now."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if not self.closed and now - self.last_used < IDLE_SECONDS:
+                return False
+            self._close_locked()
+            return True
+        finally:
+            self._lock.release()
+
+    def kill(self):
+        """Shutdown: refuse new calls and kill the child now, without waiting for a call in
+        flight. The engine session is closed after (close_all)."""
+        self.closed = True
+        self._closed_line = STOPPING
+        child, self._child = self._child, None
+        if child is not None:
+            child.kill()
+            child.stop()  # reaps it and closes its pipes; a call in flight then reads its end
 
 
 class Pool:
-    """One BrowserUpstream per (ws, bot). get holds the pool lock, so two turns never make two."""
+    """One BrowserUpstream per (ws, bot). The pool lock only guards the table: closing runs
+    outside it, and a replacement waits for its predecessor to close before it starts."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
+        self._stopping = False
+        self._halt = threading.Event()
 
     def get(self, ws, bot, mode, root):
+        old = None
         with self._lock:
+            if self._stopping:
+                return BrowserUpstream(ws, bot, mode, root, stopped=True)
             up = self._items.get((ws, bot))
             if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed):
-                up.close()  # under the lock: the old session ends before a new one can start
-                up = None
+                old, up = up, None
             if up is None:
-                up = BrowserUpstream(ws, bot, mode, root)
+                up = BrowserUpstream(ws, bot, mode, root, after=old)
                 self._items[(ws, bot)] = up
-            return up
+        if old is not None:
+            old.close()
+        return up
 
     def sweep(self, now=None):
         """Close children with no call for IDLE_SECONDS. A call in flight is left alone."""
         now = time.time() if now is None else now
         with self._lock:
-            idle = [(k, up) for k, up in self._items.items()
-                    if now - up.last_used >= IDLE_SECONDS and not up.busy()]
-            for k, up in idle:  # under the lock: a session ends before get can start it again
-                del self._items[k]
-                up.close()
-        return len(idle)
+            items = list(self._items.items())
+        closed = 0
+        for k, up in items:
+            if up.close_if_idle(now):
+                closed += 1
+                with self._lock:
+                    if self._items.get(k) is up:
+                        del self._items[k]
+        return closed
 
-    def close_all(self):
+    def start_sweeper(self, interval=SWEEP_SECONDS):
+        """A daemon thread that sweeps every `interval` seconds until close_all."""
+        def loop():
+            while not self._halt.wait(interval):
+                try:
+                    self.sweep()
+                except Exception:  # noqa: BLE001 - the sweeper never takes the server down
+                    traceback.print_exc()
+        thread = threading.Thread(target=loop, name="browser-sweep", daemon=True)
+        thread.start()
+        return thread
+
+    def close_all(self, bound=CLOSE_SECONDS):
+        """Server shutdown: refuse new browsers, kill every child, then close their engine
+        sessions in parallel, all within `bound` seconds."""
         with self._lock:
+            self._stopping = True
             items, self._items = list(self._items.values()), {}
+        self._halt.set()
         for up in items:
-            try:
-                up.close()
-            except Exception:  # noqa: BLE001 - shutdown closes every other one
-                pass
+            up.kill()
+        threads = [threading.Thread(target=up._engine_close, name="browser-close", daemon=True) for up in items]
+        for t in threads:
+            t.start()
+        deadline = time.monotonic() + bound
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        for up in items:
+            up._done.set()
 
 
 POOL = Pool()

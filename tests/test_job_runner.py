@@ -227,26 +227,5 @@ class Digest(Base):
         self.assertEqual(jobs.digest_state(self.root)["last"], self.clock())
 
 
-class EveryTick(Base):
-    def test_minute_chores_run_and_a_failing_one_stops_nothing(self):
-        ran = threading.Event()
-
-        def broken():
-            raise RuntimeError("boom")
-        runner = job_runner.Runner(self.root, run_turn=lambda job: {}, every_tick=(broken, ran.set))
-        with mock.patch.object(job_runner, "TICK", 0.01), mock.patch("traceback.print_exc"):
-            thread = runner.start()
-            try:
-                self.assertTrue(ran.wait(5))
-            finally:
-                runner.halt()
-                thread.join(5)
-
-    def test_server_sweeps_browsers_each_minute_and_closes_them_on_stop(self):
-        src = (Path(job_runner.__file__).parent / "server.py").read_text()
-        self.assertIn("every_tick=(browser_upstream.POOL.sweep,)", src)
-        self.assertIn("browser_upstream.POOL.close_all()", src)
-
-
 if __name__ == "__main__":
     unittest.main()

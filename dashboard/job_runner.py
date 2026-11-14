@@ -116,10 +116,8 @@ class Runner:
     flight. `threads` and `post` are the saved-thread source and the note writer (the server
     passes its own chat_store copy)."""
 
-    def __init__(self, root, run_turn, stop_turn=None, threads=None, post=None, now=time.time, activity=None,
-                 every_tick=()):
+    def __init__(self, root, run_turn, stop_turn=None, threads=None, post=None, now=time.time, activity=None):
         self.root, self.run_turn, self.stop_turn = root, run_turn, stop_turn
-        self.every_tick = tuple(every_tick)  # other minute chores (idle browser sweep), before the jobs
         self.activity = activity  # when the run in flight last did something (epoch), or None
         self.threads = threads or chat_store.records
         self.post = post or chat_store.post_note
@@ -200,11 +198,6 @@ class Runner:
 
         def loop():
             while not self._halt.wait(TICK):
-                for chore in self.every_tick:
-                    try:
-                        chore()
-                    except Exception:  # noqa: BLE001 - a chore never stops the jobs
-                        traceback.print_exc()
                 try:
                     self.tick()
                 except Exception:  # noqa: BLE001 - the runner never takes the server down

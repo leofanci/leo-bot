@@ -1,4 +1,5 @@
 """The browser upstream: one engine child per bot, both modes, against a fake engine."""
+import http.server
 import json
 import os
 import socket
@@ -17,10 +18,15 @@ FAKE = Path(__file__).resolve().parent / "fixtures" / "fake_agent_browser.py"
 P = "agent_browser_"
 LOOPBACK = "127.0" + ".0.1"
 CDP = "ws" + "://" + LOOPBACK + ":9222/devtools/browser/abc-1"
+CDP2 = "ws" + "://" + LOOPBACK + ":9333/devtools/browser/def-2"
 
 
 def call(rid, name, **args):
     return {"jsonrpc": "2.0", "id": rid, "method": "tools/call", "params": {"name": name, "arguments": args}}
+
+
+def text(reply):
+    return reply["result"]["content"][0]["text"]
 
 
 class Base(unittest.TestCase):
@@ -31,9 +37,14 @@ class Base(unittest.TestCase):
         self.home.mkdir()
         self.root.mkdir()
         env = mock.patch.dict(os.environ, {"HOME": str(self.home), "LEOBOT_AGENT_BROWSER": str(FAKE),
-                                           "AGENT_BROWSER_HEADED": "1", "LEOBOT_GATE_TOKEN": "secret"})
+                                           "AGENT_BROWSER_HEADED": "1", "AGENT_BROWSER_AUTO_CONNECT": "1",
+                                           "AGENT_BROWSER_PROXY": "x", "LEOBOT_GATE_TOKEN": "secret"})
         env.start()
         self.addCleanup(env.stop)
+        for target, attr, value in ((bu, "SOCKET_MAX", 1000),):  # temp homes are long: plain names here
+            p = mock.patch.object(target, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
         tools = mock.patch.dict(bu._TOOLS, clear=True)  # no tools/list known from another test
         tools.start()
         self.addCleanup(tools.stop)
@@ -58,6 +69,12 @@ class Base(unittest.TestCase):
             return os.waitpid(pid, os.WNOHANG) == (0, 0)
         except ChildProcessError:
             return True
+
+    def chrome(self, value):
+        p = mock.patch.object(bu, "find_chrome_debug_url", return_value=value)
+        p.start()
+        self.addCleanup(p.stop)
+        return p
 
 
 class Children(Base):
@@ -101,48 +118,107 @@ class Children(Base):
         start = self.log("start")[0]
         self.assertEqual(start["argv"], ["mcp", "--tools", "core"])
         key = bu.key_file(self.root).read_text()
+        config = self.root / "run" / "agent-browser.json"
         self.assertEqual(start["env"], {
+            "AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
             "AGENT_BROWSER_SESSION": "acme--b1", "AGENT_BROWSER_NAMESPACE": "leobot",
-            "AGENT_BROWSER_RESTORE": "1", "AGENT_BROWSER_ENCRYPTION_KEY": key,
+            "AGENT_BROWSER_RESTORE": "acme--b1", "AGENT_BROWSER_ENCRYPTION_KEY": key,
             "AGENT_BROWSER_IDLE_TIMEOUT_MS": "600000", "AGENT_BROWSER_STATE_EXPIRE_DAYS": "365"})
+        self.assertNotIn("AGENT_BROWSER_AUTO_CONNECT", start["keys"])  # set at all, it turns auto-connect on
         self.assertNotIn("LEOBOT_GATE_TOKEN", start["keys"])
         self.assertNotIn("LEOBOT_AGENT_BROWSER", start["keys"])
+        self.assertEqual(json.loads(config.read_text()), {"headed": False, "autoConnect": False})
+        self.assertEqual(stat.S_IMODE(config.stat().st_mode), 0o600)
+        self.assertEqual(Path(start["cwd"]).resolve(), (self.root / "run" / "engine-cwd").resolve())
+
+    def test_hostile_engine_config_ignored(self):
+        user = self.home / ".agent-browser"
+        user.mkdir()
+        hostile = {"autoConnect": True, "headed": True, "cdp": "9222", "proxy": "x", "plugins": [{"name": "p"}]}
+        (user / "config.json").write_text(json.dumps(hostile))
+        cwd = self.root / "run" / "engine-cwd"
+        cwd.mkdir(parents=True)
+        (cwd / "agent-browser.json").write_text(json.dumps(hostile))
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        up.forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual(self.log("start")[0]["settings"],
+                         {"autoConnect": False, "headed": False, "cdp": None, "proxy": None, "plugins": None})
+        self.assertFalse((cwd / "agent-browser.json").exists())
+
+    def test_restore_key_is_the_session(self):
+        for bot in ("b1", "b2"):
+            self.pool.get("acme", bot, "bot", self.root).forward(call(1, P + "click", selector="@e1"), None)
+        self.assertEqual([s["env"]["AGENT_BROWSER_RESTORE"] for s in self.log("start")], ["acme--b1", "acme--b2"])
 
     def test_mode_change_restarts_child(self):
         a = self.pool.get("acme", "b1", "bot", self.root)
         a.forward(call(1, P + "click", selector="@e1"), None)
         first = self.log("start")[0]["pid"]
-        with mock.patch.object(bu, "find_chrome_debug_url", return_value=CDP):
-            b = self.pool.get("acme", "b1", "my_chrome", self.root)
-            self.assertIsNot(b, a)
-            self.assertFalse(self.alive(first))
-            closes = self.log("close")
-            self.assertEqual(len(closes), 1)
-            self.assertEqual(closes[0]["argv"], ["--session", "acme--b1", "--namespace", "leobot", "close"])
-            b.forward(call(2, P + "click", selector="@e1"), None)
+        self.chrome(CDP)
+        b = self.pool.get("acme", "b1", "my_chrome", self.root)
+        self.assertIsNot(b, a)
+        self.assertFalse(self.alive(first))
+        closes = self.log("close")
+        self.assertEqual(len(closes), 1)
+        self.assertEqual(closes[0]["argv"], ["--session", "acme--b1", "--namespace", "leobot", "close"])
+        self.assertTrue(closes[0]["env"]["AGENT_BROWSER_ENCRYPTION_KEY"])
+        b.forward(call(2, P + "click", selector="@e1"), None)
         self.assertEqual(b.browser_key, "my_chrome")
+        events = [r["event"] for r in self.log()]
+        self.assertLess(events.index("close"), len(events) - 1 - events[::-1].index("start"))
         env = self.log("start")[1]["env"]
         self.assertEqual(env["AGENT_BROWSER_CDP"], CDP)
         self.assertEqual(env["AGENT_BROWSER_PIN_TAB"], "1")
         self.assertNotIn("AGENT_BROWSER_RESTORE", env)
         self.assertEqual(env["AGENT_BROWSER_SESSION"], "acme--b1--chrome")  # never the bot browser's daemon
-        self.assertEqual(self.pool.get("acme", "b1", "my_chrome", self.root), b)
+        self.assertIs(self.pool.get("acme", "b1", "my_chrome", self.root), b)
 
-    def test_my_chrome_close_never_closes_chrome(self):
-        with mock.patch.object(bu, "find_chrome_debug_url", return_value=CDP):
-            up = self.pool.get("acme", "b1", "my_chrome", self.root)
-            up.forward(call(1, P + "click", selector="@e1"), None)
+    def test_my_chrome_close_ends_its_session_only(self):
+        self.chrome(CDP)
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        up.forward(call(1, P + "click", selector="@e1"), None)
         pid = self.log("start")[0]["pid"]
-        self.pool.close_all()
+        up.close()
         self.assertFalse(self.alive(pid))
-        self.assertEqual(self.log("close"), [])
+        closes = self.log("close")
+        self.assertEqual([c["argv"] for c in closes], [["--session", "acme--b1--chrome", "--namespace", "leobot", "close"]])
+        self.assertNotIn("AGENT_BROWSER_CDP", closes[0]["env"])  # closing never attaches anew
+
+    def test_my_chrome_quit_mid_session(self):
+        p = self.chrome(CDP)
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        self.assertFalse(up.forward(call(1, P + "click", selector="@e1"), None)[0]["result"]["isError"])
+        pid = self.log("start")[0]["pid"]
+        p.stop()
+        self.chrome(None)
+        reply, _ = up.forward(call(2, P + "click", selector="@e1"), None)
+        self.assertEqual(text(reply), bu.CHROME_OFF)
+        self.assertFalse(self.alive(pid))
+        self.assertEqual(len(self.log("close")), 1)
+        up.forward(call(3, P + "click", selector="@e1"), None)  # still off: nothing more starts or closes
+        self.assertEqual((len(self.log("start")), len(self.log("close"))), (1, 1))
+
+    def test_my_chrome_restart_on_new_port(self):
+        p = self.chrome(CDP)
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        up.forward(call(1, P + "click", selector="@e1"), None)
+        pid = self.log("start")[0]["pid"]
+        up.forward(call(2, P + "click", selector="@e1"), None)
+        self.assertEqual(len(self.log("start")), 1)  # same Chrome: same child
+        p.stop()
+        self.chrome(CDP2)
+        reply, _ = up.forward(call(3, P + "click", selector="@e1"), None)
+        self.assertFalse(reply["result"]["isError"])
+        self.assertFalse(self.alive(pid))
+        self.assertEqual(len(self.log("close")), 1)
+        self.assertEqual(self.log("start")[1]["env"]["AGENT_BROWSER_CDP"], CDP2)
 
     def test_two_bots_share_my_chrome_each_own_tab(self):
-        with mock.patch.object(bu, "find_chrome_debug_url", return_value=CDP):
-            a = self.pool.get("acme", "b1", "my_chrome", self.root)
-            b = self.pool.get("demo", "b2", "my_chrome", self.root)
-            for up in (a, b):
-                up.forward(call(1, P + "click", selector="@e1"), None)
+        self.chrome(CDP)
+        a = self.pool.get("acme", "b1", "my_chrome", self.root)
+        b = self.pool.get("demo", "b2", "my_chrome", self.root)
+        for up in (a, b):
+            up.forward(call(1, P + "click", selector="@e1"), None)
         self.assertEqual(a.browser_key, b.browser_key)
         envs = [s["env"] for s in self.log("start")]
         self.assertEqual({e["AGENT_BROWSER_SESSION"] for e in envs}, {"acme--b1--chrome", "demo--b2--chrome"})
@@ -160,8 +236,28 @@ class Children(Base):
         self.assertIsNot(self.pool.get("acme", "b1", "bot", self.root), up)
         # a turn still holding the swept one is told, and nothing starts behind the pool
         reply, _ = up.forward(call(2, P + "click", selector="@e1"), None)
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.CLOSED)
+        self.assertEqual(text(reply), bu.CLOSED)
         self.assertEqual(len(self.log("start")), 1)
+
+    def test_sweep_and_get_never_wait_on_a_busy_bot(self):
+        busy = self.pool.get("acme", "b1", "bot", self.root)
+        busy.forward(call(1, P + "click", selector="@e1"), None)
+        self.control(hang_on=P + "click")
+        with mock.patch.object(bu, "CALL_SECONDS", 3):
+            t = threading.Thread(target=busy.forward, args=(call(2, P + "click", selector="@e1"), None))
+            t.start()
+            time.sleep(0.5)
+            started = time.monotonic()
+            self.assertEqual(self.pool.sweep(now=time.time() + bu.IDLE_SECONDS + 1), 0)  # in flight: left alone
+            switch = threading.Thread(target=self.pool.get, args=("acme", "b1", "my_chrome", self.root))
+            switch.start()  # waits for b1's call, and only b1's
+            time.sleep(0.2)
+            other = self.pool.get("acme", "b2", "bot", self.root)
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertIsNot(other, busy)
+            t.join(10)
+            switch.join(10)
+        self.assertTrue(busy.closed)
 
     def test_close_all_stops_every_child(self):
         for bot in ("b1", "b2"):
@@ -170,22 +266,56 @@ class Children(Base):
         self.pool.close_all()
         self.assertFalse(any(self.alive(p) for p in pids))
         self.assertEqual(len(self.log("close")), 2)
+        late = self.pool.get("acme", "b3", "bot", self.root)  # stopping: nothing new starts
+        self.assertEqual(text(late.forward(call(1, P + "click", selector="@e1"), None)[0]), bu.STOPPING)
+        self.assertEqual(len(self.log("start")), 2)
+
+    def test_close_all_does_not_wait_for_calls_and_closes_in_parallel(self):
+        ups = [self.pool.get("acme", f"b{i}", "bot", self.root) for i in range(3)]
+        for up in ups:
+            up.forward(call(1, P + "click", selector="@e1"), None)
+        self.control(hang_on=P + "click")
+        replies = []
+        t = threading.Thread(target=lambda: replies.append(ups[0].forward(call(2, P + "click", selector="@e1"), None)))
+        t.start()
+        time.sleep(0.5)
+        real = bu.BrowserUpstream._engine_close
+
+        def slow(up):
+            time.sleep(1)
+            real(up)
+        with mock.patch.object(bu.BrowserUpstream, "_engine_close", slow):
+            started = time.monotonic()
+            self.pool.close_all(bound=5)
+            self.assertLess(time.monotonic() - started, 2.5)
+        t.join(5)
+        self.assertEqual(text(replies[0][0]), bu.CRASHED)
+        self.assertEqual(len(self.log("close")), 3)
+
+    def test_close_without_start_or_key_skips_engine_close(self):
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        up.close()
+        self.assertEqual(self.log(), [])
+        up = self.pool.get("acme", "b2", "bot", self.root)
+        up.forward(call(1, P + "click", selector="@e1"), None)
+        bu.key_file(self.root).write_text("")  # never an empty key: skip instead
+        up.close()
+        self.assertEqual(self.log("close"), [])
 
     def test_my_chrome_off_says_how_and_starts_nothing(self):
-        with mock.patch.object(bu, "find_chrome_debug_url", return_value=None):
-            up = self.pool.get("acme", "b1", "my_chrome", self.root)
-            reply, _ = up.forward(call(3, P + "open", url="about:blank"), None)
-            listed, _ = up.forward({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, None)
+        self.chrome(None)
+        up = self.pool.get("acme", "b1", "my_chrome", self.root)
+        reply, _ = up.forward(call(3, P + "open", url="about:blank"), None)
+        listed, _ = up.forward({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}, None)
         self.assertEqual(reply["id"], 3)
         self.assertTrue(reply["result"]["isError"])
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.CHROME_OFF)
+        self.assertEqual(text(reply), bu.CHROME_OFF)
         self.assertIn("error", listed)
         self.assertEqual(self.log(), [])
         self.assertIsNone(up.current_url())
         # once the engine's tools are known, Chrome off still lists them; the call says how
         self.pool.get("acme", "b2", "bot", self.root).forward(call(1, P + "click", selector="@e1"), None)
-        with mock.patch.object(bu, "find_chrome_debug_url", return_value=None):
-            listed, _ = up.forward({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, None)
+        listed, _ = up.forward({"jsonrpc": "2.0", "id": 5, "method": "tools/list"}, None)
         self.assertEqual(listed["id"], 5)
         self.assertIn(P + "open", [t["name"] for t in listed["result"]["tools"]])
         self.assertEqual(len(self.log("start")), 1)
@@ -196,7 +326,7 @@ class Children(Base):
         first = self.log("start")[0]["pid"]
         self.control(crash_on=P + "click")
         reply, _ = up.forward(call(2, P + "click", selector="@e1"), None)
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.CRASHED)
+        self.assertEqual(text(reply), bu.CRASHED)
         self.assertTrue(reply["result"]["isError"])
         self.assertFalse(self.alive(first))
         self.control()
@@ -213,32 +343,32 @@ class Children(Base):
         self.control(hang_on=P + "click")
         with mock.patch.object(bu, "CALL_SECONDS", 1):
             reply, _ = up.forward(call(2, P + "click", selector="@e1"), None)
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.TIMED_OUT.format(s=1))
+        self.assertEqual(text(reply), bu.TIMED_OUT.format(s=1))
         self.assertFalse(self.alive(first))
         self.control()
         reply, _ = up.forward(call(3, P + "click", selector="@e1"), None)
         self.assertFalse(reply["result"]["isError"])
         self.assertEqual(len(self.log("start")), 2)
 
-    def test_bad_names_refused(self):
-        for ws, bot in (("acme--x", "b1"), ("acme", "b-"), ("Acme", "b1"), ("acme", "b 1"), ("-a", "b"), ("", "b")):
-            up = bu.BrowserUpstream(ws, bot, "bot", self.root)
+    def test_odd_ids_start_with_hashed_names(self):
+        for ws, bot in (("a--b", "b1"), ("acme", "bot-")):
+            up = self.pool.get(ws, bot, "bot", self.root)
             reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
-            self.assertEqual(reply["result"]["content"][0]["text"], bu.BAD_NAME, (ws, bot))
-            up.close()
-        self.assertEqual(self.log(), [])
+            self.assertFalse(reply["result"]["isError"], (ws, bot))
+        self.assertEqual([s["env"]["AGENT_BROWSER_SESSION"] for s in self.log("start")],
+                         [bu.session_part("a--b") + "--b1", "acme--" + bu.session_part("bot-")])
 
     def test_no_engine_refused(self):
         with mock.patch.object(bu.browser_engine, "resolve", return_value=None):
             up = bu.BrowserUpstream("acme", "b1", "bot", self.root)
             reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.NO_ENGINE)
+        self.assertEqual(text(reply), bu.NO_ENGINE)
 
     def test_bad_tools_list_fails_start(self):
         self.control(bad_list=True)
         up = self.pool.get("acme", "b1", "bot", self.root)
         reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
-        self.assertEqual(reply["result"]["content"][0]["text"], bu.NO_START)
+        self.assertEqual(text(reply), bu.NO_START)
         self.assertFalse(self.alive(self.log("start")[0]["pid"]))
 
     def test_start_fills_relay_schemas_and_url(self):
@@ -255,6 +385,50 @@ class Children(Base):
         listed, _ = up.forward({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, None)
         self.assertEqual(listed["id"], 9)
         self.assertIn(P + "open", [t["name"] for t in listed["result"]["tools"]])
+
+
+class Sweeper(Base):
+    def test_sweeper_thread_sweeps_until_close_all(self):
+        swept = threading.Event()
+        with mock.patch.object(self.pool, "sweep", side_effect=lambda: swept.set()):
+            thread = self.pool.start_sweeper(interval=0.01)
+            self.assertTrue(swept.wait(5))
+            self.pool.close_all()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+
+    def test_server_shutdown_closes_browsers(self):
+        from dashboard import server
+        with mock.patch.object(server.browser_upstream.POOL, "close_all") as close_all, \
+                mock.patch.object(server, "remove_uploads"), mock.patch.object(server, "remove_token_file"), \
+                mock.patch.object(server, "release_pid_lock"), \
+                mock.patch.object(server.chat_session, "remove_bot_tmpdir"), \
+                mock.patch.object(server, "_CHAT", None), mock.patch.object(server, "_PERSON_CHATS", {}):
+            server.shutdown_children()
+        close_all.assert_called_once_with()
+
+
+class Names(unittest.TestCase):
+    def test_session_part(self):
+        self.assertEqual(bu.session_part("acme"), "acme")
+        for odd in ("a--b", "bot-", "-a", "Acme", "b 1", "", "h0123abcd"):
+            part = bu.session_part(odd)
+            self.assertRegex(part, r"^h[0-9a-f]{8}$", odd)
+        self.assertNotEqual(bu.session_part("a--b"), bu.session_part("a-b"))
+        self.assertNotEqual(bu.session_part("h0123abcd"), "h0123abcd")  # a real id never looks hashed
+
+    def test_long_names_fit_the_socket_path(self):
+        home = "/Users/" + "u" * 16
+        limit = bu._max_session(home)
+        self.assertEqual(bu.session_name("acme", "b1", "bot", home), "acme--b1")
+        long_bot, long_chrome = (bu.session_name("w" * 20, "b" * 20, m, home) for m in ("bot", "my_chrome"))
+        self.assertRegex(long_bot, r"^x[0-9a-f]{16}$")
+        self.assertEqual(long_chrome, long_bot + "c")
+        self.assertLessEqual(len(long_chrome), limit)
+        # just at the limit stays plain
+        ws = "a" * (limit - len("--b1"))
+        self.assertEqual(bu.session_name(ws, "b1", "bot", home), ws + "--b1")
+        self.assertNotEqual(bu.session_name(ws, "b1", "my_chrome", home), ws + "--b1--chrome")
 
 
 class Key(unittest.TestCase):
@@ -274,27 +448,55 @@ class Key(unittest.TestCase):
             up = bu.BrowserUpstream("acme", "b1", "bot", d)
             with mock.patch.dict(os.environ, {"LEOBOT_AGENT_BROWSER": str(FAKE), "HOME": d}):
                 reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
-            self.assertEqual(reply["result"]["content"][0]["text"], bu.NO_KEY)
+            self.assertEqual(text(reply), bu.NO_KEY)
             self.assertFalse((Path(d) / "fake-log.jsonl").exists())
 
 
 class ChromeUrl(unittest.TestCase):
-    def _port_file(self, home, port, rel="Library/Application Support/Google/Chrome"):
+    def _port_file(self, home, port, rel="Library/Application Support/Google/Chrome", path="/devtools/browser/abc-1"):
         folder = Path(home) / rel
-        folder.mkdir(parents=True)
-        (folder / "DevToolsActivePort").write_text(f"{port}\n/devtools/browser/abc-1\n")
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "DevToolsActivePort").write_text(f"{port}\n{path}\n")
+
+    def _chrome_like(self, ws_path):
+        """A loopback HTTP server answering /json/version like Chrome."""
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps({"webSocketDebuggerUrl": "ws" + "://" + LOOPBACK + ":1" + ws_path}).encode()
+                self.send_response(200 if self.path == "/json/version" else 404)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.ThreadingHTTPServer((LOOPBACK, 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        return srv.server_address[1]
 
     def test_listening_port_gives_ws_url(self):
-        srv = socket.socket()
-        srv.bind((LOOPBACK, 0))
-        srv.listen(1)
-        self.addCleanup(srv.close)
-        port = srv.getsockname()[1]
+        port = self._chrome_like("/devtools/browser/abc-1")
         with tempfile.TemporaryDirectory() as home:
             self._port_file(home, port)
             self.assertEqual(bu.find_chrome_debug_url(home=home, platform="darwin"),
                              "ws" + "://" + LOOPBACK + f":{port}/devtools/browser/abc-1")
             self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="win32"))
+
+    def test_other_browser_id_on_port_is_none(self):
+        port = self._chrome_like("/devtools/browser/zzz-9")  # another Chrome run reuses the port
+        with tempfile.TemporaryDirectory() as home:
+            self._port_file(home, port)
+            self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"))
+
+    def test_plain_listener_is_none(self):
+        srv = socket.socket()
+        srv.bind((LOOPBACK, 0))
+        srv.listen(1)
+        self.addCleanup(srv.close)
+        with mock.patch.object(bu, "CONNECT_SECONDS", 0.3), tempfile.TemporaryDirectory() as home:
+            self._port_file(home, srv.getsockname()[1])
+            self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"))
 
     def test_stale_file_is_none(self):
         srv = socket.socket()
@@ -305,13 +507,17 @@ class ChromeUrl(unittest.TestCase):
             self._port_file(home, port, ".config/google-chrome")
             self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="linux"))
 
-    def test_missing_or_bad_file_is_none(self):
+    def test_missing_or_bad_file_is_none_and_next_candidate_used(self):
+        port = self._chrome_like("/devtools/browser/abc-1")
         with tempfile.TemporaryDirectory() as home:
             self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"))
-            folder = Path(home) / ".config/chromium"
-            folder.mkdir(parents=True)
-            (folder / "DevToolsActivePort").write_text("notaport\n/x\n")
-            self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="linux"))
+            for garbage in ("notaport", "9²", "٣٣", "-1", "99999", ""):
+                self._port_file(home, garbage)
+                self.assertIsNone(bu.find_chrome_debug_url(home=home, platform="darwin"), garbage)
+            (Path(home) / "Library/Application Support/Google/Chrome/DevToolsActivePort").write_bytes(b"\xff\xfe\n")
+            self._port_file(home, port, "Library/Application Support/Chromium")
+            self.assertEqual(bu.find_chrome_debug_url(home=home, platform="darwin"),
+                             "ws" + "://" + LOOPBACK + f":{port}/devtools/browser/abc-1")
 
 
 if __name__ == "__main__":

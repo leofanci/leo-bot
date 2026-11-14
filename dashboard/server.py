@@ -4632,6 +4632,27 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "unknown endpoint"})
 
 
+def shutdown_children(*_a):
+    """Server stop: end live chat turns and browser children, remove run files."""
+    # Terminate the chat agent's in-flight turn, if any. Per-connection
+    # TerminalSessions already close() in _handle_terminal_ws's finally.
+    for live in [_CHAT] + [slot[0] for slot in list(_PERSON_CHATS.values())]:
+        if live is None:
+            continue
+        try:
+            live.close()
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        browser_upstream.POOL.close_all()  # engine children; the owner's Chrome stays open
+    except Exception:  # noqa: BLE001
+        pass
+    remove_uploads()
+    chat_session.remove_bot_tmpdir()
+    remove_token_file()
+    release_pid_lock()
+
+
 def main():
     # Line-buffer stdout/stderr so the startup banner + request log reach
     # server.log immediately (anaconda python block-buffers a redirected stdout,
@@ -4682,27 +4703,8 @@ def main():
                 refuse("startup re-index failed — fix source files and retry")
             print("WARNING: re-index failed; running on the last good index. Fix the file above.", file=sys.stderr)
 
-    def _shutdown_children(*_a):
-        # Terminate the chat agent's in-flight turn, if any. Per-connection
-        # TerminalSessions already close() in _handle_terminal_ws's finally.
-        for live in [_CHAT] + [slot[0] for slot in list(_PERSON_CHATS.values())]:
-            if live is None:
-                continue
-            try:
-                live.close()
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            browser_upstream.POOL.close_all()  # engine children; the owner's Chrome stays open
-        except Exception:  # noqa: BLE001
-            pass
-        remove_uploads()
-        chat_session.remove_bot_tmpdir()
-        remove_token_file()
-        release_pid_lock()
-
     # Quitting LeoBot.app (Cmd+Q) sends SIGTERM to this PID; clean up children before exiting.
-    signal.signal(signal.SIGTERM, lambda *a: (_shutdown_children(), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda *a: (shutdown_children(), sys.exit(0)))
 
     try:
         srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
@@ -4714,8 +4716,8 @@ def main():
     # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
     job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
                       threads=chat_store.records, post=chat_store.post_note,
-                      activity=lambda: (_JOB_RUN["live"] or {}).get("active"),
-                      every_tick=(browser_upstream.POOL.sweep,)).start()
+                      activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
+    browser_upstream.POOL.start_sweeper()  # idle engine children close after 10 minutes
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).
@@ -4728,7 +4730,7 @@ def main():
     except KeyboardInterrupt:
         print("\nstopped.")
     finally:
-        _shutdown_children()
+        shutdown_children()
 
 
 if __name__ == "__main__":
