@@ -560,8 +560,7 @@ class TurnFolders(unittest.TestCase):
         if runner:
             patches.append(mock.patch.object(server.runners.HUB, "online", return_value=True))
         if apps:
-            patches += [mock.patch.object(server.integrations, "api_key", return_value="k"),
-                        mock.patch.object(server, "_needs_apps", return_value=True)]
+            patches += [mock.patch.object(server.integrations, "api_key", return_value="k")]
         for p in patches:
             p.start()
         try:

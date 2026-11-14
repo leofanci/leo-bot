@@ -131,12 +131,18 @@ class CodexDriver(Base):
         self.assertEqual(argv[:3], ["exec", "resume", "th-1"])
         self.assertIn('sandbox_mode="read-only"', argv)
 
-    def test_refuses_shared_and_apps(self):
-        for kw, sess_shared in (({}, True), ({"apps_token": "t", "apps_port": 1}, False)):
-            s = self.session(self.engine)
-            s.shared = sess_shared
-            self.assertEqual(list(s.ask("hi", **kw))[-1][0], "error")
+    def test_refuses_shared(self):
+        s = self.session(self.engine)
+        s.shared = True
+        self.assertEqual(list(s.ask("hi"))[-1][0], "error")
         self.assertFalse(self.log.exists())
+
+    def test_edit_folders_only_on_a_shell_level(self):
+        from dashboard.engines.base import TurnPolicy
+        with self.assertRaises(EngineRefused):
+            self.engine.check(TurnPolicy(read_dirs=("/x",), edit_dirs=("/x",)))
+        self.engine.check(TurnPolicy(read_dirs=("/x",), edit_dirs=("/x",), shell=True, level="full"))
+        self.engine.check(TurnPolicy(apps=True, apps_used=True))  # apps, also after a read
 
     def test_never_runs_jobs(self):
         with self.assertRaises(EngineRefused):

@@ -99,6 +99,14 @@ class EngineLevels(unittest.TestCase):
         self.assertEqual(full[full.index("--permission-mode") + 1], "default")
         self.assertIn("Bash", full[full.index("--allowedTools") + 1:full.index("--disallowedTools")])
 
+    def test_claude_shell_turn_works_in_its_folder_and_still_reaches_osctl(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        self.assertEqual(ClaudeCodeEngine.shell_dir(self.policy("full"), True), self.dir)
+        self.assertIsNone(ClaudeCodeEngine.shell_dir(self.policy("full"), False))  # no gate
+        self.assertIsNone(ClaudeCodeEngine.shell_dir(self.policy("ask", shell=False), True))
+        env = ClaudeCodeEngine().turn_env(self.policy("full"), self.tokens(), repo_dir="/repo")
+        self.assertTrue(env["PYTHONPATH"].startswith("/repo"))
+
     def test_api_engine_shell_tool(self):
         from pathlib import Path
         from dashboard import taint

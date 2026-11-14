@@ -59,7 +59,8 @@ def _people_engine(data, root, refusal=NO_PEOPLE_ENGINE):
 
 def pick(root, ws, bot, invited=False, shared=False, apps=False):
     """The engine for one run. An invited person's message never runs on the owner's login.
-    A full-disk engine runs only the owner's private threads, with no connected apps."""
+    A full-disk engine runs only the owner's private threads. `apps`: the run needs connected
+    apps, so an engine without them hands it to the default one."""
     data = config.load(root)
     if invited:
         return _people_engine(data, root)

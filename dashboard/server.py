@@ -732,49 +732,6 @@ def _needs_web(text, skill=None, *, private=False):
     return False
 
 
-# Connected apps (Composio) mount only when the lead bot has a grant here and the
-# message is about one of its apps. Gmail/Calendar/Drive have intent words; any
-# other app needs `@apps` or "my <app>": a bare name ("a LinkedIn post") is
-# content work for the Leo Bot pipeline. Plain calendar words stay on the Leo Bot calendar.
-_GMAIL_INTENT_RE = re.compile(
-    r"\b(?:inbox|gmail|unread)\b|\bmy (?:e-?mails?|mail)\b|\breply to (?:him|her|them|this|that|the)\b", re.I)
-_GCAL_INTENT_RE = re.compile(r"\bgoogle calendar\b|\b(?:invite|meeting|call) with\b", re.I)
-_DRIVE_INTENT_RE = re.compile(r"\b(?:google )?drive\b|\bgoogle docs?\b", re.I)
-_APP_INTENT = {"gmail": _GMAIL_INTENT_RE, "googlecalendar": _GCAL_INTENT_RE, "googledrive": _DRIVE_INTENT_RE}
-
-
-# Words people use for a social app, and verbs that act on it (send, DM, read...). "write a
-# LinkedIn post" has none of those verbs, so it stays content work for the pipeline.
-_APP_WORDS = {"instagram": ("insta", "ig"), "facebook": ("fb",), "twitter": ("x",)}
-_APP_ACT = (r"send|dm|message|text|reach out to|reach|contact|check|read|fetch|pull|list|look at|"
-            r"look up|show|reply|answer|follow up")
-
-
-def _app_acted_on(slug, text):
-    """The message sends to, reads or messages on this app (its name or a short form)."""
-    names = [slug.replace("_", " "), *_APP_WORDS.get(slug, ())]
-    word = "|".join(re.escape(n) for n in names)
-    return bool(re.search(rf"\b(?:{_APP_ACT})\b[^.?!\n]{{0,60}}\b(?:{word})\b"
-                          rf"|\b(?:{word})\s+(?:profile|account|dms?|inbox|handle)\b", text, re.I))
-
-
-def _needs_apps(text, grant, explicit_skill=False):
-    """Pure string classifier, like _needs_web: no model call, no network."""
-    if explicit_skill or not grant:
-        return False
-    text = text or ""
-    if "apps" in _MENTION_RE.findall(text.lower()) or re.search(r"\bcomposio\b", text, re.I):
-        return True
-    for slug in grant:
-        rx = _APP_INTENT.get(slug)
-        if rx is not None:
-            if rx.search(text):
-                return True
-        elif re.search(rf"\bmy {re.escape(slug.replace('_', ' '))}\b", text, re.I) or _app_acted_on(slug, text):
-            return True
-    return False
-
-
 # A code question with no usable linked folder gets the "App workspace unavailable"
 # note, so the bot never reads Leo Bot's own source as a substitute. Folder access itself
 # is on every private turn (_turn_folders), not decided by this classifier.
@@ -842,7 +799,6 @@ class TurnSetup:
     may_write: bool
     may_edit: bool
     app_grant: dict
-    app_turn: bool
     mount: bool
     engine: object
     locked: bool
@@ -3140,29 +3096,18 @@ class Handler(BaseHTTPRequestHandler):
             may_edit = False if not edit_ok else (job_mode == "auto" if job
                                                   else routed or level != "ask"
                                                   or _may_edit(explicit, room, user_msg, team, sess))
-            # An app request is not a content write: decided before may_write, and
-            # its only approval path is the held app action (no skill, no APPROVAL line).
-            # A thread an invited person can see never reaches the owner's connected apps.
+            # A bot's granted apps are on every private turn its engine can carry them: the bot
+            # decides when to use them, the way it decides on any other tool. No guessing from the
+            # owner's wording. A thread an invited person can see never reaches the owner's apps.
             app_grant = (integrations.effective_grant(ws, bot_id, ROOT)
                          if integrations.api_key(ROOT) and not shared else {})
-            # A job keeps its skill and gets its apps mounted like any private turn (below).
-            app_turn = False if job else _needs_apps(user_msg, app_grant, bool(_explicit_skill(user_msg)))
-            # A short follow-up ("yes", "go ahead") in a thread that already used apps stays an app turn.
-            if (not app_turn and not job and app_grant and getattr(sess, "apps_used", False) and not _explicit_skill(user_msg)
-                    and len((user_msg or "").strip()) <= 60 and not re.search(r"[@/]", user_msg or "")):
-                app_turn = True
-            if app_turn:
-                skill = explicit = None
-                may_write = False
-                sess.apps_used = True
 
             # The sender's own Mac when it is connected (apps stay on the server). A runner
             # turn is locked down like a shared one: the Mac is not the workspace.
             try:
                 engine = (RunnerEngine(sender, person["name"] if person else None)
-                          if not app_turn and not job and runners.HUB.online(sender)
-                          else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared,
-                                                    apps=bool(app_turn)))
+                          if not job and runners.HUB.online(sender)
+                          else engine_registry.pick(ROOT, ws, bot_id, invited=bool(person), shared=shared))
             except EngineRefused as e:
                 return str(e)
             if job and not engine_registry.metered(engine):
@@ -3175,8 +3120,7 @@ class Handler(BaseHTTPRequestHandler):
             # them), so the owner never has to word a message for them: the bot decides. Reading app data
             # keeps its folder edits and web search (what leaves the machine is watched instead: fetches
             # reach only typed hosts, and a Full access shell sends nothing out after outside content).
-            mount = bool(app_grant) and not app_turn and not locked \
-                and "apps" in engine.supports and not engine.full_disk
+            mount = bool(app_grant) and not locked and "apps" in getattr(engine, "supports", ())
             # A shell level, the same on every engine that has a shell: Full access (any command,
             # each checked by Leo Bot's gate first) or Approve for me (the engine's own reviewer
             # decides, Leo Bot's gate still refuses the worst; an engine with no reviewer falls
@@ -3197,9 +3141,8 @@ class Handler(BaseHTTPRequestHandler):
             # (/web) takes the stronger model. A thread invited people can see keeps the explicit rule.
             web_asked = _needs_web(user_msg, skill)
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
-            model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
-                             else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
-                                                     editing=bool(may_edit and edit_dirs)))
+            model, reason = _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
+                                               editing=bool(may_edit and edit_dirs))
 
             wants_file_search = _needs_workspace(user_msg, skill)
             # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
@@ -3258,11 +3201,11 @@ class Handler(BaseHTTPRequestHandler):
                 workspace = ("## App workspace unavailable\n" + why
                              + " Do not inspect the Leo Bot source tree as a substitute.")
 
-            if (app_turn or mount or integrations.api_key(ROOT)) and not locked:
+            if (mount or integrations.api_key(ROOT)) and not locked:
                 # Which accounts the bot may name this turn (a workspace's own picks), how each app
                 # runs, and which granted apps still need an account: the bot asks for those itself.
                 # Apps not on this turn (an engine without them): only what is left to connect.
-                shown = app_grant if (app_turn or mount) else {}
+                shown = app_grant if mount else {}
                 workspace = "\n\n".join(
                     x for x in (workspace, _apps_accounts_note(ws, shown, bot=bot_id)) if x) or None
             if locked:
@@ -3281,7 +3224,7 @@ class Handler(BaseHTTPRequestHandler):
                 workspace = "\n\n".join(x for x in (workspace, JOB_NOTES[job_mode].format(name=job["name"]),
                                                       _job_notepad(job)) if x)
             return TurnSetup(bot_id=bot_id, skill=skill, explicit=explicit, handoff_from=handoff_from,
-                             may_write=may_write, may_edit=may_edit, app_grant=app_grant, app_turn=app_turn,
+                             may_write=may_write, may_edit=may_edit, app_grant=app_grant,
                              mount=mount, engine=engine, locked=locked, apps_used=apps_used,
                              folder_rows=folder_rows, read_dirs=read_dirs, edit_dirs=edit_dirs,
                              web_asked=web_asked, with_web=with_web, model=model, reason=reason,
@@ -3298,7 +3241,7 @@ class Handler(BaseHTTPRequestHandler):
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
             return self._sse_message(st)
-        (bot_id, skill, explicit, handoff_from, may_write, may_edit, app_grant, app_turn, mount, engine,
+        (bot_id, skill, explicit, handoff_from, may_write, may_edit, app_grant, mount, engine,
          locked, apps_used, folder_rows, read_dirs, edit_dirs, web_asked, with_web, model, reason,
          graph_folder, graph_context, workspace) = astuple_shallow(st)
         saved_rec = chat_store.load(sess.session_id) if isinstance(getattr(sess, "session_id", None), str) else None
@@ -3322,7 +3265,7 @@ class Handler(BaseHTTPRequestHandler):
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
                            handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
-                           code_index=bool(graph_folder), apps_on=bool(app_turn or mount),
+                           code_index=bool(graph_folder), apps_on=bool(mount),
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
         )
@@ -3348,7 +3291,7 @@ class Handler(BaseHTTPRequestHandler):
         self.log_message(
             "chat turn prompt=%d ctx=%d bot=%s skill=%s explicit=%s model=%s web=%s folders=%d edit=%d graph=%s apps=%s fresh=%s turn=%d",
             len(text), ctx_len, bot_id, skill or "-", bool(explicit), model, with_web,
-            len(read_dirs), len(edit_dirs), bool(graph_context), app_turn, fresh,
+            len(read_dirs), len(edit_dirs), bool(graph_context), mount, fresh,
             sess._turn_count,
         )
 
@@ -3495,7 +3438,8 @@ class Handler(BaseHTTPRequestHandler):
             if job and not engine_registry.metered(c.engine):  # its spend would escape the job's cap
                 emit({"error": JOB_MATE_UNMETERED.format(bot=b2, label=c.engine.label)})
                 raise _RunFailed
-            c.apps_used = apps_used  # its prompt quotes the lead's reply (app data)
+            # Its prompt quotes the lead's reply: app data once the lead has read an app.
+            c.apps_used = bool(getattr(sess, "apps_used", False) or turn.app_data)
             # Consulted: its own layered folders, read-only, and its own walls, but never a folder
             # the lead cannot read: its answer goes back into the lead's turn, so a teammate must
             # not carry in what the lead's own folder limits keep out.
@@ -3534,10 +3478,10 @@ class Handler(BaseHTTPRequestHandler):
                     os_relay.TOKENS.revoke(c_kw["os_token"])
 
         def _mint(st_):
-            """The tokens one bot's run gets: the apps relay (its own grant) or, on a locked or
-            full-disk engine, the osctl relay. Revoked in the finally below."""
+            """The tokens one bot's run gets: the apps relay (its own grant), plus the osctl relay
+            on a locked or full-disk engine (a locked turn has no apps). Revoked in the finally below."""
             kw = {}
-            if st_.app_turn or st_.mount:
+            if st_.mount:
                 kw = {"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
@@ -3547,9 +3491,7 @@ class Handler(BaseHTTPRequestHandler):
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
                       "apps_port": self.server.server_address[1]}
             if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
-                if kw.get("apps_token"):  # replaced below, so nothing else would ever revoke it
-                    apps_relay.TOKENS.revoke(kw["apps_token"])
-                kw = {"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
+                kw = {**kw, "os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                         "apps_used": st_.apps_used,
                                                         "engine": st_.engine.id, "runner_owner": sender,
                                                         "shared": shared, "chat": getattr(sess, "session_id", None),
@@ -3631,7 +3573,7 @@ class Handler(BaseHTTPRequestHandler):
                         context=context, skill=None, session=sess, projects=projects, workspace=hst.workspace,
                         bot=_bot_block(team, target, sess, project_slug if project_record else None, bot_id,
                                        fresh=True, shared=shared, query=task, code_index=bool(hst.graph_folder),
-                                       apps_on=bool(hst.app_turn or hst.mount), handed_by_bot=True,
+                                       apps_on=bool(hst.mount), handed_by_bot=True,
                                        members=members),
                         only_project=(project_slug or None))
                     if hst.engine.id != engine.id:

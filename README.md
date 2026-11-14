@@ -286,7 +286,9 @@ the channel's lead, and that bot decides what it needs:
   conversation. While a workspace holds a labeled file you have not trusted, its Auto jobs
   save only through your click and a Full access shell sends nothing off the machine. Approvals lists each one: read the whole file, then Trust it, or delete it.
   Trust covers the version you read; a later change is labeled again.
-- **Apps (sending on your behalf).** Each bot gets each app per workspace as Read, Asks
+- **Apps (sending on your behalf).** A bot has its apps on every one of your turns, on
+  every engine (Claude Code, Codex, API keys), and decides itself when to use them: no
+  wording needed. Each bot gets each app per workspace as Read, Asks
   every time (anything that is not a read waits for your click), or Sends without asking
   (it sends, posts and messages on its own, also after reading mail or pages; deletes,
   payments, ads, databases, code, sharing and paid lookups still wait). Each action it runs shows in Approvals as done or

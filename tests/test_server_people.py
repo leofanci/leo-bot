@@ -303,6 +303,7 @@ def fake_session(seen):
 
 class FakeApiEngine:
     id, label, kind, full_disk = "api:demo", "Demo API", "api", False
+    supports = frozenset({"web", "apps", "folder_edit", "complete"})
 
     def resolve_model(self, model):
         return model
@@ -347,8 +348,7 @@ class Ask(Base):
         for room, shared in (("acme/general", True), ("acme/dm-cos", False), ("acme/t-deals", False)):
             seen = {}
             with mock.patch.object(server.integrations, "api_key", return_value="ak_x"), \
-                    mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": "write"}), \
-                    mock.patch.object(server, "_needs_apps", side_effect=lambda m, g, e: bool(g)):
+                    mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": "write"}):
                 self.assertEqual(self.owner_ask(room, seen)[0], 200)
             self.assertEqual(bool(seen["shared"]), shared, room)
             self.assertEqual("apps_token" in seen["kw"], not shared, room)

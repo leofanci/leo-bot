@@ -169,10 +169,12 @@ class EngineSettings(Tmp):
         self.assertEqual(data["workspaces"], {"demo": "codex"})
         self.assertEqual((data["providers"], data["acp_agents"]), ([], []))
 
-    def test_full_disk_engine_refused_after_an_app_read(self):
+    def test_full_disk_engine_continues_after_an_app_read(self):
+        # Like every engine: app data no longer ends a thread (web stays on; a shell level still
+        # sends nothing out after outside content). A shared thread is still refused.
+        CodexEngine().check(TurnPolicy(apps_used=True))
         with self.assertRaises(EngineRefused):
-            CodexEngine().check(TurnPolicy(apps_used=True))
-        CodexEngine().check(TurnPolicy())
+            CodexEngine().check(TurnPolicy(shared=True))
 
 
 class TempFolders(Tmp):

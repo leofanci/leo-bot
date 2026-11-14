@@ -431,39 +431,12 @@ class Approve(Base):
 CHAT = "11111111-2222-3333-4444-555555555555"
 
 
-class NeedsApps(unittest.TestCase):
-    def test_needs_apps_table(self):
-        gm, gc, dr = {"gmail": "write"}, {"googlecalendar": "write"}, {"googledrive": "read"}
-        cases = [
-            ("summarize my inbox", gm, False, True),
-            ("any unread from the bank?", gm, False, True),
-            ("write an email newsletter", gm, False, False),
-            ("add to my calendar tomorrow", gc, False, False),
-            ("set a meeting with Ana on google calendar", gc, False, True),
-            ("write a LinkedIn post", {"linkedin": "write"}, False, False),
-            ("check my instagram stats", {"instagram": "read"}, False, True),
-            ("how is my google search console doing", {"google_search_console": "read"}, False, True),
-            ("send a message (test message) using the insta profile to people", {"instagram": "write"}, False, True),
-            ("dm them on ig", {"instagram": "write"}, False, True),
-            ("reach out to Ana on Instagram", {"instagram": "write"}, False, True),
-            ("what does the instagram account look like", {"instagram": "read"}, False, True),
-            ("write an instagram caption about launch day", {"instagram": "write"}, False, False),
-            ("plan a LinkedIn post and a facebook carousel", {"linkedin": "write", "facebook": "write"}, False, False),
-            ("it is available through composio", {"instagram": "write"}, False, True),
-            ("@apps list files", dr, False, True),
-            ("summarize my inbox", {}, False, False),
-            ("summarize my inbox", gm, True, False),
-        ]
-        for text, grant, explicit, want in cases:
-            self.assertIs(server._needs_apps(text, grant, explicit), want, text)
-
-
 class Turn(Base):
     def setUp(self):
         super().setUp()
         integrations.set_key("ak_x", self.root)
 
-    def run_turn(self, text, replies=(), apps_used=False, hold=False):
+    def run_turn(self, text, replies=(), apps_used=False, hold=False, reads=False):
         seen = []
         self_root = self.root
         replies = list(replies)
@@ -493,6 +466,8 @@ class Turn(Base):
 
                 def ask(self, prompt, **kw):
                     seen.append({"who": who, "apps_used": self.apps_used, **kw})
+                    if kw.get("apps_token") and reads:  # the bot reads an app: the relay marks the thread
+                        server.apps_relay.TOKENS.lookup(kw["apps_token"])["on_call"]()
                     if kw.get("apps_token") and hold:  # what the relay does mid-turn
                         approvals.add_app_action(self_root, ws="hq", room="hq/general", chat=CHAT, bot="cos",
                                                  person="ceo", toolkit="gmail", slug="GMAIL_SEND_EMAIL",
@@ -539,16 +514,16 @@ class Turn(Base):
         integrations.set_grant("hq", "cos", {"gmail": "write"}, self.root)
         self.assertIn("- gmail (waits for approval)", server._apps_accounts_note("hq", {"gmail": "write"}, bot="cos"))
 
-    def test_app_turn_flags(self):
-        seen, lead, out = self.run_turn("draft a reply to the thread in my inbox")
-        self.assertNotIn("tag who should do it", out)
-        kw = seen[0]
-        self.assertEqual(kw["model"], server.chat_session.ESCALATED_MODEL)
-        # Web search beside apps: a query only reaches the search engine, and a fetch only
-        # reaches hosts the owner typed, so app data has no road to another host.
-        self.assertIs(kw["with_web"], True)
-        self.assertEqual(kw["apps_port"], PORT)
-        self.assertEqual(len(kw["apps_token"]), 64)
+    def test_apps_are_on_whatever_the_wording(self):
+        # No keyword routing: a granted bot has its apps on every private turn and decides itself.
+        for text in ("draft a reply to the thread in my inbox", "what should we post this week?"):
+            seen, lead, out = self.run_turn(text)
+            kw = seen[0]
+            self.assertEqual(kw["apps_port"], PORT)
+            self.assertEqual(len(kw["apps_token"]), 64)
+            self.assertIs(kw["with_web"], True)
+            self.assertFalse(lead.apps_used)  # nothing read yet
+        seen, lead, _ = self.run_turn("anything new?", reads=True)
         self.assertTrue(lead.apps_used)
 
     def test_no_key_no_apps(self):
@@ -585,7 +560,8 @@ class Turn(Base):
 
     def test_followup_gets_same_token_teammate_none(self):
         server.bots.set_active("cmo", True, root=self.root)
-        seen, _, _ = self.run_turn("summarize my inbox", replies=["CONSULT @cmo: tone?", "advice", "final"])
+        seen, _, _ = self.run_turn("summarize my inbox", replies=["CONSULT @cmo: tone?", "advice", "final"],
+                                   reads=True)
         self.assertEqual([s["who"] for s in seen], ["lead", "mate", "lead"])
         self.assertEqual(seen[0]["apps_token"], seen[2]["apps_token"])
         self.assertNotIn("apps_token", seen[1])
