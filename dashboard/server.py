@@ -3169,26 +3169,24 @@ class Handler(BaseHTTPRequestHandler):
             apps_used = bool(getattr(sess, "apps_used", False))
             # A bot with a connected-app grant always has its apps on a private turn (the engine can use
             # them), so the owner never has to word a message for them: the bot decides. Reading app data
-            # still costs the turn its folder edits, and the thread its web search once it has read any.
+            # keeps its folder edits and web search (what leaves the machine is watched instead: fetches
+            # reach only typed hosts, and a Full access shell sends nothing out after outside content).
             mount = bool(app_grant) and not app_turn and not locked \
                 and "apps" in engine.supports and not engine.full_disk
             folder_rows, read_dirs, edit_dirs = _turn_folders(
                 ws, room, bot_id, locked=locked, may_edit=may_edit,
-                drop_edit=bool(app_turn or mount or apps_used), engine=engine)
+                drop_edit=False, engine=engine)
             sess.deny_dirs = _workspace_deny_dirs(ws, projects, read_dirs)
             # Full access: any shell command in its edit folders (each checked by the gate), on an
             # engine that can hold that wall, on this machine only (never a server or a runner).
             sess.shell = bool(level == "full" and edit_dirs and not locked and "shell" in engine.supports
                               and engine.kind != "runner" and DEPLOYMENT != "server")
 
-            # Web search is on every private turn and every job until app data is in the conversation
-            # (dashboard/taint.py: then no query may carry it out; mid-run the gate turns it off).
-            # A fetch only reaches hosts the owner typed (a job's message grants none). Asking for it
+            # Web search is on every private turn and every job, app data or not. A fetch only reaches
+            # hosts the owner typed (a job's message grants none). Asking for it
             # (/web) takes the stronger model. A thread invited people can see keeps the explicit rule.
             web_asked = _needs_web(user_msg, skill)
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
-            if turn.app_data:  # app data in this conversation: no query may carry it out
-                web_asked = with_web = False
             model, reason = ((chat_session.ESCALATED_MODEL, "app") if app_turn
                              else _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                      editing=bool(may_edit and edit_dirs)))
@@ -3496,7 +3494,7 @@ class Handler(BaseHTTPRequestHandler):
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
             # A teammate's web follows the lead's turn, never the question the lead model wrote (it
             # may echo text from a file or another person): search, and fetch only the owner's typed hosts.
-            c_web = bool(with_web) and not turn.app_data  # the lead may have read an app since
+            c_web = bool(with_web)
             c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
             c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],

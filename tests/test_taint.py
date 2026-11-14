@@ -19,14 +19,14 @@ HOOK = Path(taint.__file__).resolve().parent / "turn_hook.py"
 
 
 class Rules(unittest.TestCase):
-    def test_web_is_off_once_app_data_is_in(self):
+    def test_web_stays_on_after_app_data(self):
         t = taint.Turn()
         self.assertEqual(t.decide("WebSearch"), (True, ""))
         self.assertTrue(t.outside)  # search results are outside content
         self.assertFalse(t.app_data)
         t.saw_app_data()
-        self.assertEqual(t.decide("WebSearch"), (False, taint.WEB_OFF))
-        self.assertEqual(t.decide("WebFetch")[0], False)
+        self.assertEqual(t.decide("WebSearch"), (True, ""))
+        self.assertEqual(t.decide("WebFetch"), (True, ""))
 
     def test_an_auto_save_waits_after_outside_content(self):
         t = taint.Turn()
@@ -223,13 +223,12 @@ class ApiEngine(unittest.TestCase):
         return api_tools.ToolBox(policy, Path("."), TurnTokens(apps_token="a" if apps else None, gate_token=tok),
                                  "api", backends)
 
-    def test_web_follows_the_turn(self):
+    def test_web_stays_open_after_app_data(self):
         t = taint.Turn()
         box = self.box(t, apps=True)
         self.assertTrue(box.web_open())
         t.saw_app_data()
-        self.assertFalse(box.web_open())
-        self.assertEqual(box.run("web_fetch", {"url": "https://example.com"}), (taint.WEB_OFF, True))
+        self.assertTrue(box.web_open())
 
     def test_apps_without_a_gate_never_get_web(self):
         self.assertFalse(self.box(apps=True).web_open())

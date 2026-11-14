@@ -529,9 +529,10 @@ class ToolBox:
                 self._apps.add(tool["name"])
 
     def web_open(self):
-        """May web search or fetch be offered now? Not once app data is in the conversation."""
+        """May web search or fetch be offered now? Yes with a gate watching the turn (app data no
+        longer turns it off); apps with nothing watching: no."""
         if self.turn is not None:
-            return not self.turn.app_data
+            return True
         return not self._apps
 
     def saw_web(self):

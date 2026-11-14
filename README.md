@@ -264,10 +264,9 @@ the channel's lead, and that bot decides what it needs:
   approve the card, and Approve goes back to the bot that asked. A skill a bot loads by
   itself never unlocks folder edits. A thread invited people can see still needs a tagged skill for that.
   Folder edits still need a tagged message.
-- **Web.** Web search is on in your private threads and scheduled jobs until a conversation
-  holds data from your connected apps: from then on no search or page runs in it, checked at
-  the moment the tool would run, so a query can never carry that data out. A page is fetched
-  only from a site you typed (a job's message grants none). Only `/web` takes the stronger
+- **Web.** Web search is on in your private threads and scheduled jobs, also after a bot
+  read your connected apps. A page is fetched only from a site you typed (a job's message
+  grants none), so a page or a mail cannot steer a fetch to another site. Only `/web` takes the stronger
   model. Codex searches its index on those turns and never fetches a page live.
 - **Outside content.** Mail, pages, app data and a guest's message are someone else's words.
   Once a conversation holds any, nothing a bot does goes out on its own: its app actions wait
