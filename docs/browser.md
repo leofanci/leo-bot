@@ -238,9 +238,30 @@ The bot uses its own pinned tab in the owner's everyday Chrome, with the owner's
 
 Remote debugging gives any local program full control of that Chrome. Turn it on only on a machine you trust.
 
+### My Chrome on a server: the runner lends Chrome
+
+On a server Leo Bot (`LEOBOT_DEPLOYMENT=server`), a My Chrome bot uses its own tab of the owner's Chrome on the owner's computer, through that person's runner (`dashboard/runner.py`). The server never looks for a Chrome of its own.
+
+- **Lend my Chrome** is a setting of the runner, saved on that computer only (`~/.leobot-runner-settings.json`). It is off until the person at that computer runs `python3 -m dashboard.runner --lend-chrome on` (`off` turns it back off; the runner reads it again for every call). The server cannot turn it on.
+- `--browser-only` lends Chrome and takes no turns. A runner that takes turns makes the owner's chats run on that computer, and runner turns never get the browser. So to use My Chrome from chats on a server, run the runner with `--browser-only`. Scheduled jobs run on the server's engine either way.
+- The gate stays on the server: levels, send plans, daily caps, site modes and the field read. Each call the gate passes becomes one `browser` job in the runner hub (`core/runners.py`) for the turn's own person. A frame for one person's turn never reaches another person's runner. The answer comes back on `POST /api/runner/reply/<job>`, and only the runner holding that job may send it. An answer over `MAX_TURN_CHARS` is dropped.
+- The runner checks each call again before its Chrome sees it (`browser_lent.runner_check`). It passes only the engine tools of the four sets, never a tab tool or a `newTab` click. It drops the engine-wide inputs (and undeclared ones), opens only http(s) addresses or `about:blank`, and allows `eval` only as the relay's fixed field read (`FIELDS_SCRIPT`). A server that is not to be trusted still reaches no eval, file or cookie tool through the lend.
+- No runner of that person online: "Your computer is offline, so this bot cannot use your Chrome. Open Leo Bot on your computer, then ask again." Nothing else is tried: not the bot browser, not a Chrome on the server.
+- Runner online with Lend my Chrome off: "Lend my Chrome is off on your computer, so this bot cannot use your Chrome. Turn it on in the Leo Bot runner there, then ask again."
+- A thread invited people can see has no browser: "This thread is shared with invited people, so it has no browser. This call was not performed."
+- Settings, Browser on a server shows whether a computer lends its Chrome now, in place of the local Chrome check.
+- One person with several lending computers: a bot sticks to one. When another one takes over, the typed text is set aside, because that Chrome has nothing typed.
+- The lent tabs' engine sessions close when the runner stops (Ctrl-C or a plain kill) and after 10 idle minutes. Chrome keeps running.
+
+Live check (2026-11-15, one machine, scratch dirs, 127.0.0.1 only): a server-mode Leo Bot (scratch `LEOBOT_HOME`, `demo` workspace, `research` bot at Reads only in My Chrome) and a real runner (`--browser-only`, scratch settings and browser folder). A throwaway Chrome for Testing (`--headless=new --remote-debugging-port=0`, scratch `--user-data-dir`) stood in for the owner's Chrome. A test wrapper pointed the runner's Chrome lookup at that folder.
+
+1. With Lend my Chrome on, Settings, Browser showed a lending computer. Asked for the fixture page's title and button text, the bot ran open, get_title and snapshot and answered: "Browser form fixture", "Send". The engine child ran under the runner process. The server started none, and the page was open in the throwaway Chrome.
+2. After `--lend-chrome off` the bot quoted the Lend my Chrome line, and Settings showed no lending computer.
+3. With the runner stopped, the bot quoted the offline line. This held both right after the stop (the job was not taken within its lease) and after the runner's 45 seconds online window had passed. The stop closed the runner's engine session.
+
 ### Limits and what is not supported
 
-- Phase 1 only: Leo Bot and Chrome on the same machine. A server Leo Bot cannot borrow the owner's Chrome, and logging in is refused on a server.
+- A server Leo Bot reaches My Chrome only through the owner's runner (see "My Chrome on a server"). Logging a bot browser in is refused on a server.
 - A send that needs no typing (a one-click canned reply, Like, Connect, Accept, a quick-reply chip) is not detected. It runs as a plain click within the bot's level.
 - Text in cross-origin frames and closed shadow roots is not seen by the field read.
 - No file upload, download, PDF, cookie, storage, network or `eval` tool reaches a bot.

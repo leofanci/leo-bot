@@ -28,6 +28,10 @@ headed window (Pool.begin_login, open_login). The bot's child is closed first an
 that bot in bot mode answers LOGGING_IN until the session's daemon is gone (Done, the engine's
 idle timeout, or LOGIN_SECONDS), so the bot never sees the login page.
 
+On a server (dashboard/deployment.py) a my_chrome bot never reaches a Chrome on that server:
+Pool.get gives it a RunnerChromeUpstream (dashboard/browser_lent.py), the turn owner's own
+Chrome through their runner, with no fallback.
+
 The gate (dashboard/browser_relay.py, approvals.LOCK) is in-process: this module runs only
 inside the dashboard server. The server starts POOL's sweeper (idle children closed after
 IDLE_SECONDS) and closes them all when it stops.
@@ -52,7 +56,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from core import bots, browser, browser_engine
-from dashboard import browser_relay
+from dashboard import browser_relay, deployment
 from dashboard.browser_relay import MAX_SESSION, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
 
@@ -666,6 +670,7 @@ class Pool:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
+        self._lent = {}  # (ws, bot, person) -> RunnerChromeUpstream: server my_chrome bots
         self._logins = {}  # bot-mode session name -> _Login: an owner's login window is open
         self._stopping = False
         self._halt = threading.Event()
@@ -681,7 +686,9 @@ class Pool:
     def starts_ready(self):
         self._ready.set()
 
-    def get(self, ws, bot, mode, root):
+    def get(self, ws, bot, mode, root, ctx=None):
+        """This bot's upstream in `mode`. On a server, my_chrome is the turn owner's own Chrome
+        through their runner (ctx "runner_owner"; a shared thread or no owner is refused)."""
         old = None
         if mode == "bot" and not self._ready.wait(STARTUP_SECONDS):
             return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=NO_START)
@@ -693,6 +700,8 @@ class Pool:
         with self._lock:
             if self._stopping:
                 return BrowserUpstream(ws, bot, mode, root, stopped=True, epoch=e)
+            if mode == "my_chrome" and deployment.mode() == "server":
+                return self._lent_get(ws, bot, root, e, ctx or {})
             if mode == "bot" and session_name(ws, bot, "bot", e) in self._logins:
                 # The owner's login window drives this session: the bot never sees that page.
                 return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=LOGGING_IN, epoch=e)
@@ -706,6 +715,18 @@ class Pool:
             old.close()
         return up
 
+    def _lent_get(self, ws, bot, root, epoch, ctx):
+        """Under the pool lock: the kept RunnerChromeUpstream of (ws, bot, person)."""
+        from dashboard.browser_lent import RunnerChromeUpstream
+        owner, shared = ctx.get("runner_owner"), bool(ctx.get("shared"))
+        if shared or not (isinstance(owner, str) and owner):
+            return RunnerChromeUpstream(ws, bot, root, owner, epoch, shared=True)
+        key = (ws, bot, owner)
+        up = self._lent.get(key)
+        if up is None or up.closed or up.epoch != epoch or str(up.root) != str(root):
+            up = self._lent[key] = RunnerChromeUpstream(ws, bot, root, owner, epoch)
+        return up
+
     def kill_where(self, ws, epoch):
         """A deleted workspace: take its children of that epoch out of the table and kill them now
         (no wait for a call in flight). A child of another epoch is left alone. Returns them."""
@@ -713,6 +734,8 @@ class Pool:
             items = [(k, up) for k, up in self._items.items() if k[0] == ws and up.epoch == epoch]
             for k, _ in items:
                 del self._items[k]
+            for k in [k for k, up in self._lent.items() if k[0] == ws and up.epoch == epoch]:
+                self._lent.pop(k).close(WS_DELETED)
             for sess in [s for s, x in self._logins.items() if x.ws == ws and x.epoch == epoch]:
                 self._logins.pop(sess).stop.set()  # its window's daemon is settled by the delete tidy
         ups = [up for _, up in items]
@@ -937,6 +960,9 @@ class Pool:
         with self._lock:
             self._stopping = True
             items, self._items = list(self._items.values()), {}
+            for up in self._lent.values():
+                up.close(STOPPING)
+            self._lent = {}
             logins, self._logins = list(self._logins.items()), {}
         self._halt.set()
         for _, login in logins:

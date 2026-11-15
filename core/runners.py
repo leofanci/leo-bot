@@ -3,6 +3,11 @@
 Tokens live hashed in gitignored team/runners.json. The hub is in-memory: the
 server queues a job for a person, their runner long-polls for it and streams the
 turn's events back. Outbound HTTPS from the Mac only; no tunnel to it.
+
+A `browser` job (kind "browser") is one MCP frame for that person's own Chrome, lent by
+their runner (dashboard/browser_lent.py): one reply back, the same per-person queue and
+holder check as a turn. Each poll says what the runner does: "turns" (default on, as older
+runners send nothing) and "lend" (its owner turned on Lend my Chrome on that computer).
 """
 import hashlib
 import json
@@ -20,6 +25,8 @@ LEASE_SECONDS = 60      # a queued job no runner took
 MAX_TURN_SECONDS = 1800 # a runner that keeps polling but never ends a turn holds the thread no longer
 MAX_TURN_CHARS = 4_000_000  # what one turn may stream back
 MAX_PER_PERSON = 10
+BROWSER_LEASE = 15     # a browser job no lending runner took: that computer is not answering
+BROWSER_SECONDS = 300  # one browser call on the runner: an engine start plus the call itself
 _KINDS = ("delta", "tool", "error")
 _LOCK = threading.Lock()
 
@@ -127,16 +134,31 @@ class Hub:
         self._waiting = {}  # owner -> [Turn]
         self._turns = {}    # turn id -> Turn
         self._seen = {}     # runner id -> (owner, last poll)
+        self._caps = {}     # runner id -> {"turns": bool, "lend": bool}, from its last poll
 
     def seen_recently(self, rid):
         with self._cond:
             row = self._seen.get(rid)
             return bool(row and time.time() - row[1] < ONLINE_SECONDS)
 
+    def _live(self, owner):
+        now = time.time()
+        return [rid for rid, (o, t) in self._seen.items() if o == owner and now - t < ONLINE_SECONDS]
+
     def online(self, owner):
+        """A runner of this person that takes turns is on (the turn engine)."""
         with self._cond:
-            now = time.time()
-            return any(o == owner and now - t < ONLINE_SECONDS for o, t in self._seen.values())
+            return any(self._caps.get(rid, {}).get("turns", True) for rid in self._live(owner))
+
+    def reachable(self, owner):
+        """Any runner of this person is on."""
+        with self._cond:
+            return bool(self._live(owner))
+
+    def lenders(self, owner):
+        """This person's runners that are on and lend their Chrome, oldest id first."""
+        with self._cond:
+            return sorted(rid for rid in self._live(owner) if self._caps.get(rid, {}).get("lend"))
 
     def submit(self, owner, job):
         job = {**job, "turn": uuid.uuid4().hex}
@@ -147,17 +169,28 @@ class Hub:
             self._cond.notify_all()
         return turn
 
-    def next(self, rid, owner, wait=25):
-        """Long poll: the next job for this runner's person, or None. Also its heartbeat."""
+    def next(self, rid, owner, wait=25, caps=None):
+        """Long poll: the next job for this runner's person, or None. Also its heartbeat.
+        A browser job goes only to a lending runner (the one it names, when it names one);
+        a turn only to a runner that takes turns."""
+        caps = caps if isinstance(caps, dict) else {}
+        mine = {"turns": caps.get("turns", True) is not False, "lend": caps.get("lend") is True}
         deadline = time.time() + wait
         with self._cond:
+            self._caps[rid] = mine
             while True:
                 self._seen[rid] = (owner, time.time())
                 rows = self._waiting.get(owner) or []
-                while rows:
-                    turn = rows.pop(0)
+                for turn in list(rows):
                     if turn.cancelled:
+                        rows.remove(turn)
                         continue
+                    if turn.job.get("kind") == "browser":
+                        if not mine["lend"] or turn.job.get("runner") not in (None, rid):
+                            continue
+                    elif not mine["turns"]:
+                        continue
+                    rows.remove(turn)
                     turn.runner = rid
                     return turn.job
                 left = deadline - time.time()
@@ -169,7 +202,7 @@ class Hub:
         """Events from the runner holding this turn. Returns True when it should stop."""
         with self._cond:
             turn = self._turns.get(turn_id)
-            if turn is None or turn.runner != rid:
+            if turn is None or turn.runner != rid or turn.job.get("kind") == "browser":
                 return True
             if turn.cancelled:  # nobody is listening any more
                 return True
@@ -186,6 +219,50 @@ class Hub:
             if end:
                 turn.events.put(None)
         return False
+
+    def reply(self, rid, turn_id, payload):
+        """The one answer to a browser job, from the runner holding it. False when this runner
+        does not hold it, it was answered or ended, or it is not a browser job. An answer over
+        MAX_TURN_CHARS is dropped and the caller hears that it was too long."""
+        try:
+            size = len(json.dumps(payload))
+        except (TypeError, ValueError):
+            size = None
+        with self._cond:
+            turn = self._turns.get(turn_id)
+            if (turn is None or turn.runner != rid or turn.cancelled
+                    or turn.job.get("kind") != "browser"):
+                return False
+            turn.cancelled = True  # one answer per job
+            if size is None:
+                turn.events.put(("error", "bad reply"))
+            elif size > MAX_TURN_CHARS:
+                turn.events.put(("too_long", None))
+            else:
+                turn.events.put(("reply", payload))
+        return True
+
+    def call(self, owner, job, lease=BROWSER_LEASE, limit=BROWSER_SECONDS, poll=0.5):
+        """Queue one browser job for this person and wait for its answer:
+        ("reply", payload), ("too_long", None), ("offline", None), ("timeout", None) or
+        ("error", line) when it was ended here (runner removed, workspace deleted)."""
+        turn = self.submit(owner, {**job, "kind": "browser"})
+        try:
+            while True:
+                try:
+                    ev = turn.events.get(timeout=poll)
+                except queue.Empty:
+                    age = time.time() - turn.created
+                    if age > limit:
+                        return ("timeout", None)
+                    if turn.runner is None and age > lease:
+                        return ("offline", None)
+                    if turn.runner is not None and not self.seen_recently(turn.runner):
+                        return ("offline", None)
+                    continue
+                return ev if ev is not None else ("error", "This call was ended.")
+        finally:
+            self.finish(turn)
 
     def holds(self, rid, turn_id):
         with self._cond:
@@ -253,6 +330,7 @@ class Hub:
     def drop(self, rid):
         with self._cond:
             self._seen.pop(rid, None)
+            self._caps.pop(rid, None)
             for turn in self._turns.values():
                 if turn.runner == rid:
                     turn.cancelled = True

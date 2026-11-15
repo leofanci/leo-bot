@@ -1545,7 +1545,16 @@ function browserSiteListed(sites, value){
   return !!host && (sites || []).some(s => s.site === host);
 }
 // Settings, Browser: is Chrome reachable for My Chrome bots, and how to turn remote debugging on.
-function chromeCheckHtml(on){
+function chromeCheckHtml(on, server){
+  if (server) {
+    const lent = on
+      ? `<span class="eng-state on">Your computer lends its Chrome</span>`
+      : `<span class="eng-state">No computer lends its Chrome right now</span>`;
+    return `<div class="post brw-chrome"><div class="t">${lent}
+    <small>My Chrome bots here use their own tab of your Chrome, through the Leo Bot runner on your computer. On that computer, run the runner with --lend-chrome on (it stays off until you turn it on there), and keep Chrome open with remote debugging on.</small>
+    <small>With --browser-only the runner lends Chrome and takes no turns, so your chats keep running here and can use it.</small></div>
+    <button class="btn sm" data-chrome-check>Check again</button></div>`;
+  }
   const state = on
     ? `<span class="eng-state on">Chrome is open with remote debugging on</span>`
     : `<span class="eng-state">Chrome is not open with remote debugging on</span>`;
@@ -1832,7 +1841,7 @@ async function renderBrowserSettings(){
       <div class="help">A listed site can set where it opens for every bot, and a daily limit on sends there across all bots. Bot's choice: each bot's own setting.</div>
       <div class="rowc">${(d.sites || []).map(s => browserSiteRowHtml(s, d.max_daily)).join("") || `<div class="empty">No sites listed.</div>`}</div>
       <form class="share-form brw-add"><input name="site" placeholder="site, like example.com" aria-label="Site to add" autocomplete="off"><button class="btn" type="submit">Add site</button></form></section>`;
-    const chrome = `<section class="integ-group"><h3>My Chrome</h3>${chromeCheckHtml(d.chrome)}</section>`;
+    const chrome = `<section class="integ-group"><h3>My Chrome</h3>${chromeCheckHtml(d.chrome, d.deployment === "server")}</section>`;
     const open = new Set((d.logins || []).filter(l => l.ws === loginWs).map(l => l.bot));
     const botRow = b => {
       const set = d.bots?.[b.id] || { level: "off", mode: "bot" };

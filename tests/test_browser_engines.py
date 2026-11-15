@@ -231,7 +231,8 @@ class ApiEngine(Root):
             listed = [t["name"] for t in server._browser_list(tok)]
             self.assertEqual(server._browser_call(tok, P + "read", {}), ("ok", False))
         self.assertEqual(listed, [P + "open", P + "read", browser_relay.PLAN_TOOL])
-        get.assert_called_with("hq", "cos", "bot", self.root)
+        get.assert_called_with("hq", "cos", "bot", self.root, ctx=mock.ANY)
+        self.assertEqual(get.call_args.kwargs["ctx"]["bot"], "cos")  # the turn's ctx: who owns the runner
         server.BROWSER_TOKENS.revoke(tok)
         with self.assertRaises(ValueError):
             server._browser_rpc(tok, "tools/list", {})
@@ -297,7 +298,7 @@ class Endpoint(Root):
         self.assertEqual(code, 200)
         self.assertEqual([t["name"] for t in data["result"]["tools"]], [P + "open", P + "read"])  # read: no plan tool
         self.assertEqual(hdrs.get("mcp-session-id"), "m-1")
-        self.get.assert_called_with("hq", "cos", "bot", self.root)
+        self.get.assert_called_with("hq", "cos", "bot", self.root, ctx=mock.ANY)
         server.BROWSER_TOKENS.revoke(self.token)
         self.assertEqual(self.post(self.token)[0], 403)
 

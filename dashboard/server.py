@@ -1404,7 +1404,7 @@ def _browser_upstream(ctx):
     """This bot's engine child, asked again on every frame: the owner may switch its mode
     mid-turn, and a child the sweeper closed answers closed, so the pool starts a new one."""
     mode = browser.bot_setting(ctx["ws"], ctx["bot"], ROOT)["mode"]
-    return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
+    return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT, ctx=ctx)
 
 
 _BROWSER_INSTALL = {"running": False, "last": None}  # Settings, Browser: one engine install at a time
@@ -1430,7 +1430,9 @@ def _browser_view(ws=None):
                       "installing": install["running"], "last_install": install["last"]},
            "levels": list(browser.LEVELS), "modes": list(browser.MODES), "max_daily": browser.MAX_DAILY,
            "sites": [{"site": host, **row} for host, row in sorted(browser.sites(ROOT).items())],
-           "chrome": browser_upstream.find_chrome_debug_url() is not None,
+           # On a server, My Chrome is the owner's own Chrome lent by their runner (browser_lent).
+           "chrome": (bool(runners.HUB.lenders("owner")) if DEPLOYMENT == "server"
+                      else browser_upstream.find_chrome_debug_url() is not None),
            "logins": [{"ws": w, "bot": b} for w, b in browser_upstream.POOL.logins()],
            "deployment": DEPLOYMENT}
     if ws is not None:
@@ -2813,7 +2815,12 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "bad request"})
         if path == "/api/runner/next":
-            return self._send(200, {"job": runners.HUB.next(rec["id"], rec["owner"])})
+            caps = {"turns": body.get("turns", True) is not False, "lend": body.get("lend") is True}
+            return self._send(200, {"job": runners.HUB.next(rec["id"], rec["owner"], caps=caps)})
+        if path.startswith("/api/runner/reply/"):  # one browser job's answer (dashboard/browser_lent.py)
+            reply = body.get("reply")
+            done = isinstance(reply, dict) and runners.HUB.reply(rec["id"], path[len("/api/runner/reply/"):], reply)
+            return self._send(200, {"ok": bool(done)})
         if path.startswith("/api/runner/events/"):
             turn_id = path[len("/api/runner/events/"):]
             events = body.get("events") if isinstance(body.get("events"), list) else []
@@ -3821,6 +3828,8 @@ class Handler(BaseHTTPRequestHandler):
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
                            "report": job_mode == "report",
+                           # On a server, My Chrome is this sender's own Chrome via their runner only.
+                           "runner_owner": sender, "shared": shared,
                            "taint": turn}), ROOT)
                 if tok:
                     kw.update({"browser_token": tok, "browser_port": self.server.server_address[1]})
