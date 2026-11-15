@@ -115,6 +115,7 @@ TIMED_OUT = ("The browser did not answer within {s} seconds and was restarted, s
              "finished. The next call starts it fresh.")
 CLOSED = "This browser was closed after a while without use. Ask again to start it fresh."
 STOPPING = "Leo Bot is stopping, so the browser did not start."
+STOPPING_LOGIN = "Leo Bot is stopping, so no login window was opened. Try again once it has started again."
 WS_DELETED = "This workspace was deleted, so its browser is closed."
 LOGGING_IN = ("The owner is logging in to a site in this browser right now, so it is not available. Try again "
               "in a few minutes.")
@@ -127,6 +128,8 @@ TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the ta
 MOVING = ("The owner is moving this bot's browser logins right now, so its browser is not available. Try "
           "again in a minute.")
 BUSY = "This bot is using its browser right now. Try again when its turn has finished."
+TURN_BUSY = ("This bot is in a turn right now, so its browser logins are not moved. Try again when the turn "
+             "has finished.")
 LOGIN_OPEN = "A login window is open for this bot. Press Done there first."
 NO_LOGIN = "This bot has no saved browser login here yet. Log it in first (Log in, then Done)."
 BAD_STATE = "The saved login could not be read with this computer's key, so nothing was sent."
@@ -268,6 +271,10 @@ def _call_error(frame, line):
 
 class _Failed(Exception):
     """The child could not start or answer: its message is the line the bot sees."""
+
+
+class _BadLogin(_Failed):
+    """A login sent to import_login that is malformed or too large (the sender's fault)."""
 
 
 class _Child:
@@ -866,17 +873,23 @@ class Pool:
             up = self._items.pop((ws, bot), None)
         return sess, up, login.token
 
-    def hold(self, ws, bot, epoch, root):
+    def stopping(self):
+        return self._stopping
+
+    def hold(self, ws, bot, epoch, root, busy=None):
         """Hold this bot's bot-mode session for a login move (export or import): like
         begin_login, every call of the bot in bot mode answers MOVING meanwhile. Refused (raises
-        _Failed) while a login window is open or a call of the bot is in flight. Returns
-        (session, the bot's upstream to close, token); end it with end_login."""
+        _Failed) while a login window is open, while the bot is in a turn (`busy()`: the server
+        asks its live browser tokens, so between calls too), or while a call of it is in flight.
+        Returns (session, the bot's upstream to close, token); end it with end_login."""
         sess = session_name(ws, bot, "bot", epoch)
         with self._lock:
             if self._stopping:
                 raise _Failed(STOPPING)
             if sess in self._logins:
                 raise _Failed(LOGIN_OPEN if self._logins[sess].line == LOGGING_IN else MOVING)
+            if busy is not None and busy():
+                raise _Failed(TURN_BUSY)
             up = self._items.get((ws, bot))
             if up is not None and up._lock.locked():
                 raise _Failed(BUSY)
@@ -1406,15 +1419,16 @@ def _held_close(up):
         up._done.set()
 
 
-def export_login(ws, bot, root, home=None, pool=None):
+def export_login(ws, bot, root, home=None, pool=None, busy=None):
     """This bot's saved bot-browser logins as plain state JSON (bytes), to move to a server.
-    The session is held and closed first. Nothing of a site bound to My Chrome is in it.
-    Returns (bytes, dropped sites). Raises _Failed with the line the owner sees."""
+    The session is held and closed first (refused while the bot is in a turn: `busy`, see
+    Pool.hold). Nothing of a site bound to My Chrome is in it. Returns (bytes, dropped sites).
+    Raises _Failed with the line the owner sees."""
     pool = POOL if pool is None else pool
     epoch = browser.epochs(root).get(ws)
     if epoch is None:
         raise _Failed(NO_LOGIN)
-    sess, up, token = pool.hold(ws, bot, epoch, root)
+    sess, up, token = pool.hold(ws, bot, epoch, root, busy)
     try:
         _held_close(up)
         if not _settle_one(sess, "bot", root, home):
@@ -1444,22 +1458,24 @@ def export_login(ws, bot, root, home=None, pool=None):
         pool.end_login(sess, token)
 
 
-def import_login(ws, bot, blob, root, epoch, home=None, pool=None):
+def import_login(ws, bot, blob, root, epoch, home=None, pool=None, busy=None):
     """Replace this bot's saved bot-browser logins with `blob` (plain state JSON from
     export_login), sealed with this data root's key straight into the engine's state file: no
-    plain copy is written. The session is held and closed first; a call in flight or an open
-    login window refuses it. Returns (cookies saved, dropped sites). Raises _Failed."""
+    plain copy is written. The session is held and closed first; a turn of the bot (`busy`), a
+    call in flight or an open login window refuses it. The old file stays until the new one is
+    in place. Returns (cookies saved, dropped sites). Raises _BadLogin for a malformed or too
+    large login, _Failed otherwise."""
     pool = POOL if pool is None else pool
     if not isinstance(blob, (bytes, bytearray)) or len(blob) > MAX_LOGIN_BYTES:
-        raise _Failed("The login is too large to save here.")
+        raise _BadLogin("The login is too large to save here.")
     try:
         state, dropped = clean_state(json.loads(bytes(blob)), root)
     except ValueError:
-        raise _Failed("The login could not be read, so nothing was saved.") from None
+        raise _BadLogin("The login could not be read, so nothing was saved.") from None
     key = _read_key(root)
     if key is None:
         raise _Failed(NO_KEY)
-    sess, up, token = pool.hold(ws, bot, epoch, root)
+    sess, up, token = pool.hold(ws, bot, epoch, root, busy)
     try:
         _held_close(up)
         if not _settle_one(sess, "bot", root, home):
@@ -1469,18 +1485,25 @@ def import_login(ws, bot, blob, root, epoch, home=None, pool=None):
         sealed = aes_gcm.seal_file(key, secrets.token_bytes(aes_gcm.NONCE), json.dumps(state, indent=2).encode())
         folder = state_dir(home)
         folder.mkdir(parents=True, exist_ok=True)
-        forget_sessions([sess], home)  # replaces it: no older file of this session is restored
+        target = f"{sess}-{sess}.json.enc"
         fd, tmp = tempfile.mkstemp(dir=folder, prefix=".leobot-", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(sealed)
-            os.replace(tmp, folder / f"{sess}-{sess}.json.enc")
+            os.replace(tmp, folder / target)
         except OSError:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise _Failed("The login could not be saved here.") from None
+        for name in state_names(sess):  # only now: any other file of this session is never restored
+            if name != target:
+                try:
+                    if (folder / name).is_symlink() or (folder / name).is_file():
+                        (folder / name).unlink()
+                except OSError:
+                    traceback.print_exc()
         return len(state["cookies"]), dropped
     finally:
         pool.end_login(sess, token)

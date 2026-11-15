@@ -77,6 +77,14 @@ class Tokens:
         with self._lock:
             self._live.pop(token, None)
 
+    def any_where(self, **match):
+        """True while a live (not expired) token's context holds all of these values: a turn
+        of that bot is running."""
+        now = time.time()
+        with self._lock:
+            return any(now - made <= MAX_AGE and all(ctx.get(k) == v for k, v in match.items())
+                       for ctx, made in self._live.values())
+
     def revoke_where(self, **match):
         """Revoke every live token whose context holds all of these values."""
         with self._lock:

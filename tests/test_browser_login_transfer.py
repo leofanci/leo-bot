@@ -9,7 +9,10 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -182,6 +185,30 @@ class RoundTrip(Base):
         finally:
             self.pool.end_login(sess, token)
 
+    def test_old_login_kept_until_the_new_one_is_in(self):
+        e = browser.epoch("acme", self.remote)
+        sess = bu.session_name("acme", "cmo", "bot", e)
+        folder = bu.state_dir(self.home)
+        folder.mkdir(parents=True, exist_ok=True)
+        key = bu.key_file(self.remote).read_text().strip()
+        old = aes_gcm.seal_file(key, os.urandom(12), json.dumps(state(cookies=[], origins=[])).encode())
+        (folder / f"{sess}-{sess}.json.enc").write_bytes(old)
+        (folder / f"{sess}-{sess}.json").write_text("{}")  # a stray plain file of the session
+        blob = json.dumps(state()).encode()
+        with mock.patch.object(bu.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(bu._Failed):
+                bu.import_login("acme", "cmo", blob, self.remote, e, self.home)
+        self.assertEqual((folder / f"{sess}-{sess}.json.enc").read_bytes(), old)  # still the old login
+        self.assertEqual([p.name for p in folder.iterdir() if p.name.startswith(".leobot-")], [])
+        bu.import_login("acme", "cmo", blob, self.remote, e, self.home)
+        self.assertNotEqual((folder / f"{sess}-{sess}.json.enc").read_bytes(), old)
+        self.assertFalse((folder / f"{sess}-{sess}.json").exists())  # removed only after the new one
+
+    def test_mask_hides_any_userinfo(self):
+        self.assertEqual(browser.mask_proxy(HTTP + "tok123@" + LOOPBACK + ":8"), HTTP + "***@" + LOOPBACK + ":8")
+        self.assertEqual(browser.mask_proxy(HTTP + "u:p@" + LOOPBACK + ":8"), HTTP + "***@" + LOOPBACK + ":8")
+        self.assertEqual(browser.mask_proxy(HTTP + LOOPBACK + ":8"), HTTP + LOOPBACK + ":8")
+
     def test_bad_blob_refused(self):
         e = browser.epoch("acme", self.remote)
         for blob in (b"not json", json.dumps({"cookies": "x"}).encode(), b"x" * (bu.MAX_LOGIN_BYTES + 1)):
@@ -217,6 +244,25 @@ class HttpBase(Base):
             return request("POST", "/api/runner/browser-login", body, owner=False, origin=None,
                            headers={"Authorization": f"Bearer {token}"})
 
+    @contextlib.contextmanager
+    def wire(self):
+        """runner.Client's own opener, answered by the server handler on the remote root (the
+        real runner.send_login and Client.post run, HTTP errors included)."""
+        seen = []
+        test = self
+
+        class Opener:
+            def open(self, req, timeout=None):
+                path = urllib.parse.urlsplit(req.full_url).path
+                seen.append((req.full_url, req.get_header("Authorization")))
+                code, out = test.runner_post(req.get_header("Authorization")[7:], json.loads(req.data))
+                body = json.dumps(out).encode()
+                if code >= 400:
+                    raise urllib.error.HTTPError(req.full_url, code, "refused", {}, io.BytesIO(body))
+                return _Resp(body)
+        with mock.patch.object(runner.urllib.request, "build_opener", return_value=Opener()):
+            yield seen
+
     def connect(self):
         token = runners.create(self.remote, "owner", "Mac")[1]
         tf = Path(self.tmp.name) / "tok"
@@ -224,6 +270,14 @@ class HttpBase(Base):
         tf.chmod(0o600)
         runner.set_connection(self.settings, "http" + "://" + LOOPBACK + ":1", tf)
         return token
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
 
 
 class Http(HttpBase):
@@ -261,15 +315,10 @@ class Http(HttpBase):
         # The whole chain: the owner's computer sends through the runner's client to the server.
         browser.set_site(MINE, "my_chrome", None, self.remote)
 
-        def through_runner(ws, bot, state_bytes, path, timeout=120):
-            client, _ = runner.connection(path)
-            self.assertEqual(client.token, token)
-            code, out = self.runner_post(client.token, {"ws": ws, "bot": bot, "state": state_bytes.decode()})
-            self.assertEqual(code, 200, out)
-            return out
-        with self.on(self.local), mock.patch.object(runner, "send_login", side_effect=through_runner):
+        with self.on(self.local), self.wire() as seen:
             code, out = request("POST", "/api/browser/login/send", {"ws": "acme", "bot": "cmo"})
         self.assertEqual(code, 200, out)
+        self.assertEqual(seen, [("http" + "://" + LOOPBACK + ":1/api/runner/browser-login", "Bearer " + token)])
         self.assertEqual(out["sent"]["cookies"], 1)
         self.assertEqual(out["sent"]["skipped"], [MINE])
         e2 = browser.epochs(self.remote)["acme"]
@@ -291,9 +340,78 @@ class Http(HttpBase):
         with self.assertRaises(ValueError) as cm:
             runner.connection(self.settings)
         self.assertIn("chmod 600", str(cm.exception))
-        with self.assertRaises(ValueError):
-            runner.set_connection(self.settings, "http://server.example", tf) or runner.connection(self.settings)
+        tf.chmod(0o600)
+        self.assertEqual(runner.connection(self.settings)[0].token, "myr_x")
+        runner.set_connection(self.settings, "http" + "://server.example", tf)  # not local: no plain http
+        with self.assertRaises(ValueError) as cm:
+            runner.connection(self.settings)
+        self.assertIn("use https", str(cm.exception))
         self.assertNotIn("myr_x", self.settings.read_text())  # the token itself is never saved there
+
+    def test_send_without_runner_holds_nothing(self):
+        """No runner connection: refused before the export, so the bot's browser keeps running."""
+        self.seal_local(state())
+        with self.on(self.local):
+            up = self.pool.get("acme", "cmo", "bot", self.local)
+            up.forward(call(1, "agent_browser_get_url"), None)
+            code, out = request("POST", "/api/browser/login/send", {"ws": "acme", "bot": "cmo"})
+        self.assertEqual(code, 409)
+        self.assertEqual(out["error"], runner.NO_RUNNER)
+        self.assertFalse(up.closed)
+        self.assertEqual(self.log("close"), [])
+        self.assertIs(self.pool.get("acme", "cmo", "bot", self.local), up)
+
+    def test_runner_errors_reach_the_owner(self):
+        """The server's refusal line comes back through Client.post and its HTTPError mapping."""
+        self.seal_local(state())
+        self.connect()
+        (self.remote / "projects" / "acme").rename(self.remote / "projects" / "gone")
+        with self.on(self.local), self.wire():
+            code, out = request("POST", "/api/browser/login/send", {"ws": "acme", "bot": "cmo"})
+        self.assertEqual(code, 409)
+        self.assertIn("same workspace", out["error"])
+
+    def test_turn_refuses_the_move(self):
+        """A turn of the bot (its browser token live), with no call in flight: both ends refuse,
+        and neither bot's browser is closed."""
+        self.seal_local(state())
+        token = self.connect()
+        tok = server.BROWSER_TOKENS.mint({"ws": "acme", "bot": "cmo"})
+        self.addCleanup(server.BROWSER_TOKENS.revoke, tok)
+        with self.on(self.local):
+            up = self.pool.get("acme", "cmo", "bot", self.local)
+            up.forward(call(1, "agent_browser_get_url"), None)
+            code, out = request("POST", "/api/browser/login/send", {"ws": "acme", "bot": "cmo"})
+        self.assertEqual(code, 409)
+        self.assertEqual(out["error"], bu.TURN_BUSY)
+        self.assertFalse(up.closed)
+        self.assertEqual(self.log("close"), [])
+        # The server (one pool per process: the remote bot's browser replaces the local one here).
+        with self.on(self.remote, "server"):
+            up2 = self.pool.get("acme", "cmo", "bot", self.remote)
+            up2.forward(call(2, "agent_browser_get_url"), None)
+        closes = len(self.log("close"))
+        code, out = self.runner_post(token, {"ws": "acme", "bot": "cmo", "state": json.dumps(state())})
+        self.assertEqual(code, 409)
+        self.assertEqual(out["error"], bu.TURN_BUSY)
+        self.assertFalse(up2.closed)
+        self.assertEqual(len(self.log("close")), closes)
+        server.BROWSER_TOKENS.revoke(tok)  # the turn ended: now it moves
+        code, out = self.runner_post(token, {"ws": "acme", "bot": "cmo", "state": json.dumps(state())})
+        self.assertEqual(code, 200, out)
+
+    def test_malformed_login_is_400(self):
+        token = self.connect()
+        for blob in ("not json", json.dumps({"cookies": "x"})):
+            code, out = self.runner_post(token, {"ws": "acme", "bot": "cmo", "state": blob})
+            self.assertEqual(code, 400, out)
+
+    def test_login_window_while_stopping(self):
+        self.pool.close_all()
+        with self.on(self.local):
+            code, out = request("POST", "/api/browser/login", {"ws": "acme", "bot": "cmo", "url": "https://" + SITE + "/"})
+        self.assertEqual(code, 409)
+        self.assertEqual(out["error"], bu.STOPPING_LOGIN)
 
 
 class ProxyBotOnly(Base):
@@ -392,6 +510,119 @@ class ProxyBotOnly(Base):
         self.assertEqual(up.seen, [("CONNECT", SITE)])
 
 
+class _KeepAlive:
+    """An origin that ignores Connection: close and keeps reading requests on one connection."""
+
+    def __init__(self):
+        self.requests = []
+        self.sock = socket.socket()
+        self.sock.bind((LOOPBACK, 0))
+        self.sock.listen(5)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._conn, args=(conn,), daemon=True).start()
+
+    def _conn(self, conn):
+        data = b""
+        with conn:
+            while True:
+                try:
+                    chunk = conn.recv(4096)
+                except OSError:
+                    return
+                if not chunk:
+                    return
+                data += chunk
+                while b"\r\n\r\n" in data:
+                    head, _, data = data.partition(b"\r\n\r\n")
+                    self.requests.append(head.split(b"\r\n")[0].decode())
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+
+    def close(self):
+        self.sock.close()
+
+
+class RouterOneRequest(Base):
+    def router(self):
+        browser.set_site(SITE, "bot", None, self.local, proxy=HTTP + LOOPBACK + ":9")
+        url = browser_proxy.router_url(self.local)
+        self.addCleanup(browser_proxy.close_all)
+        port = int(url.rsplit(":", 1)[1])
+        token = url.split("leobot:", 1)[1].split("@", 1)[0]
+        return port, browser_proxy._basic("leobot", token)
+
+    def test_second_request_never_reaches_the_first_origin(self):
+        origin = _KeepAlive()
+        self.addCleanup(origin.close)
+        port, auth = self.router()
+        s = socket.create_connection((LOOPBACK, port), timeout=10)
+        self.addCleanup(s.close)
+        first = f"GET {HTTP}{LOOPBACK}:{origin.port}/a HTTP/1.1\r\nHost: {LOOPBACK}:{origin.port}\r\nProxy-Authorization: {auth}\r\n\r\n"
+        s.sendall(first.encode())
+        got = b""
+        while not got.endswith(b"ok"):
+            got += s.recv(4096)
+        self.assertIn(b"Connection: close\r\n", got)  # Chrome will not reuse it
+        self.assertNotIn(b"keep-alive", got)
+        # Chrome may reuse the connection for another host: that request must go nowhere.
+        second = f"GET {HTTP}{SITE}/b HTTP/1.1\r\nHost: {SITE}\r\nProxy-Authorization: {auth}\r\n\r\n"
+        s.settimeout(3)
+        try:
+            s.sendall(second.encode())
+            rest = s.recv(4096)
+        except (ConnectionResetError, BrokenPipeError):
+            rest = b""
+        self.assertEqual(rest, b"")  # closed right after the first answer (a timeout fails here)
+        time.sleep(0.3)
+        self.assertEqual(origin.requests, ["GET /a HTTP/1.1"])
+
+    def test_body_sent_and_pipelined_bytes_dropped(self):
+        origin = _KeepAlive()
+        self.addCleanup(origin.close)
+        port, auth = self.router()
+        s = socket.create_connection((LOOPBACK, port), timeout=10)
+        self.addCleanup(s.close)
+        req = (f"POST {HTTP}{LOOPBACK}:{origin.port}/f HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n"
+               f"Proxy-Authorization: {auth}\r\n\r\nabcGET /smuggled HTTP/1.1\r\nHost: x\r\n\r\n")
+        s.sendall(req.encode())
+        got = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            got += chunk
+        self.assertTrue(got.endswith(b"ok"))
+        time.sleep(0.3)
+        self.assertEqual(origin.requests, ["POST /f HTTP/1.1"])
+        s2 = socket.create_connection((LOOPBACK, port), timeout=10)
+        self.addCleanup(s2.close)
+        s2.sendall(f"POST {HTTP}{LOOPBACK}:1/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\nProxy-Authorization: {auth}\r\n\r\n".encode())
+        self.assertIn(b" 501 ", s2.recv(4096))
+
+    def test_settings_read_only_when_changed(self):
+        browser.set_site(SITE, "bot", None, self.local, proxy=HTTP + LOOPBACK + ":9")
+        self.addCleanup(browser_proxy.close_all)
+        with mock.patch.object(browser_proxy.browser, "site_proxies", wraps=browser.site_proxies) as read:
+            first = browser_proxy.router_url(self.local)
+            for _ in range(5):
+                self.assertEqual(browser_proxy.router_url(self.local), first)
+            self.assertEqual(read.call_count, 1)
+            up = self.pool.get("acme", "cmo", "bot", self.local)
+            for i in range(3):
+                up.forward(call(i, "agent_browser_get_url"), None)
+            self.assertEqual(read.call_count, 1)
+            browser.set_site(SITE, "bot", None, self.local)  # the proxy removed: read again
+            self.assertIsNone(browser_proxy.router_url(self.local))
+            self.assertEqual(read.call_count, 2)
+
+
 class _Page(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -412,7 +643,7 @@ class ProxyNeverShown(HttpBase):
             self.assertEqual(code, 200, view)
             self.assertNotIn(SECRET, json.dumps(view))
             row = next(s for s in view["sites"] if s["site"] == SITE)
-            self.assertEqual(row["proxy"], HTTP + "demo:***@" + LOOPBACK + ":3128")
+            self.assertEqual(row["proxy"], HTTP + "***@" + LOOPBACK + ":3128")
             code, view = request("GET", "/api/browser/settings?ws=acme")
             self.assertNotIn(SECRET, json.dumps(view))
             # A change of limit keeps the proxy; a masked value is never saved back.
@@ -432,9 +663,7 @@ class ProxyNeverShown(HttpBase):
             # The engine, a bot's calls, a send plan in Approvals, the router's own failure.
             up = self.pool.get("acme", "cmo", "bot", self.local)
             reply, _ = up.forward(call(1, "agent_browser_open", url="https://" + SITE + "/"), None)
-            approvals.add_send_plan(self.local, ws="acme", room="acme/general", chat="0" * 8 + "-0000-0000-0000-" + "0" * 12,
-                                    bot="cmo", person="owner",
-                                    items=[{"url": "https://" + SITE + "/m", "text": "hi", "site": SITE}])
+            self.relay_sends()
             router = browser_proxy.router_url(self.local)
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": router}))
             with self.assertRaises(urllib.error.HTTPError) as cm:  # nothing listens on the proxy's port
@@ -448,6 +677,29 @@ class ProxyNeverShown(HttpBase):
         self.assertNotIn(SECRET, (self.local / "team" / "approvals.json").read_text())
         self.assertNotIn(SECRET, err.getvalue() + out.getvalue())
         self.assertEqual(stat.S_IMODE(os.stat(self.local / "team" / "browser.json").st_mode), 0o600)
+
+    def relay_sends(self):
+        """A send plan and an act send on the proxied site, through the relay's own gate."""
+        from dashboard import browser_relay, taint
+        from tests.test_browser_relay import FakeUpstream
+        page = "https://" + SITE + "/messages/1"
+        ctx = {"ws": "acme", "bot": "cmo", "chat": "c1", "room": "acme/general", "person": "ceo", "taint": taint.Turn()}
+        fake = FakeUpstream(page)
+        browser.set_bot("acme", "cmo", "write", "bot", self.local)
+        browser_relay.handle(call(1, browser_relay.PLAN_TOOL, sends=[{"url": page, "text": "hi there"}]), ctx, "s", fake, self.local)
+        for r in approvals.pending(self.local):
+            approvals.approve_send(r["id"], self.local)
+        for i, (name, args) in enumerate((("agent_browser_" + "fill", {"selector": "#m", "text": "hi there"}),
+                                          ("agent_browser_" + "click", {"selector": "#send"}))):
+            browser_relay.handle(call(10 + i, name, **args), ctx, "s", fake, self.local)
+        browser.set_bot("acme", "cmo", "act", "bot", self.local)
+        for i, (name, args) in enumerate((("agent_browser_" + "fill", {"selector": "#m", "text": "on its own"}),
+                                          ("agent_browser_" + "click", {"selector": "#send"}))):
+            browser_relay.handle(call(20 + i, name, **args), ctx, "s", fake, self.local)
+        rows = approvals.load(self.local)
+        self.assertGreaterEqual(len(rows), 2)  # the proxied site's records are really there
+        self.assertIn(SITE, json.dumps(rows))
+        self.assertTrue(any(r.get("status") == "done" for r in rows), rows)
 
     def test_app_never_prefills_the_proxy(self):
         js = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text(encoding="utf-8")

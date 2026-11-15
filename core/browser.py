@@ -147,7 +147,8 @@ def _proxy(value):
 
 
 def mask_proxy(url):
-    """A proxy URL safe to show: its password replaced by ***. None stays None."""
+    """A proxy URL safe to show: any user and password replaced by *** (a user alone can be a
+    token). None stays None."""
     if not isinstance(url, str) or not url:
         return None
     try:
@@ -156,7 +157,7 @@ def mask_proxy(url):
     except ValueError:
         return "(set)"
     host = f"[{host}]" if ":" in host else host
-    who = (user + (":***" if parts.password is not None else "") + "@") if user is not None else ""
+    who = "***@" if user is not None or parts.password is not None or "@" in parts.netloc else ""
     return f"{parts.scheme}://{who}{host}" + (f":{port}" if port else "")
 
 

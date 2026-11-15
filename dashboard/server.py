@@ -1482,6 +1482,8 @@ def _browser_login(ws, bot_id, url):
         raise LookupError("unknown workspace")
     epoch, held = begun
     if held is None:
+        if browser_upstream.POOL.stopping():
+            raise _AppRefused(browser_upstream.STOPPING_LOGIN)
         if browser_upstream.POOL.login_session(ws, bot_id) is None:
             raise _AppRefused(browser_upstream.MOVING)
         raise _AppRefused("A login window is already open for this bot. Press Done there first.")
@@ -1515,8 +1517,12 @@ def _browser_send_login(ws, bot_id):
     from dashboard import runner
     if browser.bot_setting(ws, bot_id, ROOT)["mode"] == "my_chrome":
         raise _AppRefused("This bot uses your Chrome, which has your own logins. Nothing to send.")
+    try:  # before the export: no connection, nothing is held or closed
+        runner.connection(runner.SETTINGS_FILE)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
     try:
-        state, dropped = browser_upstream.export_login(ws, bot_id, ROOT)
+        state, dropped = browser_upstream.export_login(ws, bot_id, ROOT, busy=_bot_in_turn(ws, bot_id))
     except browser_upstream._Failed as e:
         raise _AppRefused(str(e)) from None
     try:
@@ -1527,6 +1533,12 @@ def _browser_send_login(ws, bot_id):
         raise _AppRefused(str((answer or {}).get("error") or "The server did not take the login."))
     skipped = sorted(set(dropped) | set(answer.get("dropped") or []))
     return {**_browser_view(ws), "sent": {"bot": bot_id, "cookies": answer.get("cookies"), "skipped": skipped}}
+
+
+def _bot_in_turn(ws, bot_id):
+    """busy() for a login move: True while a turn of this bot holds a live browser token (minted
+    for the whole turn, revoked when it ends), so between its calls too."""
+    return lambda: BROWSER_TOKENS.any_where(ws=ws, bot=bot_id)
 
 
 def _browser_receive_login(owner, body):
@@ -1553,7 +1565,10 @@ def _browser_receive_login(owner, body):
     if epoch is None:
         return 404, {"error": "This server has no such workspace or bot."}
     try:
-        count, dropped = browser_upstream.import_login(ws, bot_id, state.encode(), ROOT, epoch)
+        count, dropped = browser_upstream.import_login(ws, bot_id, state.encode(), ROOT, epoch,
+                                                       busy=_bot_in_turn(ws, bot_id))
+    except browser_upstream._BadLogin as e:
+        return 400, {"error": str(e)}
     except browser_upstream._Failed as e:
         return 409, {"error": str(e)}
     if browser.epochs(ROOT).get(ws) != epoch:  # the workspace was deleted meanwhile: its tidy forgets it
