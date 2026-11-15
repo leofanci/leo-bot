@@ -478,6 +478,25 @@ class StartupGate(Base):
         self.assertTrue(self.pool._ready.is_set())
         self.assertEqual(bu.STARTUP_SECONDS, bu.CLOSE_SECONDS + 2 * bu.DAEMON_WAIT + 5)
 
+    def test_gate_reopens_even_when_the_orphan_sweep_raises_a_base_exception(self):
+        class Stop(BaseException):
+            pass
+        self.pool.hold_starts()
+        with mock.patch.object(server.browser_upstream, "sweep_orphans", side_effect=Stop()), \
+                mock.patch.object(self.pool, "close_stale_daemons") as close:
+            with self.assertRaises(Stop):
+                server._sweep_browser_orphans()
+        self.assertTrue(self.pool._ready.is_set())
+        close.assert_not_called()
+
+    def test_gate_is_held_before_jobs_and_the_sweeper_start(self):
+        src = Path(server.__file__).read_text(encoding="utf-8")
+        main = src[src.index("srv = ThreadingHTTPServer("):]
+        hold = main.index("browser_upstream.POOL.hold_starts()")
+        self.assertLess(hold, main.index("job_runner.Runner("))
+        self.assertLess(hold, main.index("browser_upstream.POOL.start_sweeper()"))
+        self.assertLess(hold, main.index("target=_sweep_browser_orphans"))
+
 
 class StartupClose(Base):
     """Server start closes daemons of this root's live epochs that nothing owns, and only those."""

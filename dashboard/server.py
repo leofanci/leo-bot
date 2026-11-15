@@ -1507,14 +1507,15 @@ def _tidy_browsers(ws, epoch, bot_ids, killed):
 
 def _sweep_browser_orphans():
     try:
-        browser_upstream.sweep_orphans(ROOT)
-    except Exception:  # noqa: BLE001 - the server starts whatever is left on disk
-        traceback.print_exc()
-    try:  # a crash may have left a live epoch's daemon (a headed login window): close it
-        browser_upstream.POOL.close_stale_daemons(ROOT)
-    except Exception:  # noqa: BLE001 - as above
-        traceback.print_exc()
-    finally:  # bot-mode children may start now (Pool.get waited for this)
+        try:
+            browser_upstream.sweep_orphans(ROOT)
+        except Exception:  # noqa: BLE001 - the server starts whatever is left on disk
+            traceback.print_exc()
+        try:  # a crash may have left a live epoch's daemon (a headed login window): close it
+            browser_upstream.POOL.close_stale_daemons(ROOT)
+        except Exception:  # noqa: BLE001 - as above
+            traceback.print_exc()
+    finally:  # whatever happened above, bot-mode children may start now (Pool.get waited for this)
         browser_upstream.POOL.starts_ready()
 
 
@@ -5044,13 +5045,16 @@ def main():
         raise
     write_token_file()
     _start_update_checker()
+    # No bot-mode browser child starts until the startup close (below) has finished: held before
+    # anything that can reach POOL.get (jobs, the sweeper, requests) runs.
+    browser_upstream.POOL.hold_starts()
     # Scheduled jobs and the daily HQ digest (core/jobs.py): one job turn at a time.
     job_runner.Runner(ROOT, run_turn=lambda job: run_job(job, srv), stop_turn=stop_job,
                       threads=chat_store.records, post=chat_store.post_note,
                       activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
     browser_upstream.POOL.start_sweeper()  # idle engine children close after 10 minutes
-    # Sessions of an epoch no workspace has (a delete whose tidy did not finish): settle, forget.
-    browser_upstream.POOL.hold_starts()  # until the startup close below has finished
+    # Sessions of an epoch no workspace has (a delete whose tidy did not finish): settle, forget;
+    # then stale daemons of live epochs. It reopens the gate held above.
     threading.Thread(target=_sweep_browser_orphans, name="browser-orphans", daemon=True).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
