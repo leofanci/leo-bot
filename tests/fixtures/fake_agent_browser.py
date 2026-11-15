@@ -34,7 +34,7 @@ TOOLS = [
         "url": {"type": "string"}, "session": {"type": "string"}, "timeoutMs": {"type": "number"}}}},
     {"name": "agent_browser_get_url", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "agent_browser_click", "inputSchema": {"type": "object", "properties": {
-        "selector": {"type": "string"}}}},
+        "selector": {"type": "string"}, "newTab": {"type": "boolean"}}}},
 ] + [{"name": "agent_browser_" + n, "inputSchema": {"type": "object", "properties": {"tabId": {"type": "string"}}}}
      for n in ("tab_list", "tab_switch", "tab_close", "tab_new")]
 

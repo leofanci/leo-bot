@@ -340,5 +340,56 @@ class AppActions(unittest.TestCase):
         self.assertEqual(approvals.get(b["id"], self.root)["status"], "pending")
 
 
+class BrowserSent(unittest.TestCase):
+    """Approvals lists browser sends that ran, so "Sent from the browser" is visible there."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.page = "https" + "://" + "acme.test/inbox"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def send(self, ws, text, ok=True, now=None):
+        status, rec = approvals.claim_send(self.root, ws=ws, bot="b1", url=self.page, text=text,
+                                           planned=False, now=now)
+        self.assertEqual(status, "ok")
+        if ok is not None:
+            approvals.end_send(rec["id"], ok, self.root)
+        return rec
+
+    def test_done_failed_and_running_listed_newest_first_per_workspace(self):
+        self.send("acme", "one")
+        self.send("acme", "two", ok=False)
+        self.send("acme", "three", ok=None)  # still running
+        self.send("demo", "elsewhere")
+        rows = approvals.browser_sent(self.root, "acme")
+        self.assertEqual([(r["action"]["arguments"]["text"], r["status"]) for r in rows],
+                         [("three", "running"), ("two", "failed"), ("one", "done")])
+        self.assertEqual(rows[2]["result"], approvals.SENT)
+        self.assertEqual(len(approvals.browser_sent(self.root, bots.HQ)), 4)  # HQ: every workspace
+        self.assertEqual(approvals.pending(self.root, "acme"), [])  # never a pending card
+
+    def test_planned_send_listed_once_it_ran_only(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"}])
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # pending: not a sent row
+        approvals.approve_send(held[0]["id"], self.root)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # approved, not yet sent
+        self.assertIsNotNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="hi"))
+        self.assertEqual([r["status"] for r in approvals.browser_sent(self.root, "acme")], ["done"])
+
+    def test_older_than_a_week_left_out(self):
+        self.send("acme", "old", now=time.time() - approvals.PLAN_TTL - 60)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])
+
+    def test_api_returns_sent(self):
+        self.send("acme", "one")
+        with mock.patch.object(server, "ROOT", self.root):
+            out = server.approvals_view("acme")
+        self.assertEqual([r["action"]["arguments"]["text"] for r in out["sent"]], ["one"])
+
+
 if __name__ == "__main__":
     unittest.main()

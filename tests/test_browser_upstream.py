@@ -508,6 +508,37 @@ class SharedChrome(Base):
             self.assertNotIn("\u2014", text(reply))
         self.assertEqual(len(self.log("call")), before)  # nothing reached the engine
 
+    def test_click_new_tab_refused_and_hidden_in_my_chrome(self):
+        # 0.41.0's click declares newTab: it opens the link in a new tab of the owner's Chrome
+        # and moves the bot there (probed live), so it is a tab tool in disguise.
+        ctx = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}
+        listed, _ = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, ctx, "s-1", self.a, self.root)
+        click = next(t for t in listed["result"]["tools"] if t["name"] == P + "click")
+        self.assertNotIn("newTab", click["inputSchema"]["properties"])
+        before = len(self.log("call"))
+        self.assertEqual(text(self.relay(self.a, "b1", P + "click", selector="@e1", newTab=True)),
+                         browser_relay.CHROME_NEW_TAB)
+        self.assertEqual(len(self.log("call")), before)  # nothing reached the engine
+        self.assertNotIn("\u2014", browser_relay.CHROME_NEW_TAB)
+        reply = self.relay(self.a, "b1", P + "click", selector="@e1", newTab=False)  # off: a plain click
+        self.assertNotEqual(text(reply), browser_relay.CHROME_NEW_TAB)
+        clicks = [c for c in self.log("call") if c["name"] == P + "click"]
+        self.assertEqual(len(clicks), 1)
+        self.assertNotIn("newTab", clicks[0].get("args") or {})
+
+    def test_bot_mode_keeps_click_new_tab(self):
+        from core import browser
+        browser.set_bot("demo", "b3", "act", "bot", self.root)
+        up = self.pool.get("demo", "b3", "bot", self.root)
+        ctx = {"ws": "demo", "bot": "b3", "chat": "c1", "room": "demo/general", "person": "ceo"}
+        listed, _ = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, ctx, "s-1", up, self.root)
+        click = next(t for t in listed["result"]["tools"] if t["name"] == P + "click")
+        self.assertIn("newTab", click["inputSchema"]["properties"])
+        reply = browser_relay.handle(call(2, P + "click", selector="@e1", newTab=True), ctx, "s-1", up, self.root)[0]
+        self.assertNotEqual(text(reply), browser_relay.CHROME_NEW_TAB)
+        clicks = [c for c in self.log("call") if c["name"] == P + "click"]
+        self.assertTrue(clicks[-1]["args"]["newTab"])
+
     def test_bot_mode_keeps_tab_tools(self):
         from core import browser
         browser.set_bot("demo", "b3", "act", "bot", self.root)

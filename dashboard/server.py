@@ -2406,6 +2406,12 @@ def _approve_job_card(aid, fields=None):
 BROWSER_APPROVED = "Approved. The bot sends it on its next run."
 
 
+def approvals_view(ws):
+    """/api/approvals: open cards, job receipts with Undo, and the browser sends that ran."""
+    return {"ws": ws, "approvals": approvals.pending(ROOT, ws), "receipts": approvals.receipts(ROOT, ws),
+            "sent": approvals.browser_sent(ROOT, ws)}
+
+
 def _approve_browser_send(rec, arguments=None):
     """A planned browser send: approving only lets the bot's own click send it later. Composio is
     never asked, and the text cannot be edited here (the bot types exactly what was approved)."""
@@ -4333,8 +4339,7 @@ class Handler(BaseHTTPRequestHandler):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
                 if path == "/api/approvals":
-                    return self._send(200, {"ws": ws, "approvals": approvals.pending(ROOT, ws),
-                                            "receipts": approvals.receipts(ROOT, ws)})
+                    return self._send(200, approvals_view(ws))
                 if path == "/api/costs":
                     return self._send(200, {"ws": ws, **_costs(ws, db.tree())})
                 bot_id = (qs.get("bot") or [""])[0]

@@ -457,6 +457,7 @@ try { _WS = localStorage.getItem("wsId") || "hq"; } catch {}
 let _ROOMS = [];   // current workspace's rooms: [{id, kind, name, members, lead}]
 let _APPROVALS = [];  // pending approvals visible here (HQ: every workspace)
 let _RECEIPTS = [];   // jobs bots set up lately: shown in their thread with Undo and Pause
+let _SENT = [];       // browser sends that ran this week: listed on Approvals
 const fmtTokens = n => !n ? "" : n >= 1e6 ? `${(n/1e6).toFixed(1)}M tok` : n >= 1000 ? `${(n/1000).toFixed(1)}k tok` : `${n} tok`;
 const fmtCost = c => c ? `$${c < 0.01 ? c.toFixed(4) : c.toFixed(2)}` : "";
 const fmtUsage = (tokens, cost) => [fmtTokens(tokens), fmtCost(cost)].filter(Boolean).join(" · ");
@@ -550,7 +551,7 @@ async function renderRail(){
   [_BOTS, _ROOMS, _APPROVALS] = await Promise.all([
     api("/api/bots" + q).then(d => d.bots || []).catch(() => []),
     api("/api/rooms" + q).then(d => d.rooms || []).catch(() => []),
-    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; return d.approvals || []; }).catch(() => []),
+    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; _SENT = d.sent || []; return d.approvals || []; }).catch(() => []),
   ]);
   renderWsBar();
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
@@ -1458,7 +1459,16 @@ async function renderApprovals(){
         <pre class="outside-text" hidden></pre></div>
       <button class="go" data-out-read>Read</button>
       <button class="go primary-go" data-out-trust hidden>Trust</button>
-    </div>`).join("")}</div>` : ""}</div>`;
+    </div>`).join("")}</div>` : ""}
+    ${_SENT.length ? `<h4 class="sec-h">Sent from the browser</h4>
+    <div class="help">What bots sent from a browser this week: sends you approved and sends of bots that act on their own.</div>
+    <div class="rowc">${_SENT.map(r => {
+      const b = botById(r.bot) || { id: r.bot, name: r.bot }, args = (r.action && r.action.arguments) || {};
+      const state = r.status === "done" ? (r.result || "Sent from the browser.") : r.status === "running" ? "Sending now." : (r.result || "May or may not have gone out.");
+      return `<div class="post approval-row sent-row">
+      ${botAvatar(b)}
+      <div class="t">${esc(args.text || "")}<small>${esc(state)} · ${esc(args.site || "")} · ${esc(b.name)} · ${esc(wsById(r.ws)?.name || r.ws)} · ${relAge(r.started || r.created)}${r.auto ? " · on its own" : ""}</small></div>
+    </div>`; }).join("")}</div>` : ""}</div>`;
   $("#main").querySelectorAll(".outside-row").forEach(row => {
     const pre = row.querySelector(".outside-text"), trust = row.querySelector("[data-out-trust]");
     let sig = null;
@@ -1834,7 +1844,7 @@ async function renderBrowserSettings(){
     };
     const logins = d.deployment === "server"
       ? `<div class="help">A login opens a window on the machine Leo Bot runs on, so it is not available on a server yet.</div>`
-      : `<div class="help">Log a bot in to a site once: a window of that bot's own browser opens on this Mac. Log in there, then press Done. The bot keeps the login for its later runs. While the window is open, that bot cannot use its browser.</div>
+      : `<div class="help">Log a bot in to a site once: a window of that bot's own browser opens on this Mac. Log in there, then press Done here: closing the window is not enough, Chrome keeps running on a Mac. The bot keeps the login for its later runs. While the window is open, that bot cannot use its browser.</div>
         <label class="brw-ws">Workspace <select data-login-ws>${(wsList.workspaces || []).map(w => `<option value="${esc(w.id)}"${w.id === loginWs ? " selected" : ""}>${esc(w.name)}</option>`).join("")}</select></label>
         <div class="rowc">${teamBots.filter(b => b.active).map(botRow).join("") || `<div class="empty">No bots on in this workspace.</div>`}</div>`;
     box.innerHTML = engine + sites + chrome + `<section class="integ-group"><h3>Logins</h3>${logins}</section>`;

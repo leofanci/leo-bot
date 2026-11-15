@@ -306,6 +306,13 @@ class Login(Base):
         reply, _ = busy.forward({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                                  "params": {"name": "agent_browser_get_url", "arguments": {}}}, None)
         self.assertEqual(reply["result"]["content"][0]["text"], bu.LOGGING_IN)
+        # A bot turn that starts mid-login still lists the tools (the engine's known list), so
+        # its first call gets LOGGING_IN and can say why, instead of seeing no browser at all.
+        listed, _ = busy.forward({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, None)
+        self.assertIn("agent_browser_open", [t["name"] for t in listed["result"]["tools"]])
+        bu._TOOLS.clear()  # a server restart: the list is read back from the run folder
+        listed, _ = busy.forward({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}, None)
+        self.assertIn("agent_browser_open", [t["name"] for t in listed["result"]["tools"]])
         self.assertEqual(len(self.log("start")), 1)  # no child started meanwhile
         mine = self.pool.get("acme", "cmo", "my_chrome", self.root)  # another session: not held
         self.assertFalse(mine.closed)

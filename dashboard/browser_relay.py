@@ -120,6 +120,11 @@ CONTROL_TEXT = ("Text with a line break or another control character is not type
 CHROME_TAB_TOOLS = frozenset("agent_browser_" + n for n in ("tab_list", "tab_switch", "tab_close", "tab_new"))
 CHROME_TABS = ("Tab tools are off in the owner's Chrome, so other tabs stay private. Use agent_browser_open in "
                "this bot's own tab. This call was not performed.")
+# click's newTab opens the link in a new tab and moves the bot there (probed on 0.41.0): in the
+# owner's Chrome it is a tab tool too, so it is refused there and left out of click's inputs.
+NEW_TAB_ARG = "newTab"
+CHROME_NEW_TAB = ("New tabs are off in the owner's Chrome, so this bot stays in its own tab. Click without "
+                  "newTab, or open the link's address with agent_browser_open. This call was not performed.")
 READ_URL = "Open the page first with agent_browser_open, then read it without a url. This call was not performed."
 UNKNOWN_PAGE = "The browser could not tell which page it is on, so the result was withheld. Open a page to go on."
 NO_CHECK = "The page could not be checked for typed text, so nothing was clicked."
@@ -537,12 +542,16 @@ def _gate(frame, ctx, sid, upstream, root):
     mode = _mode_of(upstream, setting)
     if mode == "my_chrome" and name in CHROME_TAB_TOOLS:
         return _text(rid, CHROME_TABS), sid
+    if mode == "my_chrome" and arguments.get(NEW_TAB_ARG):
+        return _text(rid, CHROME_NEW_TAB), sid
     if name == PLAN_TOOL:
         return _plan(rid, arguments, ctx, setting, mode, root), sid
     if name == READ and "url" in arguments:  # a fetch of another page is a hidden navigation
         return _text(rid, READ_URL), sid
     st = _state(upstream)
     args = _clean(arguments, st["schemas"].get(name))
+    if mode == "my_chrome":
+        args.pop(NEW_TAB_ARG, None)
     key = _key_kind(args.get("key")) if name == PRESS else None
     if name == PRESS and key is None:
         return _text(rid, BAD_KEY), sid
@@ -651,10 +660,16 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT):
         tools = reply["result"].get("tools") or []
         schemas = _state(upstream)["schemas"]  # the engine's own inputs per tool, for _clean
         setting = browser.bot_setting(ctx["ws"], ctx["bot"], root)
-        hidden = CHROME_TAB_TOOLS if _mode_of(upstream, setting) == "my_chrome" else frozenset()
+        chrome = _mode_of(upstream, setting) == "my_chrome"
+        hidden = CHROME_TAB_TOOLS if chrome else frozenset()
         # The plan tool only where a send can happen: at read (or off) it is refused anyway.
         plan = [dict(PLAN_SCHEMA)] if setting["level"] in ("write", "act") else []
-        reply["result"]["tools"] = [_strip_schema(t, schemas) for t in tools
-                                    if isinstance(t, dict) and t.get("name") in KNOWN and t["name"] not in hidden] \
-            + plan
+        listed = [_strip_schema(t, schemas) for t in tools
+                  if isinstance(t, dict) and t.get("name") in KNOWN and t["name"] not in hidden]
+        if chrome:
+            for t in listed:
+                props = (t.get("inputSchema") or {}).get("properties")
+                if isinstance(props, dict):
+                    props.pop(NEW_TAB_ARG, None)
+        reply["result"]["tools"] = listed + plan
     return reply, sid

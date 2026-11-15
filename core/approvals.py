@@ -428,6 +428,20 @@ def receipts(root=bots.ROOT, ws=None, now=None):
     return sorted(rows, key=lambda r: r.get("created") or 0, reverse=True)
 
 
+SENT_LIMIT = 50
+
+
+def browser_sent(root=bots.ROOT, ws=None, now=None):
+    """Browser sends that ran in the last PLAN_TTL (done, failed or still running), newest first;
+    `ws` other than HQ narrows. Approvals lists them, so every send is logged there."""
+    now = time.time() if now is None else now
+    rows = [r for r in load(root) if _is_send(r) and r.get("status") in ("done", "failed", "running")
+            and 0 <= now - (r.get("started") or r.get("created") or 0) <= PLAN_TTL
+            and (not ws or ws == bots.HQ or r.get("ws") == ws)]
+    rows.sort(key=lambda r: r.get("started") or r.get("created") or 0, reverse=True)
+    return rows[:SENT_LIMIT]
+
+
 def undo_receipt(aid, apply, root=bots.ROOT, now=None):
     """Run a receipt's Undo once: `apply(undo)` returns the result line (ValueError: nothing
     changes and the receipt keeps its Undo)."""

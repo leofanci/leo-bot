@@ -113,6 +113,7 @@ LONG_HOME = ("The home folder path is too long for the browser engine, so the br
 
 _KEY_LOCK = threading.Lock()
 _TOOLS = {}  # engine binary -> its last tools/list result: Chrome off still lists the tools
+TOOLS_NAME = "browser-tools.json"  # <root>/run: the last list, so a login right after a restart lists it too
 
 
 def key_file(root):
@@ -452,6 +453,11 @@ class BrowserUpstream(browser_relay.Upstream):
                 raise _Failed(self._closed_line)
             self._child = child
         _TOOLS[str(binary)] = {"tools": tools}
+        try:
+            bots._atomic_write(Path(self.root) / "run" / TOOLS_NAME,
+                               json.dumps({"binary": str(binary), "tools": tools}) + "\n")
+        except OSError:
+            pass  # only a convenience: the memory copy still serves this process
         browser_relay.learn_schemas(self, tools)  # the relay's per-tool input allowlist
         return child
 
@@ -498,7 +504,16 @@ class BrowserUpstream(browser_relay.Upstream):
 
     def _cached_tools(self):
         binary = self._binary or browser_engine.resolve()
-        listed = _TOOLS.get(str(binary)) if binary else None
+        if not binary:
+            return None
+        listed = _TOOLS.get(str(binary))
+        if listed is None:
+            try:
+                saved = json.loads((Path(self.root) / "run" / TOOLS_NAME).read_text())
+            except (OSError, ValueError):
+                saved = None
+            if isinstance(saved, dict) and saved.get("binary") == str(binary) and isinstance(saved.get("tools"), list):
+                listed = {"tools": saved["tools"]}
         return copy.deepcopy(listed) if listed else None
 
     # -- the Upstream interface ---------------------------------------------------------------
@@ -523,6 +538,11 @@ class BrowserUpstream(browser_relay.Upstream):
             self.last_used = time.time()
             try:
                 if self.closed:
+                    # Logging in or stopped: the tools stay listed when known, so a bot's call
+                    # then gets this line and can say why, instead of seeing no browser at all.
+                    listed = self._cached_tools() if method == "tools/list" else None
+                    if listed is not None:
+                        return {"jsonrpc": "2.0", "id": rid, "result": listed}, mcp_session_id
                     raise _Failed(self._closed_line)
                 try:
                     child = self._start(self._chrome() if self.mode == "my_chrome" else None)
