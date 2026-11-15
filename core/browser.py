@@ -115,7 +115,9 @@ def _host(value):
     return host.rstrip(".") if host else None
 
 
-def set_site(host, mode, daily, root=bots.ROOT):
+def set_site(host, mode, daily, root=bots.ROOT, new=False):
+    """Set a site's mode and daily limit. `new`: adding it, refused when it is listed already
+    (so an add never wipes an existing row)."""
     name = _host(host)
     if not name or "." not in name:
         raise ValueError("host required")
@@ -128,6 +130,8 @@ def set_site(host, mode, daily, root=bots.ROOT):
     def fn(d):
         if not isinstance(d.get("sites"), dict):
             d["sites"] = json.loads(json.dumps(DEFAULT_SITES))
+        if new and isinstance(d["sites"].get(name), dict):
+            raise ValueError(f"{name} is already listed. Change it in its row.")
         d["sites"][name] = row
     _update(root, fn)
     return dict(row)

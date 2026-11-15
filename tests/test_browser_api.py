@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from email.message import Message
@@ -24,6 +25,8 @@ PROJECTS = [{"slug": "acme", "name": "Acme", "kind": "venture"}]
 HOST = "acme" + ".example"
 PAGE = "https" + "://" + HOST + "/compose"
 OTHER = "https" + "://" + "demo" + ".example" + "/login"
+# What an invited person gets on an owner-only route: forbidden, read or write.
+MEMBER_GET, MEMBER_POST = 403, 403
 CHAT = "0" * 8 + "-0000-0000-0000-" + "0" * 12
 APP_JS = (Path(__file__).resolve().parents[1] / "dashboard" / "app.js").read_text(encoding="utf-8")
 
@@ -164,13 +167,12 @@ class Settings(Base):
                   ("/api/browser/install", {}),
                   ("/api/browser/login", {"ws": "acme", "bot": "cmo", "url": PAGE}))
         with mock.patch.object(server.browser_engine, "install", side_effect=AssertionError("install")):
-            self.assertNotEqual(request("GET", "/api/browser/settings?ws=acme", owner=False, member=member)[0], 200)
+            self.assertEqual(request("GET", "/api/browser/settings?ws=acme", owner=False, member=member)[0], MEMBER_GET)
             self.assertEqual(request("GET", "/api/browser/settings", owner=False)[0], 403)
             for path, body in writes:
-                for kw in ({"owner": False, "member": member}, {"owner": False},
-                           {"origin": ""}, {"origin": "https://evil.example"}):
-                    code, _ = request("POST", path, body, **kw)
-                    self.assertIn(code, (403, 404), (path, kw))
+                self.assertEqual(request("POST", path, body, owner=False, member=member)[0], MEMBER_POST, path)
+                for kw in ({"owner": False}, {"origin": ""}, {"origin": "https://evil.example"}):
+                    self.assertEqual(request("POST", path, body, **kw)[0], 403, (path, kw))
         self.assertEqual(browser.bot_setting("acme", "cmo", self.root), {"level": "off", "mode": "bot"})
         self.assertNotIn(HOST, browser.sites(self.root))
         self.assertEqual(self.log("open"), [])
@@ -201,6 +203,11 @@ class Settings(Base):
             self.assertEqual(request("POST", "/api/browser/settings", {"site": HOST, "mode": None, **bad})[0], 400, bad)
         data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "", "daily": ""})[1]
         self.assertIn({"site": HOST, "mode": None, "daily": None}, data["sites"])
+        code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": None, "daily": None, "add": True})
+        self.assertEqual(code, 400, data)  # an add never wipes a listed row
+        self.assertIn("already listed", data["error"])
+        self.assertEqual(request("POST", "/api/browser/settings", {"site": "LinkedIn.com", "add": True})[0], 400)
+        self.assertEqual(browser.sites(self.root)["linkedin.com"]["daily"], 20)
         data = request("POST", "/api/browser/settings", {"site": HOST, "remove": True})[1]
         self.assertNotIn(HOST, [s["site"] for s in data["sites"]])
         self.assertNotIn(HOST, browser.sites(self.root))
@@ -276,6 +283,7 @@ class Login(Base):
         o, sess = opened[0], self.session()
         self.assertEqual(o["argv"], ["--session", sess, "--namespace", bu.NAMESPACE, "open", PAGE])
         self.assertEqual(o["env"]["AGENT_BROWSER_HEADED"], "true")
+        self.assertEqual(o["env"]["AGENT_BROWSER_IDLE_TIMEOUT_MS"], str(bu.LOGIN_SECONDS * 1000))  # 30 min
         self.assertTrue(o["settings"]["headed"])
         self.assertFalse(o["settings"]["autoConnect"])
         self.assertEqual(o["env"]["AGENT_BROWSER_RESTORE"], sess)
@@ -330,6 +338,145 @@ class Login(Base):
         self.assertEqual(self.log("open"), [])
 
 
+class LoginTokens(Base):
+    """Each login has its own token: an old login's watcher or Done never ends a newer one."""
+
+    def setUp(self):
+        super().setUp()
+        self.epoch = browser.epoch("acme", self.root)
+        self.sess = bu.session_name("acme", "cmo", "bot", self.epoch)
+        self.settles = []
+        for target, attr, kw in ((bu, "daemon_alive", {"return_value": True}),
+                                 (bu, "_settle_one", {"side_effect": self.settle}),
+                                 (bu, "LOGIN_POLL", None), (bu, "LOGIN_RETRY_MAX", None)):
+            p = (mock.patch.object(target, attr, 0.02 if attr == "LOGIN_POLL" else 0.08) if kw is None
+                 else mock.patch.object(target, attr, **kw))
+            p.start()
+            self.addCleanup(p.stop)
+        self.settle_ok = True
+
+    def settle(self, sess, mode, root, home):
+        self.settles.append(time.monotonic())
+        return self.settle_ok
+
+    def watch(self, token, limit=3600):
+        login = self.pool._login(self.sess, token)
+        t = threading.Thread(target=self.pool._watch_login, args=(self.sess, login, self.root), kwargs={"limit": limit},
+                             daemon=True)
+        t.start()
+        return t
+
+    def begin(self):
+        sess, _, token = self.pool.begin_login("acme", "cmo", self.epoch, self.root)
+        self.assertEqual(sess, self.sess)
+        return token
+
+    def test_done_stops_the_old_watcher_and_a_new_login_survives_it(self):
+        a = self.begin()
+        old = self.watch(a)
+        self.assertTrue(self.pool.finish_login("acme", "cmo", self.root))  # Done
+        b = self.begin()  # a new login of the same session at once
+        old.join(2)
+        self.assertFalse(old.is_alive())  # Done stopped it
+        time.sleep(0.1)
+        self.assertEqual(self.pool.login_session("acme", "cmo"), (self.sess, b))
+        self.pool.end_login(self.sess, a)  # a stale end of the old token is a no-op
+        self.assertEqual(self.pool.login_session("acme", "cmo"), (self.sess, b))
+        self.assertEqual(self.pool.get("acme", "cmo", "bot", self.root).forward(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "agent_browser_get_url"}}, None
+        )[0]["result"]["content"][0]["text"], bu.LOGGING_IN)
+
+    def test_old_deadline_never_closes_a_new_login(self):
+        self.settle_ok = False
+        a = self.begin()
+        old = self.watch(a, limit=0)  # past its deadline at once: it retries the close
+        deadline = time.monotonic() + 2
+        while not self.settles and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.pool.end_login(self.sess, a)
+        old.join(2)
+        self.assertFalse(old.is_alive())
+        seen = len(self.settles)
+        b = self.begin()
+        time.sleep(0.2)
+        self.assertEqual(len(self.settles), seen)  # nothing touched the new login's window
+        self.assertEqual(self.pool.login_session("acme", "cmo"), (self.sess, b))
+
+    def test_new_watcher_ends_only_its_own_login(self):
+        a = self.begin()
+        self.pool.end_login(self.sess, a)
+        b = self.begin()
+        with mock.patch.object(bu, "daemon_alive", return_value=False):
+            self.watch(b).join(2)
+        self.assertEqual(self.pool.logins(), [])
+        self.assertIsNone(self.pool._login(self.sess, b))
+
+    def test_close_past_deadline_backs_off_and_is_logged(self):
+        self.settle_ok = False
+        a = self.begin()
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            t = self.watch(a, limit=0)
+            deadline = time.monotonic() + 3
+            while len(self.settles) < 4 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNotNone(self.pool.login_session("acme", "cmo"))  # never ended while it lives
+            self.pool.end_login(self.sess, a)
+            t.join(2)
+        gaps = [y - x for x, y in zip(self.settles, self.settles[1:])]
+        self.assertGreaterEqual(len(gaps), 3)
+        self.assertGreater(gaps[1], gaps[0] * 1.5)  # the wait grows
+        self.assertLessEqual(max(gaps), 0.08 + 0.1)  # up to LOGIN_RETRY_MAX
+        self.assertIn("did not close", err.getvalue())
+
+
+class StartupClose(Base):
+    """Server start closes daemons of this root's live epochs that nothing owns, and only those."""
+
+    def setUp(self):
+        super().setUp()
+        self.live = browser.epoch("acme", self.root)
+        self.run = bu.run_dir(self.home)
+        self.run.mkdir(parents=True)
+        self.up = set()
+        p = mock.patch.object(bu, "daemon_alive", side_effect=self.alive)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def alive(self, sess, home=None):
+        closed = {r["env"].get("AGENT_BROWSER_SESSION") for r in self.log("close")}
+        return sess in self.up and sess not in closed
+
+    def daemon(self, sess):
+        for ext in ("pid", "sock"):
+            (self.run / f"{sess}.{ext}").write_text("")
+        self.up.add(sess)
+
+    def test_closes_only_unowned_daemons_of_live_epochs(self):
+        stale = bu.session_name("acme", "cmo", "bot", self.live)
+        chrome = bu.session_name("acme", "cos", "my_chrome", self.live)
+        owned = bu.session_name("acme", "gtm", "bot", self.live)
+        other = bu.session_name("acme", "cmo", "bot", "cccccc")  # another root's (or retired) epoch
+        for sess in (stale, chrome, owned, other):
+            self.daemon(sess)
+        self.pool.get("acme", "gtm", "bot", self.root)  # a child this pool owns
+        with mock.patch.object(bu.browser, "epochs", return_value={"acme": self.live}):
+            done = self.pool.close_stale_daemons(self.root, self.home)
+        self.assertEqual(set(done), {stale, chrome})
+        closed = [r["env"]["AGENT_BROWSER_SESSION"] for r in self.log("close")]
+        self.assertEqual(sorted(closed), sorted([stale, chrome]))
+        self.assertFalse((self.run / f"{stale}.sock").exists())
+        self.assertTrue((self.run / f"{other}.sock").exists())  # never touched
+        self.assertTrue((self.run / f"{owned}.sock").exists())
+
+    def test_server_start_runs_it(self):
+        with mock.patch.object(server.browser_upstream, "sweep_orphans") as sweep, \
+                mock.patch.object(self.pool, "close_stale_daemons") as close:
+            server._sweep_browser_orphans()
+        sweep.assert_called_once_with(self.root)
+        close.assert_called_once_with(self.root)
+
+
 def _fn(name):
     m = re.search(rf"^(?:async )?function {name}\(.*?\n}}\n", APP_JS, re.S | re.M)
     assert m, f"{name} missing from app.js"
@@ -365,6 +512,13 @@ class Screens(unittest.TestCase):
             self.assertIn(text, off)
         self.assertIn("not open with remote debugging on", off)
         self.assertIn('class="eng-state on"', on)
+
+    def test_site_listed_check_before_add(self):
+        self.assertEqual(_run(["browserSiteListed"],
+                              '[browserSiteListed([{site:"x.example"}], " X.example. "), browserSiteListed([{site:"x.example"}], "https://x.example/a"),'
+                              ' browserSiteListed([{site:"x.example"}], "y.example"), browserSiteListed([], ""), browserSiteListed(undefined, "x.example")]'),
+                         [True, True, False, False, False])
+        self.assertIn("it then has no daily limit", _fn("renderBrowserSettings"))
 
     def test_browser_send_card_has_no_edit(self):
         web, app = _run(["appCardHtml"], '[appCardHtml({kind:"app_action", action:{toolkit:"browser"}, preview:{title:"Send", fields:[]}}, 1),'

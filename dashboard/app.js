@@ -1529,6 +1529,11 @@ function browserSiteRowHtml(s, maxDaily){
     <label>Daily limit <input data-site-daily type="number" min="1" max="${+maxDaily || 500}" step="1" inputmode="numeric" placeholder="None" value="${s.daily ? esc(String(s.daily)) : ""}" aria-label="Daily limit for ${esc(s.site)} (empty: none)"></label>
     <button class="more" data-site-rm>Remove</button></div>`;
 }
+// Is this site already in the list? Same reading as the server: lowercase, no scheme, path or trailing dot.
+function browserSiteListed(sites, value){
+  const host = String(value || "").trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").split(/[\/?#:]/)[0].replace(/\.$/, "");
+  return !!host && (sites || []).some(s => s.site === host);
+}
 // Settings, Browser: is Chrome reachable for My Chrome bots, and how to turn remote debugging on.
 function chromeCheckHtml(on){
   const state = on
@@ -1849,12 +1854,19 @@ async function renderBrowserSettings(){
       daily.onchange = save;
       row.querySelector("[data-site-rm]").onclick = ev => {
         const b = ev.currentTarget;
-        if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to remove"; return; }
+        if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again: it then has no daily limit"; return; }
         saveSite(site, { remove: true });
       };
     });
     const add = box.querySelector(".brw-add");
-    add.onsubmit = ev => { ev.preventDefault(); if (add.site.value.trim()) saveSite(add.site.value.trim(), { mode: null, daily: null }); };
+    add.onsubmit = ev => {
+      ev.preventDefault();
+      const site = add.site.value.trim();
+      if (!site) return;
+      // Adding a listed site again would wipe where it opens and its daily limit.
+      if (browserSiteListed(d.sites, site)) return toast(`${site} is already listed. Change it in its row.`);
+      saveSite(site, { mode: null, daily: null, add: true });
+    };
     box.querySelector("[data-chrome-check]").onclick = () => draw();
     const wsSel = box.querySelector("[data-login-ws]");
     if (wsSel) wsSel.onchange = () => { loginWs = wsSel.value; draw(); };

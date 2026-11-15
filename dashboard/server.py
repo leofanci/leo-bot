@@ -1478,13 +1478,13 @@ def _browser_login(ws, bot_id, url):
     epoch, held = begun
     if held is None:
         raise _AppRefused("A login window is already open for this bot. Press Done there first.")
-    sess, up = held
+    sess, up, token = held
     try:
-        browser_upstream.POOL.open_login(sess, up, url, ROOT)
+        browser_upstream.POOL.open_login(sess, token, up, url, ROOT)
     except browser_upstream._Failed as e:
         raise _AppRefused(str(e)) from None
     if browser.epochs(ROOT).get(ws) != epoch:  # the workspace was deleted meanwhile
-        browser_upstream.POOL.close_login(sess, ROOT)
+        browser_upstream.POOL.close_login(sess, ROOT, token)
         raise LookupError("unknown workspace")
     return _browser_view(ws)
 
@@ -1509,6 +1509,10 @@ def _sweep_browser_orphans():
     try:
         browser_upstream.sweep_orphans(ROOT)
     except Exception:  # noqa: BLE001 - the server starts whatever is left on disk
+        traceback.print_exc()
+    try:  # a crash may have left a live epoch's daemon (a headed login window): close it
+        browser_upstream.POOL.close_stale_daemons(ROOT)
+    except Exception:  # noqa: BLE001 - as above
         traceback.print_exc()
 
 
@@ -2903,7 +2907,7 @@ class Handler(BaseHTTPRequestHandler):
                     browser.remove_site(site, ROOT)
                 else:
                     mode = body.get("mode") or None
-                    browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT)
+                    browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT, new=bool(body.get("add")))
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
