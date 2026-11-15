@@ -219,26 +219,42 @@ def epochs(root=bots.ROOT):
             if isinstance(ws, str) and isinstance(e, str) and EPOCH_RE.fullmatch(e)}
 
 
+def _ensure_epoch(d, ws):
+    rows = d.get("epochs") if isinstance(d.get("epochs"), dict) else {}
+    d["epochs"] = rows
+    e = rows.get(ws)
+    if isinstance(e, str) and EPOCH_RE.fullmatch(e):
+        return e
+    old = d.get("retired") if isinstance(d.get("retired"), list) else []
+    taken = {v for v in list(rows.values()) + old if isinstance(v, str)}  # never a retired one
+    e = secrets.token_hex(3)
+    while e in taken:
+        e = secrets.token_hex(3)
+    rows[ws] = e
+    return e
+
+
+def with_epoch(ws, exists, then, root=bots.ROOT):
+    """then(epoch) under LOCK, only while exists() holds: forget_workspace takes the same lock,
+    so a workspace deleted meanwhile never gets an epoch (or what `then` makes). None if gone."""
+    with LOCK:
+        if not exists():
+            return None
+        data = load(root)
+        had = _dict(data.get("epochs")).get(ws)
+        e = _ensure_epoch(data, ws)
+        if e != had:
+            _save(root, data)
+        return then(e)
+
+
 def epoch(ws, root=bots.ROOT):
     """This workspace's browser epoch, made (unique among live ones) on first use."""
     have = epochs(root).get(ws)
     if have:
         return have
 
-    def fn(d):
-        rows = d.get("epochs") if isinstance(d.get("epochs"), dict) else {}
-        d["epochs"] = rows
-        e = rows.get(ws)
-        if isinstance(e, str) and EPOCH_RE.fullmatch(e):
-            return e
-        old = d.get("retired") if isinstance(d.get("retired"), list) else []
-        taken = {v for v in list(rows.values()) + old if isinstance(v, str)}  # never a retired one
-        e = secrets.token_hex(3)
-        while e in taken:
-            e = secrets.token_hex(3)
-        rows[ws] = e
-        return e
-    return _update(root, fn)
+    return _update(root, lambda d: _ensure_epoch(d, ws))
 
 
 def retired(root=bots.ROOT):

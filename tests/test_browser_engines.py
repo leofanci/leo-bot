@@ -399,6 +399,34 @@ class Turn(Root):
         self.assertEqual(len(held), 1)
         self.assertEqual(held[0][0]["action"]["slug"], approvals.BROWSER_SEND)
 
+    def test_workspace_deleted_between_setup_and_mint_gets_no_token(self):
+        browser.set_bot("hq", "cos", "act", "bot", self.root)
+        with mock.patch.object(server, "_workspace_exists", return_value=False):  # its folder is gone
+            kw = self.run_turn()[0]
+        self.assertNotIn("browser_token", kw)
+        self.assertNotIn("hq", browser.epochs(self.root))
+
+    def test_epoch_and_token_made_under_the_lock_forget_takes(self):
+        made, order = [], []
+        self.assertIsNone(browser.with_epoch("acme", lambda: False, made.append, self.root))
+        self.assertEqual((made, browser.epochs(self.root)), ([], {}))
+        inside = threading.Event()
+
+        def then(e):
+            inside.set()
+            time.sleep(0.3)
+            order.append("mint")
+            return e
+        t = threading.Thread(target=browser.with_epoch, args=("acme", lambda: True, then, self.root))
+        t.start()
+        inside.wait(2)
+        browser.forget_workspace("acme", self.root)  # waits for the mint to finish
+        order.append("forget")
+        t.join(2)
+        self.assertEqual(order, ["mint", "forget"])
+        self.assertNotIn("acme", browser.epochs(self.root))  # retired right after: no live epoch left
+        self.assertEqual(len(browser.retired(self.root)), 1)
+
     def test_shared_thread_never_gets_a_token(self):
         browser.set_bot("hq", "cos", "act", "bot", self.root)
         kw = self.run_turn(shared=True)[0]

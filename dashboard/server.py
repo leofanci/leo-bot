@@ -1407,6 +1407,15 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
+def _workspace_exists(ws):
+    """HQ, or a project whose folder is still there (fileops.delete_project removes it first)."""
+    try:
+        bots.ws_dir(ws, ROOT)
+        return True
+    except ValueError:
+        return False
+
+
 def _tidy_browsers(ws, epoch, bot_ids, killed):
     try:
         browser_upstream.POOL.tidy_workspace(ws, epoch, bot_ids, ROOT, ups=killed)
@@ -3643,7 +3652,7 @@ class Handler(BaseHTTPRequestHandler):
             on a locked or full-disk engine (a locked turn has no apps). Revoked in the finally below."""
             kw = {}
             minted.append(kw)  # listed before any token exists: the finally revokes what was made
-            if st_.mount:
+            if st_.mount and _workspace_exists(ws):  # a workspace deleted since setup gets no token
                 kw.update({"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
@@ -3653,13 +3662,16 @@ class Handler(BaseHTTPRequestHandler):
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
                            "apps_port": self.server.server_address[1]})
             if st_.browse and not st_.locked:  # its own token: pages it reads mark the turn as outside content
-                browser.epoch(ws, ROOT)  # made here, while the workspace surely exists (never by a frame)
-                kw.update({"browser_token": BROWSER_TOKENS.mint(
+                # The epoch and the token are made under browser.LOCK while the workspace still
+                # exists: a delete (forget_workspace takes that lock) between setup and here gives
+                # neither, so no live epoch is ever made for a deleted slug.
+                tok = browser.with_epoch(ws, lambda: _workspace_exists(ws), lambda _e: BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
                            "report": job_mode == "report",
-                           "taint": turn}),
-                           "browser_port": self.server.server_address[1]})
+                           "taint": turn}), ROOT)
+                if tok:
+                    kw.update({"browser_token": tok, "browser_port": self.server.server_address[1]})
             if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
                 kw.update({"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                         "apps_used": st_.apps_used,
