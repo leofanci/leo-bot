@@ -35,6 +35,7 @@ import pwd
 import queue
 import re
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -57,6 +58,8 @@ CLOSE_SECONDS = 15
 CONNECT_SECONDS = 0.5
 POLL_SECONDS = 0.25
 STATE_EXPIRE_DAYS = 365
+DAEMON_WAIT = 5  # seconds a signalled session daemon or its Chrome gets to exit
+SETTLE_POLL = 5  # seconds between background checks of a deleted workspace's daemons
 SOCKET_MAX, SOCKET_FIXED = 103, 37
 PROTOCOL = "2024-11-05"
 KEY_NAME = "browser-engine-key"
@@ -323,6 +326,27 @@ class _Child:
             pass
 
 
+def _engine_env(session, mode, key, config, cdp=None):
+    """The child's environment (see the module docstring): an allowlist of the server's own."""
+    env = {k: os.environ[k] for k in PARENT_ENV if k in os.environ}
+    if not env.get("HOME") and _home():  # the same home state_dir and session_fits measure
+        env["HOME"] = _home()
+    # No AGENT_BROWSER_AUTO_CONNECT: the engine turns auto-connect on when it is set at all,
+    # even to "false" (probed on 0.41.0). Leo Bot's config file sets it off.
+    env.update({"AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
+                "AGENT_BROWSER_SESSION": session, "AGENT_BROWSER_NAMESPACE": NAMESPACE,
+                "AGENT_BROWSER_ENCRYPTION_KEY": key,
+                "AGENT_BROWSER_IDLE_TIMEOUT_MS": str(IDLE_SECONDS * 1000),
+                "AGENT_BROWSER_STATE_EXPIRE_DAYS": str(STATE_EXPIRE_DAYS)})
+    if mode == "bot":
+        env["AGENT_BROWSER_RESTORE"] = session  # its own saved state, never another's
+    else:
+        env["AGENT_BROWSER_PIN_TAB"] = "1"
+        if cdp:
+            env["AGENT_BROWSER_CDP"] = cdp
+    return env
+
+
 class BrowserUpstream(browser_relay.Upstream):
     """The engine child of one bot in one mode. Calls run one at a time. `after` is the
     upstream it replaces for the same bot: no child starts before that one has closed."""
@@ -353,23 +377,7 @@ class BrowserUpstream(browser_relay.Upstream):
     # -- the child --------------------------------------------------------------------------
 
     def _env(self, key, config, cdp=None):
-        env = {k: os.environ[k] for k in PARENT_ENV if k in os.environ}
-        if not env.get("HOME") and _home():  # the same home state_dir and session_fits measure
-            env["HOME"] = _home()
-        # No AGENT_BROWSER_AUTO_CONNECT: the engine turns auto-connect on when it is set at all,
-        # even to "false" (probed on 0.41.0). Leo Bot's config file sets it off.
-        env.update({"AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
-                    "AGENT_BROWSER_SESSION": self.session, "AGENT_BROWSER_NAMESPACE": NAMESPACE,
-                    "AGENT_BROWSER_ENCRYPTION_KEY": key,
-                    "AGENT_BROWSER_IDLE_TIMEOUT_MS": str(IDLE_SECONDS * 1000),
-                    "AGENT_BROWSER_STATE_EXPIRE_DAYS": str(STATE_EXPIRE_DAYS)})
-        if self.mode == "bot":
-            env["AGENT_BROWSER_RESTORE"] = self.session  # its own saved state, never another's
-        else:
-            env["AGENT_BROWSER_PIN_TAB"] = "1"
-            if cdp:
-                env["AGENT_BROWSER_CDP"] = cdp
-        return env
+        return _engine_env(self.session, self.mode, key, config, cdp)
 
     def _start(self, cdp=None):
         """A running child, started with the handshake and tools/list. Raises _Failed."""
@@ -578,12 +586,13 @@ class BrowserUpstream(browser_relay.Upstream):
         finally:
             self._lock.release()
 
-    def kill(self):
+    def kill(self, line=STOPPING):
         """Shutdown: refuse new calls and kill the child now, without waiting for a call in
-        flight. The engine session is closed after (close_all)."""
+        flight. The engine session is closed after (close_all). `line` is what later calls are
+        told, set before the child lock is released."""
         with self._child_lock:
             self.closed = True
-            self._closed_line = STOPPING
+            self._closed_line = line
             children = [c for c in (self._child, self._pending) if c is not None]
             self._child = self._pending = None
         for child in children:
@@ -639,8 +648,7 @@ class Pool:
         ups = [up for _, up in items]
         for up in ups:
             try:
-                up.kill()
-                up._closed_line = WS_CLOSING
+                up.kill(WS_CLOSING)
             except Exception:  # noqa: BLE001 - one child that fails to stop never stops the rest
                 traceback.print_exc()
         threads = [threading.Thread(target=_close_session, args=(up,), name="browser-close", daemon=True)
@@ -653,6 +661,31 @@ class Pool:
         for up in ups:
             up._done.set()
         return [k[1] for k, _ in items]
+
+    def forget_workspace(self, ws, bot_ids, root, home=None, bound=CLOSE_SECONDS + 5, poll=SETTLE_POLL):
+        """A deleted workspace, in order: close its children; forget their state; make sure no
+        session daemon of it lives (close again, else kill it and its Chrome); forget the state
+        again; then reopen. True when done now. False: a daemon is not confirmed gone, so the mark
+        stays and a background thread finishes wait, forget, reopen. Nothing is forgotten after
+        reopen."""
+        ids = set(bot_ids) | set(self.close_where(ws, bound))
+        forget_state(ws, ids, home)
+        if settle_sessions(ws, ids, root, home):
+            forget_state(ws, ids, home)
+            self.reopen(ws)
+            return True
+
+        def finish():
+            while not self._halt.wait(poll):
+                try:
+                    if settle_sessions(ws, ids, root, home):
+                        forget_state(ws, ids, home)
+                        self.reopen(ws)
+                        return
+                except Exception:  # noqa: BLE001 - keep trying; the mark stays meanwhile
+                    traceback.print_exc()
+        threading.Thread(target=finish, name="browser-forget", daemon=True).start()
+        return False
 
     def reopen(self, ws):
         """After forget_state: browsers may start in this workspace again (a reused slug)."""
@@ -772,6 +805,197 @@ def forget_state(ws, bot_ids, home=None):
         except OSError:
             traceback.print_exc()
     return removed
+
+
+# -- an engine session's own daemon (probed on 0.41.0, docs/browser.md "Session daemons") ----------
+# A live session is <home>/.agent-browser/namespaces/<ns>/run/<session>.sock (a Unix socket that
+# accepts) and <session>.pid (the daemon's pid). The daemon is its own process group, with
+# AGENT_BROWSER_DAEMON=1, AGENT_BROWSER_SESSION and AGENT_BROWSER_NAMESPACE in its environment.
+# The headless Chrome it launched is its child, leader of its own process group (crash handlers
+# included). SIGTERM to the daemon closes Chrome and saves the state; SIGKILL leaves Chrome
+# running and the socket and pid files behind (the socket then refuses).
+BROWSER_CLOSING = ("This workspace's browser is still closing. Its name can browse again once it "
+                   "has closed.")
+
+
+def run_dir(home=None):
+    return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "run"
+
+
+def _socket_live(path):
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        sock.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _pid_exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _proc_env(pid):
+    """The environment words of a process of this user, or None."""
+    try:
+        return Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8", "replace").split("\0")
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["ps", "-E", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True,
+                             text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.split() if out.returncode == 0 else None
+
+
+def daemon_pid(session, home=None):
+    """The pid of this session's daemon, only when that process really is it (its environment
+    names this session and namespace), else None."""
+    try:
+        pid = int((run_dir(home) / f"{session}.pid").read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 1 or pid == os.getpid() or not _pid_exists(pid):
+        return None
+    words = set(_proc_env(pid) or ())
+    need = {"AGENT_BROWSER_DAEMON=1", f"AGENT_BROWSER_SESSION={session}", f"AGENT_BROWSER_NAMESPACE={NAMESPACE}"}
+    return pid if need <= words else None
+
+
+def daemon_alive(session, home=None):
+    return _socket_live(run_dir(home) / f"{session}.sock") or daemon_pid(session, home) is not None
+
+
+def _children(pid):
+    """[(child pid, its process group)] of `pid`, from ps."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    rows = []
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and all(x.isdigit() for x in parts) and int(parts[1]) == pid:
+            rows.append((int(parts[0]), int(parts[2])))
+    return rows
+
+
+def _wait_gone(pids, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if not any(_pid_exists(p) for p in pids):
+            return True
+        time.sleep(0.1)
+    return not any(_pid_exists(p) for p in pids)
+
+
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def kill_daemon(session, home=None, wait=DAEMON_WAIT):
+    """Stop this session's daemon and the Chrome it launched: SIGTERM first (it closes Chrome and
+    saves state), then SIGKILL, then each Chrome group it started. Only a pid that daemon_pid
+    confirms is touched, and only its own children. True when the session is gone."""
+    pid = daemon_pid(session, home)
+    if pid is None:
+        return not daemon_alive(session, home)
+    own = os.getpgid(0)
+    kids = [(c, g) for c, g in _children(pid) if g != own]
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if not _wait_gone([pid], wait):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        _wait_gone([pid], wait)
+    for c, g in kids:  # a Chrome left behind: its whole group (helpers and crash handlers)
+        if _pid_exists(c):
+            if g == c:
+                _signal_group(g, signal.SIGTERM)
+            else:
+                try:
+                    os.kill(c, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+    if not _wait_gone([c for c, _ in kids], wait):
+        for c, g in kids:
+            if g == c:
+                _signal_group(g, signal.SIGKILL)
+            elif _pid_exists(c):
+                try:
+                    os.kill(c, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        _wait_gone([c for c, _ in kids], wait)
+    return not daemon_alive(session, home) and not any(_pid_exists(c) for c, _ in kids)
+
+
+def engine_close_session(session, mode, root):
+    """`<binary> --session <s> --namespace leobot close` for a session by name. True when it ran."""
+    binary = browser_engine.resolve()
+    key = _read_key(root)
+    if binary is None or key is None:
+        return False
+    try:
+        config, cwd = engine_dirs(root)
+        subprocess.run([str(binary), "--session", session, "--namespace", NAMESPACE, "close"],
+                       env=_engine_env(session, mode, key, config), cwd=str(cwd), capture_output=True,
+                       timeout=CLOSE_SECONDS)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def sessions_of(ws, bot_ids, home=None):
+    """{session name: mode} that may run for `ws`: each known bot's names in both modes, plus any
+    plain-named session of this workspace with a file in the run folder (exact parse, as
+    plain_state_names)."""
+    out = {}
+    for bot in {b for b in bot_ids if isinstance(b, str) and b}:
+        for mode in browser.MODES:
+            out[session_name(ws, bot, mode)] = mode
+    try:
+        names = os.listdir(run_dir(home))
+    except OSError:
+        names = []
+    wsp = session_part(ws)
+    for name in names:
+        sess = name.rsplit(".", 1)[0] if "." in name else None
+        parts = (sess or "").split("--")
+        if (sess and len(sess) <= MAX_SESSION and parts[0] == wsp and _PART.fullmatch(parts[1] if len(parts) > 1 else "")
+                and (len(parts) == 2 or (len(parts) == 3 and parts[2] == "chrome"))):
+            out.setdefault(sess, "my_chrome" if len(parts) == 3 else "bot")
+    return out
+
+
+def settle_sessions(ws, bot_ids, root, home=None):
+    """Make sure no daemon of `ws` lives: a live one is closed once more, then killed (with its
+    Chrome). True when none is left."""
+    left = []
+    for sess, mode in sessions_of(ws, bot_ids, home).items():
+        if not daemon_alive(sess, home):
+            continue
+        engine_close_session(sess, mode, root)
+        if daemon_alive(sess, home) and not kill_daemon(sess, home):
+            left.append(sess)
+    return not left
 
 
 POOL = Pool()

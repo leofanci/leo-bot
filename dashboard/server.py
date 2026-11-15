@@ -4438,12 +4438,15 @@ class Handler(BaseHTTPRequestHandler):
                 BROWSER_TOKENS.revoke_where(ws=out["slug"])
                 # Its browsers close (saving state as they do), then that state is removed: a reused
                 # slug starts with a fresh browser and no logins.
-                # No browser starts there from close_where until reopen, after the state is gone.
+                # No browser starts there until its daemons are gone and its saved logins removed.
+                # Not confirmed yet: the name stays refused and a background thread finishes.
                 try:
-                    closed = browser_upstream.POOL.close_where(out["slug"])
-                    browser_upstream.forget_state(out["slug"], set(closed) | browsed)
-                finally:
-                    browser_upstream.POOL.reopen(out["slug"])
+                    settled = browser_upstream.POOL.forget_workspace(out["slug"], browsed, ROOT)
+                except Exception:  # noqa: BLE001 - the delete stands; the browser mark stays on
+                    traceback.print_exc()
+                    settled = False
+                if not settled:
+                    out = {**out, "browser": browser_upstream.BROWSER_CLOSING}
                 runners.HUB.drop_workspace(out["slug"])  # queued or running runner turns there, anyone's
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])

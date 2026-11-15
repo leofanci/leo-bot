@@ -137,6 +137,24 @@ Yes, both exist and encryption is built in.
 - `agent-browser install` downloads Chrome for Testing into `~/.agent-browser/browsers/chrome-<version>` (about 190 MB). `agent-browser doctor [--fix]` diagnoses an install.
 - Other `agent-browser` daemons on the machine (any tool using the same engine) share `~/.agent-browser`; use a Leo Bot specific `--namespace` so sockets and states do not collide.
 
+### Session daemons (probed on 0.41.0)
+
+Probed in a scratch namespace on a 127.0.0.1 page, every process cleaned up after.
+- A live session has its files in `~/.agent-browser/namespaces/<ns>/run/`: `<session>.sock` (a Unix socket that accepts while the daemon lives), `<session>.pid` (the daemon's pid), plus `.config`, `.engine`, `.stream`, `.target`, `.version`.
+- The daemon is the engine binary with parent pid 1, the leader of its own process group. Its environment holds `AGENT_BROWSER_DAEMON=1`, `AGENT_BROWSER_SESSION=<session>` and `AGENT_BROWSER_NAMESPACE=<ns>`, readable with `ps -E` for the same user, so a pid can be checked as that session's daemon before anything is signalled.
+- The headless Chrome is a child of the daemon and the leader of its own process group. Its renderers and helpers are in that group, and its crash handlers have their own groups and exit with it. Chrome's argv names a temporary `--user-data-dir`, not the session.
+- SIGTERM to the daemon ends Chrome and the daemon, removes `.pid` and `.sock`, and saves the state (`<restore>-<session>.json.enc`).
+- SIGKILL to the daemon leaves Chrome running with parent pid 1 and the `.pid` and `.sock` files behind; the stale socket then refuses connections. Signalling Chrome's process group ends Chrome and its crash handlers.
+- Workspace delete (`Pool.forget_workspace`) runs in this order:
+  1. Close the children in parallel within one bound.
+  2. Forget the state.
+  3. For each session of that workspace whose daemon lives, retry the engine close once.
+  4. If it still lives, kill it (`kill_daemon`): SIGTERM to the verified daemon pid, SIGKILL if it stays, then the process group of each Chrome child it started.
+  5. Forget the state again.
+  6. Reopen the workspace name for browsing.
+
+  While a daemon is not confirmed gone, the workspace stays refused, the delete answer says the browser is still closing, and a background thread finishes the wait, the forget and the reopen. Live check, two sessions: the SIGTERM path and the SIGKILL path (daemon stopped so it could not answer SIGTERM) both left no engine or Chrome process (`pgrep`). The SIGTERM path saved a state file, which the forget then removed.
+
 ### Install in Leo Bot
 
 `core/browser_engine.py`: `resolve()` checks `LEOBOT_AGENT_BROWSER`, then `<data>/tools/agent-browser/0.41.0/node_modules/.bin/agent-browser`, then `PATH`. `install()` runs `npm install --prefix <that folder> agent-browser@0.41.0`, then `<binary> install`, with a 600 s timeout, and returns `status()`.
