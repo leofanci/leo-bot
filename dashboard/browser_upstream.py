@@ -23,6 +23,11 @@ no server-wide AGENT_BROWSER_* setting reaches it.
 A call that takes longer than CALL_SECONDS stops the child; so does a crash. Either is
 answered once as an MCP error and the next call starts a fresh child.
 
+A first login (Settings, Browser, "Log in"): the owner gets the bot's bot-mode session in a
+headed window (Pool.begin_login, open_login). The bot's child is closed first and every call of
+that bot in bot mode answers LOGGING_IN until the session's daemon is gone (Done, the engine's
+idle timeout, or LOGIN_SECONDS), so the bot never sees the login page.
+
 The gate (dashboard/browser_relay.py, approvals.LOCK) is in-process: this module runs only
 inside the dashboard server. The server starts POOL's sweeper (idle children closed after
 IDLE_SECONDS) and closes them all when it stops.
@@ -39,6 +44,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -94,6 +100,10 @@ TIMED_OUT = ("The browser did not answer within {s} seconds and was restarted, s
 CLOSED = "This browser was closed after a while without use. Ask again to start it fresh."
 STOPPING = "Leo Bot is stopping, so the browser did not start."
 WS_DELETED = "This workspace was deleted, so its browser is closed."
+LOGGING_IN = ("The owner is logging in to a site in this browser right now, so it is not available. Try again "
+              "in a few minutes.")
+LOGIN_SECONDS = 1800  # a login window still open after this long is closed (its logins are saved)
+LOGIN_POLL = 1  # seconds between checks that the login window's session is still alive
 TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the tab was closed), so a new empty "
              "tab was opened. This call was not performed. Open the page again.")
 LONG_HOME = ("The home folder path is too long for the browser engine, so the browser did not start. Ask the "
@@ -624,6 +634,7 @@ class Pool:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
+        self._logins = {}  # bot-mode session name -> (ws, bot, epoch): an owner's login window is open
         self._stopping = False
         self._halt = threading.Event()
 
@@ -637,6 +648,9 @@ class Pool:
         with self._lock:
             if self._stopping:
                 return BrowserUpstream(ws, bot, mode, root, stopped=True, epoch=e)
+            if mode == "bot" and session_name(ws, bot, "bot", e) in self._logins:
+                # The owner's login window drives this session: the bot never sees that page.
+                return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=LOGGING_IN, epoch=e)
             up = self._items.get((ws, bot))
             if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed or up.epoch != e):
                 old, up = up, None
@@ -654,6 +668,8 @@ class Pool:
             items = [(k, up) for k, up in self._items.items() if k[0] == ws and up.epoch == epoch]
             for k, _ in items:
                 del self._items[k]
+            for sess in [s for s, row in self._logins.items() if row[0] == ws and row[2] == epoch]:
+                del self._logins[sess]  # its window's daemon is settled by the delete tidy
         ups = [up for _, up in items]
         for up in ups:
             try:
@@ -730,16 +746,120 @@ class Pool:
         thread.start()
         return thread
 
+    # -- the owner's login window --------------------------------------------------------------
+
+    def begin_login(self, ws, bot, epoch, root):
+        """Hand this bot's bot-mode session to the owner for a login window. Cheap (no process
+        runs), so it may run under browser.LOCK. Returns (session, the bot's upstream to close),
+        or None when a login window is open for it already or the server is stopping. From now
+        on every call of the bot in bot mode answers LOGGING_IN, until end_login."""
+        sess = session_name(ws, bot, "bot", epoch)
+        with self._lock:
+            if self._stopping or sess in self._logins:
+                return None
+            self._logins[sess] = (ws, bot, epoch, root)
+            up = self._items.pop((ws, bot), None)
+        return sess, up
+
+    def end_login(self, sess):
+        with self._lock:
+            self._logins.pop(sess, None)
+
+    def logins(self):
+        """[(ws, bot)] with a login window open now."""
+        with self._lock:
+            return sorted((row[0], row[1]) for row in self._logins.values())
+
+    def login_session(self, ws, bot):
+        with self._lock:
+            return next((s for s, row in self._logins.items() if row[:2] == (ws, bot)), None)
+
+    def open_login(self, sess, up, url, root, home=None):
+        """Close the bot's own child (`up`, from begin_login) and any daemon left of its session,
+        then run `<binary> --session <s> --namespace leobot open <url>` headed, with the same
+        environment as the bot's own browser (its saved logins restored, saved again on close).
+        A watcher ends the login once that session's daemon is gone. Raises _Failed with the line
+        the owner sees; the login is ended then."""
+        try:
+            if up is not None:
+                up.kill(LOGGING_IN)
+                _close_session(up)
+                up._done.set()
+            if not _settle_one(sess, "bot", root, home):
+                raise _Failed("This bot's browser is still closing. Try again in a minute.")
+            binary = browser_engine.resolve()
+            if binary is None:
+                raise _Failed("The browser engine is not installed. Install it first.")
+            key = _read_key(root)
+            if key is None:
+                raise _Failed(NO_KEY)
+            if not session_fits(sess, home):
+                raise _Failed(LONG_HOME)
+            config, cwd = engine_dirs(root)
+            env = _engine_env(sess, "bot", key, config)
+            env["AGENT_BROWSER_HEADED"] = "true"  # the one difference: the owner sees the window
+            # Files, not pipes: the session daemon this starts may keep its output open.
+            with tempfile.TemporaryFile() as out:
+                r = subprocess.run([str(binary), "--session", sess, "--namespace", NAMESPACE, "open", url],
+                                   env=env, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=out,
+                                   stderr=subprocess.STDOUT, timeout=CALL_SECONDS)
+                if r.returncode != 0:
+                    out.seek(0)
+                    tail = out.read(4096).decode("utf-8", "replace").strip().splitlines()[-1:]
+                    raise _Failed("The login window did not open." + (f" The engine said: {tail[0][:200]}" if tail else ""))
+        except (_Failed, OSError, subprocess.SubprocessError) as e:
+            engine_close_session(sess, "bot", root)
+            self.end_login(sess)
+            if isinstance(e, _Failed):
+                raise
+            raise _Failed("The login window did not open.") from None
+        threading.Thread(target=self._watch_login, args=(sess, root, home), name="browser-login",
+                         daemon=True).start()
+
+    def _watch_login(self, sess, root, home=None, limit=None, poll=None):
+        """The login is over when its session daemon is gone (the owner pressed Done, or the
+        engine's idle timeout closed it), or after `limit` seconds, when it is closed here."""
+        limit = LOGIN_SECONDS if limit is None else limit
+        poll = LOGIN_POLL if poll is None else poll
+        deadline = time.monotonic() + limit
+        try:
+            while not self._halt.wait(poll):
+                if not daemon_alive(sess, home):
+                    break
+                if time.monotonic() > deadline:
+                    if not _settle_one(sess, "bot", root, home):
+                        continue  # still alive: the bot must not reach that window
+                    break
+        except Exception:  # noqa: BLE001 - never leave the bot refused for good
+            traceback.print_exc()
+        if not self._halt.is_set():
+            self.end_login(sess)
+
+    def finish_login(self, ws, bot, root, home=None):
+        """Done: close the login window (the engine saves its logins). True when it is gone."""
+        sess = self.login_session(ws, bot)
+        return True if sess is None else self.close_login(sess, root, home)
+
+    def close_login(self, sess, root, home=None):
+        """Close this login window's session, by name. True (and the login ended) when it is gone."""
+        if not _settle_one(sess, "bot", root, home):
+            return False
+        self.end_login(sess)
+        return True
+
     def close_all(self, bound=CLOSE_SECONDS):
         """Server shutdown: refuse new browsers, kill every child, then close their engine
-        sessions in parallel, all within `bound` seconds."""
+        sessions (and any login window) in parallel, all within `bound` seconds."""
         with self._lock:
             self._stopping = True
             items, self._items = list(self._items.values()), {}
+            logins, self._logins = list(self._logins.items()), {}
         self._halt.set()
         for up in items:
             up.kill()
         threads = [threading.Thread(target=up._engine_close, name="browser-close", daemon=True) for up in items]
+        threads += [threading.Thread(target=engine_close_session, args=(sess, "bot", row[3]), name="browser-close",
+                                     daemon=True) for sess, row in logins]
         for t in threads:
             t.start()
         deadline = time.monotonic() + bound

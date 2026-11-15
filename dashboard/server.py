@@ -51,7 +51,7 @@ from core import bots, datadir, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
-from core import app_rules, browser, composio, integrations, people, ws_logos  # noqa: E402
+from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
 import ws                # noqa: E402
@@ -1407,6 +1407,88 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
+_BROWSER_INSTALL = {"running": False, "last": None}  # Settings, Browser: one engine install at a time
+_BROWSER_INSTALL_LOCK = threading.Lock()
+
+
+def _browser_install_run():
+    try:
+        out = browser_engine.install()
+    except Exception as e:  # noqa: BLE001 - the page says it failed instead of spinning forever
+        traceback.print_exc()
+        out = {"state": "missing", "detail": f"install failed: {e}"}
+    with _BROWSER_INSTALL_LOCK:
+        _BROWSER_INSTALL.update(running=False, last=out)
+
+
+def _browser_view(ws=None):
+    """Settings, Browser and Team: the engine, the sites, the My Chrome check, open logins and,
+    with `ws`, that workspace's bot levels and modes. Owner only (the caller checked)."""
+    with _BROWSER_INSTALL_LOCK:
+        install = dict(_BROWSER_INSTALL)
+    out = {"engine": {**browser_engine.status(), "version": browser_engine.VERSION,
+                      "installing": install["running"], "last_install": install["last"]},
+           "levels": list(browser.LEVELS), "modes": list(browser.MODES), "max_daily": browser.MAX_DAILY,
+           "sites": [{"site": host, **row} for host, row in sorted(browser.sites(ROOT).items())],
+           "chrome": browser_upstream.find_chrome_debug_url() is not None,
+           "logins": [{"ws": w, "bot": b} for w, b in browser_upstream.POOL.logins()],
+           "deployment": DEPLOYMENT}
+    if ws is not None:
+        out["ws"] = ws
+        out["bots"] = {b: browser.bot_setting(ws, b, ROOT) for b in bots.load_defs()}
+    return out
+
+
+def _browser_bot(body):
+    ws = _strict_ws(body.get("ws"))
+    bot_id = str(body.get("bot") or "")
+    if bot_id not in bots.load_defs():
+        raise ValueError(f"unknown bot: {bot_id}")
+    return ws, bot_id
+
+
+def _browser_daily(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and value.strip().isdecimal():
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"daily limit must be a whole number from 1 to {browser.MAX_DAILY}, or empty")
+    return value
+
+
+def _browser_login(ws, bot_id, url):
+    """Open a headed window for this bot's own browser (bot mode) on this machine. The epoch is
+    made under browser.LOCK only while the workspace exists. Returns the view, raises ValueError
+    (bad request) or _AppRefused (refused now) with a plain line."""
+    if not isinstance(url, str) or not browser.is_web_url(url) or not browser.host_of(url):
+        raise ValueError("Give a web address that starts with http:// or https://")
+    url = url.strip()
+    if browser.bot_setting(ws, bot_id, ROOT)["mode"] == "my_chrome":
+        raise _AppRefused("This bot uses your Chrome, which has your own logins. Log in there instead.")
+    site = browser.site_of(url, ROOT)
+    if site and browser.sites(ROOT).get(site, {}).get("mode") == "my_chrome":
+        raise _AppRefused(f"{site} opens in your Chrome, which has your own logins. Log in there instead.")
+    if browser_engine.resolve() is None:
+        raise _AppRefused("The browser engine is not installed. Install it first.")
+    begun = browser.with_epoch(ws, lambda: _workspace_exists(ws),
+                               lambda e: (e, browser_upstream.POOL.begin_login(ws, bot_id, e, ROOT)), ROOT)
+    if begun is None:
+        raise LookupError("unknown workspace")
+    epoch, held = begun
+    if held is None:
+        raise _AppRefused("A login window is already open for this bot. Press Done there first.")
+    sess, up = held
+    try:
+        browser_upstream.POOL.open_login(sess, up, url, ROOT)
+    except browser_upstream._Failed as e:
+        raise _AppRefused(str(e)) from None
+    if browser.epochs(ROOT).get(ws) != epoch:  # the workspace was deleted meanwhile
+        browser_upstream.POOL.close_login(sess, ROOT)
+        raise LookupError("unknown workspace")
+    return _browser_view(ws)
+
+
 def _workspace_exists(ws):
     """HQ, or a project whose folder is still there (fileops.delete_project removes it first)."""
     try:
@@ -2314,6 +2396,26 @@ def _approve_job_card(aid, fields=None):
     return out
 
 
+BROWSER_APPROVED = "Approved. The bot sends it on its next run."
+
+
+def _approve_browser_send(rec, arguments=None):
+    """A planned browser send: approving only lets the bot's own click send it later. Composio is
+    never asked, and the text cannot be edited here (the bot types exactly what was approved)."""
+    if arguments is not None:
+        raise _AppRefused("A browser send cannot be edited. Say No and ask the bot for new text.")
+    level = browser.bot_setting(rec.get("ws"), rec.get("bot"), ROOT)["level"]
+    if level not in ("write", "act"):
+        raise _AppRefused(f"{rec.get('bot')} may no longer send from the browser")
+    try:
+        out = approvals.approve_send(rec["id"], ROOT)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    if out.get("chat"):
+        chat_store.append_note(out["chat"], out["bot"], BROWSER_APPROVED)
+    return {**out, "result": BROWSER_APPROVED}
+
+
 def _approve_app_action(aid, arguments=None):
     """Run one held app action, exactly once, after re-checking it may still run."""
     rec = approvals.get(aid, ROOT)
@@ -2321,6 +2423,8 @@ def _approve_app_action(aid, arguments=None):
         raise LookupError("no such app action")
     if rec.get("status") != "pending":
         raise _AppRefused(f"already {rec.get('status')}")
+    if (rec.get("action") or {}).get("toolkit") == approvals.BROWSER:
+        return _approve_browser_send(rec, arguments)
     if arguments is not None:
         rec = approvals.edit_arguments(aid, arguments, ROOT)
     action = rec["action"]
@@ -2789,6 +2893,41 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(code, {"error": str(e)})
             _UPDATE_STARTED = time.monotonic()
         return self._send(202, {"updating": True})
+
+    def _browser_post(self, path, body):
+        """Settings, Browser and Team: owner only (the caller checked)."""
+        if path == "/api/browser/settings":
+            if "site" in body:
+                site = body.get("site")
+                if body.get("remove"):
+                    browser.remove_site(site, ROOT)
+                else:
+                    mode = body.get("mode") or None
+                    browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT)
+                return self._send(200, _browser_view())
+            ws, bot_id = _browser_bot(body)
+            browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
+            return self._send(200, _browser_view(ws))
+        if path == "/api/browser/install":
+            with _BROWSER_INSTALL_LOCK:
+                if not _BROWSER_INSTALL["running"]:
+                    _BROWSER_INSTALL.update(running=True, last=None)
+                    threading.Thread(target=_browser_install_run, name="browser-install", daemon=True).start()
+            return self._send(202, _browser_view())
+        if path in ("/api/browser/login", "/api/browser/login/done"):
+            # A window opens on this machine's screen: from this machine only, never a server.
+            if not self._local_request() or DEPLOYMENT == "server":
+                return self._send(403, {"error": "Logging in opens a window on the Mac Leo Bot runs on. Do it there."})
+            ws, bot_id = _browser_bot(body)
+            try:
+                if path.endswith("/done"):
+                    if not browser_upstream.POOL.finish_login(ws, bot_id, ROOT):
+                        raise _AppRefused("The login window is still closing. Try again in a minute.")
+                    return self._send(200, _browser_view(ws))
+                return self._send(200, _browser_login(ws, bot_id, body.get("url")))
+            except _AppRefused as e:
+                return self._send(409, {"ok": False, "error": str(e)})
+        return self._send(404, {"error": "unknown endpoint"})
 
     def _engines_post(self, path, body):
         """Settings, Engines: owner only (the caller checked)."""
@@ -4158,6 +4297,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ws": ws, "files": files})
             if path == "/api/engines":
                 return self._send(200, _engines_view())
+            if path == "/api/browser/settings":  # owner only (checked above)
+                ws = (parse_qs(urlparse(self.path).query).get("ws") or [None])[0]
+                try:
+                    ws = _strict_ws(ws) if ws else None
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, _browser_view(ws))
             if path == "/api/folders":
                 projects = db.tree()
                 ws = _folders_ws((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], projects)
@@ -4609,6 +4755,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._runners_post(path, body, "owner")
+            if path.startswith("/api/browser/"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._browser_post(path, body)
             if path.startswith("/api/integrations/") or (
                     path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject", "/undo"))):
                 if not self._authorized(require_origin=True):

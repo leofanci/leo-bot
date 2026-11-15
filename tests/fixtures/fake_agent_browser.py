@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""A stand-in agent-browser for tests: `mcp ...` speaks MCP over stdio, `... close` exits.
+"""A stand-in agent-browser for tests: `mcp ...` speaks MCP over stdio, `... close` and `... open <url>` exit.
 
 It logs every start, call and close to $HOME/fake-log.jsonl (with its argv and AGENT_BROWSER_*
 environment) and reads $HOME/fake.json for what to do: {"crash_on": tool} exits mid-call,
-{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error, {"tab_gone_on": tool} answers
+{"hang_on": tool} never answers, {"bad_list": true} answers tools/list with an error,
+{"open_fails": true} fails `open`, {"tab_gone_on": tool} answers
 "tab_gone:" until agent_browser_tab_new runs. "settings" in a start record is
 what the real engine would use from its config files and environment.
 """
@@ -70,6 +71,9 @@ def main():
     if sys.argv[-1] == "close":
         log("close", argv=sys.argv[1:], env=env)
         return 0
+    if len(sys.argv) > 2 and sys.argv[-2] == "open":  # the owner's login window: `... open <url>`
+        log("open", argv=sys.argv[1:], env=env, settings=effective())
+        return 4 if control().get("open_fails") else 0
     log("start", argv=sys.argv[1:], env=env, keys=sorted(os.environ), cwd=os.getcwd(), settings=effective())
     url = "about:blank"
     for raw in sys.stdin:

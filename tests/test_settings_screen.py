@@ -39,8 +39,8 @@ class SettingsScreen(unittest.TestCase):
         self.assertIn(".ws-settings{margin-top:auto", APP_CSS)
 
     def test_tabs_hold_only_machine_wide_things(self):
-        self.assertIn("/^\\/settings(?:\\/(engines|bots|integrations|access))?$/", APP_JS)
-        self.assertIn('["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]', APP_JS)
+        self.assertIn("/^\\/settings(?:\\/(engines|bots|integrations|browser|access))?$/", APP_JS)
+        self.assertIn('["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]', APP_JS)
 
     def test_old_links_still_land(self):
         self.assertIn("/^\\/(engines|integrations)$/", APP_JS)

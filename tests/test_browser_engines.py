@@ -860,6 +860,7 @@ class KillPath(unittest.TestCase):
             except (ProcessLookupError, PermissionError):
                 pass
         proc.wait(5)
+        proc.stdout.close()
 
     def group_alive(self, pgid):
         try:

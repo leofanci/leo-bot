@@ -133,6 +133,19 @@ def set_site(host, mode, daily, root=bots.ROOT):
     return dict(row)
 
 
+def remove_site(host, root=bots.ROOT):
+    """Take a site off the list: its mode and daily limit go. True when it was listed."""
+    name = _host(host)
+    if not name:
+        raise ValueError("host required")
+
+    def fn(d):
+        if not isinstance(d.get("sites"), dict):
+            d["sites"] = json.loads(json.dumps(DEFAULT_SITES))
+        return d["sites"].pop(name, None) is not None
+    return _update(root, fn)
+
+
 _IGNORABLE = dict.fromkeys(
     [0x00AD, 0x034F, 0x180B, 0x180C, 0x180D, 0x180E, 0x180F, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xFEFF]
     + list(range(0x200B, 0x2010)) + list(range(0xFE00, 0xFE10)))
