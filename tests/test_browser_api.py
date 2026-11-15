@@ -388,6 +388,9 @@ class LoginTokens(Base):
 
     def test_old_deadline_never_closes_a_new_login(self):
         self.settle_ok = False
+        quiet = mock.patch("sys.stderr", io.StringIO())  # its retry lines
+        quiet.start()
+        self.addCleanup(quiet.stop)
         a = self.begin()
         old = self.watch(a, limit=0)  # past its deadline at once: it retries the close
         deadline = time.monotonic() + 2
@@ -414,20 +417,66 @@ class LoginTokens(Base):
     def test_close_past_deadline_backs_off_and_is_logged(self):
         self.settle_ok = False
         a = self.begin()
+        login = self.pool._login(self.sess, a)
+
+        class Stop:  # no sleeps: records each wait asked for; the fifth one ends the login
+            asked = []
+
+            def wait(self, t):
+                self.asked.append(t)
+                return len(self.asked) >= 5
+
+            def set(self):
+                pass
+        login.stop = Stop()
         err = io.StringIO()
         with mock.patch("sys.stderr", err):
-            t = self.watch(a, limit=0)
-            deadline = time.monotonic() + 3
-            while len(self.settles) < 4 and time.monotonic() < deadline:
-                time.sleep(0.01)
-            self.assertIsNotNone(self.pool.login_session("acme", "cmo"))  # never ended while it lives
-            self.pool.end_login(self.sess, a)
-            t.join(2)
-        gaps = [y - x for x, y in zip(self.settles, self.settles[1:])]
-        self.assertGreaterEqual(len(gaps), 3)
-        self.assertGreater(gaps[1], gaps[0] * 1.5)  # the wait grows
-        self.assertLessEqual(max(gaps), 0.08 + 0.1)  # up to LOGIN_RETRY_MAX
-        self.assertIn("did not close", err.getvalue())
+            self.pool._watch_login(self.sess, login, self.root, limit=-1)
+        self.assertEqual(Stop.asked, [0.02, 0.04, 0.08, 0.08, 0.08])  # doubles up to LOGIN_RETRY_MAX
+        self.assertEqual(len(self.settles), 4)  # one close per wait that did not end it
+        self.assertEqual(err.getvalue().count("did not close"), 4)
+        self.assertIn("retrying in", err.getvalue())
+
+
+class StartupGate(Base):
+    """Until the startup close is done, no bot-mode child starts (one could attach to a stale
+    headed login daemon). My Chrome sessions do not wait."""
+
+    def setUp(self):
+        super().setUp()
+        browser.epoch("acme", self.root)
+
+    def call(self, up):
+        return up.forward({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "agent_browser_get_url", "arguments": {}}}, None)[0]
+
+    def test_get_during_startup_close_starts_nothing_then_works(self):
+        self.pool.hold_starts()
+        with mock.patch.object(bu, "STARTUP_SECONDS", 0.05):
+            held = self.pool.get("acme", "cmo", "bot", self.root)
+        self.assertEqual(self.call(held)["result"]["content"][0]["text"], bu.NO_START)
+        self.assertEqual(self.log("start"), [])
+        chrome = self.pool.get("acme", "cmo", "my_chrome", self.root)  # does not wait
+        self.assertFalse(chrome.closed)
+        got = []
+        t = threading.Thread(target=lambda: got.append(self.pool.get("acme", "cmo", "bot", self.root)), daemon=True)
+        t.start()
+        t.join(0.1)
+        self.assertTrue(t.is_alive())  # waiting for the startup close
+        self.assertEqual(self.log("start"), [])
+        self.pool.starts_ready()
+        t.join(5)
+        self.assertFalse(self.call(got[0])["result"]["isError"])
+        self.assertEqual(len(self.log("start")), 1)
+
+    def test_server_start_opens_the_gate_even_when_the_close_fails(self):
+        self.pool.hold_starts()
+        with mock.patch.object(server.browser_upstream, "sweep_orphans"), \
+                mock.patch.object(self.pool, "close_stale_daemons", side_effect=RuntimeError("boom")), \
+                mock.patch("sys.stderr", io.StringIO()):
+            server._sweep_browser_orphans()
+        self.assertTrue(self.pool._ready.is_set())
+        self.assertEqual(bu.STARTUP_SECONDS, bu.CLOSE_SECONDS + 2 * bu.DAEMON_WAIT + 5)
 
 
 class StartupClose(Base):

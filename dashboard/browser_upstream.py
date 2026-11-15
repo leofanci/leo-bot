@@ -104,6 +104,7 @@ LOGGING_IN = ("The owner is logging in to a site in this browser right now, so i
               "in a few minutes.")
 LOGIN_SECONDS = 1800  # a login window still open after this long is closed (its logins are saved)
 LOGIN_POLL = 1  # seconds between checks that the login window's session is still alive
+STARTUP_SECONDS = CLOSE_SECONDS + 2 * DAEMON_WAIT + 5  # the startup close's bound: a bot-mode get waits this long
 LOGIN_RETRY_MAX = 60  # longest wait between closes of a login window that outlived LOGIN_SECONDS
 TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the tab was closed), so a new empty "
              "tab was opened. This call was not performed. Open the page again.")
@@ -647,9 +648,22 @@ class Pool:
         self._logins = {}  # bot-mode session name -> _Login: an owner's login window is open
         self._stopping = False
         self._halt = threading.Event()
+        # Server start closes stale daemons (close_stale_daemons) while it already serves; until
+        # that is done a bot-mode child could attach to one (a headed login window), so none starts.
+        self._ready = threading.Event()
+        self._ready.set()
+
+    def hold_starts(self):
+        """Server start: no bot-mode child until starts_ready (the startup close has finished)."""
+        self._ready.clear()
+
+    def starts_ready(self):
+        self._ready.set()
 
     def get(self, ws, bot, mode, root):
         old = None
+        if mode == "bot" and not self._ready.wait(STARTUP_SECONDS):
+            return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=NO_START)
         # Read on every frame, never made here (a turn's mint makes it): a recreated slug has a
         # new one, and a deleted workspace has none, so a late frame starts nothing.
         e = browser.epochs(root).get(ws)

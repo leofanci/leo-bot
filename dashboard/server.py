@@ -1514,6 +1514,8 @@ def _sweep_browser_orphans():
         browser_upstream.POOL.close_stale_daemons(ROOT)
     except Exception:  # noqa: BLE001 - as above
         traceback.print_exc()
+    finally:  # bot-mode children may start now (Pool.get waited for this)
+        browser_upstream.POOL.starts_ready()
 
 
 def _bots_known_in(ws):
@@ -5048,6 +5050,7 @@ def main():
                       activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
     browser_upstream.POOL.start_sweeper()  # idle engine children close after 10 minutes
     # Sessions of an epoch no workspace has (a delete whose tidy did not finish): settle, forget.
+    browser_upstream.POOL.hold_starts()  # until the startup close below has finished
     threading.Thread(target=_sweep_browser_orphans, name="browser-orphans", daemon=True).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
