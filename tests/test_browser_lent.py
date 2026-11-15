@@ -258,6 +258,168 @@ class LenderClose(unittest.TestCase):
         self.assertEqual(lender._ups, {})
 
 
+class RunnerMain(unittest.TestCase):
+    """runner_client.main: lent tabs close when the poll loop ends, however it ends."""
+
+    def run_main(self, argv_extra=(), engine_ok=True):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        token = root / "token"
+        token.write_text("myr_x")
+        token.chmod(0o600)
+        settings = root / "settings.json"
+        runner_client.set_lend(settings, True)
+        made, handlers = [], {}
+
+        class FakeLender:
+            def __init__(self, *a, **k):
+                self.closed = 0
+                made.append(self)
+
+            def close_all(self):
+                self.closed += 1
+
+            def sweep(self):
+                pass
+
+        class Engine:
+            def __init__(self, *a):
+                pass
+
+            def status(self):
+                return {"ok": engine_ok, "detail": "ok"}
+
+        def post(client, path, body, timeout=30):
+            raise SystemExit(0)  # what the SIGTERM handler raises in the poll
+
+        out = io.StringIO()
+        with mock.patch.object(runner_client, "Lender", FakeLender), \
+                mock.patch.object(runner_client.Client, "post", post), \
+                mock.patch.object(runner_client, "ClaudeCodeEngine", Engine), \
+                mock.patch.object(runner_client, "sweep_stale_tmpdirs"), \
+                mock.patch.object(runner_client, "private_tmpdir", return_value=str(root / "work")), \
+                mock.patch.object(runner_client.atexit, "register"), \
+                mock.patch.object(runner_client.os, "umask"), \
+                mock.patch.object(runner_client.signal, "signal",
+                                  side_effect=lambda sig, fn: handlers.__setitem__(sig, fn)), \
+                contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            runner_client.main(["--server", "http://127.0.0.1:9", "--token-file", str(token),
+                                "--settings-file", str(settings), "--browser-root", str(root / "b"), *argv_extra])
+        return made, handlers, out.getvalue()
+
+    def test_stop_closes_lent_tabs(self):
+        made, handlers, _ = self.run_main(["--browser-only"])
+        self.assertEqual([m.closed for m in made], [1])
+        with self.assertRaises(SystemExit) as stop:  # SIGTERM takes the same way out
+            handlers[runner_client.signal.SIGTERM](runner_client.signal.SIGTERM, None)
+        self.assertEqual(stop.exception.code, 0)
+
+    def test_lend_with_turns_says_chats_have_no_browser(self):
+        _, _, said = self.run_main()
+        self.assertIn("--browser-only", said)
+        self.assertIn("no browser", said)
+        _, _, said = self.run_main(["--browser-only"])
+        self.assertNotIn("no browser", said)
+
+
+class BadJobReply(unittest.TestCase):
+    def test_bad_job_with_a_turn_gets_an_error_reply(self):
+        posted = []
+
+        class C:
+            def post(self, path, body, timeout=30):
+                posted.append((path, body))
+
+        lender = runner_client.Lender(Path(tempfile.gettempdir()) / "unused", Path("/nonexistent/s.json"),
+                                      make=lambda *a: FakeLocal())
+        turn = "c" * 32
+        bad = {"kind": "browser", "turn": turn, "op": "call", "ws": "demo", "bot": "research", "epoch": "nope",
+               "frame": call(5, P + "get_title")}
+        with contextlib.redirect_stderr(io.StringIO()):
+            runner_client.safe_browser_job(bad, C(), lender)
+            runner_client.safe_browser_job({**bad, "turn": "not-a-turn"}, C(), lender)
+            runner_client.safe_browser_job("junk", C(), lender)
+        self.assertEqual(len(posted), 1)
+        path, body = posted[0]
+        self.assertEqual(path, f"/api/runner/reply/{turn}")
+        self.assertEqual(body["reply"]["error"]["message"], browser_lent.BAD_JOB)
+        self.assertEqual(body["reply"]["id"], 5)
+
+    def test_reply_cap_is_the_hubs(self):
+        self.assertFalse(hasattr(runner_client, "MAX_REPLY_CHARS"))
+        posted = []
+
+        class C:
+            def post(self, path, body, timeout=30):
+                posted.append(body)
+
+        class Big:
+            def answer(self, job):
+                return ok(1, "x" * 2000)
+
+        with mock.patch.object(runners, "MAX_TURN_CHARS", 1000):
+            runner_client.safe_browser_job({"turn": "d" * 32}, C(), Big())
+        self.assertEqual(posted[0]["reply"]["error"]["message"], browser_lent.TOO_LONG)
+
+    def test_lend_off_line_names_the_command(self):
+        self.assertIn("--lend-chrome on", browser_lent.LEND_OFF)
+        self.assertNotIn("\u2014", browser_lent.LEND_OFF)
+
+
+class CloseOnDelete(Base):
+    def test_workspace_delete_closes_the_runners_lent_tabs(self):
+        settings = self.root / "s.json"
+        runner_client.set_lend(settings, True)
+        tabs = {}
+
+        class Tab(FakeLocal):
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        lender = runner_client.Lender(self.root / "lend", settings,
+                                      make=lambda ws, bot, epoch: tabs.setdefault((ws, bot, epoch), Tab()))
+        r = self.runner("rn-o", "owner", answer=lambda job: lender.answer(job) if job["op"] != "close" else None)
+        other = self.runner("rn-p", "profile-b")
+        pool = bu.Pool()
+        ctx = {"ws": "demo", "bot": "research", "runner_owner": "owner", "shared": False}
+        with mock.patch.object(bu.browser, "epochs", return_value={"demo": EPOCH}), \
+                mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "server"}), \
+                mock.patch.object(browser_lent.runners, "HUB", self.hub):
+            up = pool.get("demo", "research", "my_chrome", self.root, ctx=ctx)
+            up.hub = self.hub
+            up.POLL = 0.05
+            self.assertEqual(up.current_url(), "https://acme.example/page")
+            lender.answer({"kind": "browser", "turn": "e" * 32, "op": "url", "ws": "acme", "bot": "research",
+                           "epoch": EPOCH})  # another workspace: stays open
+            pool.kill_where("demo", EPOCH)
+        deadline = time.time() + 2
+        while not any(j["op"] == "close" for j in r.jobs) and time.time() < deadline:
+            time.sleep(0.02)
+        close = [j for j in r.jobs if j["op"] == "close"]
+        self.assertEqual([(j["ws"], j["epoch"]) for j in close], [("demo", EPOCH)])
+        lender.answer(close[0])
+        self.assertTrue(tabs[("demo", "research", EPOCH)].closed)
+        self.assertFalse(tabs[("acme", "research", EPOCH)].closed)
+        self.assertNotIn(("demo", "research", EPOCH), lender._ups)
+        self.assertEqual([j for j in other.jobs if j["op"] == "close"], [])  # only the person who lent
+        self.assertEqual(self.hub._turns, {})  # a close note is not kept waiting for an answer
+
+    def test_close_note_untaken_expires(self):
+        self.hub.notify("owner", {"op": "close", "ws": "demo", "epoch": EPOCH})
+        with mock.patch.object(runners, "NOTE_SECONDS", 0):
+            self.assertIsNone(self.hub.next("rn-o", "owner", wait=0, caps=LEND))
+        self.assertEqual((self.hub._turns, self.hub._waiting.get("owner")), ({}, []))
+
+    def test_close_job_shape(self):
+        runner_client.check_browser_job({"kind": "browser", "turn": "f" * 32, "op": "close", "ws": "demo",
+                                         "epoch": EPOCH})
+        with self.assertRaises(ValueError):
+            runner_client.check_browser_job({"kind": "browser", "turn": "f" * 32, "op": "close", "ws": "demo"})
+
+
 class HubCaps(unittest.TestCase):
     def setUp(self):
         self.hub = runners.Hub()

@@ -32,15 +32,16 @@ from dashboard.browser_relay import (BAD_URL, CHROME_NEW_TAB, CHROME_TAB_TOOLS, 
 
 RUNNER_OFF = ("Your computer is offline, so this bot cannot use your Chrome. Open Leo Bot on your computer, "
               "then ask again.")
-LEND_OFF = ("Lend my Chrome is off on your computer, so this bot cannot use your Chrome. Turn it on in the "
-            "Leo Bot runner there, then ask again.")
+LEND_OFF = ("Lend my Chrome is off on your computer, so this bot cannot use your Chrome. Run the runner there "
+            "with --lend-chrome on, then ask again.")
 SHARED = "This thread is shared with invited people, so it has no browser. This call was not performed."
 TOO_LONG = "Your computer's answer was too long, so it was dropped. This call may have run."
 SLOW = ("Your computer did not answer within {s} seconds, so this browser call may not have finished. "
         "Ask again.")
+BAD_JOB = "Your computer could not read this browser call, so it did not run."
 BAD_REPLY = "Your computer's answer could not be read. This call may have run."
 LISTS_NAME = "browser-lent-tools.json"  # <root>/run: the last tools a runner listed, per person
-OPS = ("call", "list", "url")
+OPS = ("call", "list", "url", "close")  # close: a deleted workspace's tabs (a note, no answer)
 # A tools/list must answer fast (an MCP client lists tools as it connects): a runner that does
 # not take it within LIST_LEASE seconds is skipped and the last list this server saw is used.
 LIST_LEASE, LIST_SECONDS = 3, 20

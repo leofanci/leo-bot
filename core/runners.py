@@ -27,6 +27,7 @@ MAX_TURN_CHARS = 4_000_000  # what one turn may stream back
 MAX_PER_PERSON = 10
 BROWSER_LEASE = 15     # a browser job no lending runner took: that computer is not answering
 BROWSER_SECONDS = 300  # one browser call on the runner: an engine start plus the call itself
+NOTE_SECONDS = 300     # a note (a browser job nobody waits on, e.g. "close") no runner took is dropped
 _KINDS = ("delta", "tool", "error")
 _LOCK = threading.Lock()
 
@@ -182,8 +183,10 @@ class Hub:
                 self._seen[rid] = (owner, time.time())
                 rows = self._waiting.get(owner) or []
                 for turn in list(rows):
-                    if turn.cancelled:
+                    note = turn.job.get("note")
+                    if turn.cancelled or (note and time.time() - turn.created >= NOTE_SECONDS):
                         rows.remove(turn)
+                        self._turns.pop(turn.id, None)
                         continue
                     if turn.job.get("kind") == "browser":
                         if not mine["lend"] or turn.job.get("runner") not in (None, rid):
@@ -192,6 +195,8 @@ class Hub:
                         continue
                     rows.remove(turn)
                     turn.runner = rid
+                    if note:  # nobody waits for its answer
+                        self._turns.pop(turn.id, None)
                     return turn.job
                 left = deadline - time.time()
                 if left <= 0:
@@ -241,6 +246,11 @@ class Hub:
             else:
                 turn.events.put(("reply", payload))
         return True
+
+    def notify(self, owner, job):
+        """A browser job nobody waits on (op "close"): handed to the runner it names, or
+        dropped after NOTE_SECONDS. No answer is kept."""
+        return self.submit(owner, {**job, "kind": "browser", "note": True})
 
     def call(self, owner, job, lease=BROWSER_LEASE, limit=BROWSER_SECONDS, poll=0.5):
         """Queue one browser job for this person and wait for its answer:

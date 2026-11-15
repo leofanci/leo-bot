@@ -734,10 +734,14 @@ class Pool:
             items = [(k, up) for k, up in self._items.items() if k[0] == ws and up.epoch == epoch]
             for k, _ in items:
                 del self._items[k]
-            for k in [k for k, up in self._lent.items() if k[0] == ws and up.epoch == epoch]:
-                self._lent.pop(k).close(WS_DELETED)
+            lent = [self._lent.pop(k) for k in [k for k, up in self._lent.items() if k[0] == ws and up.epoch == epoch]]
             for sess in [s for s, x in self._logins.items() if x.ws == ws and x.epoch == epoch]:
                 self._logins.pop(sess).stop.set()  # its window's daemon is settled by the delete tidy
+        for up in lent:  # the owner's runners close that workspace's tabs now, not after 10 minutes
+            up.close(WS_DELETED)
+        for hub, owner in {(up.hub, up.owner) for up in lent}:
+            for rid in hub.lenders(owner):
+                hub.notify(owner, {"op": "close", "ws": ws, "epoch": epoch, "runner": rid})
         ups = [up for _, up in items]
         for up in ups:
             try:

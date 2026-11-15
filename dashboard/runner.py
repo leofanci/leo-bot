@@ -33,13 +33,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+from core import runners  # noqa: E402
 from dashboard import browser_lent  # noqa: E402
 from dashboard.engines.base import EngineRefused, SessionLost, TurnPolicy, TurnTokens  # noqa: E402
 from dashboard.engines.claude_code import (  # noqa: E402
     ClaudeCodeEngine, private_tmpdir, remove_bot_tmpdir, sweep_stale_tmpdirs)
 
 POLL_TIMEOUT = 40
-MAX_REPLY_CHARS = 4_000_000  # core/runners.MAX_TURN_CHARS: what the server takes back
 FLUSH_SECONDS = 0.25
 HEARTBEAT_SECONDS = 5   # how soon a Stop reaches a turn that is thinking
 STATE_FILE = Path.home() / ".leobot-runner-sessions.json"
@@ -163,8 +163,9 @@ def check_browser_job(job):
     if (not isinstance(job, dict) or job.get("kind") != "browser" or job.get("op") not in browser_lent.OPS
             or not isinstance(job.get("turn"), str) or not _TURN_RE.fullmatch(job["turn"])
             or not isinstance(job.get("epoch"), str) or not _EPOCH_RE.fullmatch(job["epoch"])
-            or any(not isinstance(job.get(k), str) or not 0 < len(job[k]) <= 200 for k in ("ws", "bot"))
-            or (job["op"] != "url" and not isinstance(job.get("frame"), dict))):
+            or any(not isinstance(job.get(k), str) or not 0 < len(job[k]) <= 200
+                   for k in (("ws",) if job["op"] == "close" else ("ws", "bot")))
+            or (job["op"] in ("call", "list") and not isinstance(job.get("frame"), dict))):
         raise ValueError("bad browser job from the server")
 
 
@@ -199,6 +200,9 @@ class Lender:
     def answer(self, job):
         """The reply to one browser job (check_browser_job first)."""
         check_browser_job(job)
+        if job["op"] == "close":  # a deleted workspace: always allowed, nothing goes back
+            self.close_where(job["ws"], job["epoch"])
+            return None
         if not lend_on(self.settings):  # read again for every call: off takes effect at once
             return {"refused": "lend_off"}
         up = self._upstream(job["ws"], job["bot"], job["epoch"])
@@ -226,6 +230,13 @@ class Lender:
                     if self._ups.get(key) is up:
                         del self._ups[key]
 
+    def close_where(self, ws, epoch):
+        with self._lock:
+            keys = [k for k in self._ups if k[0] == ws and k[2] == epoch]
+            ups = [self._ups.pop(k) for k in keys]
+        for up in ups:
+            _close(up)
+
     def close_all(self):
         with self._lock:
             ups, self._ups = list(self._ups.values()), {}
@@ -242,21 +253,37 @@ def _close(up):
         print(f"A lent Chrome tab did not close: {type(e).__name__}: {e}", file=sys.stderr)
 
 
+def _job_error(rid, line):
+    return {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": line}}
+
+
 def safe_browser_job(job, client, lender):
-    """One browser job on its own thread: the answer always goes back, a bad job is skipped."""
+    """One browser job on its own thread: the answer always goes back. A job this runner
+    cannot read still gets an error reply when its id can be read, so the server does not
+    wait out BROWSER_SECONDS for it; otherwise it is skipped."""
+    turn = job.get("turn") if isinstance(job, dict) else None
+    if not (isinstance(turn, str) and _TURN_RE.fullmatch(turn)):
+        print("Skipped a browser job: bad browser job from the server", file=sys.stderr)
+        return
+    frame = job.get("frame") if isinstance(job.get("frame"), dict) else {}
+    rid = frame.get("id") if isinstance(frame.get("id"), (int, str)) else None
     try:
         reply = lender.answer(job)
     except ValueError as e:
         print(f"Skipped a browser job: {e}", file=sys.stderr)
-        return
+        if job.get("note"):
+            return
+        reply = _job_error(rid, browser_lent.BAD_JOB)
     except Exception as e:  # noqa: BLE001
-        reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": f"The runner failed: {type(e).__name__}"}}
+        reply = _job_error(rid, f"The runner failed: {type(e).__name__}")
+    if job.get("op") == "close" or job.get("note"):
+        return  # a note: nobody waits for its answer
     try:
         size = len(json.dumps(reply))
     except (TypeError, ValueError):
-        reply, size = {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "unreadable reply"}}, 0
-    if size > MAX_REPLY_CHARS:  # the server drops it anyway: say so instead of sending it
-        reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": browser_lent.TOO_LONG}}
+        reply, size = _job_error(rid, "unreadable reply"), 0
+    if size > runners.MAX_TURN_CHARS:  # the server drops it anyway: say so instead of sending it
+        reply = _job_error(rid, browser_lent.TOO_LONG)
     for attempt in range(3):
         try:
             client.post(f"/api/runner/reply/{job['turn']}", {"reply": reply})
@@ -391,6 +418,9 @@ def main(argv=None):
     threading.Thread(target=sweeper, daemon=True).start()
     what = "Your Chrome is lent to My Chrome bots there" if args.browser_only else "Your messages there now run on this Mac"
     print(f"Connected to {args.server}. {what}. Lend my Chrome: {'on' if lend_on(settings) else 'off'}. Ctrl-C to stop.")
+    if lend_on(settings) and not args.browser_only:
+        print("Your chats there run on this computer, and those turns have no browser. "
+              "For My Chrome in chats, run with --browser-only.")
     backoff = 1
     try:
         while True:
