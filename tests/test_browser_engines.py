@@ -419,11 +419,12 @@ if __name__ == "__main__":
 
 
 class Up:
-    """A pooled child that records its kill and its engine close (slow ones overlap in parallel)."""
+    """A pooled child of one epoch that records its kill and its engine close."""
 
-    def __init__(self, ws, bot, slow=0.0, log=None):
-        self.ws, self.bot, self.closed, self.mode, self.root = ws, bot, False, "bot", None
-        self.slow, self.log, self.killed = slow, log if log is not None else [], False
+    def __init__(self, ws, bot, epoch="aaaaaa", slow=0.0):
+        self.ws, self.bot, self.epoch, self.closed, self.mode, self.root = ws, bot, epoch, False, "bot", None
+        self.session = browser_upstream.session_name(ws, bot, "bot", epoch)
+        self.slow, self.killed = slow, False
         self._done = threading.Event()
         self._closed_line = None
 
@@ -433,84 +434,112 @@ class Up:
     def _engine_close(self):
         time.sleep(self.slow)
         self.closed = True
-        self.log.append(self.bot)
+
+
+def touch(folder, *names):
+    folder.mkdir(parents=True, exist_ok=True)
+    for n in names:
+        (folder / n).write_text("x")
+
+
+class Epochs(Root):
+    def test_recreated_slug_gets_different_session_names(self):
+        first = browser.epoch("acme", self.root)
+        self.assertEqual(browser.epoch("acme", self.root), first)  # stable while the workspace lives
+        old = browser_upstream.BrowserUpstream("acme", "b1", "bot", self.root)
+        self.assertEqual(old.session, f"acme-{first}--b1")
+        self.assertEqual(old.lock_key, f"bot:{old.session}")
+        self.assertEqual(old.typed_key, old.lock_key)
+        browser.forget_workspace("acme", self.root)
+        self.assertNotIn("acme", browser.epochs(self.root))
+        new = browser_upstream.BrowserUpstream("acme", "b1", "bot", self.root)
+        self.assertNotEqual(new.epoch, first)
+        self.assertNotEqual(new.session, old.session)
+        self.assertNotEqual(new.typed_key, old.typed_key)  # old typed text is never the new browser's
+        self.assertEqual(browser_upstream.state_files("acme", "b1", first),
+                         [n for m in browser.MODES for n in browser_upstream.state_names(
+                             browser_upstream.session_name("acme", "b1", m, first))])
+        self.assertTrue(set(browser_upstream.state_files("acme", "b1", first)).isdisjoint(
+            browser_upstream.state_files("acme", "b1", new.epoch)))
+
+    def test_epochs_are_unique_and_kept_for_hq(self):
+        with mock.patch.object(browser.secrets, "token_hex", side_effect=["aaaaaa", "aaaaaa", "bbbbbb"]):
+            self.assertEqual(browser.epoch("acme", self.root), "aaaaaa")
+            self.assertEqual(browser.epoch("demo", self.root), "bbbbbb")  # a live epoch is never reused
+        self.assertEqual(browser.epochs(self.root), {"acme": "aaaaaa", "demo": "bbbbbb"})
+        browser.forget_workspace(server.bots.HQ, self.root)  # HQ is never deleted: its epoch stays
+        hq = browser.epoch(server.bots.HQ, self.root)
+        browser.forget_workspace(server.bots.HQ, self.root)
+        self.assertEqual(browser.epochs(self.root)[server.bots.HQ], hq)
+
+    def test_long_names_keep_their_epoch_readable(self):
+        e = browser.epoch("acme-workspace-long", self.root)
+        for mode in browser.MODES:
+            name = browser_upstream.session_name("acme-workspace-long", "social-media-bot", mode, e)
+            self.assertRegex(name, r"^x[0-9a-f]{16}c?$")
+            self.assertEqual(browser_relay.parse_session(name), (None, e, mode))
+        self.assertEqual(browser_relay.parse_session(f"acme-2-{e}--b1"), ("acme-2", e, "bot"))
+        self.assertEqual(browser_relay.parse_session(f"ac-{e}--b1--chrome"), ("ac", e, "my_chrome"))
+        self.assertIsNone(browser_relay.parse_session(f"acme-2-{e}--b1--chrome"))  # over 24: always hashed
+        self.assertIsNone(browser_relay.parse_session("acme--b1"))  # a name from before epochs
+
+    def test_pool_replaces_a_child_of_an_old_epoch(self):
+        pool = browser_upstream.Pool()
+        with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
+            old = pool.get("acme", "b1", "bot", self.root)
+            self.assertIs(pool.get("acme", "b1", "bot", self.root), old)
+            browser.forget_workspace("acme", self.root)
+            new = pool.get("acme", "b1", "bot", self.root)
+        self.assertIsNot(new, old)
+        self.assertTrue(old.closed)
+        self.assertNotEqual(new.session, old.session)
 
 
 class WorkspaceDelete(Root):
-    def test_close_where_closes_only_that_workspace(self):
+    def test_close_where_closes_only_that_workspace_and_epoch(self):
         pool = browser_upstream.Pool()
-        a, b, c = Up("acme", "b1"), Up("acme", "b2"), Up("acme-2", "b1")
-        pool._items.update({("acme", "b1"): a, ("acme", "b2"): b, ("acme-2", "b1"): c})
-        self.assertEqual(sorted(pool.close_where("acme")), ["b1", "b2"])
-        self.assertTrue(a.closed and b.closed and a.killed and b.killed and a._done.is_set())
-        self.assertFalse(c.closed or c.killed)
-        self.assertEqual(list(pool._items), [("acme-2", "b1")])
+        a, b, c, d = Up("acme", "b1"), Up("acme", "b2"), Up("acme-2", "b1"), Up("acme", "b3", epoch="cccccc")
+        pool._items.update({("acme", "b1"): a, ("acme", "b2"): b, ("acme-2", "b1"): c, ("acme", "b3"): d})
+        self.assertEqual(sorted(u.bot for u in pool.close_where("acme", "aaaaaa")), ["b1", "b2"])
+        self.assertTrue(a.closed and b.closed and a.killed and a._done.is_set())
+        self.assertEqual(a._closed_line, browser_upstream.WS_DELETED)
+        self.assertFalse(c.closed or c.killed or d.closed or d.killed)  # another ws, another epoch
+        self.assertEqual(sorted(pool._items), [("acme", "b3"), ("acme-2", "b1")])
 
     def test_close_where_closes_in_parallel_within_one_bound(self):
         pool = browser_upstream.Pool()
         ups = [Up("acme", f"b{i}", slow=0.3) for i in range(4)]
         pool._items.update({("acme", u.bot): u for u in ups})
         started = time.monotonic()
-        pool.close_where("acme", bound=5)
+        pool.close_where("acme", "aaaaaa", bound=5)
         self.assertLess(time.monotonic() - started, 1.0)  # four 0.3 s closes overlap
         self.assertTrue(all(u.closed for u in ups))
         hung = Up("demo", "b1", slow=3)
         pool._items[("demo", "b1")] = hung
         started = time.monotonic()
-        pool.close_where("demo", bound=0.2)
+        pool.close_where("demo", "aaaaaa", bound=0.2)
         self.assertLess(time.monotonic() - started, 1.5)  # the bound holds
         self.assertTrue(hung._done.is_set())
 
-    def test_no_browser_starts_between_close_and_forget(self):
-        pool = browser_upstream.Pool()
-        with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
-            pool.get("acme", "b1", "bot", self.root)
-            pool.close_where("acme")
-            mid = pool.get("acme", "b1", "bot", self.root)
-            other = pool.get("acme-2", "b1", "bot", self.root)
-        self.assertTrue(mid.closed)
-        with mock.patch.object(browser_upstream.BrowserUpstream, "_start") as start:
-            reply, _ = mid.forward({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                                    "params": {"name": P + "open", "arguments": {}}}, None)
-        start.assert_not_called()
-        self.assertIn(browser_upstream.WS_CLOSING, json.dumps(reply))
-        self.assertNotIn(("acme", "b1"), pool._items)
-        self.assertFalse(other.closed)  # another workspace is not held
-        pool.reopen("acme")
-        after = pool.get("acme", "b1", "bot", self.root)
-        self.assertFalse(after.closed)
-        self.assertIs(pool.get("acme", "b1", "bot", self.root), after)
+    def test_sessions_of_one_ws_and_epoch_only(self):
+        home = self.root / "home"
+        touch(browser_upstream.run_dir(home), "acme-aaaaaa--side-bot.sock", "acme-2-aaaaaa--b1.pid",
+              "acme-cccccc--b1.pid", "acme--b1.pid")
+        touch(browser_upstream.state_dir(home), "leobot-acme-aaaaaa--ot--chrome.json.enc")
+        names = browser_upstream.sessions_of("acme", "aaaaaa", {"b1"}, home)
+        self.assertEqual(names, {"acme-aaaaaa--b1": "bot", "acme-aaaaaa--b1--chrome": "my_chrome",
+                                 "acme-aaaaaa--side-bot": "bot", "acme-aaaaaa--ot--chrome": "my_chrome"})
 
-    def test_recreated_slug_gets_a_new_child(self):
-        pool = browser_upstream.Pool()
-        with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
-            old = pool.get("acme", "b1", "bot", self.root)
-            self.assertIs(pool.get("acme", "b1", "bot", self.root), old)
-            pool.close_where("acme")
-            pool.reopen("acme")
-            new = pool.get("acme", "b1", "bot", self.root)
-        self.assertIsNot(new, old)
-        self.assertTrue(old.closed)
-        self.assertFalse(new.closed)
-
-    def test_state_files_of_that_workspace_removed_others_kept(self):
+    def test_forget_sessions_by_exact_name(self):
         home = self.root / "home"
         folder = browser_upstream.state_dir(home)
-        folder.mkdir(parents=True)
-        long_ws = "acme-" + "x" * 30  # a hashed session name: computed, never guessed
-        mine = [n for ws in ("acme",) for n in browser_upstream.state_files(ws, "b1")]
-        hashed = browser_upstream.state_files(long_ws, "b1")
-        theirs = browser_upstream.state_files("acme-2", "b1") + browser_upstream.state_files("demo", "b1")
-        custom = ["acme--side-bot-acme--side-bot.json.enc", "leobot-acme--side-bot--chrome.json"]
-        theirs += ["acme-2--side-bot-acme-2--side-bot.json.enc", "x-acme--b1.json.enc"]
-        for name in mine + hashed + theirs + custom + ["acme--b1-extra.json.enc"]:
-            (folder / name).write_text("x")
-        removed = browser_upstream.forget_state("acme", {"b1", "b2"}, home=home)
-        self.assertEqual(sorted(p.name for p in removed), sorted(mine + custom))  # a bot no list names too
-        browser_upstream.forget_state(long_ws, {"b1"}, home=home)
-        left = sorted(p.name for p in folder.iterdir())
-        self.assertEqual(left, sorted(theirs + ["acme--b1-extra.json.enc"]))
-        self.assertTrue(any(n.startswith("x") for n in hashed))
+        mine = browser_upstream.state_names("acme-aaaaaa--b1")
+        keep = (browser_upstream.state_names("acme-2-aaaaaa--b1") + browser_upstream.state_names("acme-cccccc--b1")
+                + ["acme-aaaaaa--b1-extra.json.enc", "x-acme-aaaaaa--b1.json.enc"])
+        touch(folder, *(mine + keep))
+        removed = browser_upstream.forget_sessions({"acme-aaaaaa--b1": "bot"}, home)
+        self.assertEqual(sorted(p.name for p in removed), sorted(mine))
+        self.assertEqual(sorted(os.listdir(folder)), sorted(keep))
 
     def test_home_unset_uses_the_account_home(self):
         account = str(self.root / "acct")
@@ -527,96 +556,148 @@ class WorkspaceDelete(Root):
         with mock.patch.dict(os.environ, {"HOME": account}):
             self.assertEqual(up._env("0" * 64, "cfg")["HOME"], account)  # a set HOME passes as is
 
-    def delete(self, settled):
-        order = []
-        with mock.patch.object(server.fileops, "delete_project",
-                               side_effect=lambda slug: order.append("files") or {"slug": "acme"}), \
-                mock.patch.object(server.browser_upstream.POOL, "forget_workspace",
-                                  side_effect=lambda ws, ids, root: order.append("browsers") or settled) as fw:
-            code, data, _ = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)
-        self.assertEqual(code, 200)
-        self.assertEqual(order, ["files", "browsers"])
-        return fw, data
-
-    def test_delete_closes_browsers_and_forgets_their_state(self):
+    def test_delete_tidies_the_old_epoch_and_drops_it(self):
         browser.set_bot("acme", "growth", "write", "bot", self.root)
+        old = browser.epoch("acme", self.root)
         server.integrations.set_grant("acme", "outreach", {"gmail": "read"}, self.root)
         team = self.root / "projects" / "acme" / "team"
         team.mkdir(parents=True)
         (team / "state.json").write_text(json.dumps({"active": {"side-bot": True}}))
-        fw, data = self.delete(True)
-        ws, ids, root = fw.call_args.args
-        self.assertEqual((ws, root), ("acme", self.root))
+        tok = server.BROWSER_TOKENS.mint({"ws": "acme", "bot": "growth", "person": "ceo"})
+        self.addCleanup(server.BROWSER_TOKENS.revoke, tok)
+        with mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme"}), \
+                mock.patch.object(server.browser_upstream.POOL, "tidy_workspace") as tidy:
+            code, data, _ = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)
+        self.assertEqual(code, 200)
+        ws, epoch, ids, root = tidy.call_args.args
+        self.assertEqual((ws, epoch, root), ("acme", old, self.root))
         # Shipped bots, its browser setting, its app grant and its team state (a non-shipped id).
         self.assertTrue({"growth", "outreach", "side-bot", "cos"} <= ids)
-        self.assertNotIn("browser", data)
-        self.assertEqual(browser.bot_setting("acme", "growth", self.root)["level"], "off")
-
-    def test_delete_says_when_the_browser_is_still_closing(self):
-        _, data = self.delete(False)
-        self.assertEqual(data["browser"], browser_upstream.BROWSER_CLOSING)
+        self.assertNotIn("acme", browser.epochs(self.root))  # a recreated slug gets a new epoch
+        self.assertIsNone(server.BROWSER_TOKENS.lookup(tok))
+        self.assertNotIn("browser", data)  # nothing to wait for: new names never meet old ones
 
 
-class Daemons(Root):
-    """Pool.forget_workspace with the daemon checks faked: what may and may not happen in order."""
+class Tidy(Root):
+    """tidy_workspace and the startup sweep, the daemon checks faked or real files on disk."""
 
     def setUp(self):
         super().setUp()
         self.home = self.root / "home"
-        self.folder = browser_upstream.state_dir(self.home)
-        self.folder.mkdir(parents=True)
+        self.state = browser_upstream.state_dir(self.home)
         self.pool = browser_upstream.Pool()
         self.addCleanup(self.pool._halt.set)
-        self.log = []
-        real = browser_upstream.forget_state
 
-        def forget(ws, ids, home=None):
-            self.log.append("forget")
-            return real(ws, ids, home)
-        p = mock.patch.object(browser_upstream, "forget_state", side_effect=forget)
-        p.start()
-        self.addCleanup(p.stop)
-        reopen = self.pool.reopen
-        self.pool.reopen = lambda ws: (self.log.append("reopen"), reopen(ws))[1]
+    def test_repeated_delete_with_a_stuck_old_daemon_never_touches_the_new_workspace(self):
+        old = browser.epoch("acme", self.root)
+        old_s = f"acme-{old}--b1"
+        touch(self.state, *browser_upstream.state_names(old_s))
+        browser.forget_workspace("acme", self.root)  # deleted...
+        new = browser.epoch("acme", self.root)       # ...and recreated: its first browse
+        new_s = f"acme-{new}--b1"
+        touch(self.state, *browser_upstream.state_names(new_s))
+        alive = {old_s, new_s}
+        touched = []
 
-    def saved(self):
-        return self.folder / browser_upstream.state_files("acme", "b1")[0]
+        def settle_one(sess, mode, root, home):
+            touched.append(sess)
+            return False  # the old daemon will not go
+        with mock.patch.object(browser_upstream, "_settle_one", side_effect=settle_one):
+            done = self.pool.tidy_workspace("acme", old, {"b1"}, self.root, home=self.home, poll=0.02, limit=0.3)
+            time.sleep(0.5)  # the background tidy retries, then gives up at its limit
+        self.assertFalse(done)
+        self.assertTrue(touched)
+        self.assertTrue(all(old in s for s in touched))
+        self.assertNotIn(new_s, touched)
+        self.assertTrue(all((self.state / n).exists() for n in browser_upstream.state_names(new_s)))
+        self.assertFalse(any((self.state / n).exists() for n in browser_upstream.state_names(old_s)))
+        self.assertEqual(alive, {old_s, new_s})
+        # A second delete of the recreated workspace tidies only its own epoch.
+        browser.forget_workspace("acme", self.root)
+        with mock.patch.object(browser_upstream, "_settle_one", return_value=True):
+            self.assertTrue(self.pool.tidy_workspace("acme", new, {"b1"}, self.root, home=self.home))
+        self.assertFalse(any((self.state / n).exists() for n in browser_upstream.state_names(new_s)))
 
-    def test_daemon_gone_now_forgets_twice_then_reopens(self):
-        def settle(ws, ids, root, home=None):
-            self.log.append("settle")
-            self.saved().write_text("old logins")  # the daemon saved state as it went
+    def test_tidy_forgets_again_after_the_daemon_saved_on_its_way_out(self):
+        old = browser.epoch("acme", self.root)
+        sess = f"acme-{old}--b1"
+
+        def settle_one(s, mode, root, home):
+            if s == sess:
+                touch(self.state, f"{sess}-{sess}.json.enc")  # SIGTERM saved state as it exited
             return True
-        with mock.patch.object(browser_upstream, "settle_sessions", side_effect=settle):
-            self.assertTrue(self.pool.forget_workspace("acme", {"b1"}, self.root, home=self.home))
-        self.assertEqual(self.log, ["forget", "settle", "forget", "reopen"])
-        self.assertFalse(self.saved().exists())
-        self.assertNotIn("acme", self.pool._deleting)
+        browser.forget_workspace("acme", self.root)
+        self.assertEqual(browser.retired(self.root), [old])
+        with mock.patch.object(browser_upstream, "_settle_one", side_effect=settle_one):
+            self.assertTrue(self.pool.tidy_workspace("acme", old, {"b1"}, self.root, home=self.home))
+        self.assertFalse((self.state / f"{sess}-{sess}.json.enc").exists())
+        self.assertEqual(browser.retired(self.root), [])  # tidied: the start sweep skips it
 
-    def test_hanging_close_keeps_the_slug_refused_until_the_daemon_is_gone(self):
-        gone = threading.Event()
+    def test_settle_runs_in_parallel_within_one_bound(self):
+        sessions = {f"acme-aaaaaa--b{i}": "bot" for i in range(4)}
+        with mock.patch.object(browser_upstream, "_settle_one", side_effect=lambda *a: time.sleep(0.3) or True):
+            started = time.monotonic()
+            self.assertTrue(browser_upstream.settle_sessions(sessions, self.root, self.home, bound=5))
+            self.assertLess(time.monotonic() - started, 1.0)
+        with mock.patch.object(browser_upstream, "_settle_one", side_effect=lambda *a: time.sleep(2) or True):
+            started = time.monotonic()
+            self.assertFalse(browser_upstream.settle_sessions(sessions, self.root, self.home, bound=0.2))
+            self.assertLess(time.monotonic() - started, 1.0)
 
-        def settle(ws, ids, root, home=None):
-            self.log.append("settle")
-            if gone.is_set():
-                self.saved().write_text("old logins")  # written back as the daemon finally exits
-                return True
-            return False
-        with mock.patch.object(browser_upstream, "settle_sessions", side_effect=settle), \
-                mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
-            self.assertFalse(self.pool.forget_workspace("acme", {"b1"}, self.root, home=self.home, poll=0.05))
-            time.sleep(0.2)
-            self.assertTrue(self.pool.get("acme", "b1", "bot", self.root).closed)  # still refused
-            self.assertNotIn("reopen", self.log)
-            gone.set()
-            deadline = time.monotonic() + 5
-            while "reopen" not in self.log and time.monotonic() < deadline:
-                time.sleep(0.02)
-            fresh = self.pool.get("acme", "b1", "bot", self.root)
-        self.assertEqual(self.log[-3:], ["settle", "forget", "reopen"])  # forget again, before reopen
-        self.assertEqual(self.log.count("reopen"), 1)
-        self.assertFalse(fresh.closed)
-        self.assertFalse(self.saved().exists())  # the recreated slug never sees the old logins
+    def test_settle_one_closes_then_kills(self):
+        calls, live = [], {"s1"}
+        with mock.patch.object(browser_upstream, "daemon_alive", side_effect=lambda s, h=None: s in live), \
+                mock.patch.object(browser_upstream, "engine_close_session",
+                                  side_effect=lambda s, m, r: calls.append(("close", s))), \
+                mock.patch.object(browser_upstream, "kill_daemon",
+                                  side_effect=lambda s, h=None: calls.append(("kill", s)) or live.discard(s) or True):
+            self.assertTrue(browser_upstream._settle_one("s1", "bot", self.root, self.home))
+            self.assertTrue(browser_upstream._settle_one("s2", "bot", self.root, self.home))
+        self.assertEqual(calls, [("close", "s1"), ("kill", "s1")])
+
+    def test_restart_sweep_removes_only_orphan_epochs(self):
+        gone = browser.epoch("acme", self.root)
+        browser.forget_workspace("acme", self.root)      # deleted: its epoch is retired
+        live = browser.epoch("acme", self.root)          # recreated
+        other = browser.epoch("demo", self.root)
+        self.assertEqual(browser.retired(self.root), [gone])
+        long_gone = browser_upstream.session_name("acme-workspace-long", "social-media-bot", "bot", gone)
+        orphan_names = [f"acme-{gone}--b1", f"ac-{gone}--b2--chrome", long_gone]
+        keep_names = [f"acme-{live}--b1", f"demo-{other}--b1",
+                      "acme-ffffff--b1",  # an epoch this data root never made: another install's
+                      "acme--b1"]          # a name from before epochs: not ours to judge
+        orphan = [n for g in orphan_names for n in browser_upstream.state_names(g)]
+        keep = [n for g in keep_names for n in browser_upstream.state_names(g)] + ["unrelated.json"]
+        touch(self.state, *(keep + orphan))
+        touch(browser_upstream.run_dir(self.home), f"acme-{gone}--b3.pid", f"acme-{live}--b3.pid",
+              "acme-ffffff--b3.pid")
+        settled = []
+        with mock.patch.object(browser_upstream, "_settle_one",
+                               side_effect=lambda s, m, r, h: settled.append(s) or True):
+            found = browser_upstream.sweep_orphans(self.root, home=self.home)
+        self.assertEqual(set(found), set(orphan_names) | {f"acme-{gone}--b3"})
+        self.assertEqual(set(settled), set(found))  # a live or foreign epoch's daemon is never touched
+        self.assertEqual(sorted(os.listdir(self.state)), sorted(keep))
+        self.assertEqual(sorted(os.listdir(browser_upstream.run_dir(self.home))),
+                         sorted([f"acme-{live}--b3.pid", "acme-ffffff--b3.pid"]))
+        self.assertEqual(browser.retired(self.root), [])  # nothing left of it: cleared
+        self.assertEqual(browser_upstream.sweep_orphans(self.root, home=self.home), {})
+
+    def test_sweep_keeps_an_epoch_retired_while_its_daemon_lives(self):
+        gone = browser.epoch("acme", self.root)
+        browser.forget_workspace("acme", self.root)
+        touch(browser_upstream.run_dir(self.home), f"acme-{gone}--b1.pid")
+        with mock.patch.object(browser_upstream, "_settle_one", return_value=False), \
+                mock.patch.object(browser_upstream, "daemon_alive", return_value=True):
+            browser_upstream.sweep_orphans(self.root, home=self.home)
+        self.assertEqual(browser.retired(self.root), [gone])  # the next start tries again
+
+    def test_run_files_of_a_live_daemon_stay(self):
+        run = browser_upstream.run_dir(self.home)
+        touch(run, "acme-ffffff--b1.pid", "acme-ffffff--b1.target", "acme-ffffff--b2.target")
+        with mock.patch.object(browser_upstream, "daemon_alive", side_effect=lambda s, h=None: s.endswith("b1")):
+            browser_upstream.forget_run_files({"acme-ffffff--b1": "bot", "acme-ffffff--b2": "bot"}, self.home)
+        self.assertEqual(sorted(os.listdir(run)), ["acme-ffffff--b1.pid", "acme-ffffff--b1.target"])
 
     def test_kill_line_is_set_before_the_child_lock_is_released(self):
         up = browser_upstream.BrowserUpstream("acme", "b1", "bot", self.root)
@@ -629,8 +710,8 @@ class Daemons(Root):
             def __exit__(self_, *a):
                 seen.append(up._closed_line)
         up._child_lock = Lock()
-        up.kill(browser_upstream.WS_CLOSING)
-        self.assertEqual(seen, [browser_upstream.WS_CLOSING])
+        up.kill(browser_upstream.WS_DELETED)
+        self.assertEqual(seen, [browser_upstream.WS_DELETED])
 
 
 FAKE_DAEMON = r"""
@@ -642,11 +723,13 @@ chrome = subprocess.Popen([sys.executable, "-c",
 print(chrome.pid, flush=True)
 time.sleep(60)
 """
+S1 = "acme-aaaaaa--b1"
 
 
 class KillPath(unittest.TestCase):
     """kill_daemon on real processes: a fake daemon (its own group, the engine's env words) that
-    ignores SIGTERM and a fake Chrome it started in a group of its own, with a helper inside."""
+    ignores SIGTERM and a fake Chrome it started in a group of its own, with a helper inside
+    (both inherit the words, as the real Chrome does)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -682,22 +765,46 @@ class KillPath(unittest.TestCase):
             return False
 
     def test_kill_path_stops_daemon_and_its_chrome(self):
-        proc, chrome = self.spawn("acme--b1")
+        proc, chrome = self.spawn(S1)
         time.sleep(0.3)
-        self.assertEqual(browser_upstream.daemon_pid("acme--b1", self.home), proc.pid)
-        self.assertTrue(browser_upstream.daemon_alive("acme--b1", self.home))
-        self.assertTrue(browser_upstream.kill_daemon("acme--b1", self.home, wait=1))
+        self.assertEqual(browser_upstream.daemon_pid(S1, self.home), proc.pid)
+        self.assertTrue(browser_upstream.daemon_alive(S1, self.home))
+        self.assertTrue(browser_upstream.kill_daemon(S1, self.home, wait=1))
         proc.wait(5)
         self.assertFalse(self.group_alive(chrome))  # Chrome and its helper: no orphan left
-        self.assertFalse(browser_upstream.daemon_alive("acme--b1", self.home))
+        self.assertFalse(browser_upstream.daemon_alive(S1, self.home))
+
+    def test_pids_checked_again_before_each_signal(self):
+        proc, chrome = self.spawn(S1)
+        time.sleep(0.3)
+        checks, real = [], browser_upstream._is_session
+
+        def is_session(pid, session, daemon=False):
+            checks.append((pid, daemon))
+            return real(pid, session, daemon)
+        with mock.patch.object(browser_upstream, "_is_session", side_effect=is_session):
+            self.assertTrue(browser_upstream.kill_daemon(S1, self.home, wait=1))
+        proc.wait(5)
+        self.assertGreaterEqual(checks.count((proc.pid, True)), 2)  # before SIGTERM and again before SIGKILL
+        self.assertIn((chrome, False), checks)                      # Chrome's leader before its group
+
+    def test_a_chrome_that_is_no_longer_that_session_is_not_signalled(self):
+        proc, chrome = self.spawn(S1)
+        time.sleep(0.3)
+        real = browser_upstream._is_session
+        with mock.patch.object(browser_upstream, "_is_session",
+                               side_effect=lambda pid, s, daemon=False: pid != chrome and real(pid, s, daemon)):
+            browser_upstream.kill_daemon(S1, self.home, wait=0.5)
+        proc.wait(5)
+        self.assertTrue(self.group_alive(chrome))  # its pid did not check out: left alone
 
     def test_a_pid_that_is_not_that_sessions_daemon_is_never_killed(self):
-        other, _ = self.spawn("acme--b1", words=False)   # no engine words in its env
-        self.assertIsNone(browser_upstream.daemon_pid("acme--b1", self.home))
-        theirs, _ = self.spawn("acme-2--b1")
-        (self.run / "acme--b1.pid").write_text(f"{theirs.pid}\n")  # another session's daemon
-        self.assertIsNone(browser_upstream.daemon_pid("acme--b1", self.home))
-        browser_upstream.kill_daemon("acme--b1", self.home, wait=0.2)
+        other, _ = self.spawn(S1, words=False)   # no engine words in its env
+        self.assertIsNone(browser_upstream.daemon_pid(S1, self.home))
+        theirs, _ = self.spawn("acme-2-aaaaaa--b1")
+        (self.run / f"{S1}.pid").write_text(f"{theirs.pid}\n")  # another session's daemon
+        self.assertIsNone(browser_upstream.daemon_pid(S1, self.home))
+        browser_upstream.kill_daemon(S1, self.home, wait=0.2)
         self.assertIsNone(other.poll())
         self.assertIsNone(theirs.poll())
 
@@ -706,25 +813,8 @@ class KillPath(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(short, ignore_errors=True))
         with mock.patch.object(browser_upstream, "run_dir", return_value=short):
             sock = __import__("socket").socket(__import__("socket").AF_UNIX)
-            sock.bind(str(short / "acme--b1.sock"))
+            sock.bind(str(short / f"{S1}.sock"))
             sock.listen(1)
-            self.assertTrue(browser_upstream.daemon_alive("acme--b1"))
+            self.assertTrue(browser_upstream.daemon_alive(S1))
             sock.close()  # a stale socket left by a killed daemon refuses
-            self.assertFalse(browser_upstream.daemon_alive("acme--b1"))
-
-    def test_settle_closes_then_kills_and_lists_plain_sessions(self):
-        (self.run / "acme--side-bot.sock").write_text("")
-        (self.run / "acme-2--b1.pid").write_text("1")
-        names = browser_upstream.sessions_of("acme", {"b1"}, self.home)
-        self.assertIn("acme--side-bot", names)
-        self.assertNotIn("acme-2--b1", names)
-        self.assertEqual(names["acme--b1--chrome"], "my_chrome")
-        live = {"acme--b1"}
-        calls = []
-        with mock.patch.object(browser_upstream, "daemon_alive", side_effect=lambda s, h=None: s in live), \
-                mock.patch.object(browser_upstream, "engine_close_session",
-                                  side_effect=lambda s, m, r: calls.append(("close", s))), \
-                mock.patch.object(browser_upstream, "kill_daemon",
-                                  side_effect=lambda s, h=None: calls.append(("kill", s)) or live.discard(s) or True):
-            self.assertTrue(browser_upstream.settle_sessions("acme", {"b1"}, self.home, self.home))
-        self.assertEqual(calls, [("close", "acme--b1"), ("kill", "acme--b1")])
+            self.assertFalse(browser_upstream.daemon_alive(S1))

@@ -1407,10 +1407,17 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
+def _sweep_browser_orphans():
+    try:
+        browser_upstream.sweep_orphans(ROOT)
+    except Exception:  # noqa: BLE001 - the server starts whatever is left on disk
+        traceback.print_exc()
+
+
 def _bots_known_in(ws):
     """Every bot id any store names for workspace `ws`: the shipped definitions, its browser
     settings, app grants, engine picks and access levels, and its team state file. Read before
-    the workspace is removed, so forget_state can name each bot's saved browser state."""
+    the workspace is removed, so the delete tidy can name each bot's browser sessions."""
     def keys(d):
         return {k for k in d if isinstance(k, str)} if isinstance(d, dict) else set()
 
@@ -4426,27 +4433,23 @@ class Handler(BaseHTTPRequestHandler):
                 slug = path[len("/api/project/"):-len("/delete")]
                 browsed = _bots_known_in(slug)  # before its files go: they name its bots
                 out = fileops.delete_project(slug)
+                BROWSER_TOKENS.revoke_where(ws=out["slug"])  # first: no frame of it reaches a browser now
+                old_epoch = browser.epochs(ROOT).get(out["slug"])  # its engine sessions carry this epoch
                 approvals.forget_workspace(out["slug"], ROOT)
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
-                browser.forget_workspace(out["slug"], ROOT)
+                browser.forget_workspace(out["slug"], ROOT)  # and its epoch: a reused slug gets new names
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
                     runners.revoke_owner(ROOT, pid)
                 # Turns still running for the deleted workspace lose their tokens and sessions now.
                 os_relay.TOKENS.revoke_where(ws=out["slug"])
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
-                BROWSER_TOKENS.revoke_where(ws=out["slug"])
-                # Its browsers close (saving state as they do), then that state is removed: a reused
-                # slug starts with a fresh browser and no logins.
-                # No browser starts there until its daemons are gone and its saved logins removed.
-                # Not confirmed yet: the name stays refused and a background thread finishes.
+                # Tidying only: its old-epoch browsers close and their saved logins go. A reused slug
+                # has a new epoch, so it never reaches them whatever is left (the startup sweep).
                 try:
-                    settled = browser_upstream.POOL.forget_workspace(out["slug"], browsed, ROOT)
-                except Exception:  # noqa: BLE001 - the delete stands; the browser mark stays on
+                    browser_upstream.POOL.tidy_workspace(out["slug"], old_epoch, browsed, ROOT)
+                except Exception:  # noqa: BLE001 - the delete stands
                     traceback.print_exc()
-                    settled = False
-                if not settled:
-                    out = {**out, "browser": browser_upstream.BROWSER_CLOSING}
                 runners.HUB.drop_workspace(out["slug"])  # queued or running runner turns there, anyone's
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])
@@ -4868,6 +4871,8 @@ def main():
                       threads=chat_store.records, post=chat_store.post_note,
                       activity=lambda: (_JOB_RUN["live"] or {}).get("active")).start()
     browser_upstream.POOL.start_sweeper()  # idle engine children close after 10 minutes
+    # Sessions of an epoch no workspace has (a delete whose tidy did not finish): settle, forget.
+    threading.Thread(target=_sweep_browser_orphans, name="browser-orphans", daemon=True).start()
     url = f"http://127.0.0.1:{args.port}"
     # The login link carries the token: print it only to an interactive
     # terminal, never into server.log (the app reads TOKEN_FILE instead).

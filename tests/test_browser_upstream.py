@@ -23,6 +23,33 @@ P = "agent_browser_"
 LOOPBACK = "127.0" + ".0.1"
 CDP = "ws" + "://" + LOOPBACK + ":9222/devtools/browser/abc-1"
 CDP2 = "ws" + "://" + LOOPBACK + ":9333/devtools/browser/def-2"
+# Fixed workspace epochs (core/browser.py makes random ones), so session names read plainly here.
+EPOCHS = {"acme": "aaaaaa", "demo": "bbbbbb"}
+
+
+def _epoch(ws, root=None):
+    import hashlib
+    return EPOCHS.get(ws) or hashlib.sha256(str(ws).encode()).hexdigest()[:6]
+
+
+class _Epochs(dict):
+    def get(self, ws, default=None):
+        return _epoch(ws)
+
+
+_PATCHES = []
+
+
+def setUpModule():
+    _PATCHES.extend([mock.patch.object(bu.browser, "epoch", side_effect=_epoch),
+                     mock.patch.object(bu.browser, "epochs", side_effect=lambda root=None: _Epochs())])
+    for p in _PATCHES:
+        p.start()
+
+
+def tearDownModule():
+    for p in _PATCHES:
+        p.stop()
 
 
 def call(rid, name, **args):
@@ -85,7 +112,7 @@ class Children(Base):
     def test_one_child_per_bot(self):
         a = self.pool.get("acme", "b1", "bot", self.root)
         self.assertIs(self.pool.get("acme", "b1", "bot", self.root), a)
-        self.assertEqual(a.browser_key, "bot:acme--b1")
+        self.assertEqual(a.browser_key, "bot:acme-aaaaaa--b1")
         reply, sid = a.forward(call(7, P + "open", url="about:blank"), "m-1")
         self.assertEqual((reply["id"], sid), (7, "m-1"))
         self.assertFalse(reply["result"]["isError"])
@@ -95,7 +122,7 @@ class Children(Base):
         self.assertIsNot(b, a)
         b.forward(call(1, P + "click", selector="@e1"), None)
         starts = self.log("start")
-        self.assertEqual([s["env"]["AGENT_BROWSER_SESSION"] for s in starts], ["acme--b1", "acme--b2"])
+        self.assertEqual([s["env"]["AGENT_BROWSER_SESSION"] for s in starts], ["acme-aaaaaa--b1", "acme-aaaaaa--b2"])
 
     def test_concurrent_turns_start_one_child(self):
         ups, errors = [], []
@@ -125,8 +152,8 @@ class Children(Base):
         config = self.root / "run" / "agent-browser.json"
         self.assertEqual(start["env"], {
             "AGENT_BROWSER_CONFIG": str(config), "AGENT_BROWSER_HEADED": "false",
-            "AGENT_BROWSER_SESSION": "acme--b1", "AGENT_BROWSER_NAMESPACE": "leobot",
-            "AGENT_BROWSER_RESTORE": "acme--b1", "AGENT_BROWSER_ENCRYPTION_KEY": key,
+            "AGENT_BROWSER_SESSION": "acme-aaaaaa--b1", "AGENT_BROWSER_NAMESPACE": "leobot",
+            "AGENT_BROWSER_RESTORE": "acme-aaaaaa--b1", "AGENT_BROWSER_ENCRYPTION_KEY": key,
             "AGENT_BROWSER_IDLE_TIMEOUT_MS": "600000", "AGENT_BROWSER_STATE_EXPIRE_DAYS": "365"})
         self.assertNotIn("AGENT_BROWSER_AUTO_CONNECT", start["keys"])  # set at all, it turns auto-connect on
         self.assertNotIn("LEOBOT_GATE_TOKEN", start["keys"])
@@ -152,7 +179,7 @@ class Children(Base):
     def test_restore_key_is_the_session(self):
         for bot in ("b1", "b2"):
             self.pool.get("acme", bot, "bot", self.root).forward(call(1, P + "click", selector="@e1"), None)
-        self.assertEqual([s["env"]["AGENT_BROWSER_RESTORE"] for s in self.log("start")], ["acme--b1", "acme--b2"])
+        self.assertEqual([s["env"]["AGENT_BROWSER_RESTORE"] for s in self.log("start")], ["acme-aaaaaa--b1", "acme-aaaaaa--b2"])
 
     def test_mode_change_restarts_child(self):
         a = self.pool.get("acme", "b1", "bot", self.root)
@@ -164,7 +191,7 @@ class Children(Base):
         self.assertFalse(self.alive(first))
         closes = self.log("close")
         self.assertEqual(len(closes), 1)
-        self.assertEqual(closes[0]["argv"], ["--session", "acme--b1", "--namespace", "leobot", "close"])
+        self.assertEqual(closes[0]["argv"], ["--session", "acme-aaaaaa--b1", "--namespace", "leobot", "close"])
         self.assertTrue(closes[0]["env"]["AGENT_BROWSER_ENCRYPTION_KEY"])
         b.forward(call(2, P + "click", selector="@e1"), None)
         self.assertEqual(b.browser_key, "my_chrome")
@@ -174,7 +201,7 @@ class Children(Base):
         self.assertEqual(env["AGENT_BROWSER_CDP"], CDP)
         self.assertEqual(env["AGENT_BROWSER_PIN_TAB"], "1")
         self.assertNotIn("AGENT_BROWSER_RESTORE", env)
-        self.assertEqual(env["AGENT_BROWSER_SESSION"], "acme--b1--chrome")  # never the bot browser's daemon
+        self.assertEqual(env["AGENT_BROWSER_SESSION"], "acme-aaaaaa--b1--chrome")  # never the bot browser's daemon
         self.assertIs(self.pool.get("acme", "b1", "my_chrome", self.root), b)
 
     def test_my_chrome_close_ends_its_session_only(self):
@@ -185,7 +212,7 @@ class Children(Base):
         up.close()
         self.assertFalse(self.alive(pid))
         closes = self.log("close")
-        self.assertEqual([c["argv"] for c in closes], [["--session", "acme--b1--chrome", "--namespace", "leobot", "close"]])
+        self.assertEqual([c["argv"] for c in closes], [["--session", "acme-aaaaaa--b1--chrome", "--namespace", "leobot", "close"]])
         self.assertNotIn("AGENT_BROWSER_CDP", closes[0]["env"])  # closing never attaches anew
 
     def test_my_chrome_quit_mid_session(self):
@@ -260,7 +287,7 @@ class Children(Base):
             up.forward(call(1, P + "click", selector="@e1"), None)
         self.assertEqual(a.browser_key, b.browser_key)
         envs = [s["env"] for s in self.log("start")]
-        self.assertEqual({e["AGENT_BROWSER_SESSION"] for e in envs}, {"acme--b1--chrome", "demo--b2--chrome"})
+        self.assertEqual({e["AGENT_BROWSER_SESSION"] for e in envs}, {"acme-aaaaaa--b1--chrome", "demo-bbbbbb--b2--chrome"})
         self.assertTrue(all(e["AGENT_BROWSER_PIN_TAB"] == "1" for e in envs))
 
     def test_idle_sweep_closes(self):
@@ -395,7 +422,7 @@ class Children(Base):
             reply, _ = up.forward(call(1, P + "click", selector="@e1"), None)
             self.assertFalse(reply["result"]["isError"], (ws, bot))
         self.assertEqual([s["env"]["AGENT_BROWSER_SESSION"] for s in self.log("start")],
-                         [bu.session_part("a--b") + "--b1", "acme--" + bu.session_part("bot-")])
+                         [bu.session_part("a--b") + "-" + _epoch("a--b") + "--b1", "acme-aaaaaa--" + bu.session_part("bot-")])
 
     def test_no_engine_refused(self):
         with mock.patch.object(bu.browser_engine, "resolve", return_value=None):
@@ -447,9 +474,9 @@ class SharedChrome(Base):
         self.assertEqual((self.a.lock_key, self.b.lock_key), ("my_chrome", "my_chrome"))
         self.assertEqual(self.a.browser_key, self.a.lock_key)
         self.assertEqual((self.a.typed_key, self.b.typed_key),
-                         ("my_chrome:acme--b1--chrome", "my_chrome:acme--b2--chrome"))
+                         ("my_chrome:acme-aaaaaa--b1--chrome", "my_chrome:acme-aaaaaa--b2--chrome"))
         bot = self.pool.get("demo", "b3", "bot", self.root)
-        self.assertEqual((bot.lock_key, bot.typed_key, bot.browser_key), ("bot:demo--b3",) * 3)
+        self.assertEqual((bot.lock_key, bot.typed_key, bot.browser_key), ("bot:demo-bbbbbb--b3",) * 3)
 
     def test_other_bots_open_never_unlocks_an_unplanned_send(self):
         self.relay(self.a, "b1", P + "open", url=self.page)
@@ -502,7 +529,8 @@ class SharedChrome(Base):
         ws, bot = "acme-workspace-long", "social-media-bot"
         up = bu.BrowserUpstream(ws, bot, "my_chrome", self.root)
         self.assertRegex(up.session, r"^x[0-9a-f]{16}c$")
-        self.assertEqual(browser_relay.typed_key_for("my_chrome", ws, bot), up.typed_key)
+        self.assertEqual(browser_relay.typed_key_for("my_chrome", ws, bot, bu.session_name(ws, bot, "my_chrome", _epoch(ws))),
+                         up.typed_key)
 
         class Bare(browser_relay.Upstream):
             mode = "my_chrome"

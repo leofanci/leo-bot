@@ -47,7 +47,7 @@ from urllib.parse import urlparse
 
 from core import bots, browser, browser_engine
 from dashboard import browser_relay
-from dashboard.browser_relay import MAX_SESSION, session_name, session_part  # noqa: F401 - names live with the keys
+from dashboard.browser_relay import MAX_SESSION, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
 
 NAMESPACE = "leobot"
@@ -60,6 +60,7 @@ POLL_SECONDS = 0.25
 STATE_EXPIRE_DAYS = 365
 DAEMON_WAIT = 5  # seconds a signalled session daemon or its Chrome gets to exit
 SETTLE_POLL = 5  # seconds between background checks of a deleted workspace's daemons
+TIDY_SECONDS = 900  # how long a delete's background tidy keeps retrying a daemon that lives on
 SOCKET_MAX, SOCKET_FIXED = 103, 37
 PROTOCOL = "2024-11-05"
 KEY_NAME = "browser-engine-key"
@@ -92,7 +93,7 @@ TIMED_OUT = ("The browser did not answer within {s} seconds and was restarted, s
              "finished. The next call starts it fresh.")
 CLOSED = "This browser was closed after a while without use. Ask again to start it fresh."
 STOPPING = "Leo Bot is stopping, so the browser did not start."
-WS_CLOSING = "This workspace is being deleted, so the browser did not start."
+WS_DELETED = "This workspace was deleted, so its browser is closed."
 TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the tab was closed), so a new empty "
              "tab was opened. This call was not performed. Open the page again.")
 LONG_HOME = ("The home folder path is too long for the browser engine, so the browser did not start. Ask the "
@@ -351,14 +352,16 @@ class BrowserUpstream(browser_relay.Upstream):
     """The engine child of one bot in one mode. Calls run one at a time. `after` is the
     upstream it replaces for the same bot: no child starts before that one has closed."""
 
-    def __init__(self, ws, bot, mode, root, after=None, stopped=False, stopped_line=STOPPING):
+    def __init__(self, ws, bot, mode, root, after=None, stopped=False, stopped_line=STOPPING, epoch=None):
         if mode not in ("bot", "my_chrome"):
             raise ValueError(f"unknown browser mode: {mode}")
         self.ws, self.bot, self.mode, self.root = ws, bot, mode, root
-        self.session = session_name(ws, bot, mode)
+        # The workspace's epoch is part of the name: a recreated slug never reaches this session.
+        self.epoch = epoch or browser.epoch(ws, root)
+        self.session = session_name(ws, bot, mode, self.epoch)
         # One lock per real browser (all my_chrome bots share the owner's Chrome); typed text
         # per tab (each my_chrome bot has its own pinned tab).
-        self.lock_key = self.browser_key = browser_relay.browser_key_for(mode, ws, bot)
+        self.lock_key = self.browser_key = browser_relay.browser_key_for(mode, ws, bot, self.session)
         self.typed_key = browser_relay.typed_key_for(mode, ws, bot, self.session)
         self.last_used = time.time()
         self.closed = stopped
@@ -600,6 +603,12 @@ class BrowserUpstream(browser_relay.Upstream):
             child.stop()  # reaps it; a call in flight then sees it exit
 
 
+def _clear_if_empty(epoch, root, home=None):
+    """A retired epoch with no file left on disk: the start sweep need not look for it again."""
+    if not any(parse_session(s)[1] == epoch for s in found_sessions(home)):
+        browser.clear_retired([epoch], root)
+
+
 def _close_session(up):
     try:
         up._engine_close()
@@ -614,83 +623,75 @@ class Pool:
     def __init__(self):
         self._lock = threading.Lock()
         self._items = {}
-        self._deleting = set()  # workspaces close_where is closing: no browser starts there till reopen
         self._stopping = False
         self._halt = threading.Event()
 
     def get(self, ws, bot, mode, root):
         old = None
+        e = browser.epoch(ws, root)  # read every frame: a recreated slug has a new one
         with self._lock:
             if self._stopping:
-                return BrowserUpstream(ws, bot, mode, root, stopped=True)
-            if ws in self._deleting:
-                return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=WS_CLOSING)
+                return BrowserUpstream(ws, bot, mode, root, stopped=True, epoch=e)
             up = self._items.get((ws, bot))
-            if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed):
+            if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed or up.epoch != e):
                 old, up = up, None
             if up is None:
-                up = BrowserUpstream(ws, bot, mode, root, after=old)
+                up = BrowserUpstream(ws, bot, mode, root, after=old, epoch=e)
                 self._items[(ws, bot)] = up
         if old is not None:
             old.close()
         return up
 
-    def close_where(self, ws, bound=CLOSE_SECONDS + 5):
-        """A deleted workspace: mark it (get starts nothing there until reopen), take its children
-        out of the table, kill them and close their engine sessions in parallel within `bound`
-        seconds, as close_all does. Closing saves state, so forget_state runs after this.
-        Returns the bot ids closed."""
+    def close_where(self, ws, epoch, bound=CLOSE_SECONDS + 5):
+        """A deleted workspace: take its children of that epoch out of the table, kill them and
+        close their engine sessions in parallel within `bound` seconds, as close_all does. A child
+        of another epoch (the recreated slug's) is left alone. Returns the closed upstreams."""
         with self._lock:
-            self._deleting.add(ws)
-            items = [(k, up) for k, up in self._items.items() if k[0] == ws]
+            items = [(k, up) for k, up in self._items.items() if k[0] == ws and up.epoch == epoch]
             for k, _ in items:
                 del self._items[k]
         ups = [up for _, up in items]
         for up in ups:
             try:
-                up.kill(WS_CLOSING)
+                up.kill(WS_DELETED)
             except Exception:  # noqa: BLE001 - one child that fails to stop never stops the rest
                 traceback.print_exc()
-        threads = [threading.Thread(target=_close_session, args=(up,), name="browser-close", daemon=True)
-                   for up in ups]
-        for t in threads:
-            t.start()
-        deadline = time.monotonic() + bound
-        for t in threads:
-            t.join(max(0.0, deadline - time.monotonic()))
+        _parallel([lambda up=up: _close_session(up) for up in ups], bound)
         for up in ups:
             up._done.set()
-        return [k[1] for k, _ in items]
+        return ups
 
-    def forget_workspace(self, ws, bot_ids, root, home=None, bound=CLOSE_SECONDS + 5, poll=SETTLE_POLL):
-        """A deleted workspace, in order: close its children; forget their state; make sure no
-        session daemon of it lives (close again, else kill it and its Chrome); forget the state
-        again; then reopen. True when done now. False: a daemon is not confirmed gone, so the mark
-        stays and a background thread finishes wait, forget, reopen. Nothing is forgotten after
-        reopen."""
-        ids = set(bot_ids) | set(self.close_where(ws, bound))
-        forget_state(ws, ids, home)
-        if settle_sessions(ws, ids, root, home):
-            forget_state(ws, ids, home)
-            self.reopen(ws)
+    def tidy_workspace(self, ws, epoch, bot_ids, root, home=None, bound=CLOSE_SECONDS + 5,
+                       poll=SETTLE_POLL, limit=TIDY_SECONDS):
+        """Best-effort tidying after a workspace delete, of its old epoch's sessions only: close
+        its children, forget their state, close or kill any daemon still alive (confirmed pids
+        only), forget again. A daemon not gone yet is retried in the background for up to `limit`
+        seconds (the startup sweep catches what is left). It never touches another epoch's names,
+        so a recreated slug is never reached. True when everything is gone now."""
+        if not (isinstance(epoch, str) and browser.EPOCH_RE.fullmatch(epoch)):
+            return True  # no epoch: this workspace never browsed
+        self.close_where(ws, epoch, bound)
+        sessions = sessions_of(ws, epoch, bot_ids, home)
+        forget_sessions(sessions, home)
+        if settle_sessions(sessions, root, home, bound):
+            forget_sessions(sessions, home)
+            forget_run_files(sessions, home)
+            _clear_if_empty(epoch, root, home)
             return True
 
         def finish():
-            while not self._halt.wait(poll):
+            deadline = time.monotonic() + limit
+            while time.monotonic() < deadline and not self._halt.wait(poll):
                 try:
-                    if settle_sessions(ws, ids, root, home):
-                        forget_state(ws, ids, home)
-                        self.reopen(ws)
+                    if settle_sessions(sessions, root, home, bound):
+                        forget_sessions(sessions, home)
+                        forget_run_files(sessions, home)
+                        _clear_if_empty(epoch, root, home)
                         return
-                except Exception:  # noqa: BLE001 - keep trying; the mark stays meanwhile
+                except Exception:  # noqa: BLE001 - keep trying until the limit
                     traceback.print_exc()
-        threading.Thread(target=finish, name="browser-forget", daemon=True).start()
+        threading.Thread(target=finish, name="browser-tidy", daemon=True).start()
         return False
-
-    def reopen(self, ws):
-        """After forget_state: browsers may start in this workspace again (a reused slug)."""
-        with self._lock:
-            self._deleting.discard(ws)
 
     def sweep(self, now=None):
         """Close children with no call for IDLE_SECONDS. A call in flight is left alone."""
@@ -742,84 +743,108 @@ def state_dir(home=None):
     return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "state" / "sessions"
 
 
-def state_files(ws, bot):
-    """The exact state file names one bot's sessions in `ws` can have, in both modes: the restore key
-    is the session name (<key>-<session>), or the namespace when the engine picks it. Exact names,
-    never a prefix: "acme" must not reach "acme-2", and a hashed name is computed, not guessed."""
-    names = []
-    for mode in browser.MODES:
-        s = session_name(ws, bot, mode)
-        for key in (s, NAMESPACE):
-            names += [f"{key}-{s}.json.enc", f"{key}-{s}.json"]
-    return names
+def run_dir(home=None):
+    """Where a live session keeps its socket and pid file (docs/browser.md, Session daemons)."""
+    return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "run"
 
 
-_PART = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")  # one session part (a slug, or a hashed "h" + 8 hex)
+def state_names(session):
+    """The exact state file names a session can have: the restore key is the session name
+    (<key>-<session>), or the namespace when the engine picks it."""
+    return [f"{key}-{session}{ext}" for key in (session, NAMESPACE) for ext in (".json.enc", ".json")]
 
 
-def plain_state_names(ws, names):
-    """Of these file names, the state files of plain (unhashed) sessions in `ws`, whichever bot:
-    "<key>-<s>.json[.enc]" with <s> = "<ws part>--<bot part>[--chrome]" and <key> the session
-    name or the namespace. The ws part must match exactly, so "acme" never reaches "acme-2"."""
-    wsp = session_part(ws)
-    found = []
-    for name in names:
-        stem = next((name[:-len(x)] for x in (".json.enc", ".json") if name.endswith(x)), None)
-        if not stem:
-            continue
-        start = 0
-        while True:
-            i = stem.find(f"-{wsp}--", start)
-            if i < 0:
-                break
-            key, sess = stem[:i], stem[i + 1:]
-            parts = sess.split("--")
-            if (key in (sess, NAMESPACE) and len(sess) <= MAX_SESSION and parts[0] == wsp
-                    and (len(parts) == 2 or (len(parts) == 3 and parts[2] == "chrome"))
-                    and _PART.fullmatch(parts[1])):
-                found.append(name)
-                break
-            start = i + 1
-    return found
+def state_files(ws, bot, epoch=None):
+    """The state file names of one bot's sessions in `ws` and that epoch, both modes."""
+    return [n for mode in browser.MODES for n in state_names(session_name(ws, bot, mode, epoch))]
 
 
-def forget_state(ws, bot_ids, home=None):
-    """A deleted workspace: remove its bots' saved logins, so a reused slug starts with none.
-    Exact names only: each known bot's computed names (hashed ones too), plus any plain-named
-    session of this workspace found in the folder (a bot no list knows). Returns the files removed."""
-    folder = state_dir(home)
-    names = []
-    for bot in sorted({b for b in bot_ids if isinstance(b, str) and b}):
-        names += state_files(ws, bot)
+def _session_of_state(name):
+    """The session a state file name belongs to, or None."""
+    stem = next((name[:-len(x)] for x in (".json.enc", ".json") if name.endswith(x)), None)
+    if not stem:
+        return None
+    rest = stem[len(NAMESPACE) + 1:] if stem.startswith(NAMESPACE + "-") else None
+    if rest and parse_session(rest):
+        return rest
+    half = (len(stem) - 1) // 2
+    if len(stem) % 2 == 1 and stem[half] == "-" and stem[:half] == stem[half + 1:]:
+        return stem[:half]
+    return None
+
+
+RUN_EXTS = ("pid", "sock", "config", "engine", "stream", "target", "version")
+
+
+def _session_of_run(name):
+    sess, _, ext = name.rpartition(".")
+    return sess if sess and ext in RUN_EXTS else None
+
+
+def _listed(folder):
     try:
-        names += plain_state_names(ws, sorted(os.listdir(folder)))
+        return sorted(os.listdir(folder))
     except OSError:
-        pass
+        return []
+
+
+def found_sessions(home=None):
+    """{session name: mode} of every session with an epoch that has a state file or a run file."""
+    out = {}
+    for sess in [_session_of_state(n) for n in _listed(state_dir(home))] + \
+            [_session_of_run(n) for n in _listed(run_dir(home))]:
+        if sess and parse_session(sess):
+            out[sess] = parse_session(sess)[2]
+    return out
+
+
+def sessions_of(ws, epoch, bot_ids, home=None):
+    """{session name: mode} of `ws` in that epoch: each known bot's names in both modes, plus any
+    plain-named session of that exact ws part and epoch found on disk (a bot no list knows).
+    Exact matches only: "acme" never reaches "acme-2", and another epoch is never listed."""
+    out = {}
+    for bot in {b for b in bot_ids if isinstance(b, str) and b}:
+        for mode in browser.MODES:
+            out[session_name(ws, bot, mode, epoch)] = mode
+    wsp = session_part(ws)
+    for sess, mode in found_sessions(home).items():
+        parsed = parse_session(sess)
+        if parsed[0] == wsp and parsed[1] == epoch:
+            out.setdefault(sess, mode)
+    return out
+
+
+def forget_sessions(sessions, home=None):
+    """Remove the saved state of these sessions by exact name (a link is removed, never
+    followed). Returns the files removed."""
+    folder = state_dir(home)
     removed = []
-    for name in dict.fromkeys(names):
-        path = folder / name
-        try:
-            if path.is_symlink() or path.is_file():  # a link is removed, never followed
-                path.unlink()
-                removed.append(path)
-        except OSError:
-            traceback.print_exc()
+    for sess in sorted(sessions):
+        for name in state_names(sess):
+            path = folder / name
+            try:
+                if path.is_symlink() or path.is_file():
+                    path.unlink()
+                    removed.append(path)
+            except OSError:
+                traceback.print_exc()
     return removed
 
 
-# -- an engine session's own daemon (probed on 0.41.0, docs/browser.md "Session daemons") ----------
-# A live session is <home>/.agent-browser/namespaces/<ns>/run/<session>.sock (a Unix socket that
-# accepts) and <session>.pid (the daemon's pid). The daemon is its own process group, with
-# AGENT_BROWSER_DAEMON=1, AGENT_BROWSER_SESSION and AGENT_BROWSER_NAMESPACE in its environment.
-# The headless Chrome it launched is its child, leader of its own process group (crash handlers
-# included). SIGTERM to the daemon closes Chrome and saves the state; SIGKILL leaves Chrome
-# running and the socket and pid files behind (the socket then refuses).
-BROWSER_CLOSING = ("This workspace's browser is still closing. Its name can browse again once it "
-                   "has closed.")
-
-
-def run_dir(home=None):
-    return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "run"
+def forget_run_files(sessions, home=None):
+    """Remove what dead sessions left in the run folder (a .target stays after a close; a killed
+    daemon leaves its .pid and .sock). A session whose daemon still lives is left alone."""
+    folder = run_dir(home)
+    for sess in sorted(sessions):
+        if daemon_alive(sess, home):
+            continue
+        for ext in RUN_EXTS:
+            path = folder / f"{sess}.{ext}"
+            try:
+                if path.is_symlink() or path.exists():
+                    path.unlink()
+            except OSError:
+                traceback.print_exc()
 
 
 def _socket_live(path):
@@ -858,18 +883,24 @@ def _proc_env(pid):
     return out.stdout.split() if out.returncode == 0 else None
 
 
+def _is_session(pid, session, daemon=False):
+    """Does this process's environment name this session in this namespace (and, for the
+    daemon, AGENT_BROWSER_DAEMON=1)? Its Chrome inherits the same words (probed)."""
+    if pid <= 1 or pid == os.getpid() or not _pid_exists(pid):
+        return False
+    need = {f"AGENT_BROWSER_SESSION={session}", f"AGENT_BROWSER_NAMESPACE={NAMESPACE}"}
+    if daemon:
+        need.add("AGENT_BROWSER_DAEMON=1")
+    return need <= set(_proc_env(pid) or ())
+
+
 def daemon_pid(session, home=None):
-    """The pid of this session's daemon, only when that process really is it (its environment
-    names this session and namespace), else None."""
+    """The pid of this session's daemon, only when that process really is it, else None."""
     try:
         pid = int((run_dir(home) / f"{session}.pid").read_text().strip())
     except (OSError, ValueError):
         return None
-    if pid <= 1 or pid == os.getpid() or not _pid_exists(pid):
-        return None
-    words = set(_proc_env(pid) or ())
-    need = {"AGENT_BROWSER_DAEMON=1", f"AGENT_BROWSER_SESSION={session}", f"AGENT_BROWSER_NAMESPACE={NAMESPACE}"}
-    return pid if need <= words else None
+    return pid if _is_session(pid, session, daemon=True) else None
 
 
 def daemon_alive(session, home=None):
@@ -899,17 +930,24 @@ def _wait_gone(pids, seconds):
     return not any(_pid_exists(p) for p in pids)
 
 
-def _signal_group(pgid, sig):
+def _signal_chrome(pid, pgid, session, sig):
+    """Signal a Chrome the daemon started: its whole group when it leads one, else itself; only
+    after its environment is checked again to name this session (a pid may be reused)."""
+    if not _is_session(pid, session):
+        return
     try:
-        os.killpg(pgid, sig)
+        if pgid == pid:
+            os.killpg(pgid, sig)
+        else:
+            os.kill(pid, sig)
     except (ProcessLookupError, PermissionError):
         pass
 
 
 def kill_daemon(session, home=None, wait=DAEMON_WAIT):
     """Stop this session's daemon and the Chrome it launched: SIGTERM first (it closes Chrome and
-    saves state), then SIGKILL, then each Chrome group it started. Only a pid that daemon_pid
-    confirms is touched, and only its own children. True when the session is gone."""
+    saves state), then SIGKILL, then each Chrome group it started. Each signal goes only to a pid
+    checked again, just before it, as that session's. True when the session is gone."""
     pid = daemon_pid(session, home)
     if pid is None:
         return not daemon_alive(session, home)
@@ -919,32 +957,19 @@ def kill_daemon(session, home=None, wait=DAEMON_WAIT):
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    if not _wait_gone([pid], wait):
+    if not _wait_gone([pid], wait) and daemon_pid(session, home) == pid:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         _wait_gone([pid], wait)
     for c, g in kids:  # a Chrome left behind: its whole group (helpers and crash handlers)
-        if _pid_exists(c):
-            if g == c:
-                _signal_group(g, signal.SIGTERM)
-            else:
-                try:
-                    os.kill(c, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+        _signal_chrome(c, g, session, signal.SIGTERM)
     if not _wait_gone([c for c, _ in kids], wait):
         for c, g in kids:
-            if g == c:
-                _signal_group(g, signal.SIGKILL)
-            elif _pid_exists(c):
-                try:
-                    os.kill(c, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            _signal_chrome(c, g, session, signal.SIGKILL)
         _wait_gone([c for c, _ in kids], wait)
-    return not daemon_alive(session, home) and not any(_pid_exists(c) for c, _ in kids)
+    return not daemon_alive(session, home) and not any(_is_session(c, session) for c, _ in kids)
 
 
 def engine_close_session(session, mode, root):
@@ -963,39 +988,63 @@ def engine_close_session(session, mode, root):
         return False
 
 
-def sessions_of(ws, bot_ids, home=None):
-    """{session name: mode} that may run for `ws`: each known bot's names in both modes, plus any
-    plain-named session of this workspace with a file in the run folder (exact parse, as
-    plain_state_names)."""
-    out = {}
-    for bot in {b for b in bot_ids if isinstance(b, str) and b}:
-        for mode in browser.MODES:
-            out[session_name(ws, bot, mode)] = mode
-    try:
-        names = os.listdir(run_dir(home))
-    except OSError:
-        names = []
-    wsp = session_part(ws)
-    for name in names:
-        sess = name.rsplit(".", 1)[0] if "." in name else None
-        parts = (sess or "").split("--")
-        if (sess and len(sess) <= MAX_SESSION and parts[0] == wsp and _PART.fullmatch(parts[1] if len(parts) > 1 else "")
-                and (len(parts) == 2 or (len(parts) == 3 and parts[2] == "chrome"))):
-            out.setdefault(sess, "my_chrome" if len(parts) == 3 else "bot")
+def _parallel(jobs, bound):
+    """Run each job in its own thread, all joined within one bound. [result or None]."""
+    out = [None] * len(jobs)
+
+    def run(i, job):
+        try:
+            out[i] = job()
+        except Exception:  # noqa: BLE001 - one job that breaks never stops the rest
+            traceback.print_exc()
+    threads = [threading.Thread(target=run, args=(i, j), name="browser-close", daemon=True)
+               for i, j in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + bound
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
     return out
 
 
-def settle_sessions(ws, bot_ids, root, home=None):
-    """Make sure no daemon of `ws` lives: a live one is closed once more, then killed (with its
-    Chrome). True when none is left."""
-    left = []
-    for sess, mode in sessions_of(ws, bot_ids, home).items():
-        if not daemon_alive(sess, home):
-            continue
-        engine_close_session(sess, mode, root)
-        if daemon_alive(sess, home) and not kill_daemon(sess, home):
-            left.append(sess)
-    return not left
+def _settle_one(session, mode, root, home):
+    if not daemon_alive(session, home):
+        return True
+    engine_close_session(session, mode, root)
+    return not daemon_alive(session, home) or kill_daemon(session, home)
+
+
+def settle_sessions(sessions, root, home=None, bound=CLOSE_SECONDS + 2 * DAEMON_WAIT + 5):
+    """No daemon of these sessions left: each live one is closed once more, then killed (with its
+    Chrome), all in parallel within one bound. True when none is left."""
+    items = sorted(sessions.items())
+    done = _parallel([lambda s=s, m=m: _settle_one(s, m, root, home) for s, m in items], bound)
+    return all(d is True for d in done)
+
+
+def orphan_sessions(root, home=None):
+    """{session: mode} on disk of an epoch this data root retired (a deleted workspace). Only
+    retired epochs: another Leo Bot data root on this machine shares the namespace, and its
+    sessions are not ours. A live epoch is never listed (core/browser.retired)."""
+    old = set(browser.retired(root))
+    return {sess: mode for sess, mode in found_sessions(home).items() if parse_session(sess)[1] in old}
+
+
+def sweep_orphans(root, home=None):
+    """Server start: settle (confirmed daemons only) and forget every session of a retired epoch,
+    a delete whose tidy did not finish. An epoch with nothing left is cleared from the list.
+    Returns the orphan sessions handled."""
+    orphans = orphan_sessions(root, home)
+    if orphans:
+        forget_sessions(orphans, home)
+        settled = settle_sessions(orphans, root, home)
+        forget_sessions(orphans, home)
+        forget_run_files(orphans, home)
+        if not settled:
+            return orphans
+    left = {parse_session(s)[1] for s in found_sessions(home)}
+    browser.clear_retired([e for e in browser.retired(root) if e not in left], root)
+    return orphans
 
 
 POOL = Pool()

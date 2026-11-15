@@ -163,29 +163,55 @@ def session_part(value):
     return "h" + hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()[:8]
 
 
-def session_name(ws, bot, mode):
-    """bot: "<ws>--<bot>"; my_chrome: "<ws>--<bot>--chrome". A name over MAX_SESSION characters
-    becomes "x" + 16 hex of its sha256 (+ "c" for my_chrome): no "--" in it, so it never equals
-    a plain name, and the two modes still differ. The name does not depend on HOME."""
-    base = f"{session_part(ws)}--{session_part(bot)}"
+_EPOCH = re.compile(r"[0-9a-f]{6}")
+_PLAIN = re.compile(r"(?P<ws>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<epoch>[0-9a-f]{6})--(?P<bot>[a-z0-9]+(?:-[a-z0-9]+)*)"
+                    r"(?P<chrome>--chrome)?")
+_LONG = re.compile(r"x(?P<epoch>[0-9a-f]{6})[0-9a-f]{10}(?P<chrome>c?)")
+
+
+def session_name(ws, bot, mode, epoch=None):
+    """bot: "<ws>-<epoch>--<bot>"; my_chrome: "<ws>-<epoch>--<bot>--chrome". The epoch is the
+    workspace's (core/browser.py), so a recreated slug gets new names. A name over MAX_SESSION
+    characters becomes "x" + epoch + 10 hex of its sha256 (+ "c" for my_chrome): no "--" in it,
+    so it never equals a plain name, the two modes still differ, and its epoch stays readable.
+    The name does not depend on HOME. Without an epoch (tests, old names): "<ws>--<bot>", and a
+    long one is "x" + 16 hex."""
+    head = session_part(ws) if epoch is None else f"{session_part(ws)}-{epoch}"
+    base = f"{head}--{session_part(bot)}"
     name = base if mode == "bot" else base + "--chrome"
     if len(name) <= MAX_SESSION:
         return name
-    short = "x" + hashlib.sha256(base.encode()).hexdigest()[:16]
+    digest = hashlib.sha256(base.encode()).hexdigest()
+    short = "x" + (digest[:16] if epoch is None else epoch + digest[:10])
     return short if mode == "bot" else short + "c"
 
 
-def browser_key_for(mode, ws, bot):
-    """Which real browser a bot drives: its own bot browser, or the one owner Chrome every
-    my_chrome bot shares. The call lock follows this key (lock_key)."""
-    return "my_chrome" if mode == "my_chrome" else f"bot:{ws}--{bot}"
+def parse_session(name):
+    """(ws part or None, epoch, mode) of a Leo Bot session name with an epoch, else None.
+    A long (hashed) name gives its epoch but no ws part."""
+    m = _PLAIN.fullmatch(name) if isinstance(name, str) and len(name) <= MAX_SESSION else None
+    if m:
+        return m["ws"], m["epoch"], "my_chrome" if m["chrome"] else "bot"
+    m = _LONG.fullmatch(name) if isinstance(name, str) else None
+    if m:
+        return None, m["epoch"], "my_chrome" if m["chrome"] else "bot"
+    return None
+
+
+def browser_key_for(mode, ws, bot, session=None):
+    """Which real browser a bot drives: its own bot browser ("bot:<session>", so a new epoch is a
+    new browser), or the one owner Chrome every my_chrome bot shares. The call lock follows this
+    key (lock_key); in bot mode typed text does too."""
+    if mode == "my_chrome":
+        return "my_chrome"
+    return f"bot:{session}" if session else f"bot:{ws}--{bot}"
 
 
 def typed_key_for(mode, ws, bot, session=None):
     """Where typed text lives: the bot browser, or one bot's own pinned tab in the owner's
     Chrome ("my_chrome:<session>"), so another bot's tab never moves it."""
     if mode != "my_chrome":
-        return browser_key_for(mode, ws, bot)
+        return browser_key_for(mode, ws, bot, session)
     return f"my_chrome:{session or session_name(ws, bot, mode)}"
 
 
@@ -226,13 +252,15 @@ def _browser_lock(key):
         return _BROWSER_LOCKS.setdefault(key, threading.Lock())
 
 
-def _keys_of(upstream, mode, ctx):
+def _keys_of(upstream, mode, ctx, root=bots.ROOT):
     """(lock key, typed key) of this upstream, or the ones its mode and bot give."""
     def given(name):
         key = getattr(upstream, name, None)
         return key if isinstance(key, str) and key else None
-    lock = given("lock_key") or given("browser_key") or browser_key_for(mode, ctx["ws"], ctx["bot"])
-    typed = given("typed_key") or (lock if mode != "my_chrome" else typed_key_for(mode, ctx["ws"], ctx["bot"]))
+    epoch = browser.epochs(root).get(ctx["ws"])  # the upstream's own keys carry it; this is the fallback
+    session = session_name(ctx["ws"], ctx["bot"], mode, epoch) if epoch else None
+    lock = given("lock_key") or given("browser_key") or browser_key_for(mode, ctx["ws"], ctx["bot"], session)
+    typed = given("typed_key") or (lock if mode != "my_chrome" else typed_key_for(mode, ctx["ws"], ctx["bot"], session))
     return lock, typed
 
 
@@ -511,7 +539,7 @@ def _gate(frame, ctx, sid, upstream, root):
         if _has_control(args["text"]):
             return _text(rid, CONTROL_TEXT), sid
     sends = name in COMMIT_TOOLS and key != "safe"  # click, select, check, uncheck, Enter
-    lkey, bkey = _keys_of(upstream, mode, ctx)  # bkey: where this tab's typed text lives
+    lkey, bkey = _keys_of(upstream, mode, ctx, root)  # bkey: where this tab's typed text lives
     with _browser_lock(lkey):
         if "url" in args:
             refusal = _url_refusal(args["url"], mode, root)

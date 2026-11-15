@@ -2,6 +2,10 @@
 
   bots.<ws>.<bot>   {"level": "off"|"read"|"write"|"act", "mode": "bot"|"my_chrome"}
   sites.<host>      {"mode": None|"bot"|"my_chrome", "daily": None|1..500}
+  epochs.<ws>       six hex, made on first use, removed with the workspace: part of every engine
+                    session name there, so a recreated slug never reaches an old browser or login
+  retired           epochs of deleted workspaces whose sessions may still be on disk: the only
+                    names the start sweep touches (other Leo Bot data roots share the namespace)
 
 Bots default to level off, mode bot. Sites hold per-site overrides: a mode that
 beats the bot's, and a daily action cap. A site with neither stays listed.
@@ -12,6 +16,8 @@ The lock guards threads in this process only, same as core/integrations.py.
 A file of the wrong shape reads as defaults and is overwritten by the next write.
 """
 import json
+import re
+import secrets
 import threading
 import unicodedata
 from pathlib import Path
@@ -27,6 +33,7 @@ DEFAULT_SITES = {
     "instagram.com": {"mode": None, "daily": 10},
 }
 MAX_DAILY = 500
+EPOCH_RE = re.compile(r"[0-9a-f]{6}")
 
 
 def _path(root):
@@ -206,13 +213,70 @@ def site_of(url, root=bots.ROOT, listed=None):
     return best
 
 
+def epochs(root=bots.ROOT):
+    """{ws: epoch} of every workspace with one."""
+    return {ws: e for ws, e in _dict(load(root).get("epochs")).items()
+            if isinstance(ws, str) and isinstance(e, str) and EPOCH_RE.fullmatch(e)}
+
+
+def epoch(ws, root=bots.ROOT):
+    """This workspace's browser epoch, made (unique among live ones) on first use."""
+    have = epochs(root).get(ws)
+    if have:
+        return have
+
+    def fn(d):
+        rows = d.get("epochs") if isinstance(d.get("epochs"), dict) else {}
+        d["epochs"] = rows
+        e = rows.get(ws)
+        if isinstance(e, str) and EPOCH_RE.fullmatch(e):
+            return e
+        taken = {v for v in rows.values() if isinstance(v, str)}
+        e = secrets.token_hex(3)
+        while e in taken:
+            e = secrets.token_hex(3)
+        rows[ws] = e
+        return e
+    return _update(root, fn)
+
+
+def retired(root=bots.ROOT):
+    """Epochs of deleted workspaces not yet tidied away, never a live one."""
+    rows = load(root).get("retired")
+    live = set(epochs(root).values())
+    return [e for e in rows if isinstance(e, str) and EPOCH_RE.fullmatch(e) and e not in live] \
+        if isinstance(rows, list) else []
+
+
+def clear_retired(done, root=bots.ROOT):
+    """These retired epochs have nothing left on disk."""
+    done = set(done)
+
+    def fn(d):
+        rows = d.get("retired") if isinstance(d.get("retired"), list) else []
+        d["retired"] = [e for e in rows if e not in done]
+    if done:
+        _update(root, fn)
+
+
 def forget_workspace(ws, root=bots.ROOT):
-    """A deleted project: a new one with the same slug starts with browsing off."""
+    """A deleted project: a new one with the same slug starts with browsing off, and a new
+    epoch (new engine session names) on its first browse."""
     if ws == bots.HQ:
         return
     with LOCK:
         data = load(root)
-        bots_map = data.get("bots")
-        if isinstance(bots_map, dict) and ws in bots_map:
-            del bots_map[ws]
+        changed = False
+        old = _dict(data.get("epochs")).get(ws)
+        if isinstance(old, str) and EPOCH_RE.fullmatch(old):
+            gone = [e for e in data.get("retired") or [] if isinstance(e, str)] if isinstance(
+                data.get("retired"), list) else []
+            data["retired"] = gone + ([old] if old not in gone else [])
+            changed = True
+        for key in ("bots", "epochs"):
+            rows = data.get(key)
+            if isinstance(rows, dict) and ws in rows:
+                del rows[ws]
+                changed = True
+        if changed:
             _save(root, data)
