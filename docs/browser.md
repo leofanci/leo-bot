@@ -202,7 +202,7 @@ Settings, Browser, "Install" runs `npm install --prefix <data>/tools/agent-brows
 ### Levels (Team, a bot's Details, Browser)
 
 - **Off** (the default): no browser tools.
-- **Reads only**: open, read, snapshot, screenshot, scroll, wait, history, tabs. Typing and clicks that change the page are refused.
+- **Reads only**: open, read, snapshot, screenshot, scroll, wait, history, tabs (bot browser only). Typing and clicks that change the page are refused.
 - **Read + write**: may type. A send (a click, select, check, uncheck or Enter after typing) runs only when it matches an approved send plan item.
 - **Acts on its own**: sends run at once, inside each site's daily limit, and each is logged in Approvals.
 

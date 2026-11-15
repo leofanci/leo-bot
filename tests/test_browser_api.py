@@ -313,6 +313,17 @@ class Login(Base):
         bu._TOOLS.clear()  # a server restart: the list is read back from the run folder
         listed, _ = busy.forward({"jsonrpc": "2.0", "id": 10, "method": "tools/list"}, None)
         self.assertIn("agent_browser_open", [t["name"] for t in listed["result"]["tools"]])
+        saved = self.root / "run" / bu.TOOLS_NAME
+        good = json.loads(saved.read_text())
+        for bad in ([1, "x", None, {"name": 5}, {"no": "name"}], "not a list"):  # a malformed file: absent
+            saved.write_text(json.dumps({**good, "tools": bad}))
+            bu._TOOLS.clear()
+            reply, _ = busy.forward({"jsonrpc": "2.0", "id": 11, "method": "tools/list"}, None)
+            self.assertEqual(reply.get("error", {}).get("message"), bu.LOGGING_IN)
+        saved.write_text(json.dumps({**good, "tools": [7, *good["tools"]]}))  # junk entries dropped
+        bu._TOOLS.clear()
+        listed, _ = busy.forward({"jsonrpc": "2.0", "id": 12, "method": "tools/list"}, None)
+        self.assertTrue(all(isinstance(t, dict) for t in listed["result"]["tools"]))
         self.assertEqual(len(self.log("start")), 1)  # no child started meanwhile
         mine = self.pool.get("acme", "cmo", "my_chrome", self.root)  # another session: not held
         self.assertFalse(mine.closed)

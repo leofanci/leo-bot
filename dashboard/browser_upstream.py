@@ -513,7 +513,8 @@ class BrowserUpstream(browser_relay.Upstream):
             except (OSError, ValueError):
                 saved = None
             if isinstance(saved, dict) and saved.get("binary") == str(binary) and isinstance(saved.get("tools"), list):
-                listed = {"tools": saved["tools"]}
+                tools = [t for t in saved["tools"] if isinstance(t, dict) and isinstance(t.get("name"), str)]
+                listed = {"tools": tools} if tools else None  # nothing valid: as if no file
         return copy.deepcopy(listed) if listed else None
 
     # -- the Upstream interface ---------------------------------------------------------------

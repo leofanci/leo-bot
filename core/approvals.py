@@ -100,12 +100,14 @@ def _is_send(r):
 
 def _protected(r):
     # A bot's own runs of the last day stay too: they are its daily limit and the owner's record.
-    # So do browser sends of the last day (the site's daily cap counts them) and approved plans.
+    # So do approved plans and browser sends of the last week: the site's daily cap counts them,
+    # and Approvals shows them as the "Sent from the browser" log for PLAN_TTL.
     now = time.time()
     return (_is_held(r) and r.get("status") in ("pending", "running")) or \
         (r.get("auto") and now - (r.get("resolved") or 0) < AUTO_KEEP) or \
         (_is_send(r) and (r.get("status") == "approved"
-                          or (r.get("status") in ("done", "failed") and now - (r.get("resolved") or 0) < AUTO_KEEP)))
+                          or (r.get("status") in ("done", "failed")
+                              and now - (r.get("resolved") or r.get("started") or 0) < PLAN_TTL)))
 
 
 def _save(root, rows):

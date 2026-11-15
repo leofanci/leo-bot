@@ -384,6 +384,24 @@ class BrowserSent(unittest.TestCase):
         self.send("acme", "old", now=time.time() - approvals.PLAN_TTL - 60)
         self.assertEqual(approvals.browser_sent(self.root, "acme"), [])
 
+    def test_sent_log_survives_pruning_for_a_week(self):
+        now = time.time()
+
+        def row(i, age):
+            return {"id": f"s{i}", "kind": approvals.APP, "status": "done", "result": approvals.SENT,
+                    "created": now - age, "started": now - age, "resolved": now - age, "ws": "acme",
+                    "action": {"toolkit": approvals.BROWSER, "slug": approvals.BROWSER_SEND,
+                               "arguments": {"url": self.page, "text": f"t{i}"}}}
+        week = [row("3d", 3 * 86400)]
+        old = [row("8d", 8 * 86400)]
+        filler = [{"id": f"f{i}", "kind": "approval", "status": "answered", "created": now, "ws": "acme",
+                   "summary": "x"} for i in range(approvals.KEEP + 5)]
+        approvals._save(self.root, old + week + filler)
+        ids = {r["id"] for r in approvals.load(self.root)}
+        self.assertIn("s3d", ids)  # a 3-day-old send is still in the log
+        self.assertNotIn("s8d", ids)  # past the week it goes with the rest
+        self.assertEqual([r["id"] for r in approvals.browser_sent(self.root, "acme")], ["s3d"])
+
     def test_api_returns_sent(self):
         self.send("acme", "one")
         with mock.patch.object(server, "ROOT", self.root):
