@@ -28,6 +28,18 @@ headed window (Pool.begin_login, open_login). The bot's child is closed first an
 that bot in bot mode answers LOGGING_IN until the session's daemon is gone (Done, the engine's
 idle timeout, or LOGIN_SECONDS), so the bot never sees the login page.
 
+Proxies (dashboard/browser_proxy.py): when a site has a proxy, a bot-mode engine gets Leo Bot's
+local router as its only proxy (AGENT_BROWSER_PROXY), which sends that site through its proxy
+and everything else straight out. A child started before a proxy was set (or after the last one
+went) is closed before its next call, so it never browses a proxied site straight out. My Chrome
+never gets a proxy.
+
+Moving a login to a server (export_login on the owner's computer, import_login on the server):
+the engine has no plain export of a keyed state (probed on 0.41.0), so Leo Bot opens its own
+bot's saved state file with its own key (core/aes_gcm.py) and seals it with the server's key
+into the server bot's state file. The bot's session is held (as for a login window) and closed
+first, so its daemon saves, and is not running, while the file is read or replaced.
+
 On a server (dashboard/deployment.py) a my_chrome bot never reaches a Chrome on that server:
 Pool.get gives it a RunnerChromeUpstream (dashboard/browser_lent.py), the turn owner's own
 Chrome through their runner, with no fallback.
@@ -55,8 +67,8 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import bots, browser, browser_engine
-from dashboard import browser_relay, deployment
+from core import aes_gcm, bots, browser, browser_engine
+from dashboard import browser_proxy, browser_relay, deployment
 from dashboard.browser_relay import MAX_SESSION, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
 
@@ -112,6 +124,13 @@ STARTUP_SECONDS = CLOSE_SECONDS + 2 * DAEMON_WAIT + 5  # the startup close's bou
 LOGIN_RETRY_MAX = 60  # longest wait between closes of a login window that outlived LOGIN_SECONDS
 TAB_RESET = ("This bot's tab in your Chrome was gone (Chrome restarted or the tab was closed), so a new empty "
              "tab was opened. This call was not performed. Open the page again.")
+MOVING = ("The owner is moving this bot's browser logins right now, so its browser is not available. Try "
+          "again in a minute.")
+BUSY = "This bot is using its browser right now. Try again when its turn has finished."
+LOGIN_OPEN = "A login window is open for this bot. Press Done there first."
+NO_LOGIN = "This bot has no saved browser login here yet. Log it in first (Log in, then Done)."
+BAD_STATE = "The saved login could not be read with this computer's key, so nothing was sent."
+MAX_LOGIN_BYTES = 1_000_000  # one bot's saved state, plain JSON: a few KB in practice
 LONG_HOME = ("The home folder path is too long for the browser engine, so the browser did not start. Ask the "
              "owner to run Leo Bot from an account with a shorter home folder path.")
 
@@ -344,8 +363,9 @@ class _Child:
             pass
 
 
-def _engine_env(session, mode, key, config, cdp=None):
-    """The child's environment (see the module docstring): an allowlist of the server's own."""
+def _engine_env(session, mode, key, config, cdp=None, proxy=None):
+    """The child's environment (see the module docstring): an allowlist of the server's own.
+    `proxy` (bot mode only) is Leo Bot's local router, never a real proxy's address."""
     env = {k: os.environ[k] for k in PARENT_ENV if k in os.environ}
     if not env.get("HOME") and _home():  # the same home state_dir and session_fits measure
         env["HOME"] = _home()
@@ -358,6 +378,8 @@ def _engine_env(session, mode, key, config, cdp=None):
                 "AGENT_BROWSER_STATE_EXPIRE_DAYS": str(STATE_EXPIRE_DAYS)})
     if mode == "bot":
         env["AGENT_BROWSER_RESTORE"] = session  # its own saved state, never another's
+        if proxy:
+            env["AGENT_BROWSER_PROXY"] = proxy
     else:
         env["AGENT_BROWSER_PIN_TAB"] = "1"
         if cdp:
@@ -393,17 +415,24 @@ class BrowserUpstream(browser_relay.Upstream):
         self._child = None
         self._binary = None
         self._cdp = None
+        self._proxy = None  # the router URL this session's browser was started with (bot mode)
         self._started = False  # a child ran since the engine session was last closed
 
     # -- the child --------------------------------------------------------------------------
 
     def _env(self, key, config, cdp=None):
-        return _engine_env(self.session, self.mode, key, config, cdp)
+        return _engine_env(self.session, self.mode, key, config, cdp, self._proxy)
 
     def _start(self, cdp=None):
         """A running child, started with the handshake and tools/list. Raises _Failed."""
+        proxy = browser_proxy.router_url(self.root) if self.mode == "bot" else None
+        if self._started and proxy != self._proxy:
+            # A proxy was set or removed since this browser started: its Chrome keeps the old
+            # one, so the session ends first (a proxied site never goes straight out).
+            self._end_session()
         if self._child is not None and self._child.proc.poll() is None:
             return self._child
+        self._proxy = proxy
         self._drop()
         if self._after is not None:  # the bot's previous browser must be closed first
             self._after._done.wait(CALL_SECONDS + 2 * CLOSE_SECONDS)
@@ -657,8 +686,8 @@ def _close_session(up):
 class _Login:
     """One owner login window: its own token, and an event that stops its watcher."""
 
-    def __init__(self, ws, bot, epoch, root):
-        self.ws, self.bot, self.epoch, self.root = ws, bot, epoch, root
+    def __init__(self, ws, bot, epoch, root, line=LOGGING_IN):
+        self.ws, self.bot, self.epoch, self.root, self.line = ws, bot, epoch, root, line
         self.token = secrets.token_hex(8)
         self.stop = threading.Event()
 
@@ -702,9 +731,11 @@ class Pool:
                 return BrowserUpstream(ws, bot, mode, root, stopped=True, epoch=e)
             if mode == "my_chrome" and deployment.mode() == "server":
                 return self._lent_get(ws, bot, root, e, ctx or {})
-            if mode == "bot" and session_name(ws, bot, "bot", e) in self._logins:
-                # The owner's login window drives this session: the bot never sees that page.
-                return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=LOGGING_IN, epoch=e)
+            held = self._logins.get(session_name(ws, bot, "bot", e)) if mode == "bot" else None
+            if held is not None:
+                # The owner's login window drives this session (the bot never sees that page),
+                # or its login is being moved.
+                return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=held.line, epoch=e)
             up = self._items.get((ws, bot))
             if up is not None and (up.mode != mode or str(up.root) != str(root) or up.closed or up.epoch != e):
                 old, up = up, None
@@ -835,6 +866,25 @@ class Pool:
             up = self._items.pop((ws, bot), None)
         return sess, up, login.token
 
+    def hold(self, ws, bot, epoch, root):
+        """Hold this bot's bot-mode session for a login move (export or import): like
+        begin_login, every call of the bot in bot mode answers MOVING meanwhile. Refused (raises
+        _Failed) while a login window is open or a call of the bot is in flight. Returns
+        (session, the bot's upstream to close, token); end it with end_login."""
+        sess = session_name(ws, bot, "bot", epoch)
+        with self._lock:
+            if self._stopping:
+                raise _Failed(STOPPING)
+            if sess in self._logins:
+                raise _Failed(LOGIN_OPEN if self._logins[sess].line == LOGGING_IN else MOVING)
+            up = self._items.get((ws, bot))
+            if up is not None and up._lock.locked():
+                raise _Failed(BUSY)
+            login = _Login(ws, bot, epoch, root, line=MOVING)
+            self._logins[sess] = login
+            self._items.pop((ws, bot), None)
+        return sess, up, login.token
+
     def end_login(self, sess, token):
         """End this login (by its token) and stop its watcher. A newer login of the session stays."""
         with self._lock:
@@ -852,12 +902,13 @@ class Pool:
     def logins(self):
         """[(ws, bot)] with a login window open now."""
         with self._lock:
-            return sorted((x.ws, x.bot) for x in self._logins.values())
+            return sorted((x.ws, x.bot) for x in self._logins.values() if x.line == LOGGING_IN)
 
     def login_session(self, ws, bot):
         """(session, token) of this bot's open login window, or None."""
         with self._lock:
-            return next(((s, x.token) for s, x in self._logins.items() if (x.ws, x.bot) == (ws, bot)), None)
+            return next(((s, x.token) for s, x in self._logins.items()
+                         if (x.ws, x.bot) == (ws, bot) and x.line == LOGGING_IN), None)
 
     def open_login(self, sess, token, up, url, root, home=None):
         """Close the bot's own child (`up`, from begin_login) and any daemon left of its session,
@@ -882,7 +933,7 @@ class Pool:
             if not session_fits(sess, home):
                 raise _Failed(LONG_HOME)
             config, cwd = engine_dirs(root)
-            env = _engine_env(sess, "bot", key, config)
+            env = _engine_env(sess, "bot", key, config, proxy=browser_proxy.router_url(root))
             env["AGENT_BROWSER_HEADED"] = "true"  # the owner sees the window
             # A person logging in sends the engine no commands: its idle timer must outlast them.
             env["AGENT_BROWSER_IDLE_TIMEOUT_MS"] = str(LOGIN_SECONDS * 1000)
@@ -983,6 +1034,7 @@ class Pool:
             t.join(max(0.0, deadline - time.monotonic()))
         for up in items:
             up._done.set()
+        browser_proxy.close_all()
 
 
 def state_dir(home=None):
@@ -1293,6 +1345,145 @@ def sweep_orphans(root, home=None):
     left = {parse_session(s)[1] for s in found_sessions(home)}
     browser.clear_retired([e for e in browser.retired(root) if e not in left], root)
     return orphans
+
+
+# -- moving a bot's login to a server ----------------------------------------------------------
+
+_COOKIE_KEYS = ("name", "value", "domain", "path", "expires", "size", "httpOnly", "secure", "session",
+                "sameSite", "priority", "sameParty", "sourceScheme", "sourcePort", "partitionKey")
+
+
+def _cookie_host(cookie):
+    return cookie["domain"].lstrip(".") if isinstance(cookie.get("domain"), str) else ""
+
+
+def clean_state(data, root, listed=None):
+    """(state, dropped sites) from a state dict: only the engine's own fields of cookies and
+    origins (probed on 0.41.0), and nothing of a site bound to My Chrome here (its login is the
+    owner's own and never in two places). Raises ValueError on any other shape."""
+    if not isinstance(data, dict) or not isinstance(data.get("cookies", []), list) \
+            or not isinstance(data.get("origins", []), list):
+        raise ValueError("not a saved browser state")
+    listed = browser.sites(root) if listed is None else listed
+    mine = {h for h, row in listed.items() if row.get("mode") == "my_chrome"}
+    dropped = set()
+
+    def blocked(host):
+        site = browser.site_of("http://" + host + "/", root, listed) if host else None
+        if site in mine:
+            dropped.add(site)
+            return True
+        return False
+    cookies = []
+    for c in data.get("cookies", []):
+        if not (isinstance(c, dict) and all(isinstance(c.get(k), str) for k in ("name", "value", "domain"))):
+            raise ValueError("not a saved browser state")
+        row = {k: c[k] for k in _COOKIE_KEYS if k in c and isinstance(c[k], (str, int, float, bool, dict))}
+        if not blocked(_cookie_host(row)):
+            cookies.append(row)
+    origins = []
+    for o in data.get("origins", []):
+        if not (isinstance(o, dict) and isinstance(o.get("origin"), str)):
+            raise ValueError("not a saved browser state")
+        row = {"origin": o["origin"]}
+        for kind in ("localStorage", "sessionStorage"):
+            items = o.get(kind, [])
+            if not isinstance(items, list) or not all(
+                    isinstance(i, dict) and isinstance(i.get("name"), str) and isinstance(i.get("value"), str)
+                    for i in items):
+                raise ValueError("not a saved browser state")
+            row[kind] = [{"name": i["name"], "value": i["value"]} for i in items]
+        if not blocked(browser.host_of(o["origin"]) or ""):
+            origins.append(row)
+    return {"cookies": cookies, "origins": origins}, sorted(dropped)
+
+
+def _held_close(up):
+    """The bot's own child, taken out by Pool.hold: closed now (its daemon saves its state)."""
+    if up is not None:
+        up.kill(MOVING)
+        _close_session(up)
+        up._done.set()
+
+
+def export_login(ws, bot, root, home=None, pool=None):
+    """This bot's saved bot-browser logins as plain state JSON (bytes), to move to a server.
+    The session is held and closed first. Nothing of a site bound to My Chrome is in it.
+    Returns (bytes, dropped sites). Raises _Failed with the line the owner sees."""
+    pool = POOL if pool is None else pool
+    epoch = browser.epochs(root).get(ws)
+    if epoch is None:
+        raise _Failed(NO_LOGIN)
+    sess, up, token = pool.hold(ws, bot, epoch, root)
+    try:
+        _held_close(up)
+        if not _settle_one(sess, "bot", root, home):
+            raise _Failed("This bot's browser is still closing. Try again in a minute.")
+        key = _read_key(root)
+        if key is None:
+            raise _Failed(NO_KEY)
+        path = state_dir(home) / f"{sess}-{sess}.json.enc"
+        try:
+            if path.is_symlink():
+                raise _Failed(NO_LOGIN)
+            blob = path.read_bytes()
+        except FileNotFoundError:
+            raise _Failed(NO_LOGIN) from None
+        except OSError:
+            raise _Failed(BAD_STATE) from None
+        if len(blob) > MAX_LOGIN_BYTES + aes_gcm.NONCE + aes_gcm.TAG:
+            raise _Failed("This bot's saved logins are too large to move.")
+        try:
+            state, dropped = clean_state(json.loads(aes_gcm.open_file(key, blob)), root)
+        except ValueError:
+            raise _Failed(BAD_STATE) from None
+        if not state["cookies"] and not any(o["localStorage"] or o["sessionStorage"] for o in state["origins"]):
+            raise _Failed(NO_LOGIN)
+        return json.dumps(state).encode(), dropped
+    finally:
+        pool.end_login(sess, token)
+
+
+def import_login(ws, bot, blob, root, epoch, home=None, pool=None):
+    """Replace this bot's saved bot-browser logins with `blob` (plain state JSON from
+    export_login), sealed with this data root's key straight into the engine's state file: no
+    plain copy is written. The session is held and closed first; a call in flight or an open
+    login window refuses it. Returns (cookies saved, dropped sites). Raises _Failed."""
+    pool = POOL if pool is None else pool
+    if not isinstance(blob, (bytes, bytearray)) or len(blob) > MAX_LOGIN_BYTES:
+        raise _Failed("The login is too large to save here.")
+    try:
+        state, dropped = clean_state(json.loads(bytes(blob)), root)
+    except ValueError:
+        raise _Failed("The login could not be read, so nothing was saved.") from None
+    key = _read_key(root)
+    if key is None:
+        raise _Failed(NO_KEY)
+    sess, up, token = pool.hold(ws, bot, epoch, root)
+    try:
+        _held_close(up)
+        if not _settle_one(sess, "bot", root, home):
+            raise _Failed("This bot's browser is still closing. Try again in a minute.")
+        if not session_fits(sess, home):
+            raise _Failed(LONG_HOME)
+        sealed = aes_gcm.seal_file(key, secrets.token_bytes(aes_gcm.NONCE), json.dumps(state, indent=2).encode())
+        folder = state_dir(home)
+        folder.mkdir(parents=True, exist_ok=True)
+        forget_sessions([sess], home)  # replaces it: no older file of this session is restored
+        fd, tmp = tempfile.mkstemp(dir=folder, prefix=".leobot-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(sealed)
+            os.replace(tmp, folder / f"{sess}-{sess}.json.enc")
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise _Failed("The login could not be saved here.") from None
+        return len(state["cookies"]), dropped
+    finally:
+        pool.end_login(sess, token)
 
 
 POOL = Pool()

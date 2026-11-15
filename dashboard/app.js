@@ -1537,6 +1537,9 @@ function browserSiteRowHtml(s, maxDaily){
   return `<div class="post brw-site" data-site="${esc(s.site)}"><div class="t"><b>${esc(s.site)}</b></div>
     <label>Opens in <select data-site-mode>${opens.map(([v, l]) => `<option value="${v}"${(s.mode || "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
     <label>Daily limit <input data-site-daily type="number" min="1" max="${+maxDaily || 500}" step="1" inputmode="numeric" placeholder="None" value="${s.daily ? esc(String(s.daily)) : ""}" aria-label="Daily limit for ${esc(s.site)} (empty: none)"></label>
+    ${s.mode === "my_chrome" ? "" : s.proxy
+      ? `<span class="brw-proxy"><small>Proxy: ${esc(s.proxy)}</small><button class="more" data-site-proxy-rm>Remove proxy</button></span>`
+      : `<label>Proxy <input data-site-proxy type="password" placeholder="http://proxy.example:3128" autocomplete="new-password" spellcheck="false" aria-label="Proxy for ${esc(s.site)}, bot browser only, an http address with user:password@ before the host if it needs one (empty: none)"></label>`}
     <button class="more" data-site-rm>Remove</button></div>`;
 }
 // Is this site already in the list? Same reading as the server: lowercase, no scheme, path or trailing dot.
@@ -1838,7 +1841,7 @@ async function renderBrowserSettings(){
         <div class="eng-detail">${esc(ready ? e.detail : e.installing ? "This can take a few minutes: it also downloads its own Chrome." : e.detail || "")}</div>${failed}</div>
         ${ready ? "" : `<div class="eng-actions"><button class="btn sm primary" data-brw-install${e.installing ? " disabled" : ""}>${e.installing ? "Installing" : "Install"}</button></div>`}</div></section>`;
     const sites = `<section class="integ-group"><h3>Sites</h3>
-      <div class="help">A listed site can set where it opens for every bot, and a daily limit on sends there across all bots. Bot's choice: each bot's own setting.</div>
+      <div class="help">A listed site can set where it opens for every bot, and a daily limit on sends there across all bots. Bot's choice: each bot's own setting. A proxy sends that site's traffic from the bot browser through it (not My Chrome). Its password is never shown again.</div>
       <div class="rowc">${(d.sites || []).map(s => browserSiteRowHtml(s, d.max_daily)).join("") || `<div class="empty">No sites listed.</div>`}</div>
       <form class="share-form brw-add"><input name="site" placeholder="site, like example.com" aria-label="Site to add" autocomplete="off"><button class="btn" type="submit">Add site</button></form></section>`;
     const chrome = `<section class="integ-group"><h3>My Chrome</h3>${chromeCheckHtml(d.chrome, d.deployment === "server")}</section>`;
@@ -1848,12 +1851,13 @@ async function renderBrowserSettings(){
       const mine = set.mode === "my_chrome";
       const act = mine ? `<small>Uses your Chrome, with your own logins.</small>`
         : open.has(b.id) ? `<span class="tag">Window open</span><button class="btn sm primary" data-login-done="${esc(b.id)}">Done</button>`
-        : `<input data-login-url="${esc(b.id)}" type="url" placeholder="https://" aria-label="Page to log in on for ${esc(b.name)}" autocomplete="off"><button class="btn sm" data-login="${esc(b.id)}">Log in</button>`;
+        : `<input data-login-url="${esc(b.id)}" type="url" placeholder="https://" aria-label="Page to log in on for ${esc(b.name)}" autocomplete="off"><button class="btn sm" data-login="${esc(b.id)}">Log in</button><button class="btn sm" data-login-send="${esc(b.id)}" title="Send this bot's saved logins to your Leo Bot server, through this computer's runner">Send to server</button>`;
       return `<div class="post brw-login"><div class="t"><b>${esc(b.name)}</b><small>${esc(browserLevelLabel(set.level))} · ${esc(browserModeLabel(set.mode))}</small></div>${act}</div>`;
     };
     const logins = d.deployment === "server"
-      ? `<div class="help">A login opens a window on the machine Leo Bot runs on, so it is not available on a server yet.</div>`
+      ? `<div class="help">A login opens a window on the machine Leo Bot runs on, so it is not made on a server. Log the bot in on your computer's Leo Bot, then press Send to server there: the same bot here gets its logins.</div>`
       : `<div class="help">Log a bot in to a site once: a window of that bot's own browser opens on this Mac. Log in there, then press Done here: closing the window is not enough, Chrome keeps running on a Mac. The bot keeps the login for its later runs. While the window is open, that bot cannot use its browser.</div>
+        <div class="help">Send to server: the same bot on your Leo Bot server gets this bot's saved logins (they replace its own there), through this computer's runner. Start the runner once with --server and --token-file first. Logins of sites that open in My Chrome are never sent.</div>
         <label class="brw-ws">Workspace <select data-login-ws>${(wsList.workspaces || []).map(w => `<option value="${esc(w.id)}"${w.id === loginWs ? " selected" : ""}>${esc(w.name)}</option>`).join("")}</select></label>
         <div class="rowc">${teamBots.filter(b => b.active).map(botRow).join("") || `<div class="empty">No bots on in this workspace.</div>`}</div>`;
     box.innerHTML = engine + sites + chrome + `<section class="integ-group"><h3>Logins</h3>${logins}</section>`;
@@ -1871,6 +1875,10 @@ async function renderBrowserSettings(){
       const save = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null });
       mode.onchange = save;
       daily.onchange = save;
+      const proxy = row.querySelector("[data-site-proxy]");
+      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: proxy.value.trim() }); };
+      const proxyRm = row.querySelector("[data-site-proxy-rm]");
+      if (proxyRm) proxyRm.onclick = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: null });
       row.querySelector("[data-site-rm]").onclick = ev => {
         const b = ev.currentTarget;
         if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again: it then has no daily limit"; return; }
@@ -1894,6 +1902,15 @@ async function renderBrowserSettings(){
       b.disabled = true;
       try { await jpost("/api/browser/login", { ws: loginWs, bot: b.dataset.login, url }); toast("Login window opened on this Mac"); }
       catch (err) { toast("✗ " + err.message); }
+      draw();
+    });
+    box.querySelectorAll("[data-login-send]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await jpost("/api/browser/login/send", { ws: loginWs, bot: b.dataset.loginSend });
+        const skipped = (r.sent?.skipped || []).length ? ` (not sent: ${r.sent.skipped.join(", ")}, they open in My Chrome)` : "";
+        toast(`Logins sent to the server${skipped}`);
+      } catch (err) { toast("✗ " + err.message); }
       draw();
     });
     box.querySelectorAll("[data-login-done]").forEach(b => b.onclick = async () => {

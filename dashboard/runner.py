@@ -14,6 +14,11 @@ With it on, a My Chrome bot on the server uses its own tab of this computer's Ch
 through this runner. The server's gate decides what may run; each call is checked again
 here (dashboard/browser_lent.runner_check) before Chrome sees it. `--browser-only` lends
 Chrome and takes no turns (your turns then run on the server's engine).
+
+Moving a bot browser login to the server: the runner saves the server address and the token
+file's path (never the token) in its settings file when it connects. Settings, Browser, "Send
+to server" on this computer's Leo Bot then sends that bot's saved login with send_login, on
+the runner's own token and the same https-only, no-redirect client.
 """
 import argparse
 import atexit
@@ -142,20 +147,73 @@ def lend_on(path=SETTINGS_FILE):
     return isinstance(data, dict) and data.get("lend_chrome") is True
 
 
-def set_lend(path, on):
+def _save_settings(path, **changes):
     path = Path(path)
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         data = {}
     data = data if isinstance(data, dict) else {}
-    data["lend_chrome"] = bool(on)
+    data.update(changes)
     tmp = path.with_name(path.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         json.dump(data, f)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def set_lend(path, on):
+    _save_settings(path, lend_chrome=bool(on))
+
+
+def set_connection(path, server, token_file):
+    """The server and token file this runner connects with, for send_login (no token here)."""
+    _save_settings(path, server=server, token_file=str(Path(token_file).expanduser().resolve()))
+
+
+NO_RUNNER = ("This computer has no runner set up for a server yet. Start the runner once with --server and "
+             "--token-file, then send again.")
+
+
+def connection(path=SETTINGS_FILE):
+    """(Client, server) from the saved connection, or raises ValueError with the line to show."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        raise ValueError(NO_RUNNER) from None
+    if not isinstance(data, dict) or not isinstance(data.get("server"), str) or not isinstance(data.get("token_file"), str):
+        raise ValueError(NO_RUNNER)
+    server = server_url(data["server"])
+    token_file = Path(data["token_file"])
+    try:
+        if token_file.stat().st_mode & 0o077:
+            raise ValueError(f"The runner token file can be read by other users. Run: chmod 600 {token_file}")
+        token = token_file.read_text().strip()
+    except OSError:
+        raise ValueError("The runner token file could not be read. Start the runner again with --token-file.") from None
+    if not token:
+        raise ValueError(NO_RUNNER)
+    return Client(server, token), server
+
+
+def send_login(ws, bot, state, path=SETTINGS_FILE, timeout=120):
+    """Send one bot's saved login (plain state JSON, bytes) to the server on this runner's
+    token. Returns the server's answer; raises ValueError with the line to show."""
+    client, server = connection(path)
+    try:
+        return client.post("/api/runner/browser-login", {"ws": ws, "bot": bot, "state": state.decode()},
+                           timeout=timeout)
+    except urllib.error.HTTPError as e:
+        try:
+            line = json.loads(e.read() or b"{}").get("error")
+        except (OSError, ValueError, AttributeError):
+            line = None
+        if e.code in (401, 403) and not line:
+            line = "The server refused this computer's runner token. Create a new one in Leo Bot."
+        raise ValueError(str(line) if line else f"The server did not take the login (HTTP {e.code}).") from None
+    except (urllib.error.URLError, OSError, ValueError):
+        raise ValueError(f"Could not reach {server}. Check that it is up, then send again.") from None
 
 
 def check_browser_job(job):
@@ -394,6 +452,7 @@ def main(argv=None):
     except OSError as e:
         sys.exit(f"Could not read the token file: {e}")
     client = Client(server, token)
+    set_connection(settings, server, token_file)  # Settings, Browser, "Send to server" uses it
     engine = None
     if not args.browser_only:
         engine = ClaudeCodeEngine(args.claude_bin)

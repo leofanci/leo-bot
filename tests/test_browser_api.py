@@ -198,11 +198,11 @@ class Settings(Base):
     def test_sites_add_change_remove(self):
         code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "my_chrome", "daily": "7"})
         self.assertEqual(code, 200, data)
-        self.assertIn({"site": HOST, "mode": "my_chrome", "daily": 7}, data["sites"])
+        self.assertIn({"site": HOST, "mode": "my_chrome", "daily": 7, "proxy": None}, data["sites"])
         for bad in ({"daily": 0}, {"daily": 501}, {"daily": "lots"}, {"daily": True}, {"mode": "tab"}):
             self.assertEqual(request("POST", "/api/browser/settings", {"site": HOST, "mode": None, **bad})[0], 400, bad)
         data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "", "daily": ""})[1]
-        self.assertIn({"site": HOST, "mode": None, "daily": None}, data["sites"])
+        self.assertIn({"site": HOST, "mode": None, "daily": None, "proxy": None}, data["sites"])
         code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": None, "daily": None, "add": True})
         self.assertEqual(code, 400, data)  # an add never wipes a listed row
         self.assertIn("already listed", data["error"])

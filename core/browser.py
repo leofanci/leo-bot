@@ -1,7 +1,10 @@
 """browser.py: bot browser settings, in gitignored team/browser.json.
 
   bots.<ws>.<bot>   {"level": "off"|"read"|"write"|"act", "mode": "bot"|"my_chrome"}
-  sites.<host>      {"mode": None|"bot"|"my_chrome", "daily": None|1..500}
+  sites.<host>      {"mode": None|"bot"|"my_chrome", "daily": None|1..500, "proxy": optional URL}
+                    the proxy (an http address: host and port, user:password@ before the host
+                    when it needs one) is used by the bot browser only
+                    (dashboard/browser_proxy.py) and is never shown: Settings reads mask_proxy
   epochs.<ws>       six hex, made on first use, removed with the workspace: part of every engine
                     session name there, so a recreated slug never reaches an old browser or login
   retired           epochs of deleted workspaces whose sessions may still be on disk: the only
@@ -115,9 +118,70 @@ def _host(value):
     return host.rstrip(".") if host else None
 
 
-def set_site(host, mode, daily, root=bots.ROOT, new=False):
-    """Set a site's mode and daily limit. `new`: adding it, refused when it is listed already
-    (so an add never wipes an existing row)."""
+PROXY_MAX = 500
+PROXY_ONLY_BOT = ("A proxy is used only by the bot browser. Set this site to Bot browser or leave its mode "
+                  "empty, or remove the proxy.")
+PROXY_FORM = ("Give the proxy as an http address with its host and port, and user:password@ before the "
+              "host when it needs one.")
+
+
+def _proxy(value):
+    """A proxy URL as stored: http, a host and a port, nothing after it. None for no proxy.
+    The error never repeats the value (it may hold a password)."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if not isinstance(value, str) or len(value) > PROXY_MAX:
+        raise ValueError(PROXY_FORM)
+    text = value.strip()
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in text):
+        raise ValueError(PROXY_FORM)
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        raise ValueError(PROXY_FORM) from None
+    if (parts.scheme.lower() != "http" or not parts.hostname or not port
+            or parts.path not in ("", "/") or parts.query or parts.fragment):
+        raise ValueError(PROXY_FORM)
+    return text
+
+
+def mask_proxy(url):
+    """A proxy URL safe to show: its password replaced by ***. None stays None."""
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        parts = urlsplit(url)
+        host, port, user = parts.hostname or "", parts.port, parts.username
+    except ValueError:
+        return "(set)"
+    host = f"[{host}]" if ":" in host else host
+    who = (user + (":***" if parts.password is not None else "") + "@") if user is not None else ""
+    return f"{parts.scheme}://{who}{host}" + (f":{port}" if port else "")
+
+
+def site_proxies(root=bots.ROOT):
+    """{site: proxy URL} of the listed sites with a proxy, unmasked: for the proxy router only."""
+    stored = load(root).get("sites")
+    if not isinstance(stored, dict):
+        return {}
+    out = {}
+    for host, row in stored.items():
+        row = _dict(row)
+        if isinstance(host, str) and row.get("mode") != "my_chrome":
+            try:
+                p = _proxy(row.get("proxy"))
+            except ValueError:
+                p = None
+            if p:
+                out[host] = p
+    return out
+
+
+def set_site(host, mode, daily, root=bots.ROOT, new=False, proxy=None):
+    """Set a site's mode, daily limit and proxy (None: no proxy). `new`: adding it, refused
+    when it is listed already (so an add never wipes an existing row). A proxy is refused on a
+    site bound to My Chrome: only the bot browser uses it."""
     name = _host(host)
     if not name or "." not in name:
         raise ValueError("host required")
@@ -125,7 +189,12 @@ def set_site(host, mode, daily, root=bots.ROOT, new=False):
         raise ValueError("unknown mode")
     if daily is not None and (isinstance(daily, bool) or not isinstance(daily, int) or not 1 <= daily <= MAX_DAILY):
         raise ValueError("daily must be 1 to %d" % MAX_DAILY)
+    proxy = _proxy(proxy)
+    if proxy and mode == "my_chrome":
+        raise ValueError(PROXY_ONLY_BOT)
     row = {"mode": mode, "daily": daily}
+    if proxy:
+        row["proxy"] = proxy
 
     def fn(d):
         if not isinstance(d.get("sites"), dict):
@@ -134,7 +203,10 @@ def set_site(host, mode, daily, root=bots.ROOT, new=False):
             raise ValueError(f"{name} is already listed. Change it in its row.")
         d["sites"][name] = row
     _update(root, fn)
-    return dict(row)
+    out = dict(row)
+    if proxy:
+        out["proxy"] = mask_proxy(proxy)
+    return out
 
 
 def remove_site(host, root=bots.ROOT):

@@ -1426,10 +1426,13 @@ def _browser_view(ws=None):
     with `ws`, that workspace's bot levels and modes. Owner only (the caller checked)."""
     with _BROWSER_INSTALL_LOCK:
         install = dict(_BROWSER_INSTALL)
+    proxies = browser.site_proxies(ROOT)
     out = {"engine": {**browser_engine.status(), "version": browser_engine.VERSION,
                       "installing": install["running"], "last_install": install["last"]},
            "levels": list(browser.LEVELS), "modes": list(browser.MODES), "max_daily": browser.MAX_DAILY,
-           "sites": [{"site": host, **row} for host, row in sorted(browser.sites(ROOT).items())],
+           # A site's proxy is shown masked (core/browser.mask_proxy): its password never leaves here.
+           "sites": [{"site": host, **row, "proxy": browser.mask_proxy(proxies.get(host))}
+                     for host, row in sorted(browser.sites(ROOT).items())],
            # On a server, My Chrome is the owner's own Chrome lent by their runner (browser_lent).
            "chrome": (bool(runners.HUB.lenders("owner")) if DEPLOYMENT == "server"
                       else browser_upstream.find_chrome_debug_url() is not None),
@@ -1479,6 +1482,8 @@ def _browser_login(ws, bot_id, url):
         raise LookupError("unknown workspace")
     epoch, held = begun
     if held is None:
+        if browser_upstream.POOL.login_session(ws, bot_id) is None:
+            raise _AppRefused(browser_upstream.MOVING)
         raise _AppRefused("A login window is already open for this bot. Press Done there first.")
     sess, up, token = held
     try:
@@ -1489,6 +1494,71 @@ def _browser_login(ws, bot_id, url):
         browser_upstream.POOL.close_login(sess, ROOT, token)
         raise LookupError("unknown workspace")
     return _browser_view(ws)
+
+
+def _browser_site_proxy(site, body):
+    """The proxy a site row saves: the body's when it names one ("" or null removes it), else
+    the one it has (a change of mode or limit keeps it). A masked value is never saved back."""
+    if "proxy" not in body:
+        name = browser._host(site) if isinstance(site, str) else None
+        return browser.site_proxies(ROOT).get(name) if name else None
+    proxy = body.get("proxy")
+    if isinstance(proxy, str) and "***" in proxy:
+        raise ValueError("Type the proxy's full address with its password, or leave the field empty.")
+    return proxy
+
+
+def _browser_send_login(ws, bot_id):
+    """Settings, Browser, "Send to server" on the owner's computer: this bot's saved login goes to
+    the server through this computer's runner (dashboard/runner.send_login). The plain state
+    stays in memory here; the server seals it with its own key."""
+    from dashboard import runner
+    if browser.bot_setting(ws, bot_id, ROOT)["mode"] == "my_chrome":
+        raise _AppRefused("This bot uses your Chrome, which has your own logins. Nothing to send.")
+    try:
+        state, dropped = browser_upstream.export_login(ws, bot_id, ROOT)
+    except browser_upstream._Failed as e:
+        raise _AppRefused(str(e)) from None
+    try:
+        answer = runner.send_login(ws, bot_id, state, runner.SETTINGS_FILE)
+    except ValueError as e:
+        raise _AppRefused(str(e)) from None
+    if not isinstance(answer, dict) or not answer.get("ok"):
+        raise _AppRefused(str((answer or {}).get("error") or "The server did not take the login."))
+    skipped = sorted(set(dropped) | set(answer.get("dropped") or []))
+    return {**_browser_view(ws), "sent": {"bot": bot_id, "cookies": answer.get("cookies"), "skipped": skipped}}
+
+
+def _browser_receive_login(owner, body):
+    """POST /api/runner/browser-login: a login made on the owner's computer, from the owner's
+    own runner. Same workspace slug and bot id here; bot mode only; replaced only while the bot
+    is not using its browser. Returns (status, body)."""
+    if owner != "owner":
+        return 403, {"error": "Only the owner's runner can send a bot browser login."}
+    try:
+        ws, bot_id = _browser_bot(body)
+    except (ValueError, LookupError):
+        return 404, {"error": "This server has no such workspace or bot. Use the same workspace and bot as on "
+                              "your computer."}
+    if not _workspace_exists(ws):
+        return 404, {"error": "This server has no such workspace or bot. Use the same workspace and bot as on "
+                              "your computer."}
+    if browser.bot_setting(ws, bot_id, ROOT)["mode"] == "my_chrome":
+        return 409, {"error": "This bot uses My Chrome on the server, so it has no login of its own. Set it to "
+                              "Bot browser there first."}
+    state = body.get("state")
+    if not isinstance(state, str) or len(state) > browser_upstream.MAX_LOGIN_BYTES:
+        return 400, {"error": "The login is missing or too large."}
+    epoch = browser.with_epoch(ws, lambda: _workspace_exists(ws), lambda e: e, ROOT)
+    if epoch is None:
+        return 404, {"error": "This server has no such workspace or bot."}
+    try:
+        count, dropped = browser_upstream.import_login(ws, bot_id, state.encode(), ROOT, epoch)
+    except browser_upstream._Failed as e:
+        return 409, {"error": str(e)}
+    if browser.epochs(ROOT).get(ws) != epoch:  # the workspace was deleted meanwhile: its tidy forgets it
+        return 404, {"error": "This server has no such workspace or bot."}
+    return 200, {"ok": True, "cookies": count, "dropped": dropped}
 
 
 def _workspace_exists(ws):
@@ -2826,6 +2896,9 @@ class Handler(BaseHTTPRequestHandler):
             events = body.get("events") if isinstance(body.get("events"), list) else []
             stop = runners.HUB.events(rec["id"], turn_id, events, end=bool(body.get("end")))
             return self._send(200, {"cancel": stop})
+        if path == "/api/runner/browser-login":  # a bot browser login from the owner's computer
+            code, out = _browser_receive_login(rec["owner"], body)
+            return self._send(code, out)
         return self._send(404, {"error": "unknown endpoint"})
 
     def _runners_post(self, path, body, owner):
@@ -2923,7 +2996,8 @@ class Handler(BaseHTTPRequestHandler):
                     browser.remove_site(site, ROOT)
                 else:
                     mode = body.get("mode") or None
-                    browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT, new=bool(body.get("add")))
+                    browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT, new=bool(body.get("add")),
+                                     proxy=_browser_site_proxy(site, body))
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
@@ -2934,6 +3008,15 @@ class Handler(BaseHTTPRequestHandler):
                     _BROWSER_INSTALL.update(running=True, last=None)
                     threading.Thread(target=_browser_install_run, name="browser-install", daemon=True).start()
             return self._send(202, _browser_view())
+        if path == "/api/browser/login/send":
+            # The login of this computer's bot browser, to the server: from this machine only.
+            if not self._local_request() or DEPLOYMENT == "server":
+                return self._send(403, {"error": "Send a login from the computer it was made on."})
+            ws, bot_id = _browser_bot(body)
+            try:
+                return self._send(200, _browser_send_login(ws, bot_id))
+            except _AppRefused as e:
+                return self._send(409, {"ok": False, "error": str(e)})
         if path in ("/api/browser/login", "/api/browser/login/done"):
             # A window opens on this machine's screen: from this machine only, never a server.
             if not self._local_request() or DEPLOYMENT == "server":
@@ -3704,6 +3787,9 @@ class Handler(BaseHTTPRequestHandler):
                         emit({"tool": payload})
                     elif kind == "error":
                         emit({"error": payload})
+                        # Saved on the reply too: a reload keeps why it stopped (a handed-off run
+                        # that failed would otherwise vanish without a trace).
+                        msg.setdefault("notices", []).append(f"Run failed: {str(payload)[:300]}")
                         failed = True
                     elif kind == "done":
                         fin = payload or {}
