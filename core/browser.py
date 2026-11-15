@@ -231,7 +231,8 @@ def epoch(ws, root=bots.ROOT):
         e = rows.get(ws)
         if isinstance(e, str) and EPOCH_RE.fullmatch(e):
             return e
-        taken = {v for v in rows.values() if isinstance(v, str)}
+        old = d.get("retired") if isinstance(d.get("retired"), list) else []
+        taken = {v for v in list(rows.values()) + old if isinstance(v, str)}  # never a retired one
         e = secrets.token_hex(3)
         while e in taken:
             e = secrets.token_hex(3)

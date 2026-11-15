@@ -1407,6 +1407,13 @@ def _browser_upstream(ctx):
     return browser_upstream.POOL.get(ctx["ws"], ctx["bot"], mode, ROOT)
 
 
+def _tidy_browsers(ws, epoch, bot_ids, killed):
+    try:
+        browser_upstream.POOL.tidy_workspace(ws, epoch, bot_ids, ROOT, ups=killed)
+    except Exception:  # noqa: BLE001 - the delete stands; the start sweep catches what is left
+        traceback.print_exc()
+
+
 def _sweep_browser_orphans():
     try:
         browser_upstream.sweep_orphans(ROOT)
@@ -3646,6 +3653,7 @@ class Handler(BaseHTTPRequestHandler):
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
                            "apps_port": self.server.server_address[1]})
             if st_.browse and not st_.locked:  # its own token: pages it reads mark the turn as outside content
+                browser.epoch(ws, ROOT)  # made here, while the workspace surely exists (never by a frame)
                 kw.update({"browser_token": BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
@@ -4446,10 +4454,12 @@ class Handler(BaseHTTPRequestHandler):
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
                 # Tidying only: its old-epoch browsers close and their saved logins go. A reused slug
                 # has a new epoch, so it never reaches them whatever is left (the startup sweep).
-                try:
-                    browser_upstream.POOL.tidy_workspace(out["slug"], old_epoch, browsed, ROOT)
-                except Exception:  # noqa: BLE001 - the delete stands
-                    traceback.print_exc()
+                # Its children are killed now; their engine close and the rest of the tidy run in the
+                # background (a hanging close never holds the request).
+                if old_epoch:
+                    killed = browser_upstream.POOL.kill_where(out["slug"], old_epoch)
+                    threading.Thread(target=_tidy_browsers, args=(out["slug"], old_epoch, browsed, killed),
+                                     name="browser-tidy", daemon=True).start()
                 runners.HUB.drop_workspace(out["slug"])  # queued or running runner turns there, anyone's
                 for pid in list(_PERSON_CHATS):
                     stop_person_chat(pid, out["slug"])

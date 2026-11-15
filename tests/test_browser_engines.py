@@ -485,14 +485,46 @@ class Epochs(Root):
 
     def test_pool_replaces_a_child_of_an_old_epoch(self):
         pool = browser_upstream.Pool()
+        browser.epoch("acme", self.root)  # a turn's mint made it
         with mock.patch.object(browser_upstream.BrowserUpstream, "_engine_close"):
             old = pool.get("acme", "b1", "bot", self.root)
             self.assertIs(pool.get("acme", "b1", "bot", self.root), old)
             browser.forget_workspace("acme", self.root)
+            browser.epoch("acme", self.root)  # recreated: its first turn mints a new one
             new = pool.get("acme", "b1", "bot", self.root)
         self.assertIsNot(new, old)
         self.assertTrue(old.closed)
         self.assertNotEqual(new.session, old.session)
+
+    def test_a_frame_after_delete_makes_no_epoch_and_no_child(self):
+        pool = browser_upstream.Pool()
+        browser.epoch("acme", self.root)
+        browser.forget_workspace("acme", self.root)
+        with mock.patch.object(browser_upstream.BrowserUpstream, "_start") as start:
+            up = pool.get("acme", "b1", "bot", self.root)
+            reply, _ = up.forward({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                   "params": {"name": P + "open", "arguments": {}}}, None)
+        start.assert_not_called()
+        self.assertTrue(up.closed)
+        self.assertIn(browser_upstream.WS_DELETED, json.dumps(reply))
+        self.assertNotIn("acme", browser.epochs(self.root))
+        self.assertEqual(pool._items, {})
+        # The relay's own key fallback only reads epochs too.
+        browser_relay._keys_of(browser_relay.Upstream(), "bot", {"ws": "acme", "bot": "b1"}, self.root)
+        self.assertNotIn("acme", browser.epochs(self.root))
+
+    def test_a_retired_epoch_is_never_made_again(self):
+        with mock.patch.object(browser.secrets, "token_hex", side_effect=["aaaaaa", "aaaaaa", "bbbbbb"]):
+            self.assertEqual(browser.epoch("acme", self.root), "aaaaaa")
+            browser.forget_workspace("acme", self.root)
+            self.assertEqual(browser.epoch("demo", self.root), "bbbbbb")  # "aaaaaa" is retired: taken
+        self.assertEqual(browser.retired(self.root), ["aaaaaa"])
+
+    def test_turn_mint_makes_the_epoch(self):
+        self.assertNotIn("hq", browser.epochs(self.root))
+        browser.set_bot("hq", "cos", "read", "bot", self.root)
+        Turn.run_turn(self)
+        self.assertIn("hq", browser.epochs(self.root))
 
 
 class WorkspaceDelete(Root):
@@ -565,10 +597,16 @@ class WorkspaceDelete(Root):
         (team / "state.json").write_text(json.dumps({"active": {"side-bot": True}}))
         tok = server.BROWSER_TOKENS.mint({"ws": "acme", "bot": "growth", "person": "ceo"})
         self.addCleanup(server.BROWSER_TOKENS.revoke, tok)
+        called = threading.Event()
         with mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme"}), \
-                mock.patch.object(server.browser_upstream.POOL, "tidy_workspace") as tidy:
+                mock.patch.object(server.browser_upstream.POOL, "kill_where", return_value=["k"]) as kill, \
+                mock.patch.object(server.browser_upstream.POOL, "tidy_workspace",
+                                  side_effect=lambda *a, **k: called.set()) as tidy:
             code, data, _ = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)
+            self.assertTrue(called.wait(5))
         self.assertEqual(code, 200)
+        kill.assert_called_once_with("acme", old)
+        self.assertEqual(tidy.call_args.kwargs, {"ups": ["k"]})
         ws, epoch, ids, root = tidy.call_args.args
         self.assertEqual((ws, epoch, root), ("acme", old, self.root))
         # Shipped bots, its browser setting, its app grant and its team state (a non-shipped id).
@@ -576,6 +614,24 @@ class WorkspaceDelete(Root):
         self.assertNotIn("acme", browser.epochs(self.root))  # a recreated slug gets a new epoch
         self.assertIsNone(server.BROWSER_TOKENS.lookup(tok))
         self.assertNotIn("browser", data)  # nothing to wait for: new names never meet old ones
+
+    def test_delete_returns_without_waiting_for_a_hanging_close(self):
+        browser.epoch("acme", self.root)
+        pool = browser_upstream.Pool()
+        hung = Up("acme", "b1", epoch=browser.epochs(self.root)["acme"], slow=3)
+        pool._items[("acme", "b1")] = hung
+        with mock.patch.object(server.browser_upstream, "POOL", pool), \
+                mock.patch.object(server.fileops, "delete_project", return_value={"slug": "acme"}), \
+                mock.patch.object(browser_upstream, "settle_sessions", return_value=True):
+            started = time.monotonic()
+            code = request("POST", "/api/project/acme/delete", {}, cookie=True, origin=True)[0]
+            took = time.monotonic() - started
+        self.assertEqual(code, 200)
+        self.assertLess(took, 2)
+        self.assertTrue(hung.killed)       # killed before the answer...
+        self.assertFalse(hung.closed)      # ...its engine close still running in the background
+        self.assertNotIn(("acme", "b1"), pool._items)
+        self.assertNotIn("acme", browser.epochs(self.root))
 
 
 class Tidy(Root):
@@ -632,6 +688,26 @@ class Tidy(Root):
             self.assertTrue(self.pool.tidy_workspace("acme", old, {"b1"}, self.root, home=self.home))
         self.assertFalse((self.state / f"{sess}-{sess}.json.enc").exists())
         self.assertEqual(browser.retired(self.root), [])  # tidied: the start sweep skips it
+
+    def test_tidy_and_sweep_remove_only_their_sessions_typed_rows(self):
+        old = browser.epoch("acme", self.root)
+        other = browser.epoch("demo", self.root)
+        mine = [f"bot:acme-{old}--b1", f"my_chrome:acme-{old}--b1--chrome"]
+        theirs = [f"bot:demo-{other}--b1", f"bot:acme-{old}--b1x", "my_chrome", f"bot:acme-2-{old}--b1"]
+        path = self.root / "run" / "browser_typed.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({k: {"typed": "hi", "aside": ""} for k in mine + theirs}))
+        browser.forget_workspace("acme", self.root)
+        with mock.patch.object(browser_upstream, "_settle_one", return_value=True):
+            self.pool.tidy_workspace("acme", old, {"b1"}, self.root, home=self.home)
+        self.assertEqual(sorted(json.loads(path.read_text())), sorted(theirs))
+        # The start sweep does the same for a retired epoch's sessions it finds on disk.
+        gone = browser.epoch("demo", self.root)
+        browser.forget_workspace("demo", self.root)
+        touch(self.state, f"demo-{gone}--b1-demo-{gone}--b1.json.enc")
+        with mock.patch.object(browser_upstream, "_settle_one", return_value=True):
+            browser_upstream.sweep_orphans(self.root, home=self.home)
+        self.assertEqual(sorted(json.loads(path.read_text())), sorted(set(theirs) - {f"bot:demo-{other}--b1"}))
 
     def test_settle_runs_in_parallel_within_one_bound(self):
         sessions = {f"acme-aaaaaa--b{i}": "bot" for i in range(4)}

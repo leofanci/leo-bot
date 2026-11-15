@@ -357,7 +357,8 @@ class BrowserUpstream(browser_relay.Upstream):
             raise ValueError(f"unknown browser mode: {mode}")
         self.ws, self.bot, self.mode, self.root = ws, bot, mode, root
         # The workspace's epoch is part of the name: a recreated slug never reaches this session.
-        self.epoch = epoch or browser.epoch(ws, root)
+        # A stopped upstream starts nothing, so it never needs (or makes) one.
+        self.epoch = epoch or browser.epochs(root).get(ws) or (None if stopped else browser.epoch(ws, root))
         self.session = session_name(ws, bot, mode, self.epoch)
         # One lock per real browser (all my_chrome bots share the owner's Chrome); typed text
         # per tab (each my_chrome bot has its own pinned tab).
@@ -628,7 +629,11 @@ class Pool:
 
     def get(self, ws, bot, mode, root):
         old = None
-        e = browser.epoch(ws, root)  # read every frame: a recreated slug has a new one
+        # Read on every frame, never made here (a turn's mint makes it): a recreated slug has a
+        # new one, and a deleted workspace has none, so a late frame starts nothing.
+        e = browser.epochs(root).get(ws)
+        if e is None:
+            return BrowserUpstream(ws, bot, mode, root, stopped=True, stopped_line=WS_DELETED)
         with self._lock:
             if self._stopping:
                 return BrowserUpstream(ws, bot, mode, root, stopped=True, epoch=e)
@@ -642,10 +647,9 @@ class Pool:
             old.close()
         return up
 
-    def close_where(self, ws, epoch, bound=CLOSE_SECONDS + 5):
-        """A deleted workspace: take its children of that epoch out of the table, kill them and
-        close their engine sessions in parallel within `bound` seconds, as close_all does. A child
-        of another epoch (the recreated slug's) is left alone. Returns the closed upstreams."""
+    def kill_where(self, ws, epoch):
+        """A deleted workspace: take its children of that epoch out of the table and kill them now
+        (no wait for a call in flight). A child of another epoch is left alone. Returns them."""
         with self._lock:
             items = [(k, up) for k, up in self._items.items() if k[0] == ws and up.epoch == epoch]
             for k, _ in items:
@@ -656,13 +660,19 @@ class Pool:
                 up.kill(WS_DELETED)
             except Exception:  # noqa: BLE001 - one child that fails to stop never stops the rest
                 traceback.print_exc()
+        return ups
+
+    def close_where(self, ws, epoch, bound=CLOSE_SECONDS + 5, ups=None):
+        """kill_where (unless `ups` were killed already), then close their engine sessions in
+        parallel within `bound` seconds, as close_all does. Returns the closed upstreams."""
+        ups = self.kill_where(ws, epoch) if ups is None else ups
         _parallel([lambda up=up: _close_session(up) for up in ups], bound)
         for up in ups:
             up._done.set()
         return ups
 
     def tidy_workspace(self, ws, epoch, bot_ids, root, home=None, bound=CLOSE_SECONDS + 5,
-                       poll=SETTLE_POLL, limit=TIDY_SECONDS):
+                       poll=SETTLE_POLL, limit=TIDY_SECONDS, ups=None):
         """Best-effort tidying after a workspace delete, of its old epoch's sessions only: close
         its children, forget their state, close or kill any daemon still alive (confirmed pids
         only), forget again. A daemon not gone yet is retried in the background for up to `limit`
@@ -670,9 +680,10 @@ class Pool:
         so a recreated slug is never reached. True when everything is gone now."""
         if not (isinstance(epoch, str) and browser.EPOCH_RE.fullmatch(epoch)):
             return True  # no epoch: this workspace never browsed
-        self.close_where(ws, epoch, bound)
+        self.close_where(ws, epoch, bound, ups)
         sessions = sessions_of(ws, epoch, bot_ids, home)
         forget_sessions(sessions, home)
+        browser_relay.forget_typed(sessions, root)
         if settle_sessions(sessions, root, home, bound):
             forget_sessions(sessions, home)
             forget_run_files(sessions, home)
@@ -1037,6 +1048,7 @@ def sweep_orphans(root, home=None):
     orphans = orphan_sessions(root, home)
     if orphans:
         forget_sessions(orphans, home)
+        browser_relay.forget_typed(orphans, root)
         settled = settle_sessions(orphans, root, home)
         forget_sessions(orphans, home)
         forget_run_files(orphans, home)

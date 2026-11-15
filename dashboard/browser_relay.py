@@ -301,6 +301,19 @@ def _save_typed(key, tt, root):
         bots._atomic_write(_typed_path(root), json.dumps(data, indent=2) + "\n")
 
 
+def forget_typed(sessions, root=bots.ROOT):
+    """A tidied session's typed text goes: rows keyed exactly "bot:<s>" or "my_chrome:<s>" for
+    each of these sessions, never another's."""
+    keys = {f"{kind}:{s}" for s in sessions for kind in ("bot", "my_chrome")}
+    with _LOCK:
+        data = _typed_all(root)
+        if not data or not keys & set(data):
+            return
+        for k in keys:
+            data.pop(k, None)
+        bots._atomic_write(_typed_path(root), json.dumps(data, indent=2) + "\n")
+
+
 def set_aside(key, root=bots.ROOT):
     """A new tab the gate did not see (the upstream's tab_gone recovery): the typed text is set
     aside as for agent_browser_open. Called inside that browser's call, so it takes no browser lock."""
