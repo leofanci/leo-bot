@@ -3787,9 +3787,6 @@ class Handler(BaseHTTPRequestHandler):
                         emit({"tool": payload})
                     elif kind == "error":
                         emit({"error": payload})
-                        # Saved on the reply too: a reload keeps why it stopped (a handed-off run
-                        # that failed would otherwise vanish without a trace).
-                        msg.setdefault("notices", []).append(f"Run failed: {str(payload)[:300]}")
                         failed = True
                     elif kind == "done":
                         fin = payload or {}
