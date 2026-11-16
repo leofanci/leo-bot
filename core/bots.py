@@ -86,7 +86,7 @@ def ws_dir(ws=HQ, root=ROOT):
         return root / "team"
     if not _SLUG_RE.fullmatch(ws):  # one path segment: no "/", "..", or newline
         raise ValueError(f"unknown workspace: {ws}")
-    project = root / "projects" / ws
+    project = paths.inside(root / "projects", ws)
     if not project.is_dir():
         raise ValueError(f"unknown workspace: {ws}")
     return project / "team"

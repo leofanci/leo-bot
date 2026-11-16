@@ -84,3 +84,13 @@ def ensure_dirs() -> None:
     for d in (HOME, DATA, RUN, LOGS, BACKUPS):
         d.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(d, 0o700)
+
+
+def inside(base, name):
+    """`base/name` as an absolute Path, refused (ValueError) unless it is one entry directly
+    inside `base`. Callers check names already; this keeps the guarantee where the path is made."""
+    root = os.path.normpath(os.path.abspath(str(base)))
+    full = os.path.normpath(os.path.join(root, str(name)))
+    if not full.startswith(root + os.sep) or os.sep in full[len(root) + 1:]:
+        raise ValueError("invalid path name")
+    return Path(full)

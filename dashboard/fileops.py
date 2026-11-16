@@ -176,7 +176,10 @@ def _confined_dir(base: Path, component: str, label: str) -> Path:
     """Resolve one child directory and reject symlinks that leave its base."""
     base_path = base
     base_resolved = base_path.resolve()
-    child_path = base_path / _safe_component(component, label)
+    try:
+        child_path = paths.inside(base_path, _safe_component(component, label))
+    except ValueError:
+        raise ActionError(f"{label} '{component}' not found")
     child_resolved = child_path.resolve()
     if (child_path.is_symlink() or child_resolved.parent != base_resolved
             or not child_resolved.is_dir()):
@@ -1828,7 +1831,10 @@ def create_experiment(project_slug: str, fields: dict) -> dict:
     exp_dir.mkdir(parents=True, exist_ok=True)
     stem = (fields.get("stem") or "").strip() or next_experiment_stem(exp_dir)
     stem = _slugify(stem) or next_experiment_stem(exp_dir)
-    path = exp_dir / f"{stem}.json"
+    try:
+        path = paths.inside(exp_dir, f"{stem}.json")
+    except ValueError:
+        raise ActionError("invalid experiment stem")
     if path.exists():
         raise ActionError(f"experiment '{stem}' already exists")
     # A metric source is saved only by set_metric, which checks the action is read-only.

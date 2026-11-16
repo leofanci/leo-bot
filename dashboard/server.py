@@ -177,7 +177,7 @@ def upload_dir(ws=None):
         root = _UPLOAD_DIR
     if ws is None:
         return root
-    sub = os.path.join(root, chat_session.tmp_name(ws))
+    sub = str(paths.inside(root, chat_session.tmp_name(ws)))
     os.makedirs(sub, mode=0o700, exist_ok=True)
     return sub
 
