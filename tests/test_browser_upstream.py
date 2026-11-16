@@ -274,7 +274,7 @@ class Children(Base):
         self.control(tab_gone_on=P + "get_text")
         self.assertEqual(text(relay(3, P + "get_text", selector="@e1")), bu.TAB_RESET)
         self.assertEqual(browser_relay.typed_state(up.typed_key, self.root),
-                         {"typed": "", "aside": "hello"})
+                         {"typed": "", "aside": "hello", "by": {}})
         reply = relay(4, P + "click", selector="@e2")  # listed site, no filled field: a plain click
         self.assertFalse(reply["result"]["isError"], reply)
         self.assertIn(P + "click", [c["name"] for c in self.log("call")])
@@ -437,6 +437,17 @@ class Children(Base):
         self.assertEqual(text(reply), bu.NO_START)
         self.assertFalse(self.alive(self.log("start")[0]["pid"]))
 
+    def test_current_url_starts_a_child_when_none_runs(self):
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        up.forward(call(1, P + "open", url="about:blank"), None)
+        with up._lock:
+            up._drop()  # a crash or timeout dropped it; the engine's daemon keeps the page
+        self.assertEqual(up.current_url(), "about:blank")
+        self.assertEqual(len(self.log("start")), 2)
+        up.close()
+        self.assertIsNone(up.current_url())  # closed: nothing starts
+        self.assertEqual(len(self.log("start")), 2)
+
     def test_start_fills_relay_schemas_and_url(self):
         up = self.pool.get("acme", "b1", "bot", self.root)
         init, _ = up.forward({"jsonrpc": "2.0", "id": 0, "method": "initialize",
@@ -493,7 +504,7 @@ class SharedChrome(Base):
         self.relay(self.b, "b2", P + "open", url=self.page)
         self.control(tab_gone_on=P + "get_text")
         self.assertEqual(text(self.relay(self.b, "b2", P + "get_text", selector="@e1")), bu.TAB_RESET)
-        self.assertEqual(browser_relay.typed_state(self.a.typed_key, self.root), {"typed": "mine", "aside": ""})
+        self.assertEqual(browser_relay.typed_state(self.a.typed_key, self.root), {"typed": "mine", "aside": "", "by": {"s:@e1": "mine"}})
 
     def test_tab_tools_refused_and_hidden_in_my_chrome(self):
         ctx = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}

@@ -467,6 +467,38 @@ class BrowserSent(unittest.TestCase):
             out = server.approvals_view("acme")
         self.assertEqual([r["action"]["arguments"]["text"] for r in out["sent"]], ["one"])
 
+class SendPlace(unittest.TestCase):
+    """A planned send matches the page the site lands on, not only the exact address typed."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def web(self, rest):
+        return "https" + "://" + rest
+
+    def approved(self, url):
+        rec = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person=None,
+                                      items=[{"url": url, "text": "Hi", "site": "acme.test"}])[0]
+        approvals.approve_send(rec["id"], self.root)
+
+    def claim(self, url):
+        return approvals.claim_send(self.root, ws="acme", bot="b1", url=url, text="Hi", planned=True)[0]
+
+    def test_www_tracking_order_and_encoding_do_not_count(self):
+        self.approved(self.web("acme.test/messages/a b?thread=7&box=in"))
+        self.assertEqual(self.claim(self.web("www.acme.test/messages/a%20b/?box=in&utm_source=x&thread=7&ref=nav")),
+                         "ok")
+
+    def test_another_page_or_parameter_value_does_not_match(self):
+        self.approved(self.web("acme.test/messages?to=7"))
+        for url in ("acme.test/messages?to=8", "acme.test/messages", "acme.test/messages?to=7&cc=9",
+                    "other.test/messages?to=7", "mail.acme.test/messages?to=7"):
+            self.assertEqual(self.claim(self.web(url)), "no_plan", url)
+
 
 if __name__ == "__main__":
     unittest.main()

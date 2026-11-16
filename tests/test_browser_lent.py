@@ -202,7 +202,7 @@ class Lent(Base):
         browser_relay._save_typed(up.typed_key, {"typed": "hello", "aside": ""}, self.root)
         reply, _ = up.forward(call(1, P + "get_title"), None)
         self.assertEqual(text(reply), bu.TAB_RESET)
-        self.assertEqual(browser_relay.typed_state(up.typed_key, self.root), {"typed": "", "aside": "hello"})
+        self.assertEqual(browser_relay.typed_state(up.typed_key, self.root), {"typed": "", "aside": "hello", "by": {}})
 
     def test_tools_list_kept_for_when_the_runner_is_off(self):
         tools = [{"name": P + "get_title", "inputSchema": {"type": "object", "properties": {}}}]

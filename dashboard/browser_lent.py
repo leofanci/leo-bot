@@ -141,17 +141,9 @@ class RunnerChromeUpstream(browser_relay.Upstream):
         if isinstance(method, str) and method.startswith("notifications/"):
             return None, mcp_session_id  # the handshake is this upstream's own
         rid = frame.get("id")
-        if method == "initialize":
-            from dashboard.browser_upstream import PROTOCOL
-            from core import browser_engine
-            params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
-            version = params.get("protocolVersion")
-            return {"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": version if isinstance(version, str) and version else PROTOCOL,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "agent-browser", "version": browser_engine.VERSION}}}, mcp_session_id
-        if method == "ping":
-            return {"jsonrpc": "2.0", "id": rid, "result": {}}, mcp_session_id
+        local = browser_relay.local_reply(frame)
+        if local is not None:
+            return local, mcp_session_id
         if self.shared:
             return _error(frame, SHARED), mcp_session_id
         if self.closed:

@@ -8,9 +8,9 @@ from core import browser_engine as be
 from core import paths
 
 
-def _exe(path):
+def _exe(path, version=be.VERSION):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("#!/bin/sh\n")
+    path.write_text(f"#!/bin/sh\necho 'agent-browser {version}'\n")
     path.chmod(0o755)
     return path
 
@@ -32,6 +32,27 @@ class Resolve(unittest.TestCase):
             with mock.patch.object(paths, "DATA", d / "data"), mock.patch("shutil.which", return_value=None):
                 self.assertIsNone(be.resolve({}))
                 self.assertIsNone(be.resolve({"LEOBOT_AGENT_BROWSER": str(d / "nope")}))
+
+    def test_path_binary_of_another_version_is_not_used(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            other = _exe(d / "bin" / "agent-browser", version="0.40.2")
+            with mock.patch.object(paths, "DATA", d / "data"), \
+                    mock.patch("shutil.which", return_value=str(other)), mock.patch.dict("os.environ", clear=True):
+                self.assertIsNone(be.resolve({}))
+                st = be.status()
+            self.assertEqual(st["state"], "missing")
+            self.assertIn("0.40.2", st["detail"])
+            self.assertIn(be.VERSION, st["detail"])
+
+    def test_version_is_asked_again_for_a_new_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = _exe(Path(d) / "agent-browser", version="0.40.2")
+            self.assertEqual(be.version_of(p), "0.40.2")
+            _exe(p, version=be.VERSION + "  ")  # another size: a new binary at the same path
+            self.assertEqual(be.version_of(p), be.VERSION)
+            p.write_text("#!/bin/sh\nexit 3\n")
+            self.assertIsNone(be.version_of(p))
 
     def test_status_missing_says_how_to_install(self):
         with mock.patch.object(be, "resolve", return_value=None):

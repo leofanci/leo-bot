@@ -40,7 +40,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from core import app_preview, bots, browser, integrations
 
@@ -270,17 +270,26 @@ def _norm(text):
     return " ".join(text.split()) if isinstance(text, str) else ""
 
 
+# Query keys a site adds on its own redirects to track the visit; they never pick the page or
+# who a message goes to, so a plan matches with or without them.
+_TRACKING_KEY = re.compile(r"utm_[a-z0-9_]*|ref|ref_src|refsrc|trk|trkinfo|fbclid|gclid|igsh|igshid|si", re.I)
+
+
 def _place(url):
-    """(host, path, query) of a page for matching a send to its plan; a trailing slash on the
-    path and the fragment do not count."""
+    """(host, path, query) of a page for matching a send to its plan. These do not count: a
+    leading "www." on the host, a trailing slash, percent-encoding of the path, the order of
+    the query's parameters, the site's own tracking parameters, and the fragment."""
     host = browser.host_of(url)
     if not host:
         return None
     try:
         parts = urlsplit(url.strip())
+        query = parse_qsl(parts.query, keep_blank_values=True)
     except ValueError:
         return None
-    return host, parts.path.rstrip("/") or "/", parts.query
+    host = host[4:] if host.startswith("www.") and len(host) > 4 else host
+    path = unquote(parts.path).rstrip("/") or "/"
+    return host, path, tuple(sorted(kv for kv in query if not _TRACKING_KEY.fullmatch(kv[0])))
 
 
 def add_send_plan(root=bots.ROOT, *, ws, room, chat, bot, person, items):
