@@ -25,7 +25,9 @@ both and the modes never conflict.
 Per bot, same words as connected apps:
 
 - `off`: no browser tools.
-- `read`: open, read, screenshot, scroll, click links. Typing is refused.
+- `read`: open, read, screenshot, scroll, click links. Typing is refused. A link is what the last
+  snapshot's refs give the role `link`: a click passes only on such an `@ref` (see "Recorded
+  deviations").
 - `write`: may type. A **send** (see below) runs only when it matches an item the owner approved in
   a send plan.
 - `act`: sends run on their own, inside the site's daily cap, each logged in Approvals.
@@ -41,8 +43,8 @@ Clicks with nothing typed are navigation and follow the level.
 ## Send plans (the `write` level)
 
 The bot calls `leobot_plan_sends` with `[{url, text}]`. Leo Bot holds the items as one batch in
-Approvals (Approve all, edit, or No). Approved items wait up to 7 days. A send runs when the page's
-URL matches an approved item (same host, same path) and the typed text matches it after trimming
+Approvals (Approve all or No; see "Recorded deviations"). Approved items wait up to 7 days. A send runs when the page's
+URL matches an approved item (same host, same path, same query) and the typed text matches it after trimming
 and collapsing whitespace; the item is then used up and logged "Sent from the browser". Anything
 else is refused with a one-line reason the bot can pass on.
 
@@ -60,6 +62,22 @@ every bot and every workspace together, per site, over a rolling 24 hours.
 - The browser engine's own file, eval and download tools are not exposed.
 - `my_chrome` never falls back to `bot` (the logins differ). When Chrome cannot be reached, the call
   says why in one line.
+
+## Recorded deviations
+
+Agreed during the build, recorded here so the spec matches what shipped:
+
+- Send match: the page must match the approved item's host, path and query (the fragment aside),
+  stricter than same host and path, so one approved item never covers another thread or recipient
+  carried in the query.
+- Plan card: no Edit. The bot types exactly the approved text, so an edited text would not match
+  what is typed; the owner says No and asks for new text.
+- Click at `read`: "click links" is a click on an `@ref` whose role in the last snapshot is
+  `link`. No snapshot, an unknown ref, another role or a CSS selector is refused, and refs go
+  stale at every navigation or click. On a listed site the field read still runs before it.
+- A shell beside the browser: a run with a browser runs its shell commands in Leo Bot's sandbox,
+  away from the browser's debug port, engine sockets and keys. Where that sandbox cannot wrap the
+  shell, a browser level that can send and a shell level do not run together.
 
 ## Phases
 
