@@ -201,7 +201,7 @@ const ROUTES = [
   [/^\/operations$/,                            ()       => { setState("operations"); renderOperations(); }],
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
-  [/^\/settings(?:\/(engines|bots|integrations|browser|access))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
+  [/^\/settings(?:\/(general|engines|bots|integrations|browser|access))?$/, ([t]) => { setState("settings",{tab:t||"general"}); renderSettings(t||"general"); }],
   [/^\/settings\/folders$/,                     ()       => location.replace("#/folders")],
   [/^\/(engines|integrations)$/,                ([t])    => location.replace(`#/settings/${t}`)],
   [/^\/folders$/,                               ()       => { setState("folders"); renderFolders(); }],
@@ -1223,6 +1223,7 @@ async function renderTeam(){
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
   let brw = null;  // this workspace's bot browser levels and modes (owner only)
+  let eng = null;  // /api/engines: each bot's engine, model, access and instructions (owner only)
   let pv = null, link = "";
   let jobList = [];
   const person = isPerson();
@@ -1271,6 +1272,7 @@ async function renderTeam(){
         <button class="more team-more" data-bot-more="${esc(b.id)}" aria-expanded="${open}">Details</button>
         ${person ? "" : b.locked ? `<span class="team-fixed" title="Other bots roll up to it">Always on</span>` : `<button class="more" data-bot-toggle="${esc(b.id)}" data-on="1">Switch off</button>`}
         <div class="team-detail"${open ? "" : " hidden"}>
+          ${!person && eng ? `<div class="td-sec"><h4>Setup</h4>${botSetupHtml(eng, _WS, b.id)}<small>A pick that names "Every workspace" or "Your default" follows Settings, Bots.</small></div>` : ""}
           <div class="td-sec"><h4>Skills</h4><div class="team-skills">${b.skills.map(s => `<span class="tag">${esc(s)}</span>`).join("")}${covered.map(s => `<span class="tag covered">${esc(s)}</span>`).join("")}</div>
             ${b.covering.length ? `<small>Outlined ones it covers for ${b.covering.map(x => esc(botById(x)?.name || x)).join(", ")}, switched off.</small>` : ""}</div>
           ${!person && integ.configured && wsApps.length ? `<div class="td-sec"><h4>Apps</h4><div class="app-grants">${wsApps.map(slug => {
@@ -1315,6 +1317,7 @@ async function renderTeam(){
     $("#team-list").querySelectorAll(".team-row[data-bot]").forEach(row => {
       if (opened.has(row.dataset.bot) && row.querySelector(".mem-box")) toggleMemory(row, row.dataset.bot);
     });
+    wireBotSetup($("#team-list"), view => { eng = view; });
     $("#team-list").querySelectorAll("[data-grant-bot]").forEach(sel => sel.onchange = async () => {
       const bot = sel.dataset.grantBot;
       // No prototype: an app slug is only ever a plain key here.
@@ -1418,6 +1421,7 @@ async function renderTeam(){
     costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
     integ = await api("/api/integrations").catch(() => integ);
     brw = await api(`/api/browser/settings?ws=${encodeURIComponent(_WS)}`).catch(() => null);
+    eng = await api("/api/engines").catch(() => null);
     jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
   }
   if (stillOn()) draw();
@@ -1524,6 +1528,54 @@ function jobMetaText(j, wsName, now){
 }
 // Rows only their own card answers: held app actions and scheduled-job proposals.
 const ACCESS_LEVELS = [["ask", "Ask"], ["edits", "Auto-accept edits"], ["approve", "Approve for me"], ["full", "Full access"]];
+const BOT_MODELS = [["auto", "Auto"], ["fast", "Always fast"], ["strong", "Always strong"]];
+// One bot's setup for one scope, from /api/engines: ws "*" is its default for every workspace
+// (Settings, Bots), any other ws is that workspace (Team, Details; Settings, Bots). On a workspace
+// the first option of each pick inherits and names what it inherits. Most specific wins:
+// engine = this workspace's pick for the bot, the workspace's own, the bot's every-workspace pick,
+// your default. Instructions add up: every workspace first, then this one.
+function botSetupHtml(d, ws, bot, { instructions = true } = {}){
+  const every = ws === "*", scope = `${ws}/${bot}`, base = `*/${bot}`;
+  const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(label)}</option>`;
+  const engName = id => (d.engines || []).find(e => e.id === id)?.label || id;
+  const yours = `Your default: ${d.default ? engName(d.default) : "Automatic"}`;
+  const engInherit = every ? yours : d.workspaces?.[ws] ? `This workspace's: ${engName(d.workspaces[ws])}`
+    : d.bots?.[base] ? `Every workspace: ${engName(d.bots[base])}` : yours;
+  const curEng = d.bots?.[scope] || "";
+  const engines = [opt("", engInherit, curEng), ...(d.engines || []).filter(e => e.ok || e.id === curEng).map(e => opt(e.id, e.label, curEng))];
+  const name = (list, v) => (list.find(([k]) => k === v) || list[0])[1];
+  const curModel = d.models?.[scope] || "", curAcc = d.access?.[scope] || "";
+  const models = every ? BOT_MODELS.map(([v, t]) => opt(v === "auto" ? "" : v, t, curModel))
+    : [opt("", `Every workspace: ${name(BOT_MODELS, d.models?.[base] || "auto")}`, curModel), ...BOT_MODELS.map(([v, t]) => opt(v, t, curModel))];
+  const access = every ? ACCESS_LEVELS.map(([v, t]) => opt(v === "ask" ? "" : v, t, curAcc))
+    : [opt("", `Every workspace: ${name(ACCESS_LEVELS, d.access?.[base] || "ask")}`, curAcc), ...ACCESS_LEVELS.map(([v, t]) => opt(v, t, curAcc))];
+  const inherited = every ? "" : d.instructions?.[base] || "";
+  return `<div class="bot-setup">
+    <label><span>Engine</span><select data-choice="bots" data-scope="${esc(scope)}">${engines.join("")}</select></label>
+    <label><span>Model</span><select data-choice="models" data-scope="${esc(scope)}" title="Auto: quick turns on the engine's fast model, real work on its strong one">${models.join("")}</select></label>
+    <label><span>Access</span><select data-choice="access" data-scope="${esc(scope)}" title="What this bot may do on its own in your private threads">${access.join("")}</select></label>
+    ${instructions ? `<div class="bot-instr"><span>Instructions</span>
+      ${inherited ? `<small class="bot-instr-base">Every workspace: ${esc(inherited)}</small>` : ""}
+      <textarea data-instr="${esc(scope)}" rows="3" maxlength="${d.instructions_max || 2000}" aria-label="Instructions" placeholder="${every
+        ? "How this bot works everywhere: tone, what to check first, what to avoid"
+        : "Extra for this workspace, added after the every-workspace ones"}">${esc(d.instructions?.[scope] || "")}</textarea>
+      <button class="btn sm" type="button" data-instr-save="${esc(scope)}">Save instructions</button></div>` : ""}
+  </div>`;
+}
+// Wire the picks and instruction boxes inside `box`. `saved(view)` gets the new /api/engines view.
+function wireBotSetup(box, saved = () => {}){
+  box.querySelectorAll(".bot-setup [data-choice]").forEach(sel => sel.onchange = async () => {
+    try { saved(await jpost("/api/engines/choice", { name: sel.dataset.choice, value: sel.value, scope: sel.dataset.scope })); toast("Saved ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+  });
+  box.querySelectorAll("[data-instr-save]").forEach(btn => btn.onclick = async () => {
+    const area = btn.parentElement.querySelector("[data-instr]");
+    btn.disabled = true;
+    try { saved(await jpost("/api/engines/instructions", { scope: btn.dataset.instrSave, text: area.value })); toast("Instructions saved ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+    btn.disabled = false;
+  });
+}
 function isHeld(a){
   return !!a && (a.kind === "app_action" || a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict");
 }
@@ -1820,12 +1872,12 @@ async function mountUpdateCard(){
 
 // Settings: only what applies to the whole machine, across every workspace.
 // What belongs to one project (Linked folders, Team) stays in that project.
-const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]];
+const SETTINGS_TABS = [["general", "General"], ["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]];
 const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
     <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
 function renderSettings(tab){
   const out = tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess()
-    : tab === "browser" ? renderBrowserSettings() : renderEngines(tab);
+    : tab === "browser" ? renderBrowserSettings() : tab === "general" ? renderGeneral() : renderEngines(tab);
   mountUpdateCard();
   return out;
 }
@@ -1953,6 +2005,63 @@ async function renderBrowserSettings(){
   draw();
 }
 
+// Settings, General: who you are, how bots reply, your timezone, and daily spending caps.
+const REPLY_LANGUAGES = ["English", "Italiano", "Español", "Français", "Deutsch", "Português", "Nederlands", "日本語", "中文"];
+async function renderGeneral(){
+  const stillOn = routeGuard();
+  $("#main").innerHTML = `${settingsTop("general")}<div class="scroll eng-page"><div id="gen"></div></div>`;
+  const g = await api("/api/settings/general").catch(e => ({ error: e.message }));
+  if (!stillOn()) return;
+  const box = $("#gen");
+  if (g.error) { box.innerHTML = `<div class="empty">${esc(g.error)}</div>`; return; }
+  const save = async (body, done = "Saved ✓") => {
+    try { Object.assign(g, await jpost("/api/settings/general", body)); toast(done); return true; }
+    catch (err) { toast("✗ " + err.message); return false; }
+  };
+  const cap = (k, label, help) => {
+    const env = g.env_caps?.[k], v = g.caps?.[k];
+    return `<div class="eng-choice"><label><span>${label}</span> <input class="gen-cap" type="number" min="0" step="1" inputmode="decimal"
+        data-cap="${k}" value="${v === undefined ? "" : esc(String(v))}" placeholder="${k === "person" ? "5 (default)" : "No cap"}"
+        aria-label="${esc(label)}, dollars per 24 hours"${env ? " disabled" : ""}></label>
+      <small>${help}${env ? " Set on this machine by an environment variable, which wins over this box." : ""}</small></div>`;
+  };
+  box.innerHTML = `
+    <section class="integ-group"><h3>You</h3>
+      <div class="eng-choice gen-about"><label for="gen-about"><span>About you</span></label>
+        <textarea id="gen-about" rows="4" maxlength="${g.about_max || 1500}" placeholder="Your name, what you do, how you like to work">${esc(g.about_me || "")}</textarea>
+        <button class="btn sm" type="button" id="gen-about-save">Save</button>
+        <small>Every bot reads this in your private threads, never in threads invited people can see.</small></div>
+    </section>
+    <section class="integ-group"><h3>Replies</h3>
+      <div class="eng-choice"><label><span>Reply language</span> <input id="gen-lang" list="gen-langs" maxlength="40"
+          value="${esc(g.reply_language || "")}" placeholder="Same as your message" aria-label="Reply language"></label>
+        <datalist id="gen-langs">${REPLY_LANGUAGES.map(l => `<option value="${esc(l)}">`).join("")}</datalist>
+        <small>Empty: bots answer in the language you write in. New threads pick it up.</small></div>
+      <div class="eng-choice"><label class="eng-check"><input type="checkbox" id="gen-short"${g.short_replies ? " checked" : ""}> <span>Short replies</span></label>
+        <small>Bots answer first and skip filler in chat. Saved work (memos, posts, briefs) stays in full prose. New threads pick it up.</small></div>
+    </section>
+    <section class="integ-group"><h3>Time</h3>
+      <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
+          <option value="">This machine's${g.machine_timezone ? ` (${esc(g.machine_timezone)})` : ""}</option>
+          ${(g.timezones || []).map(z => `<option value="${esc(z)}"${z === g.timezone ? " selected" : ""}>${esc(z)}</option>`).join("")}</select></label>
+        <small>Scheduled jobs run on this clock.</small></div>
+    </section>
+    <section class="integ-group"><h3>Daily spending caps</h3>
+      <p class="eng-hint">Dollars per 24 hours, estimated from list prices. A run that would go over pauses and tells you when room frees up. Empty or 0: no cap.</p>
+      ${cap("owner", "Your messages", "Everything your own threads and jobs spend.")}
+      ${cap("workspace", "Each workspace", "Every turn in one workspace, yours and invited people's.")}
+      ${cap("person", "Each invited person", "Empty keeps the $5 default. 0 turns it off.")}
+    </section>`;
+  $("#gen-about-save").onclick = () => save({ about_me: $("#gen-about").value });
+  $("#gen-lang").onchange = e => save({ reply_language: e.target.value });
+  $("#gen-short").onchange = e => save({ short_replies: e.target.checked }, e.target.checked ? "Short replies on ✓" : "Short replies off ✓");
+  $("#gen-tz").onchange = e => save({ timezone: e.target.value });
+  box.querySelectorAll("[data-cap]").forEach(inp => inp.onchange = async () => {
+    const raw = inp.value.trim();
+    if (!await save({ caps: { [inp.dataset.cap]: raw === "" ? null : Number(raw) } })) inp.value = g.caps?.[inp.dataset.cap] ?? "";
+  });
+}
+
 // Settings, Engines: what can run the bots. Settings, Bots: who runs on what.
 // Claude Code on this machine's login, or an API key. Invited people only ever run on an API key.
 async function renderEngines(tab = "engines"){
@@ -1964,8 +2073,7 @@ async function renderEngines(tab = "engines"){
       : "Keys stay on this machine and no bot can read them."}</div><div id="eng"></div><div id="eng-runners"></div></div>`;
   let adding = null;
   const draw = async () => {
-    const [d, chatCfg] = await Promise.all([api("/api/engines").catch(e => ({ error: e.message })),
-      tab === "bots" ? api("/api/settings/chat").catch(() => null) : null]);
+    const d = await api("/api/engines").catch(e => ({ error: e.message }));
     if (!stillOn()) return;
     const box = $("#eng");
     if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
@@ -2011,23 +2119,27 @@ async function renderEngines(tab = "engines"){
       })();
     const wsCards = (d.bot_list || []).filter(g => g.bots.length).map(g => `<section class="eng-ws"><h4>${esc(g.ws_name)}</h4>
         ${g.ws === "hq" ? "" : `<div class="eng-choice eng-ws-all"><label><span>Whole workspace</span> <select data-choice="workspaces" data-scope="${esc(g.ws)}">${opts(d.workspaces?.[g.ws], usable, "Same as your messages")}</select></label></div>`}
-        ${g.bots.map(b => `<div class="eng-choice"><label><span>${esc(b.icon || "")} ${esc(b.name)}</span>
-          <select data-choice="bots" data-scope="${esc(g.ws)}/${esc(b.id)}">${opts(d.bots?.[`${g.ws}/${b.id}`], usable, g.ws === "hq" ? "Same as your messages" : "Same as its workspace")}</select></label>
-          <select data-choice="access" data-scope="${esc(g.ws)}/${esc(b.id)}" aria-label="${esc(b.name)} access" title="What this bot may do on its own in your private threads">${ACCESS_LEVELS.map(([v, t]) => `<option value="${v}"${(d.access?.[`${g.ws}/${b.id}`] || "ask") === v ? " selected" : ""}>${t}</option>`).join("")}</select></div>`).join("")}</section>`).join("");
+        ${g.bots.map(b => `<div class="eng-choice"><b class="eng-bot">${esc(b.icon || "")} ${esc(b.name)}</b>
+          ${botSetupHtml(d, g.ws, b.id, { instructions: false })}</div>`).join("")}</section>`).join("");
+    // A redraw keeps open cards open and unsaved instructions typed.
+    const openCards = new Set([...box.querySelectorAll("details.eng-every[open]")].map(x => x.dataset.bot));
+    const drafts = Object.fromEntries([...box.querySelectorAll("[data-instr]")]
+      .filter(t => t.value !== (d.instructions?.[t.dataset.instr] || "")).map(t => [t.dataset.instr, t.value]));
+    const everyCards = (d.every_bot || []).map(b => `<details class="eng-ws eng-every" data-bot="${esc(b.id)}"${openCards.has(b.id) ? " open" : ""}><summary><b>${esc(b.icon || "")} ${esc(b.name)}</b></summary>
+        ${botSetupHtml(d, "*", b.id)}</details>`).join("");
     box.innerHTML = tab === "engines" ? `<section class="eng-intro"><h2>Pick the minds behind your team</h2>
         <p>Every bot can think with a different model. Connect a provider here, then choose who uses it in Bots.</p></section>
       <section class="integ-group"><h3>Your engines</h3><div class="eng-list">${rows}</div>
         <h3 class="eng-sub">Connect another</h3>${form}</section>` : `
       <section class="integ-group"><h3>Defaults</h3>
-        <p class="eng-hint">Most specific wins: a bot's own pick, then its workspace, then your default.</p>
+        <p class="eng-hint">Most specific wins: a bot's pick in a workspace, then that workspace's, then the bot's pick for every workspace, then your default.</p>
         <p class="eng-hint">Access, per bot: <b>Ask</b> changes files only when you tag it. <b>Auto-accept edits</b> changes files in its edit folders on any of your messages. <b>Approve for me</b> also runs shell commands there, each one approved by a reviewer (the engine's own, or on an API key a call to the same model). <b>Full access</b> runs any shell command there on every engine, this Mac only: build, test, commit. Commands that could wreck the machine never run. After it reads mail, pages or app data, nothing that sends data out runs, and other commands run in a sandbox with no internet.</p>
         <div class="eng-choice"><label><span>Your messages</span> <select data-choice="default">${opts(d.default, usable, "Automatic (Claude Code when installed)")}</select></label></div>
         <div class="eng-choice"><label><span>Invited people</span> <select data-choice="people">${opts(d.people, apiOnly, apiOnly.length ? "Off: bots don't answer them" : "Add an API key first")}</select></label>
           <small>Billed to that key. Also used in shared threads when your own engine can't run there.</small></div>
         <div class="eng-choice"><label><span>Terminal</span> <select data-choice="terminal">${["shell", "claude", "codex"].map(t => `<option value="${t}"${(d.terminal || "shell") === t ? " selected" : ""}>${t === "shell" ? "Your shell" : t}</option>`).join("")}</select></label></div>
-        ${chatCfg ? `<div class="eng-choice"><label><input type="checkbox" data-short-replies${chatCfg.short_replies ? " checked" : ""}> <span>Short replies</span></label>
-          <small>Bots answer first and skip filler in chat. Saved work (memos, posts, briefs) stays in full prose. New threads pick it up.</small></div>` : ""}
       </section>
+      <section class="integ-group"><h3>Every workspace</h3><p class="eng-hint">Each bot's defaults everywhere. A workspace changes them in its Team, under a bot's Details, or below.</p>${everyCards}</section>
       <section class="integ-group"><h3>By workspace</h3><p class="eng-hint">Only bots switched on in that workspace. Switch them on or off in its Team.</p>${wsCards || `<div class="empty">No bots yet.</div>`}</section>`;
     box.querySelectorAll("[data-add]").forEach(b => b.onclick = () => { adding = b.dataset.add; draw(); });
     box.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => { adding = b.dataset.edit; draw(); });
@@ -2050,15 +2162,16 @@ async function renderEngines(tab = "engines"){
       } catch (err) { toast("✗ " + err.message); }
       b.disabled = false; b.textContent = "Test";
     });
-    const shortBox = box.querySelector("[data-short-replies]");
-    if (shortBox) shortBox.onchange = async () => {
-      try { await jpost("/api/settings/chat", { short_replies: shortBox.checked }); toast(shortBox.checked ? "Short replies on ✓" : "Short replies off ✓"); }
-      catch (err) { toast("✗ " + err.message); draw(); }
-    };
-    box.querySelectorAll("[data-choice]").forEach(sel => sel.onchange = async () => {
+    box.querySelectorAll("[data-choice]:not(.bot-setup [data-choice])").forEach(sel => sel.onchange = async () => {
       try { await jpost("/api/engines/choice", { name: sel.dataset.choice, value: sel.value, scope: sel.dataset.scope || null }); }
       catch (err) { toast("✗ " + err.message); draw(); }
     });
+    Object.entries(drafts).forEach(([scope, text]) => {
+      const t = [...box.querySelectorAll("[data-instr]")].find(x => x.dataset.instr === scope);
+      if (t) t.value = text;
+    });
+    // A bot's picks: redraw so each inherited label names the new value.
+    wireBotSetup(box, () => draw());
     const formEl = box.querySelector(".eng-form");
     if (formEl) formEl.onsubmit = async e => {
       e.preventDefault();

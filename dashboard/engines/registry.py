@@ -64,7 +64,9 @@ def pick(root, ws, bot, invited=False, shared=False, apps=False):
     data = config.load(root)
     if invited:
         return _people_engine(data, root)
-    engine = get(data["bots"].get(f"{ws}/{bot}") or data["workspaces"].get(ws) or default_id(data), root)
+    # The bot's pick here, the workspace's, the bot's pick for every workspace, then the default.
+    engine = get(data["bots"].get(f"{ws}/{bot}") or data["workspaces"].get(ws)
+                 or data["bots"].get(f"{config.EVERY}/{bot}") or default_id(data), root)
     if shared and not engine.shared_safe:
         return _people_engine(data, root, NO_SHARED_ENGINE.format(label=engine.label))
     if apps and "apps" not in engine.supports:

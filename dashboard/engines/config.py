@@ -3,10 +3,13 @@
 {"providers": [{id, name, format, base_url, key, models: {fast, strong}}],
  "default": "claude-code" | "api:<id>" | ...,      the owner's turns
  "people": "api:<id>" | "",                        invited people, and shared threads an engine cannot serve
- "workspaces": {slug: engine id}, "bots": {"slug/bot": engine id},
+ "workspaces": {slug: engine id}, "bots": {"slug/bot" | "*/bot": engine id},
  "acp_agents": [{id, name, command, args}],
  "terminal": "shell" | "claude" | "codex",
- "access": {"slug/bot": "ask" | "edits" | "approve" | "full"}}   a bot's permission level (ACCESS)
+ "access": {"slug/bot" | "*/bot": "ask" | "edits" | "approve" | "full"},   a bot's permission level (ACCESS)
+ "models": {"slug/bot" | "*/bot": "fast" | "strong"}}   a bot's model (MODELS; unset is auto)
+
+"*/bot" is the bot's default for every workspace; "slug/bot" overrides it in one workspace.
 
 Keys never leave this module except to the api driver: public() shows the last
 four characters only. team/ is already denied to bots and to osctl read-file.
@@ -34,6 +37,12 @@ TERMINALS = ("shell", "claude", "codex")
 #   Each shell command is checked by Leo Bot's gate first (dashboard/shell_rules.py). An Auto
 #   job gets its bot's level too.
 ACCESS = ("ask", "edits", "approve", "full")
+# A bot's model: auto (unset) lets the server pick per turn (a cheap model for quick turns, a
+# stronger one for real work); fast and strong pin the engine's fast or strong model.
+MODELS = ("fast", "strong")
+# A workspace may also save "ask" or "auto" for a bot: that beats the bot's default for every
+# workspace. Unset means inherit it.
+EVERY = "*"  # the workspace part of a bot's default for every workspace: "*/cmo"
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,31}$")
 
 # name: format, base url, needs a key, fast model, strong model
@@ -85,11 +94,19 @@ def load(root=ROOT):
         raw = data.get(key) if isinstance(data.get(key), dict) else {}
         data[key] = {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
     raw = data.get("access") if isinstance(data.get("access"), dict) else {}
-    data["access"] = {k: v for k, v in raw.items() if isinstance(k, str) and v in ACCESS and v != "ask"}
+    data["access"] = {k: v for k, v in raw.items() if isinstance(k, str) and v in ACCESS
+                      and not (v == "ask" and _every(k))}
+    raw = data.get("models") if isinstance(data.get("models"), dict) else {}
+    data["models"] = {k: v for k, v in raw.items() if isinstance(k, str)
+                      and (v in MODELS or (v == "auto" and not _every(k)))}
     for key in ("default", "people", "terminal"):
         if not isinstance(data.get(key), str):
             data.pop(key, None)
     return data
+
+
+def _every(key):
+    return key.startswith(f"{EVERY}/")
 
 
 def _provider_ok(p):
@@ -222,6 +239,7 @@ def forget_workspace(slug, root=ROOT):
     data["workspaces"].pop(slug, None)
     data["bots"] = {k: v for k, v in data["bots"].items() if not k.startswith(f"{slug}/")}
     data["access"] = {k: v for k, v in data["access"].items() if not k.startswith(f"{slug}/")}
+    data["models"] = {k: v for k, v in data["models"].items() if not k.startswith(f"{slug}/")}
     save(data, root)
 
 
@@ -235,7 +253,8 @@ def remove_provider(provider_id, root=ROOT):
 
 @_locked
 def set_choice(name, value, scope=None, root=ROOT):
-    """Set default | people | terminal, or one workspace's or bot's engine ("" clears it)."""
+    """Set default | people | terminal, one workspace's or bot's engine, or a bot's access or
+    model ("" clears it). A bot's scope is "slug/bot", or "*/bot" for every workspace."""
     data = load(root)
     value = str(value or "")
     if name == "terminal":
@@ -258,18 +277,38 @@ def set_choice(name, value, scope=None, root=ROOT):
             raise ValueError("scope required")
         if value not in ("", *ACCESS):
             raise ValueError(f"access: one of {', '.join(ACCESS)}")
-        if value in ("", "ask"):
+        if not value or (value == "ask" and _every(scope)):
             data["access"].pop(scope, None)
         else:
             data["access"][scope] = value
+    elif name == "models":
+        if not scope:
+            raise ValueError("scope required")
+        if value not in ("", "auto", *MODELS):
+            raise ValueError(f"model: auto, {', '.join(MODELS)}")
+        if not value or (value == "auto" and _every(scope)):
+            data["models"].pop(scope, None)
+        else:
+            data["models"][scope] = value
     else:
         raise ValueError("unknown setting")
     save(data, root)
 
 
+def _for_bot(table, ws, bot):
+    """The workspace's own pick for a bot, else its pick for every workspace, else None."""
+    return table.get(f"{ws}/{bot}") or table.get(f"{EVERY}/{bot}")
+
+
 def access(ws, bot, root=ROOT):
     """A bot's permission level in a workspace (ACCESS): "ask" unless the owner set more."""
-    return load(root)["access"].get(f"{ws}/{bot}", "ask")
+    return _for_bot(load(root)["access"], ws, bot) or "ask"
+
+
+def model(ws, bot, root=ROOT):
+    """A bot's model in a workspace: "fast", "strong", or "" for auto (the server picks)."""
+    pick = _for_bot(load(root)["models"], ws, bot)
+    return pick if pick in MODELS else ""
 
 
 def public(root=ROOT):
@@ -282,6 +321,7 @@ def public(root=ROOT):
                      "key_hint": key[-4:] if key else "", "no_key": not key})
     return {"providers": rows, "default": data.get("default") or "", "people": data.get("people") or "",
             "workspaces": data["workspaces"], "bots": data["bots"], "access": data["access"],
+            "models": data["models"],
             "terminal": data.get("terminal") or "shell", "acp_agents": data["acp_agents"],
             "acp_presets": ACP_PRESETS,
             "presets": {k: {f: v.get(f) for f in ("name", "format", "base_url", "models", "no_key")}

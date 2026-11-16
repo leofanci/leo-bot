@@ -851,6 +851,21 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
   color:var(--ui-color-text);font:inherit;font-size:13px;cursor:pointer;transition:background .15s,border-style .15s}
 .eng-add:hover{background:var(--eng-warm);border-style:solid}
 .eng-hint{margin:0 0 var(--ui-space-2);color:var(--ui-color-text-muted);font-size:13px}
+/* A bot's setup: engine, model, access, instructions (Team Details; Settings, Bots). */
+.bot-setup{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 12px;margin:6px 0}
+.eng-choice .bot-setup label,.bot-setup label{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:4px;font-size:13px;color:var(--ui-color-text-muted);min-width:0}
+.bot-setup select{width:100%;min-width:0}
+.bot-instr{grid-column:1/-1;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--ui-color-text-muted)}
+.bot-instr button{align-self:flex-start}
+.bot-instr-base{white-space:pre-wrap}
+.bot-instr textarea,.gen-about textarea{width:100%;box-sizing:border-box;font:inherit;color:var(--ui-color-text);background:var(--ui-color-surface);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);padding:var(--ui-space-2) var(--ui-space-2-5);resize:vertical}
+.bot-instr textarea:focus,.gen-about textarea:focus,.eng-choice input:not([type=checkbox]):focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
+.gen-about{display:flex;flex-direction:column;gap:6px}
+.gen-about button{align-self:flex-start}
+.eng-choice input:not([type=checkbox]){min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit;max-width:100%}
+.eng-every summary{cursor:pointer;padding:10px 0;font-size:14px}
+.eng-bot{display:block;font-size:13px;margin-bottom:2px}
+.eng-choice label.eng-check{justify-content:flex-start;gap:8px}
 .eng-choice em{font-style:normal;color:var(--ui-color-text-muted);font-size:12px;margin-left:4px}
 .eng-ws{margin:8px 0;padding:4px 14px;border-radius:14px;background:var(--eng-warm);border:1px solid var(--eng-warm-line)}
 .eng-ws h4{margin:10px 0 2px;font-size:14px;font-weight:600}
@@ -859,6 +874,10 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .integ-key input[type=password]{flex:1 1 220px;min-width:0}
 .settings-top{padding-bottom:0;border-bottom:0}
 .settings-top>div{flex:1;min-width:0}
+/* Six tabs on a phone: the row scrolls sideways instead of widening the page. */
+.settings-top>div{width:100%;max-width:100%}
+.settings-top .doc-tabs{overflow-x:auto;scrollbar-width:none}
+.settings-top .doc-tabs a{flex:none;white-space:nowrap}
 @media (max-width:640px){.eng-card{flex-wrap:wrap}.eng-actions{justify-content:flex-start}}
 .msg-via{display:block;color:var(--ui-color-text-muted);font-size:11px;margin-top:4px}
 .runner-cmd{white-space:pre-wrap;word-break:break-all;background:var(--ui-color-surface);border:1px solid var(--ui-color-border);border-radius:8px;padding:10px;font-size:12px}

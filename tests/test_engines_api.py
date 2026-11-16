@@ -643,7 +643,8 @@ class Config(unittest.TestCase):
         for bad, scope in (("root", "acme/cmo"), ("full", None)):
             with self.assertRaises(ValueError):
                 config.set_choice("access", bad, scope, self.root)
-        config.set_choice("access", "ask", "demo/cto", self.root)  # the default is not stored
+        config.set_choice("access", "ask", "demo/cto", self.root)  # kept: it beats the bot's default
+        config.set_choice("access", "", "demo/cto", self.root)  # cleared: inherit again
         config.forget_workspace("acme", self.root)
         self.assertEqual(config.public(self.root)["access"], {})
         data = config.load(self.root)  # a hand-edited file

@@ -47,7 +47,7 @@ import chat_session      # noqa: E402
 import chat_store        # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
-from core import bots, datadir, memory, paths, updater, version  # noqa: E402
+from core import bots, datadir, general, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
@@ -123,12 +123,16 @@ VENDOR_TYPES = {".css": "text/css", ".js": "application/javascript",
                 ".woff2": "font/woff2", ".txt": "text/plain; charset=utf-8"}
 
 def rail() -> str:
-    """The chat system rail, read per new session: the Short replies setting adds the style."""
+    """The chat system rail, read per new session: Short replies adds the style, a reply
+    language (Settings, General) adds one line."""
     try:
-        short = updater.settings()["short_replies"]
-    except Exception:  # noqa: BLE001 - a broken settings file keeps the default
-        short = True
-    return CHAT_RAIL + ("\n\n## Reply style\n" + SHORT_REPLIES if short else "")
+        g = general.view()
+    except Exception:  # noqa: BLE001 - a broken settings file keeps the defaults
+        g = {"short_replies": True, "reply_language": ""}
+    lang = g.get("reply_language") or ""
+    return (CHAT_RAIL + ("\n\n## Reply style\n" + SHORT_REPLIES if g.get("short_replies", True) else "")
+            + (f"\n\n## Reply language\nReply in {lang}, whatever language the message is in. "
+               "Files you save follow the language their own content already uses." if lang else ""))
 
 
 def new_chat_session():
@@ -927,6 +931,13 @@ def _pick_model_reason(skill, web, user_msg="", session=None, *, explicit=False,
 _MENU_DESC_CHARS = 100
 
 
+def _about_me():
+    try:
+        return general.view()["about_me"]
+    except Exception:  # noqa: BLE001 - a broken settings file says nothing
+        return ""
+
+
 def _one_line(text, limit):
     """`text` on one line, cut at a word boundary to at most `limit` chars (… when cut)."""
     flat = " ".join((text or "").split())
@@ -971,6 +982,16 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
     if fresh or getattr(session, "_last_bot", None) != bot_id:
         lines.append(f"## Speaking as @{b.handle}: {b.name}\n{b.body}")
         ws = getattr(team, "ws", bots.HQ)
+        # The owner's standing instructions for this bot (Team, Details; Settings, Bots): every
+        # workspace first, then this one. Owner-written, so they steer like the job description.
+        everywhere, here = bots.instructions(ws, bot_id, ROOT)
+        if everywhere or here:
+            lines.append("The owner's standing instructions for you (follow them unless the owner says "
+                         "otherwise in this thread):\n" + "\n".join(t for t in (everywhere, here) if t))
+        # Who the owner is (Settings, General). Private: never in a thread invited people can see.
+        about = "" if shared else _about_me()
+        if about:
+            lines.append(f"About the owner: {about}")
         shown = ws
         if ws != bots.HQ:  # the owner's name for it, when it differs from the folder slug
             try:
@@ -1628,7 +1649,7 @@ def _bots_known_in(ws):
     ids = set(bots.load_defs())
     for read in (lambda: keys(dget(browser.load(ROOT).get("bots"), ws)),
                  lambda: keys(dget(integrations.all_grants(ROOT), ws)),
-                 lambda: {k.split("/", 1)[1] for d in (engine_config.load(ROOT).get(n) for n in ("bots", "access"))
+                 lambda: {k.split("/", 1)[1] for d in (engine_config.load(ROOT).get(n) for n in ("bots", "access", "models"))
                           for k in keys(d) if k.startswith(f"{ws}/")},
                  lambda: keys(dget(json.loads((bots.ws_dir(ws, ROOT) / "state.json").read_text()), "active"))):
         try:
@@ -1669,8 +1690,10 @@ def _engines_view():
             continue
         bot_list.append({"ws": w["id"], "ws_name": w["name"],
                          "bots": [{"id": b["id"], "name": b["name"], "icon": b.get("icon")} for b in roster]})
+    every = [{"id": b.id, "name": b.name, "icon": b.icon} for b in bots.team(ROOT).ordered()]
     return {**engine_config.public(ROOT), "engines": engine_registry.statuses(ROOT), "deployment": DEPLOYMENT,
-            "bot_list": bot_list}
+            "bot_list": bot_list, "every_bot": every, "instructions": bots.load_instructions(ROOT),
+            "instructions_max": bots.INSTRUCTIONS_MAX}
 
 
 def _shared_room(ws, room):
@@ -3058,16 +3081,25 @@ class Handler(BaseHTTPRequestHandler):
             engine_config.remove_acp(str(body.get("id") or ""), ROOT)
         elif path == "/api/engines/choice":
             name, value, scope = body.get("name"), body.get("value"), body.get("scope")
-            if value and name not in ("terminal", "access"):
+            if value and name not in ("terminal", "access", "models"):
                 engine = engine_registry.get(str(value), ROOT)  # only an engine that exists
                 if name == "people" and engine.kind != "api":
                     raise ValueError("invited people run on an API key")
-            if name in ("workspaces", "bots", "access"):  # a scope names a workspace (or workspace/bot) that exists
+            if name in ("workspaces", "bots", "access", "models"):
+                # A scope names a workspace (or workspace/bot) that exists; "*/bot" is the bot's
+                # default for every workspace.
                 ws_, _, bot_ = str(scope or "").partition("/")
-                if not _known_ws(ws_, db.tree()) or (name in ("bots", "access")) != bool(bot_) \
+                every = ws_ == engine_config.EVERY and name != "workspaces"
+                if not (every or _known_ws(ws_, db.tree())) or (name != "workspaces") != bool(bot_) \
                         or (bot_ and bot_ not in bots.load_defs()):
                     raise ValueError("unknown workspace or bot")
             engine_config.set_choice(name, value, str(scope) if scope else None, ROOT)
+        elif path == "/api/engines/instructions":  # a bot's standing instructions: "*/bot" or "ws/bot"
+            scope = str(body.get("scope") or "")
+            ws_, _, bot_ = scope.partition("/")
+            if ws_ != bots.EVERY and not _known_ws(ws_, db.tree()):
+                raise ValueError("unknown workspace or bot")
+            bots.set_instructions(scope, body.get("text"), ROOT)
         elif path == "/api/engines/test":
             eid = str(body.get("id") or "")
             if eid.startswith("acp:") and not self._local_request():  # it starts a program: this machine only
@@ -3562,6 +3594,11 @@ class Handler(BaseHTTPRequestHandler):
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
             model, reason = _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                editing=bool(may_edit and edit_dirs))
+            # The owner pinned this bot's model (Team, Details; Settings, Bots): no tiering.
+            pinned = engine_config.model(ws, bot_id, ROOT)
+            if pinned:
+                model, reason = (chat_session.CHAT_MODEL if pinned == "fast"
+                                 else chat_session.ESCALATED_MODEL), f"bot-{pinned}"
 
             wants_file_search = _needs_workspace(user_msg, skill)
             # TokenSave reads the first indexed folder of the layered rows. Never in a thread invited
@@ -3892,6 +3929,9 @@ class Handler(BaseHTTPRequestHandler):
             c_web = bool(with_web)
             c_model = chat_session.ESCALATED_MODEL if web_asked else chat_session.CHAT_MODEL
             c_skill, c_reason = None, "teammate"  # its card lists its skills; it loads one itself
+            c_pinned = engine_config.model(ws, b2, ROOT)
+            if c_pinned:  # the owner pinned the teammate's model
+                c_model = chat_session.CHAT_MODEL if c_pinned == "fast" else chat_session.ESCALATED_MODEL
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, shared=shared,
                                       folders_block=linked_workspace_prompt(project_slug, c_rows))
@@ -4384,6 +4424,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, _update_view())
         if path == "/api/settings/chat":  # owner only (checked above)
             return self._send(200, {"short_replies": updater.settings()["short_replies"]})
+        if path == "/api/settings/general":  # owner only (checked above)
+            return self._send(200, {**general.view(), "timezones": general.timezones(),
+                                    "machine_timezone": general.machine_timezone(),
+                                    "about_max": general.ABOUT_MAX,
+                                    "env_caps": {k: bool((os.environ.get(v) or "").strip())
+                                                 for k, v in spend.ENV.items()}})
         if not db.db_exists():
             return self._send(503, {"error": "os.db not found — run index.py first"})
 
@@ -4597,6 +4643,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "short_replies: true or false"})
                 updater.save_settings({"short_replies": body["short_replies"]})
                 return self._send(200, {"short_replies": updater.settings()["short_replies"]})
+            if path == "/api/settings/general":  # Settings, General
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                try:
+                    return self._send(200, general.update(body))
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})
@@ -4775,6 +4828,7 @@ class Handler(BaseHTTPRequestHandler):
                         extra.close()
                 _retire_threads(lambda rec: _chat_workspace(rec) == out["slug"])
                 engine_config.forget_workspace(out["slug"], ROOT)
+                bots.forget_instructions(out["slug"], ROOT)
                 ws_logos.remove(out["slug"], ROOT)
                 return self._send(200, {"ok": True, **out})
             if path.startswith("/api/project/") and path.endswith("/intake/new"):
@@ -5148,6 +5202,7 @@ def main():
         os.dup2(log.fileno(), 2)
         sys.stdout = sys.stderr = log
     restrict_new_files()
+    general.apply_timezone()  # Settings, General: schedules and dates follow the owner's timezone
     chat_session.sweep_stale_tmpdirs()  # pasted images and bot output a crashed run left behind
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)

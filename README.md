@@ -133,7 +133,7 @@ git, editor or secret files (`.git/`, `.claude/`, `.vscode/`, `.env` and the lik
 and other CLIs edit only on a shell level (below). Invited people, shared threads and runners never reach a
 linked folder or see its path.
 
-Each bot has an **access level** (Settings, Bots), for your private threads only. The same
+Each bot has an **access level** (Settings, Bots, or its Team Details), for your private threads only. The same
 four levels hold on every engine; each engine runs them in its own mode, and where it has
 none, Leo Bot's own checks do it:
 
@@ -237,7 +237,8 @@ change through a bot's card.
 
 Every reply records its tokens, model, skill and estimated cost; the Team screen shows
 where spend went (by model, skill, engine and day). Three caps, in dollars per rolling
-24 hours, set as environment variables on the machine running Leo Bot:
+24 hours, set in Settings, General, or as environment variables on the machine running Leo
+Bot (a variable wins over the screen):
 
 - `LEOBOT_PERSON_DAILY_CAP`: each invited person's turns. Default 5.
 - `LEOBOT_WORKSPACE_DAILY_CAP`: every turn in one workspace. Default off.
@@ -307,8 +308,14 @@ the channel's lead, and that bot decides what it needs:
   thread's next message goes to it. One handoff per message. `CONSULT @handle: <question>`
   still asks a teammate for a read-only view first. The card lists which teammate holds
   which connected app.
-- **Short replies.** Bots answer first and skip filler in chat (Settings, Bots, Short
+- **Short replies.** Bots answer first and skip filler in chat (Settings, General, Short
   replies; on by default). Saved work (memos, posts, briefs, memory) stays in full prose.
+- **Per-bot setup.** Each bot has an engine, a model (Auto, Always fast, Always strong), an
+  access level and standing instructions. Settings, Bots sets them for every workspace; a
+  workspace's Team (a bot's Details) changes them there. Instructions add up: every
+  workspace first, then the workspace's own.
+- **General.** Settings, General holds About you (every bot reads it in your private
+  threads), the reply language, your timezone (scheduled jobs run on it) and the spending caps.
 
 ### Dashboard (macOS app)
 

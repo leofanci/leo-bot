@@ -39,8 +39,8 @@ class SettingsScreen(unittest.TestCase):
         self.assertIn(".ws-settings{margin-top:auto", APP_CSS)
 
     def test_tabs_hold_only_machine_wide_things(self):
-        self.assertIn("/^\\/settings(?:\\/(engines|bots|integrations|browser|access))?$/", APP_JS)
-        self.assertIn('["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]', APP_JS)
+        self.assertIn("/^\\/settings(?:\\/(general|engines|bots|integrations|browser|access))?$/", APP_JS)
+        self.assertIn('["general", "General"], ["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]', APP_JS)
 
     def test_old_links_still_land(self):
         self.assertIn("/^\\/(engines|integrations)$/", APP_JS)
@@ -83,8 +83,11 @@ class SettingsScreen(unittest.TestCase):
         self.assertIn('_WS === "hq" ? "All workspaces, last" : "Last"', APP_JS)
 
     def test_hq_bots_do_not_promise_a_workspace_engine(self):
-        # HQ has no workspace-level pick: its bots fall back to your messages.
-        self.assertIn('g.ws === "hq" ? "Same as your messages" : "Same as its workspace"', APP_JS)
+        # HQ has no workspace-level pick: its bots fall back to their every-workspace pick, then
+        # your messages. "Same as its workspace" shows only when the workspace has its own pick.
+        setup = APP_JS.split("function botSetupHtml(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('d.workspaces?.[ws] ? `This workspace\'s:', setup)
+        self.assertIn('g.ws === "hq" ? "" : `<div class="eng-choice eng-ws-all">', APP_JS)
 
 
 class UpdateCard(unittest.TestCase):

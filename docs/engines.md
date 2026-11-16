@@ -13,6 +13,10 @@ Connect them in Settings, Engines, and pick who uses them in Settings, Bots. Eac
 ## Who runs on what
 
 - Your messages: your default engine. A workspace can have its own.
+- A bot: its pick in the workspace (Team, Details), then the workspace's, then its pick for
+  every workspace (Settings, Bots), then your default. Its model follows the same order:
+  Auto (the fast model for quick turns, the strong one for real work), Always fast or Always
+  strong. On an API key, fast and strong are the two models you named for it.
 - Invited people: the API key you pick under **Invited people**, or their own runner.
   With neither, bots tell them so and nothing is spent. They never use your login.
 - Connected apps: Claude Code or an API key.
@@ -43,7 +47,7 @@ picks up your personal setup. CLIs over ACP start as clean as they allow: Gemini
 `~/.claude/CLAUDE.md` or `.claude/skills`). Neither can skip its own context files
 (`GEMINI.md`, `AGENTS.md` and OpenCode's own config), so Settings, Engines marks them
 "Loads its own context files". To get Leo Bot's short reply style, use the Short replies
-setting (Settings, Bots), not a plugin of your own.
+setting (Settings, General), not a plugin of your own.
 
 ## Keys
 
