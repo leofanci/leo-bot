@@ -499,6 +499,148 @@ class CodeWalls(unittest.TestCase):
             hop.symlink_to(newer)  # an upgrade moves the link on, the server keeps running
             self.assertIn(str(newer), shell_rules.code_walls()["literals"])
 
+    # --- round 3: Approve for me keeps Claude Code's reviewer, its shell runs sandboxed ------------
+
+    def _stub_gate(self, answer):
+        """A local gate answering `answer(body)`; returns its URL and the bodies it got."""
+        import http.server
+        import json
+        import threading
+        got = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                got.append(body)
+                raw = json.dumps(answer(body)).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *a):
+                pass
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}/api/internal/gate", got
+
+    def _wrapper(self, env_extra, script):
+        wrapper = shell_rules.review_shell()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("LEOBOT_GATE")}
+        env.update(env_extra)
+        return subprocess.run([wrapper, "-c", script], env=env, cwd=str(self.edit), capture_output=True, text=True,
+                              timeout=30)
+
+    def test_review_shell_is_walled_and_named_for_claude_code(self):
+        wrapper = shell_rules.review_shell()
+        self.assertEqual(os.path.basename(wrapper), "zsh")  # Claude Code takes a CLAUDE_CODE_SHELL naming zsh
+        self.assertTrue(os.access(wrapper, os.X_OK))
+        self.assertTrue(shell_rules.in_code(wrapper))
+        self.assertEqual(os.stat(os.path.dirname(wrapper)).st_mode & 0o777, 0o700)
+
+    def test_review_shell_fails_closed(self):
+        mark = self.edit / "ran"
+        proc = self._wrapper({}, f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        url, _ = self._stub_gate(lambda body: {"allow": False, "reason": "no"})
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url}, f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": "http://127.0.0.1:9/x"},
+                             f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        url, _ = self._stub_gate(lambda body: {"allow": True, "profile": "relative.sb"})
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url}, f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        self.assertFalse(mark.exists())
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_shell_runs_inside_the_gate_profile(self):
+        self.fake_code()
+        pdir = Path(os.path.realpath(self.tmp.name)) / "profiles"
+        tok = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),), review=True)
+        self.addCleanup(taint.GATES.revoke, tok)
+        url, got = self._stub_gate(lambda body: dict(zip(("allow", "reason", "profile"),
+                                                         taint.GATES.shell_profile(tok, profile_dir=str(pdir)))))
+        q = shlex.quote
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": tok, "LEOBOT_GATE_URL": url},
+                             f"touch {q(str(self.repo / 'x'))}; touch {q(str(self.edit / 'ok'))}")
+        self.assertFalse((self.repo / "x").exists())
+        self.assertTrue((self.edit / "ok").exists(), proc.stderr)
+        self.assertEqual(got[0]["tool"], "Bash-shell")
+
+    def test_review_shell_redeems_an_osctl_ticket(self):
+        mark = self.edit / "osctl-ran"
+        url, got = self._stub_gate(lambda body: {"allow": True, "command": f"touch {shlex.quote(str(mark))}"}
+                                   if body.get("ticket") == "a" * 32 else {"allow": False})
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url},
+                             "source x; eval ': leobot-osctl-ticket " + "a" * 32 + "'")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(mark.exists())
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url},
+                             ": leobot-osctl-ticket " + "b" * 32)
+        self.assertEqual(proc.returncode, 126)  # a ticket the gate did not issue runs nothing
+
+    def test_gate_review_tokens(self):
+        turn = taint.Turn()
+        tok = taint.GATES.mint(turn, writable=(str(self.edit),), review=True)
+        full = taint.GATES.mint(turn, writable=(str(self.edit),))
+        self.addCleanup(taint.GATES.revoke, tok)
+        self.addCleanup(taint.GATES.revoke, full)
+        self.assertTrue(taint.GATES.review(tok))
+        self.assertFalse(taint.GATES.review(full))
+        self.assertEqual(taint.GATES.shell(tok, "npm test"), (True, "", None))
+        self.assertEqual(taint.GATES.shell(tok, "rm -rf /")[:2], (False, shell_rules.NEVER))
+        run = taint.GATES.shell(tok, "python3 -m dashboard.osctl tree")[2]
+        nonce = run.split()[-1]
+        self.assertIsNone(taint.GATES.redeem(full, nonce))  # bound to its token
+        self.assertIn("-I -c", taint.GATES.redeem(tok, nonce))
+        self.assertIsNone(taint.GATES.redeem(tok, nonce))
+        self.assertFalse(taint.GATES.shell_profile(full)[0])
+        if shell_rules.can_sandbox():
+            allow, _, profile = taint.GATES.shell_profile(tok)
+            self.assertTrue(allow)
+            self.assertIn(os.path.realpath(str(shell_rules.REPO)), Path(profile).read_text())
+
+    def test_turn_env_names_the_review_shell_on_approve_only(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        tokens = TurnTokens(gate_token="t", gate_port=8765)
+        mk = lambda level: TurnPolicy(shell=True, level=level, read_dirs=(str(self.edit),),  # noqa: E731
+                                      edit_dirs=(str(self.edit),))
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SHELL": "/tmp/evil/zsh", "CLAUDE_CODE_SHELL_PREFIX": "x"}):
+            env = ClaudeCodeEngine().turn_env(mk("approve"), tokens)
+            if shell_rules.can_sandbox():
+                self.assertEqual(env["CLAUDE_CODE_SHELL"], shell_rules.review_shell())
+            self.assertNotIn("CLAUDE_CODE_SHELL_PREFIX", env)
+            for env in (ClaudeCodeEngine().turn_env(mk("full"), tokens),
+                        ClaudeCodeEngine().turn_env(mk("approve"), TurnTokens())):
+                self.assertNotIn("CLAUDE_CODE_SHELL", env)
+                self.assertNotIn("CLAUDE_CODE_SHELL_PREFIX", env)
+
+    def test_hook_is_silent_for_a_review_answer(self):
+        import io
+        import json
+        from dashboard import turn_hook
+
+        def run(answer):
+            class Resp(io.BytesIO):
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+            out = io.StringIO()
+            event = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+            env = {turn_hook.TOKEN_ENV: "t", turn_hook.URL_ENV: "http://127.0.0.1:1/api/internal/gate"}
+            with mock.patch.dict(os.environ, env), mock.patch.object(turn_hook.sys, "stdin", io.StringIO(json.dumps(event))), \
+                    mock.patch.object(turn_hook.urllib.request, "urlopen", lambda *a, **k: Resp(json.dumps(answer).encode())), \
+                    mock.patch.object(turn_hook.sys, "stdout", out):
+                turn_hook.main()
+            return out.getvalue()
+        self.assertEqual(run({"allow": True, "review": True}), "")
+        full = json.loads(run({"allow": True, "command": "sandbox-exec -f p /bin/bash -c ls"}))
+        self.assertEqual(full["hookSpecificOutput"]["permissionDecision"], "allow")
+
 
 if __name__ == "__main__":
     unittest.main()

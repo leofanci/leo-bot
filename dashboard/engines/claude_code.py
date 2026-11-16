@@ -580,8 +580,13 @@ class ClaudeCodeEngine(Engine):
         so PYTHONPATH leads with paths.CODE: `python3 -m dashboard.osctl` still finds Leo Bot's own.
         `repo_dir` is unused (kept for callers)."""
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, BROWSER_TOKEN_ENV,
-                *TURN_ENV)
+                *TURN_ENV, "CLAUDE_CODE_SHELL", "CLAUDE_CODE_SHELL_PREFIX")
+        # Approve for me: every command runs in Leo Bot's review shell, sandboxed, while Claude Code's
+        # reviewer still judges it (shell_rules.review_shell). No sandbox here: the gate's command check.
+        review = (getattr(policy, "level", "") == "approve" and bool(self.shell_dir(policy, bool(gate_vars(tokens))))
+                  and shell_rules.can_sandbox())
         return {**{k: v for k, v in os.environ.items() if k not in drop},
+                **({"CLAUDE_CODE_SHELL": shell_rules.review_shell()} if review else {}),
                 "PYTHONPATH": os.pathsep.join(x for x in (str(paths.CODE), os.environ.get("PYTHONPATH")) if x),
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(policy.workspace or "hq"),

@@ -2878,7 +2878,15 @@ class Handler(BaseHTTPRequestHandler):
             if not allow:
                 self.log_message("gate deny tool=%s", tool[:40])
             return self._send(200, {"allow": allow, "reason": reason})
-        if tool == "Bash":  # a shell command: after outside content it runs sandboxed (shell_rules.plan)
+        if tool == "Bash-shell":  # the review shell asks for its profile, or redeems an osctl ticket
+            ticket = body.get("ticket")
+            if ticket is not None:
+                run = taint.GATES.redeem(auth[7:], ticket)
+                return self._send(200, {"allow": bool(run),
+                                        **({"command": run} if run else {"reason": "no such ticket"})})
+            allow, reason, profile = taint.GATES.shell_profile(auth[7:], profile_dir=str(ROOT / "team" / "sandbox"))
+            return self._send(200, {"allow": allow, "reason": reason, **({"profile": profile} if profile else {})})
+        if tool == "Bash":  # a shell command: it runs sandboxed (shell_rules.plan), on review via its shell
             # The sandbox profile goes in Leo Bot's data folder, which a sandboxed command cannot write.
             cwd = body.get("cwd") if isinstance(body.get("cwd"), str) and body["cwd"].startswith("/") else None
             allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"),
@@ -2887,7 +2895,9 @@ class Handler(BaseHTTPRequestHandler):
             allow, reason = turn.decide(tool, command)
         if not allow:
             self.log_message("gate deny tool=%s", tool[:40])
-        return self._send(200, {"allow": allow, "reason": reason, **({"command": run} if run else {})})
+        review = tool == "Bash" and taint.GATES.review(auth[7:])
+        return self._send(200, {"allow": allow, "reason": reason, **({"command": run} if run else {}),
+                                **({"review": True} if review else {})})
 
     def _runner_from(self, token):
         """The runner behind a token, while its person still belongs here."""
@@ -3823,8 +3833,12 @@ class Handler(BaseHTTPRequestHandler):
             gate_kw, mode_was = {}, getattr(s_, "job_mode", None)
             port = (getattr(getattr(self, "server", None), "server_address", None) or (None, None))[1]
             if (gated or hooked) and isinstance(port, int):
-                gate_kw = {"gate_token": taint.GATES.mint(turn, writable=(kw.get("edit_dirs") or () if getattr(s_, "shell", False) else ()),
-                                                          wrap=not getattr(eng, "own_sandbox", False)),
+                shell_ = bool(getattr(s_, "shell", False))
+                # Approve for me on Claude Code: its reviewer judges each command, its shell sandboxes it.
+                review_ = (shell_ and getattr(s_, "level", "") == "approve"
+                           and bool(eng) and eng.id == chat_session.ClaudeCodeEngine.id)
+                gate_kw = {"gate_token": taint.GATES.mint(turn, writable=(kw.get("edit_dirs") or () if shell_ else ()),
+                                                          wrap=not getattr(eng, "own_sandbox", False), review=review_),
                            "gate_port": port}
             if (not gated or not gate_kw) and (web_ or (eng and eng.full_disk)):
                 turn.saw_outside()

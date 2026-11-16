@@ -47,6 +47,7 @@ PID_FILE = RUN / "server.pid"
 SERVER_LOG = LOGS / "server.log"
 UPDATE_LOG = LOGS / "update.log"
 TURN_CWD = DATA / "run" / "turns"  # a bot turn's working folder (turn_cwd), never CODE
+SANDBOX_DIR = DATA / "team" / "sandbox"  # sandbox profiles and the review shell (dashboard/shell_rules.py)
 
 
 HOME_SHARED = ("app", "data")  # the only home folder entries a bot turn may read

@@ -7,11 +7,14 @@ command asks. Standard library only, nothing from the bot's folders. Claude Code
 for it, so the answer holds at the moment the tool would run. Any failure (no token, server
 unreachable, a bad reply) denies: the gate fails closed. An allow prints nothing, so the
 engine's own permission rules still apply (fetch stays limited to typed hosts, Approve for me
-still asks the engine's reviewer). A shell command comes back from the gate rewritten to run in
-the OS sandbox (dashboard/shell_rules.py: from the first command for the code wall, and after
-outside content also offline and write-limited): the hook passes that one on and allows it.
-Claude Code's own reviewer refuses any rewritten command, and a sandboxed one can change only
-what the sandbox leaves open, so nothing a level allows is lost.
+still asks the engine's reviewer). On Full access a shell command comes back from the gate
+rewritten to run in the OS sandbox (dashboard/shell_rules.py: from the first command for the code
+wall, and after outside content also offline and write-limited): the hook passes that one on and
+allows it. On Approve for me the gate rewrites nothing and the hook stays silent, so Claude Code's
+own reviewer judges the command as written (a hook "allow" skips it and an "ask" is refused with no
+prompt, both verified live with 2.1.325); the sandbox comes from the review shell every command
+runs in (shell_rules.review_shell). Leo Bot's own osctl comes back as a one-time ticket that shell
+redeems, so it runs as on Full access.
 """
 import json
 import os

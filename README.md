@@ -164,7 +164,9 @@ works); the folder bot turns start in; the shell startup files `~/.zshrc`, `~/.z
 `~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.profile`;
 git's `~/.gitconfig` and `~/.config/git`; fish's `~/.config/fish`; `~/Library/LaunchAgents`;
 and no folder above any of them is renamed. Every shell command runs in macOS's sandbox from the
-first one to hold this. Before outside content that is the only limit: the internet and every
+first one to hold this. On Approve for me with Claude Code, its reviewer still judges each command
+as you wrote it, and the command then runs in a Leo Bot shell that puts it in the same sandbox;
+Leo Bot's own `osctl` runs as on Full access. Before outside content that is the only limit: the internet and every
 other folder stay as they are. File tools (Claude Code's Edit and Write, Codex's writable
 folders, the API key engine's file tools) are walled off the same places, and none of them can
 be linked as a folder, nor a folder holding them. Leo Bot's own updater runs git with no global

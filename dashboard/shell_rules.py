@@ -274,6 +274,7 @@ def code_walls(home=None):
     if writes is None:
         writes = _WALLS_CACHE[key] = sorted({
             os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD)),
+            os.path.realpath(str(paths.SANDBOX_DIR)),
             *(os.path.realpath(str(home / d)) for d in STARTUP_DIRS)})
     writes = list(writes)
     literals = sorted({*_link_chain(sys.executable), *(p for n in STARTUP_FILES for p in _link_chain(home / n))})
@@ -446,6 +447,81 @@ def osctl_command(command):
         return None
     code = _OSCTL_RUN.format(repo=repr(str(REPO)))
     return f"cd {shlex.quote(str(REPO))} && {shlex.quote(sys.executable)} -I -c {shlex.quote(code)}{command[m.end():]}"
+
+
+# Approve for me on Claude Code (the review level): Claude Code's own reviewer must judge each
+# command, and a hook that rewrites a command skips it (verified live with 2.1.325: "allow" skips
+# the reviewer, "ask" is refused with no prompt to answer). So on that level the hook stays silent
+# and the sandbox comes from the shell Claude Code runs every command in: CLAUDE_CODE_SHELL names
+# this wrapper (named zsh, as Claude Code takes only a bash or zsh), in Leo Bot's sandbox folder,
+# which no bot command writes (code_walls). Each run it asks the gate for this turn's profile
+# (the code wall before outside content; offline and write-limited after; the browser walls while
+# browsing) and runs /bin/zsh inside it. Leo Bot's own osctl comes as a one-time ticket the gate
+# issued for that exact command; the wrapper redeems it and runs only that command, as Full access
+# runs it. No gate, a refusal or a bad answer: nothing runs (exit 126).
+REVIEW_SHELL_TICKET = "leobot-osctl-ticket"
+_REVIEW_SHELL_CODE = r"""
+import json, os, re, sys, urllib.request
+args = sys.argv[1:]
+def die(why):
+    sys.stderr.write("Leo Bot did not run this command: " + why + "\n")
+    sys.exit(126)
+token, url = os.environ.get("LEOBOT_GATE_TOKEN"), os.environ.get("LEOBOT_GATE_URL") or ""
+if not token or not url.startswith("http://127.0.0.1:"):
+    die("this shell has no gate.")
+ticket = re.search(r"TICKET ([0-9a-f]{32})", " ".join(args))
+body = {"tool": "Bash-shell", **({"ticket": ticket.group(1)} if ticket else {})}
+try:
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        answer = json.loads(resp.read() or b"{}")
+except Exception:
+    die("Leo Bot could not check it.")
+if not isinstance(answer, dict) or answer.get("allow") is not True:
+    die(str((answer or {}).get("reason") or "the gate refused it.") if isinstance(answer, dict) else "bad answer.")
+if ticket:
+    run = answer.get("command")
+    if not isinstance(run, str) or not run:
+        die("bad answer.")
+    os.execv("/bin/sh", ["/bin/sh", "-c", run])
+profile = answer.get("profile")
+if not isinstance(profile, str) or not profile.startswith("/") or not os.path.isfile(profile):
+    die("no sandbox profile.")
+os.execv("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", profile, "/bin/zsh", *args])
+""".replace("TICKET", REVIEW_SHELL_TICKET)
+
+
+def review_shell():
+    """The review level's shell wrapper (notes above), written (again when it changed) into
+    core.paths.SANDBOX_DIR/shell/zsh, owner-only. Returns its path."""
+    from core import paths
+    folder = Path(paths.SANDBOX_DIR) / "shell"
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(folder, 0o700)
+    os.chmod(folder.parent, 0o700)
+    path = folder / "zsh"
+    text = f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(_REVIEW_SHELL_CODE)} \"$@\"\n"
+    try:
+        same = path.read_text(encoding="utf-8") == text and os.access(path, os.X_OK)
+    except OSError:
+        same = False
+    if not same:
+        fd, tmp = tempfile.mkstemp(dir=str(folder), suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, path)
+    return str(path)
+
+
+def profile_path(writable=(), browser=None, outside=True, profile_dir=None):
+    """The sandbox profile for these walls, written to a file in `profile_dir` (its path), or None
+    with no sandbox or no folder for it."""
+    if not can_sandbox() or not profile_dir:
+        return None
+    return _profile_file(sandbox_profile(writable, browser=browser, outside=outside, profile_dir=profile_dir),
+                         profile_dir)
 
 
 def plan(command, outside=False, writable=(), profile_dir=None, browser=None, cwd=None):

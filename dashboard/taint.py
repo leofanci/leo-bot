@@ -86,6 +86,15 @@ class Turn:
         return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir, browser=walls,
                                 cwd=cwd)
 
+    def shell_profile(self, writable=(), profile_dir=None):
+        """The sandbox profile file the review shell runs every command in, for this request's
+        state now (shell_rules.review_shell), or None with no sandbox."""
+        from dashboard import shell_rules
+        with self._lock:
+            outside, root, sends = self.outside, self.browser_root, self.browser_sends
+        walls = shell_rules.browser_walls(root, required=sends) if root else None
+        return shell_rules.profile_path(writable, browser=walls, outside=outside, profile_dir=profile_dir)
+
     def decide(self, tool, command=None):
         """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an
         Auto job) or "Bash" (a Full access shell command, dashboard/shell_rules.py). Anything
@@ -106,18 +115,26 @@ class Turn:
 class Gates:
     """Gate tokens: one per run, bound to its request's Turn."""
 
+    TICKET_AGE = 120  # seconds an osctl ticket of the review shell stays redeemable
+
     def __init__(self):
         self._live = {}
+        self._tickets = {}
         self._lock = threading.Lock()
 
-    def mint(self, turn, writable=(), wrap=True):
+    def mint(self, turn, writable=(), wrap=True, review=False):
         """`writable`: the run's edit folders, the only folders a sandboxed command may write.
-        `wrap`: whether its shell commands come back sandboxed after outside content (an engine
-        with its own sandbox, Codex, says no)."""
+        `wrap`: whether its shell commands come back sandboxed (an engine with its own sandbox,
+        Codex, says no). `review`: Approve for me on Claude Code: a command is never rewritten (a
+        rewrite skips Claude Code's reviewer); its shell (shell_rules.review_shell) sandboxes it."""
         token = secrets.token_hex(32)
         with self._lock:
-            self._live[token] = (turn, time.time(), tuple(str(d) for d in writable), bool(wrap))
+            self._live[token] = (turn, time.time(), tuple(str(d) for d in writable), bool(wrap), bool(review))
         return token
+
+    def review(self, token):
+        entry = self._find(token)
+        return bool(entry and entry[4])
 
     def _find(self, token):
         if not isinstance(token, str) or not token:
@@ -158,9 +175,41 @@ class Gates:
         entry = self._find(token)
         if entry is None:
             return False, "no gate for this run", None
-        turn, _, writable, wrap = entry
+        turn, _, writable, wrap, review = entry
         allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None, cwd=cwd)
-        return allow, reason, (run if wrap else None)
+        if not (allow and wrap and review and run):
+            return allow, reason, (run if wrap else None)
+        from dashboard import shell_rules
+        if shell_rules.osctl_command(command) == run:  # Leo Bot's own osctl: a ticket the review shell redeems
+            nonce = secrets.token_hex(16)
+            with self._lock:
+                self._tickets[nonce] = (token, run, time.time())
+            return True, "", f": {shell_rules.REVIEW_SHELL_TICKET} {nonce}"
+        return True, "", None  # Claude Code's reviewer judges it; the review shell sandboxes it
+
+    def redeem(self, token, nonce):
+        """The osctl command a review-shell ticket stands for, once, for the token it was issued to."""
+        if not isinstance(nonce, str) or self._find(token) is None:
+            return None
+        with self._lock:
+            now = time.time()
+            for k, (_, _, at) in list(self._tickets.items()):
+                if now - at > self.TICKET_AGE:
+                    del self._tickets[k]
+            entry = self._tickets.get(nonce)
+            if entry is None or not hmac.compare_digest(entry[0].encode(), str(token).encode()):
+                return None  # another run's ticket stays for its own run
+            del self._tickets[nonce]
+        return entry[1]
+
+    def shell_profile(self, token, profile_dir=None):
+        """(allow, reason, profile path) for the review shell of the run holding `token`."""
+        from core import paths
+        entry = self._find(token)
+        if entry is None or not entry[4]:
+            return False, "no review shell for this run", None
+        path = entry[0].shell_profile(entry[2], profile_dir=profile_dir or str(paths.SANDBOX_DIR))
+        return (True, "", path) if path else (False, "this machine has no sandbox", None)
 
     def revoke(self, token):
         with self._lock:
