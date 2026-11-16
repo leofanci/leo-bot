@@ -1761,10 +1761,7 @@ def _job_notepad(job):
     return text
 
 
-BROWSER_SHELL_OFF = ("This did not run: {bot}'s browser is set to {browser} (Settings, Browser) and its shell "
-                     "to {shell} (Team), and on {engine} Leo Bot cannot keep that shell away from the browser, "
-                     "so a command could send past your approvals. Set the browser to Reads only or Off, or "
-                     "the shell to a level without commands, then ask again.")
+BROWSER_SHELL_OFF = shell_rules.BROWSER_SHELL_OFF
 JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
                  "Pick another engine for @{bot} in Settings, Engines.")
 JOB_MATE_UNMETERED = ("@{bot}'s engine ({label}) does not report cost, so a scheduled job "
@@ -3947,7 +3944,15 @@ class Handler(BaseHTTPRequestHandler):
                 if tok:
                     kw.update({"browser_token": tok, "browser_port": self.server.server_address[1]})
                     # Its shell commands run walled off from the browser from now on (shell_rules.py).
-                    turn.browsing(ROOT, sends=browser.bot_setting(ws, st_.bot_id, ROOT)["level"] in ("write", "act"))
+                    # A shell Leo Bot cannot wall (an engine with its own sandbox, or none here) is
+                    # named too: the relay then refuses every send, even if the level rises mid-turn.
+                    unwalled = None
+                    if getattr(sess, "shell", False) and (getattr(st_.engine, "own_sandbox", False)
+                                                          or not shell_rules.can_sandbox()):
+                        unwalled = {"shell": SHELL_LEVELS.get(getattr(sess, "level", "full"), SHELL_LEVELS["full"])[0],
+                                    "engine": st_.engine.label}
+                    turn.browsing(ROOT, sends=browser.bot_setting(ws, st_.bot_id, ROOT)["level"] in ("write", "act"),
+                                  unwalled=unwalled)
             if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
                 kw.update({"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                         "apps_used": st_.apps_used,

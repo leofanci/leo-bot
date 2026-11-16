@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest import mock
 
 from core import approvals, browser
-from dashboard import browser_relay, taint
+from dashboard import browser_relay, shell_rules, taint
 
 CTX = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}
 P = "agent_browser_"
@@ -852,6 +852,41 @@ class FinalReview(unittest.TestCase):
         up = FakeUpstream(self.page, values=["prefilled"])
         self.assertEqual(text_of(self.handle(call(P + "click"), up)), browser_relay.FIELD_NO_PLAN)
         self.assertNotIn("\u2014", browser_relay.FIELD_NO_PLAN)
+
+
+class Round2(FinalReview):
+    """Round 2 of the final review."""
+
+    def test_send_refused_when_the_turns_shell_is_not_walled(self):
+        # B4: the owner raised the level to write or act mid-turn while the turn's shell has no wall
+        self.turn.browsing(self.root, sends=False, unwalled={"shell": "Full access", "engine": "Codex"})
+        for level in ("write", "act"):
+            self.level(level)
+            up = FakeUpstream(self.page)
+            self.handle(call(P + "fill", text="Hi"), up)
+            line = text_of(self.handle(call(P + "click"), up))
+            self.assertEqual(line, shell_rules.BROWSER_SHELL_OFF.format(
+                bot="b1", browser=browser_relay.LEVEL_LABELS[level], shell="Full access", engine="Codex"))
+            self.assertEqual(up.calls(), [P + "fill"])
+        self.assertEqual(approvals.load(self.root), [])
+        # a walled shell: the send goes on as before
+        self.turn = taint.Turn()
+        self.turn.browsing(self.root, sends=True)
+        self.level("act")
+        up = FakeUpstream(self.page)
+        self.handle(call(P + "fill", text="Hi"), up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up)), "ok")
+
+    def test_refs_go_stale_when_the_page_moves_by_itself(self):
+        # B5: a script or timer navigates with no relay call in between
+        self.level("read")
+        up = FakeUpstream(u("other.test/a"))
+        up.refs = {"e1": {"name": "Next", "role": "link"}}
+        self.handle(call(P + "snapshot"), up)
+        up.url = u("other.test/b")
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e1"), up)), browser_relay.READ_CLICK)
+        self.handle(call(P + "snapshot"), up)
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e1"), up)), "ok")
 
 
 class Preview(unittest.TestCase):

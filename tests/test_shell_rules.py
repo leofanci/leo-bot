@@ -212,8 +212,11 @@ class Sandbox(unittest.TestCase):
         self.assertEqual(shell_rules.plan("npm test"), (True, "", None))  # no outside content: as written
         self.assertEqual(shell_rules.plan("curl x", outside=True), (False, shell_rules.SENDS_OFF, None))
         self.assertEqual(shell_rules.plan("rm -rf /", outside=True), (False, shell_rules.NEVER, None))
-        # Leo Bot's own command line keeps its own rules and must write its data
-        self.assertIsNone(shell_rules.plan("python3 -m dashboard.osctl tree", outside=True)[2])
+        # Leo Bot's own command line keeps its own rules and must write its data: it runs outside
+        # the sandbox, but as Leo Bot's own code only (OsctlExempt)
+        run = shell_rules.plan("python3 -m dashboard.osctl tree", outside=True)[2]
+        self.assertTrue(run.startswith("cd "), run)
+        self.assertNotIn(shell_rules.SANDBOX_EXEC, run)
         for sneaky in ("python3 -m dashboard.osctl tree; python3 x.py", "python3 -m dashboard.osctl tree > f",
                        "python3 -m dashboard.osctl $(cat x)", "python3 -m dashboard.osctlx"):
             ok, _, run = shell_rules.plan(sneaky, outside=True)
@@ -273,18 +276,16 @@ class BrowserWall(unittest.TestCase):
             f.write("45678\n/devtools/browser/abc\n")
 
     def walls(self, required=True):
-        return shell_rules.browser_walls(self.root, required=required, home=self.home, platform="darwin")
+        return shell_rules.browser_walls(self.root, required=required, home=self.home)
 
-    def test_walls_name_the_ports_and_folders(self):
+    def test_walls_name_the_folders(self):
         w = self.walls()
-        self.assertEqual(w["ports"], [9222, 45678])
         self.assertEqual(w["paths"], sorted([os.path.join(self.home, ".agent-browser"), os.path.join(self.root, "run")]))
         self.assertTrue(w["required"])
-        self.assertEqual(shell_rules.browser_walls(self.root, home=self.home, platform="linux")["ports"], [9222])
 
     def test_profile_before_outside_content_is_the_browser_wall_alone(self):
         prof = shell_rules.sandbox_profile(["/work/acme"], browser=self.walls(), outside=False)
-        for part in ('(remote ip "*:9222")', '(remote ip "*:45678")', "(deny appleevent-send)",
+        for part in ('(deny network-outbound (remote ip "localhost:*"))', "(deny appleevent-send)",
                      f'(deny file-read* file-write* (subpath "{self.root}/run"))',
                      f'(remote unix-socket (subpath "{self.home}/.agent-browser"))'):
             self.assertIn(part, prof)
@@ -294,7 +295,7 @@ class BrowserWall(unittest.TestCase):
     def test_profile_after_outside_content_denies_every_localhost_port(self):
         prof = shell_rules.sandbox_profile(["/work/acme"], browser=self.walls(), outside=True)
         self.assertIn("(deny network-outbound (remote ip))", prof)
-        self.assertNotIn('"localhost:*"', prof)
+        self.assertNotIn('(allow network-outbound (remote ip "localhost:*"))', prof)
         self.assertIn(f'(deny file-read* file-write* (subpath "{self.home}/.agent-browser"))', prof)
         self.assertIn('"localhost:*"', shell_rules.sandbox_profile(["/work/acme"]))  # no browser: as before
 
@@ -304,7 +305,8 @@ class BrowserWall(unittest.TestCase):
         if shell_rules.can_sandbox():
             self.assertTrue(run.startswith(shell_rules.SANDBOX_EXEC))
         self.assertEqual(shell_rules.plan("rm -rf /", browser=self.walls()), (False, shell_rules.NEVER, None))
-        self.assertIsNone(shell_rules.plan("python3 -m dashboard.osctl tree", browser=self.walls())[2])
+        osctl = shell_rules.plan("python3 -m dashboard.osctl tree", browser=self.walls())[2]
+        self.assertNotIn(shell_rules.SANDBOX_EXEC, osctl)  # Leo Bot's own osctl, outside the sandbox
 
     def test_no_sandbox_refuses_when_the_browser_can_send(self):
         with unittest.mock.patch.object(shell_rules, "SANDBOX_EXEC", "/nonexistent/sandbox-exec"):
@@ -366,11 +368,124 @@ class BrowserWall(unittest.TestCase):
         unix = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({sock_path!r})"
         key = f"open({os.path.join(self.root, 'run', 'browser-engine-key')!r}).read()"
         self.assertFalse(runs(tcp.format(debug), outside=False))
-        self.assertTrue(runs(tcp.format(other), outside=False))  # other local work still runs
+        self.assertFalse(runs(tcp.format(other), outside=False))  # every localhost port (round 2, B3)
         self.assertFalse(runs(unix, outside=False))
         self.assertFalse(runs(key, outside=False))
         self.assertFalse(runs(tcp.format(other), outside=True))  # after outside content: no localhost at all
         self.assertFalse(runs(key, outside=True))
+
+
+
+class OsctlExempt(unittest.TestCase):
+    """The one command that runs outside the sandbox never loads code a bot wrote (round 2, B1)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = os.path.realpath(self.tmp.name)
+        self.mark = os.path.join(self.cwd, "shadowed.txt")
+        os.makedirs(os.path.join(self.cwd, "dashboard"))
+        with open(os.path.join(self.cwd, "dashboard", "__init__.py"), "w") as f:
+            f.write("")
+        with open(os.path.join(self.cwd, "dashboard", "osctl.py"), "w") as f:
+            f.write(f"open({self.mark!r}, 'w').write('bot code ran')\n")
+        with open(os.path.join(self.cwd, "sitecustomize.py"), "w") as f:
+            f.write(f"open({self.mark!r}, 'w').write('bot site ran')\n")
+
+    def test_every_path_rewrites_it(self):
+        import sys
+        for kw in ({}, {"outside": True}, {"browser": {"paths": [], "required": True}}):
+            allow, _, run = shell_rules.plan("python3 -m dashboard.osctl tree", **kw)
+            self.assertTrue(allow, kw)
+            self.assertIn(sys.executable, run)
+            self.assertIn(" -I -c ", run)
+            self.assertTrue(run.startswith("cd " + __import__("shlex").quote(str(shell_rules.REPO)) + " && "), run)
+
+    def test_a_shadow_package_in_the_folder_is_not_loaded(self):
+        import subprocess
+        _, _, run = shell_rules.plan("python3 -m dashboard.osctl --help", outside=True)
+        out = subprocess.run(["/bin/bash", "-c", run], cwd=self.cwd, capture_output=True, text=True,
+                             env={**os.environ, "PYTHONPATH": self.cwd})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("usage: osctl", out.stdout)  # Leo Bot's own osctl ran
+        self.assertFalse(os.path.exists(self.mark))
+        # as written, the same command would have run the bot's code
+        subprocess.run(["/bin/bash", "-c", "python3 -m dashboard.osctl --help"], cwd=self.cwd, capture_output=True)
+        self.assertTrue(os.path.exists(self.mark))
+
+    def test_a_lookalike_is_not_exempt(self):
+        for cmd in ("./python3 -m dashboard.osctl tree", "/tmp/x/python3 -m dashboard.osctl tree",
+                    "python3 -m dashboard.osctl tree; ls", "PYTHONPATH=. python3 -m dashboard.osctl tree",
+                    "python3 -I -m dashboard.osctl tree"):
+            run = shell_rules.plan(cmd, outside=True)[2]
+            if shell_rules.can_sandbox():
+                self.assertTrue(run and run.startswith(shell_rules.SANDBOX_EXEC), cmd)
+        self.assertIsNone(shell_rules.plan("./python3 -m dashboard.osctl tree")[2])  # before outside: as written
+
+
+class Round2Walls(unittest.TestCase):
+    """Round 2: no localhost at all beside a browser (B3); the profile folder and <data>/team stay
+    unwritable (B2)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = os.path.realpath(self.tmp.name)
+        self.home, self.root, self.work = (os.path.join(base, n) for n in ("h", "d", "w"))
+        for d in (os.path.join(self.home, ".agent-browser"), os.path.join(self.root, "run"),
+                  os.path.join(self.root, "team", "sandbox"), self.work):
+            os.makedirs(d)
+        self.pdir = os.path.join(self.root, "team", "sandbox")
+
+    def walls(self):
+        return shell_rules.browser_walls(self.root, required=True, home=self.home)
+
+    def test_walls_and_profiles(self):
+        w = self.walls()
+        self.assertEqual(w["write_paths"], [os.path.join(self.root, "team")])
+        self.assertNotIn("ports", w)
+        for outside in (False, True):
+            prof = shell_rules.sandbox_profile([self.work], browser=w, outside=outside, profile_dir=self.pdir)
+            self.assertIn('(deny network-outbound (remote ip "localhost:*"))', prof)
+            self.assertIn(f'(deny file-write* (subpath "{self.root}/team"))', prof)
+            self.assertIn(f'(deny file-write* (subpath "{self.pdir}"))', prof)
+        plain = shell_rules.sandbox_profile([self.work], profile_dir=self.pdir)
+        self.assertIn(f'(deny file-write* (subpath "{self.pdir}"))', plain)
+
+    @unittest.skipUnless(os.path.exists(shell_rules.SANDBOX_EXEC), "macOS sandbox only")
+    def test_live(self):
+        import shlex
+        import socket
+        import subprocess
+        import sys
+        s4 = socket.socket()
+        s4.bind(("127.0.0.1", 0))
+        s4.listen(5)
+        self.addCleanup(s4.close)
+        s6 = socket.socket(socket.AF_INET6)
+        s6.bind(("::1", 0))
+        s6.listen(5)
+        self.addCleanup(s6.close)
+        approvals = os.path.join(self.root, "team", "approvals.json")
+
+        def runs(code, outside, browser=True):
+            cmd = shell_rules.sandboxed(f"{sys.executable} -c {shlex.quote(code)}", [self.work],
+                                        profile_dir=self.pdir, browser=self.walls() if browser else None,
+                                        outside=outside)
+            return subprocess.run(cmd, shell=True, cwd=self.work, capture_output=True).returncode == 0
+        tcp4 = f"import socket; socket.create_connection(('127.0.0.1', {s4.getsockname()[1]}), 3).close()"
+        tcp6 = f"import socket; s = socket.socket(socket.AF_INET6); s.settimeout(3); s.connect(('::1', {s6.getsockname()[1]}))"
+        for outside in (False, True):
+            self.assertFalse(runs(tcp4, outside), outside)  # no localhost port from the first command
+            self.assertFalse(runs(tcp6, outside), outside)
+            self.assertFalse(runs(f"open({approvals!r}, 'w').write('{{}}')", outside), outside)
+            self.assertFalse(runs(f"open({os.path.join(self.pdir, 'x.sb')!r}, 'w').write('(allow default)')", outside))
+            self.assertTrue(runs(f"open({os.path.join(self.work, 'ok.txt')!r}, 'w').write('ok')", outside), outside)
+        # the profile file itself stays out of reach of a command it wraps
+        self.assertFalse(runs(f"open({os.path.join(self.pdir, 'y.sb')!r}, 'w').write('x')", True, browser=False))
+        self.assertFalse(os.path.exists(approvals))
 
 
 if __name__ == "__main__":

@@ -48,13 +48,17 @@ class Turn:
         self.outside = bool(outside or app_data)
         self.browser_root = None  # a run of this request has a browser: its data root
         self.browser_sends = False  # ... at a level that can send (write, act)
+        self.unwalled_shell = None  # {"shell", "engine"} of a run whose shell Leo Bot cannot wall
 
-    def browsing(self, root, sends=False):
+    def browsing(self, root, sends=False, unwalled=None):
         """A run of this request has the browser (dashboard/shell_rules.py, the third wall): from
-        now on every shell command runs sandboxed away from it. Only ever gains."""
+        now on every shell command runs sandboxed away from it. `unwalled`: that run's shell cannot
+        be walled ({"shell", "engine"} labels), so the browser relay refuses every send. Only ever gains."""
         with self._lock:
             self.browser_root = str(root)
             self.browser_sends = self.browser_sends or bool(sends)
+            if unwalled and self.unwalled_shell is None:
+                self.unwalled_shell = dict(unwalled)
 
     def saw_app_data(self):
         with self._lock:

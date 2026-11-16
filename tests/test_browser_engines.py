@@ -452,7 +452,21 @@ class Turn(Root):
                 mock.patch.object(server.taint.Turn, "browsing", autospec=True) as browsing:
             kw = self.run_turn()[0]
         self.assertEqual(len(kw["browser_token"]), 64)
-        browsing.assert_called_once_with(mock.ANY, self.root, sends=True)
+        browsing.assert_called_once_with(mock.ANY, self.root, sends=True, unwalled=None)
+
+    def test_unwalled_shell_is_named_to_the_relay(self):
+        # Reads only with a shell Leo Bot cannot wall: the turn runs, and the relay is told, so a
+        # level raised mid-turn still sends nothing (round 2, B4).
+        browser.set_bot("hq", "cos", "read", "bot", self.root)
+        work = str(self.root)
+        with mock.patch.object(server.engine_config, "access", return_value="full"), \
+                mock.patch.object(server.shell_rules, "can_sandbox", return_value=False), \
+                mock.patch.object(server, "_turn_folders", return_value=([], [work], [work])), \
+                mock.patch.object(server.taint.Turn, "browsing", autospec=True) as browsing:
+            self.assertEqual(len(self.run_turn()), 1)
+        unwalled = browsing.call_args.kwargs["unwalled"]
+        self.assertEqual(unwalled["shell"], "Full access")
+        self.assertTrue(unwalled["engine"])
 
     def test_note_names_level_mode_and_report_jobs(self):
         note = server._browser_note({"level": "act", "mode": "my_chrome"}, "report")

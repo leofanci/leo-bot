@@ -45,6 +45,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from core import approvals, bots, browser
+from dashboard import shell_rules
 from core.browser_engine import COMMIT_TOOLS, NAV_TOOLS, READ_TOOLS, TYPE_TOOLS
 
 PLAN_TOOL = "leobot_plan_sends"
@@ -101,6 +102,7 @@ RESTORES = frozenset("agent_browser_" + n for n in ("back", "forward", "reload",
 MAX_PLAN = 20
 MAX_TEXT = 10000
 MODE_LABELS = {"bot": "the bot browser", "my_chrome": "the owner's Chrome"}
+LEVEL_LABELS = {"write": "Read + write", "act": "Acts on its own"}
 
 SITE_MODE = "{site} is set to open only in {mode_label}. This bot uses {other_label}, so it did not open it."
 NO_PLAN = ("This would send what you typed, and no approved send plan matches it. Call leobot_plan_sends with "
@@ -521,6 +523,11 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     when no plan matches (what the bot typed, or text that was already in the page's field)."""
     if ctx.get("report"):
         return _text(rid, REPORT_ONLY), sid
+    unwalled = getattr(ctx.get("taint"), "unwalled_shell", None)
+    if unwalled and setting["level"] in LEVEL_LABELS:  # a shell beside it could send past the gate
+        return _text(rid, shell_rules.BROWSER_SHELL_OFF.format(
+            bot=ctx["bot"], browser=LEVEL_LABELS[setting["level"]], shell=unwalled.get("shell", "a shell"),
+            engine=unwalled.get("engine", "this engine"))), sid
     site = browser.site_of(url, root)
     refusal = _mode_refusal(site, mode, root)
     if refusal:
@@ -598,8 +605,13 @@ def _gate(frame, ctx, sid, upstream, root):
                 return _text(rid, refusal), sid
         if st["blocked"] and name not in NAV_TOOLS:
             return _text(rid, st["blocked"]), sid
+        here = None
         if name not in NAV_TOOLS:  # a late redirect may have moved the tab since the last call
-            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _page_refusal(upstream, mode, root) else None
+            here = _current(upstream)
+            if here != st.get("refs_url"):  # moved by itself (a script, a timer): old refs point anywhere
+                st["refs"] = {}
+            bad = UNKNOWN_PAGE if here is None else _mode_refusal(browser.site_of(here, root), mode, root)
+            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if bad else None
             if refusal:
                 return _text(rid, refusal), sid
         if level == "read" and name == CLICK:
@@ -653,7 +665,7 @@ def _gate(frame, ctx, sid, upstream, root):
         same_doc = name == OPEN and _same_document(args.get("url"), _current(upstream) if "url" in args else None)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
         if name == SNAPSHOT:
-            st["refs"] = _refs_of(reply)
+            st["refs"], st["refs_url"] = _refs_of(reply), here
         elif name in NAV_TOOLS or name in COMMIT_TOOLS or "url" in args:
             st["refs"] = {}  # the page may have changed: an old ref could point anywhere
         fresh = typed_state(bkey, root)  # the upstream may have set it aside (set_aside)
