@@ -121,7 +121,8 @@ class ChatSession:
 
     def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
             web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None,
-            gate_token=None, gate_port=None, browser_token=None, browser_port=None):
+            gate_token=None, gate_port=None, browser_token=None, browser_port=None,
+            canvas_token=None, canvas_port=None):
         """Run one turn on self.engine; yield (kind, payload) events.
         `with_web` adds web tools for this turn; `read_dirs` are the linked folders
         it may read and search, `edit_dirs` (a subset) the ones it may change; `model` overrides
@@ -134,7 +135,8 @@ class ChatSession:
         if not policy.shared:
             self.folder_paths |= set(policy.read_dirs)
         tokens = TurnTokens(apps_token, apps_port, os_token, os_port, gate_token=gate_token, gate_port=gate_port,
-                            browser_token=browser_token, browser_port=browser_port)
+                            browser_token=browser_token, browser_port=browser_port,
+                            canvas_token=canvas_token, canvas_port=canvas_port)
         failed = False
         try:
             for ev in self.engine.turn(self, text, policy, model, tokens):

@@ -1,0 +1,326 @@
+"""The internal canvas endpoint: the actor comes from a per-run canvas token only."""
+import io
+import json
+import os
+import tempfile
+import unittest
+from email.message import Message
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+import dashboard.server as server
+from core import canvas_store as cs, canvases as cv, rooms
+from dashboard import taint
+from dashboard.engines import api_tools, claude_code, codex
+from dashboard.engines.base import TURN_ENV, TurnPolicy, TurnTokens
+
+PORT = 8765
+PATH = "/api/internal/canvas"
+CHAT = "11111111-1111-1111-1111-111111111111"
+NO_ACCESS = "no canvas access for this run"
+
+
+def request(body=None, *, token=None, host=f"127.0.0.1:{PORT}", headers=None, path=PATH):
+    h = server.Handler.__new__(server.Handler)
+    out = {}
+    h.wfile = io.BytesIO()
+    h.send_response = lambda code, *a: out.setdefault("code", code)
+    h.send_header = lambda *a: None
+    h.end_headers = lambda: None
+    h.log_message = lambda *a: None
+    raw = b"" if body is None else json.dumps(body).encode()
+    msg = Message()
+    msg["Host"] = host
+    if raw:
+        msg["Content-Type"] = "application/json"
+    msg["Content-Length"] = str(len(raw))
+    if token:
+        msg["Authorization"] = f"Bearer {token}"
+    for k, v in (headers or {}).items():
+        msg[k] = v
+    h.headers, h.rfile, h.path = msg, io.BytesIO(raw), path
+    h.client_address = ("127.0.0.1", 50000)
+    h.server = SimpleNamespace(server_address=("127.0.0.1", PORT))
+    h.do_POST()
+    payload = h.wfile.getvalue()
+    return out["code"], (json.loads(payload) if payload else None)
+
+
+class Base(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / "chats").mkdir()
+        (self.root / "projects" / "demo").mkdir(parents=True)
+        (self.root / "team").mkdir()
+        (self.root / "team" / "people.json").write_text(json.dumps({"people": {
+            "p1": {"name": "A", "ws": {"demo": "member"}}}}))
+        for p in (mock.patch.object(server, "ROOT", self.root),
+                  mock.patch.object(server.chat_store, "CHATS_DIR", self.root / "chats"),
+                  mock.patch.object(server.db, "db_exists", return_value=True),
+                  mock.patch.object(server.db, "tree", return_value=[])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def mint(self, **over):
+        turn = over.pop("turn", None) or taint.Turn()
+        ctx = {"ws": "demo", "actor": "bot", "bot": "research", "job": None, "chat": "c1",
+               "room": "demo/general", "shared": False, "people": (), "turn": turn, "gated": True}
+        ctx.update(over)
+        tok = server.CANVAS_TOKENS.mint(ctx)
+        self.addCleanup(server.CANVAS_TOKENS.revoke, tok)
+        return tok, turn
+
+    def call(self, tok, cmd, **params):
+        return request({"cmd": cmd, "params": params}, token=tok)
+
+
+class Access(Base):
+    def test_no_token_or_bad_token_403(self):
+        for tok in (None, "nope", "a" * 64):
+            code, body = request({"cmd": "list-canvases", "params": {}}, token=tok)
+            self.assertEqual((code, body), (403, {"ok": False, "error": NO_ACCESS}), tok)
+        gate = taint.GATES.mint(taint.Turn())  # another kind of token never opens it
+        self.addCleanup(taint.GATES.revoke, gate)
+        self.assertEqual(request({"cmd": "list-canvases"}, token=gate)[0], 403)
+
+    def test_non_local_request_403(self):
+        tok, _ = self.mint()
+        for kw in ({"host": "leo.example.com"}, {"headers": {"X-Forwarded-For": "1.2.3.4"}},
+                   {"headers": {"Origin": "https://evil.example"}}):
+            code, body = request({"cmd": "list-canvases", "params": {}}, token=tok, **kw)
+            self.assertEqual(code, 403, kw)
+            self.assertFalse(body["ok"])
+
+    def test_revoked_after_run(self):
+        tok, _ = self.mint()
+        self.assertEqual(self.call(tok, "list-canvases")[0], 200)
+        server.CANVAS_TOKENS.revoke(tok)  # what run()'s finally does
+        self.assertEqual(self.call(tok, "list-canvases"), (403, {"ok": False, "error": NO_ACCESS}))
+
+    def test_bad_body_400(self):
+        tok, _ = self.mint()
+        for body in ({"params": {}}, {"cmd": 5}, {"cmd": "get-canvas", "params": "x"}):
+            code, out = request(body, token=tok)
+            self.assertEqual(code, 400, body)
+            self.assertFalse(out["ok"])
+
+
+class Actor(Base):
+    def test_actor_comes_from_token_not_body(self):
+        tok, _ = self.mint()
+        code, out = self.call(tok, "create-canvas", title="Plan", actor="owner", by="owner",
+                              _actor="owner", source="api", blocks=[{"type": "text", "md": "hi"}])
+        self.assertEqual(code, 200, out)
+        self.assertTrue(out["ok"])
+        doc = cs.read(self.root, "demo", out["id"])
+        self.assertEqual(doc["created_by"], "bot:research")
+        self.assertEqual((doc["blocks"][0]["created_by"], doc["blocks"][0]["by"]), ("bot:research", "bot:research"))
+
+    def test_refusals_and_approvals(self):
+        cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
+        tok, _ = self.mint()
+        code, out = self.call(tok, "delete-canvas", id=cid)
+        self.assertEqual(code, 200)
+        self.assertEqual((out["ok"], out.get("needs_approval")), (False, True))
+        self.assertIn("APPROVAL", out["error"])
+        code, out = self.call(tok, "nope")
+        self.assertEqual((code, out["ok"]), (200, False))
+        self.assertNotIn("needs_approval", out)
+
+    def test_hq_token_is_refused_for_a_bot(self):
+        tok, _ = self.mint(ws="hq")
+        code, out = self.call(tok, "list-canvases")
+        self.assertEqual((code, out["ok"]), (200, False))
+
+    def test_readonly_run_only_reads(self):
+        cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
+        tok, _ = self.mint(readonly=True)
+        for cmd, params in (("list-canvases", {}), ("get-canvas", {"id": cid}), ("list-templates", {}),
+                            ("list-history", {"id": cid})):
+            code, out = self.call(tok, cmd, **params)
+            self.assertTrue(out["ok"], (cmd, out))
+        for cmd in ("create-canvas", "add-block", "delete-canvas", "undo", "trust"):
+            code, out = self.call(tok, cmd, id=cid, title="x")
+            self.assertEqual((code, out["ok"]), (200, False), cmd)
+            self.assertIn("read-only", out["error"])
+        self.assertEqual(len(cs.list_ids(self.root, "demo", "cv")), 1)
+
+    def test_shared_ctx_carries_room_people(self):
+        rooms.save_topic("demo", "launch", ["research"], "research", self.root, private=True, people=["p1"])
+        tok, _ = self.mint(shared=True, room="demo/t-launch", people=("p1",))
+        code, out = self.call(tok, "create-canvas", title="Plan", pin="demo/t-launch")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(self.call(tok, "delete-canvas", id=out["id"])[1]["ok"], False)  # shared: blocked
+
+
+class Labels(Base):
+    def labeled(self):
+        tainted = cv.Actor("bot", "research", tainted=lambda: True, chat="c0")
+        return cv.dispatch(self.root, "demo", tainted, "create-canvas",
+                           {"title": "Plan", "blocks": [{"type": "text", "md": "from a page"}]})["id"]
+
+    def test_read_of_labeled_item_taints_turn(self):
+        cid = self.labeled()
+        tok, turn = self.mint()
+        self.assertFalse(turn.outside)
+        code, out = self.call(tok, "get-canvas", id=cid)
+        self.assertTrue(out["ok"], out)
+        self.assertTrue(turn.outside)
+        self.assertEqual(out["blocks"][0]["md"], "from a page")
+        self.assertIn("outside_content", out["blocks"][0])
+
+    def test_ungated_ctx_withholds_labeled_text(self):
+        cid = self.labeled()
+        tok, _ = self.mint(gated=False)
+        out = self.call(tok, "get-canvas", id=cid)[1]
+        self.assertEqual(out["blocks"][0]["md"], cv.HIDDEN)
+
+    def test_tainted_turn_labels_its_writes(self):
+        tok, turn = self.mint()
+        turn.saw_outside()
+        out = self.call(tok, "create-canvas", title="Plan", blocks=[{"type": "text", "md": "x"}])[1]
+        self.assertTrue(cs.read(self.root, "demo", out["id"])["blocks"][0]["outside"])
+
+
+class Env(unittest.TestCase):
+    def test_env_carries_canvas_vars(self):
+        self.assertIn("LEOBOT_CANVAS_TOKEN", TURN_ENV)
+        self.assertIn("LEOBOT_CANVAS_URL", TURN_ENV)
+        url = f"http://127.0.0.1:{PORT}{PATH}"
+        toks = TurnTokens(canvas_token="ct1", canvas_port=PORT)
+        leak = {"LEOBOT_CANVAS_TOKEN": "server-own", "LEOBOT_CANVAS_URL": "http://evil.example/x"}
+        with mock.patch.dict(os.environ, leak):
+            env = claude_code.ClaudeCodeEngine().turn_env(TurnPolicy(), toks)
+            self.assertEqual((env["LEOBOT_CANVAS_TOKEN"], env["LEOBOT_CANVAS_URL"]), ("ct1", url))
+            env = codex.CodexEngine().turn_env(TurnPolicy(), toks)
+            self.assertEqual((env["LEOBOT_CANVAS_TOKEN"], env["LEOBOT_CANVAS_URL"]), ("ct1", url))
+            for e in (claude_code.ClaudeCodeEngine().turn_env(TurnPolicy(), TurnTokens()),
+                      codex.CodexEngine().turn_env(TurnPolicy(), TurnTokens()),
+                      server.os_relay.env_for({"ws": "demo"})):
+                self.assertNotIn("LEOBOT_CANVAS_TOKEN", e)
+                self.assertNotIn("LEOBOT_CANVAS_URL", e)
+            env = server.os_relay.env_for({"ws": "demo", "canvas_token": "ct1", "canvas_port": PORT})
+            self.assertEqual((env["LEOBOT_CANVAS_TOKEN"], env["LEOBOT_CANVAS_URL"]), ("ct1", url))
+        box = api_tools.ToolBox(TurnPolicy(), Path("."), toks, "api", {})
+        self.assertEqual((box.osctl_ctx()["canvas_token"], box.osctl_ctx()["canvas_port"]), ("ct1", PORT))
+
+
+class Turn(Base):
+    """Through _handle_ask: run() mints a canvas token per run and revokes it after."""
+
+    def run_turn(self, body=None, during=None):
+        seen = []
+
+        class S:
+            _started = False
+            _turn_count = 0
+            _last_skill = None
+            _skill_explicit = False
+            session_id = CHAT
+            apps_used = False
+
+            def __init__(self, *a, **k):
+                pass
+
+            def is_fresh(self):
+                return not self._started
+
+            def note_skill(self, *a, **k):
+                pass
+
+            def note_bot(self, *a):
+                pass
+
+            def close(self):
+                pass
+
+            def ask(self, prompt, **kw):
+                seen.append(kw)
+                if during:
+                    during(kw)
+                yield ("delta", "ok")
+                yield ("done", {})
+        h = server.Handler.__new__(server.Handler)
+        h.wfile = io.BytesIO()
+        h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+        h.log_message = lambda *a: None
+        h.server = SimpleNamespace(server_address=("127.0.0.1", PORT))
+        with mock.patch.object(server, "get_chat_session", return_value=S()), \
+                mock.patch.object(server.chat_session, "ChatSession", S):
+            h._handle_ask({"messages": [{"role": "user", "content": "hello"}], **(body or {})})
+        return seen
+
+    def test_run_mints_then_revokes(self):
+        live = []
+        seen = self.run_turn(during=lambda kw: live.append(server.CANVAS_TOKENS.lookup(kw["canvas_token"])))
+        kw = seen[0]
+        self.assertEqual(kw["canvas_port"], PORT)
+        ctx = live[0]
+        self.assertEqual((ctx["actor"], ctx["bot"], ctx["chat"], ctx["shared"]), ("bot", "cos", CHAT, False))
+        self.assertIsInstance(ctx["turn"], taint.Turn)
+        self.assertIsNone(server.CANVAS_TOKENS.lookup(kw["canvas_token"]))
+
+    def hold(self):
+        cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
+        with self.assertRaises(cv.NeedsApproval):
+            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas", {"id": cid})
+        self.assertEqual(len(cv.pending_holds(self.root, CHAT)), 1)
+        return cid
+
+    def test_approve_runs_holds_once_reject_drops(self):
+        cid = self.hold()
+        real = cv.run_holds
+        with mock.patch.object(server.canvases, "run_holds", side_effect=real) as ran:
+            self.run_turn({"chat_id": CHAT, "approval": "approved"})
+            self.run_turn({"chat_id": CHAT, "approval": "approved"})
+        self.assertEqual(ran.call_count, 2)  # once per approval; the second finds none
+        self.assertNotIn(cid, cs.list_ids(self.root, "demo", "cv"))  # the held delete ran
+        cid = self.hold()
+        self.run_turn({"chat_id": CHAT, "approval": "rejected"})
+        self.assertEqual(cv.pending_holds(self.root, CHAT), [])
+        self.assertIn(cid, cs.list_ids(self.root, "demo", "cv"))
+        self.hold()
+        self.run_turn({"chat_id": CHAT})  # a new message answered: dropped
+        self.assertEqual(cv.pending_holds(self.root, CHAT), [])
+        self.hold()
+        code, _ = request_owner("/api/approvals/dismiss", {"chat": CHAT})
+        self.assertEqual(code, 200)
+        self.assertEqual(cv.pending_holds(self.root, CHAT), [])
+        self.assertIn(cid, cs.list_ids(self.root, "demo", "cv"))
+
+    def test_a_person_never_runs_holds(self):
+        self.hold()
+        with mock.patch.object(server.canvases, "run_holds") as ran:
+            server._canvas_holds_answered(CHAT, "approved", {"kind": "person", "id": "p1"})
+        ran.assert_not_called()
+        self.assertEqual(cv.pending_holds(self.root, CHAT), [])
+
+
+def request_owner(path, body):
+    h = server.Handler.__new__(server.Handler)
+    out = {}
+    h.wfile = io.BytesIO()
+    h.send_response = lambda code, *a: out.setdefault("code", code)
+    h.send_header = lambda *a: None
+    h.end_headers = lambda: None
+    h.log_message = lambda *a: None
+    raw = json.dumps(body).encode()
+    msg = Message()
+    msg["Host"] = f"127.0.0.1:{PORT}"
+    msg["Content-Type"] = "application/json"
+    msg["Content-Length"] = str(len(raw))
+    msg["Cookie"] = f"{server.AUTH_COOKIE}={server.AUTH_TOKEN}"
+    msg["Origin"] = f"http://127.0.0.1:{PORT}"
+    h.headers, h.rfile, h.path = msg, io.BytesIO(raw), path
+    h.client_address = ("127.0.0.1", 50000)
+    h.server = SimpleNamespace(server_address=("127.0.0.1", PORT))
+    h.do_POST()
+    payload = h.wfile.getvalue()
+    return out["code"], (json.loads(payload) if payload else None)
+
+
+if __name__ == "__main__":
+    unittest.main()

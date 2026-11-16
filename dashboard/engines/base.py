@@ -43,7 +43,7 @@ class TurnPolicy:
 
 # osctl reads these from its environment; a child never inherits the server's own copy.
 TURN_ENV = ("LEOBOT_READONLY", "LEOBOT_CHAT", "LEOBOT_JOB", "LEOBOT_JOB_MODE", "LEOBOT_CODE_FOLDER",
-            "LEOBOT_GATE_TOKEN", "LEOBOT_GATE_URL")
+            "LEOBOT_GATE_TOKEN", "LEOBOT_GATE_URL", "LEOBOT_CANVAS_TOKEN", "LEOBOT_CANVAS_URL")
 
 
 def gate_vars(tokens):
@@ -52,6 +52,14 @@ def gate_vars(tokens):
     if not (isinstance(token, str) and token and isinstance(port, int)):
         return {}
     return {"LEOBOT_GATE_TOKEN": token, "LEOBOT_GATE_URL": f"http://127.0.0.1:{port}/api/internal/gate"}
+
+
+def canvas_vars(tokens):
+    """This run's canvas token and the server's canvas endpoint for osctl, when it has one."""
+    token, port = getattr(tokens, "canvas_token", None), getattr(tokens, "canvas_port", None)
+    if not (isinstance(token, str) and token and isinstance(port, int)):
+        return {}
+    return {"LEOBOT_CANVAS_TOKEN": token, "LEOBOT_CANVAS_URL": f"http://127.0.0.1:{port}/api/internal/canvas"}
 
 
 def turn_vars(policy):
@@ -75,6 +83,8 @@ class TurnTokens:
     gate_port: int = None
     browser_token: str = None # the browser relay (dashboard/browser_relay.py), on the dashboard's own port
     browser_port: int = None
+    canvas_token: str = None  # this run's canvas token (POST /api/internal/canvas): the server knows the actor
+    canvas_port: int = None
 
 
 def drain(stream):

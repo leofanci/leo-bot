@@ -32,8 +32,8 @@ from pathlib import Path
 from core import folders, paths
 from dashboard import shell_rules
 from dashboard.engines import prices
-from dashboard.engines.base import (TURN_ENV, Engine, EngineRefused, SessionLost, drain, gate_vars, stop_child,
-                                    turn_vars)
+from dashboard.engines.base import (TURN_ENV, Engine, EngineRefused, SessionLost, canvas_vars, drain, gate_vars,
+                                    stop_child, turn_vars)
 
 
 def parse_event(obj):
@@ -604,7 +604,8 @@ class ClaudeCodeEngine(Engine):
                    if getattr(tokens, "browser_token", None) and policy.browser and not policy.shared else {}),
                 **({OS_TOKEN_ENV: tokens.os_token} if tokens.os_token else {}),
                 **({RUNNER_TOKEN_ENV: tokens.runner_token} if tokens.runner_token else {}),
-                **gate_vars(tokens)}
+                **gate_vars(tokens),
+                **canvas_vars(tokens)}
 
     def turn(self, session, text, policy, model, tokens):
         """One `claude -p` invocation, resumed by session id so context persists."""

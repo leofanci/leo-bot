@@ -77,6 +77,13 @@ class Tokens:
         with self._lock:
             self._live.pop(token, None)
 
+    def update(self, token, **fields):
+        """Add these values to a live token's context (its age stays)."""
+        with self._lock:
+            if token in self._live:
+                ctx, made = self._live[token]
+                self._live[token] = ({**ctx, **fields}, made)
+
     def any_where(self, **match):
         """True while a live (not expired) token's context holds all of these values: a turn
         of that bot is running."""

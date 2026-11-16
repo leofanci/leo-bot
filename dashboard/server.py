@@ -51,6 +51,7 @@ from core import bots, datadir, general, memory, paths, updater, version  # noqa
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
+from core import canvases  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -1381,6 +1382,48 @@ _API_APP_SESSIONS = {}  # apps turn token -> MCP session id (api engine only)
 # browser token never reaches Composio. Minted per bot run, revoked with the apps token.
 BROWSER_TOKENS = apps_relay.Tokens()
 _API_BROWSER_SESSIONS = {}  # browser turn token -> MCP session id (api engine only)
+# Canvas tokens (POST /api/internal/canvas): one per bot run, minted in run() next to the gate
+# token and revoked in its finally. The token's context is the only source of the actor.
+CANVAS_PATH = "/api/internal/canvas"
+CANVAS_TOKENS = apps_relay.Tokens()
+CANVAS_NO_ACCESS = "no canvas access for this run"
+# What a read-only run (a consulted teammate, an Approval or Report job) may still call.
+CANVAS_READS = frozenset({"list-canvases", "get-canvas", "get-list", "list-templates", "list-history"})
+
+
+def _canvas_actor(ctx):
+    """The rules engine's actor, built from a canvas token's context only."""
+    turn = ctx.get("turn")
+    if turn is None:  # never minted without one; fail closed: every write labeled
+        tainted, mark = (lambda: True), (lambda: None)
+    else:
+        tainted, mark = (lambda: bool(turn.outside)), turn.saw_outside
+    return canvases.Actor(kind="bot", id=ctx.get("bot"), job=ctx.get("job"), shared=bool(ctx.get("shared")),
+                          room=ctx.get("room"), people=tuple(ctx.get("people") or ()), tainted=tainted,
+                          mark_outside=mark, gated=bool(ctx.get("gated")), chat=ctx.get("chat"),
+                          job_mode=ctx.get("job_mode"))
+
+
+def _room_people(ws, room):
+    """Ids of the invited people of `ws` who can see `room`."""
+    if not room:
+        return ()
+    return tuple(p["id"] for p in people.people_in(ROOT, ws)
+                 if rooms.can_see(room, {"kind": "person", "id": p["id"]}))
+
+
+def _canvas_holds_answered(chat, answer, viewer):
+    """A thread's pending approval was answered: the owner's Approve runs its held canvas
+    actions once (as their original actor); Reject, a new message, or anyone else drops them."""
+    if not isinstance(chat, str) or not chat:
+        return None
+    try:
+        if answer == "approved" and (viewer or {}).get("kind") == "owner":
+            return canvases.run_holds(ROOT, chat)
+        canvases.drop_holds(ROOT, chat)
+    except OSError:
+        traceback.print_exc()
+    return None
 
 
 def _relay_rpc(tokens, sessions, handle, upstream_of, ended, token, method, params):
@@ -2857,6 +2900,34 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": -32000, "message": "The browser is unavailable. Try again."}})
         return self._send_rpc(202 if reply is None else 200, reply, sid)
 
+    def _handle_canvas_internal(self):
+        """A bot run's canvas command (osctl): canvas token only, this machine only. The actor
+        comes from the token's context, never from the body."""
+        auth = self.headers.get("Authorization", "")
+        ctx = CANVAS_TOKENS.lookup(auth[7:]) if auth.startswith("Bearer ") else None
+        if not self._local_request() or ctx is None:
+            return self._send(403, {"ok": False, "error": CANVAS_NO_ACCESS})
+        try:
+            body = self._read_json()
+        except ValueError:
+            return self._send(400, {"ok": False, "error": "bad request"})
+        cmd = body.get("cmd") if isinstance(body, dict) else None
+        params = body.get("params") if isinstance(body, dict) else None
+        if not isinstance(cmd, str) or not cmd or not isinstance(params, (dict, type(None))):
+            return self._send(400, {"ok": False, "error": 'bad request: {"cmd": str, "params": {...}}'})
+        if ctx.get("readonly") and cmd not in CANVAS_READS:
+            return self._send(200, {"ok": False, "error": f"{cmd}: this run is read-only, canvases can only be read"})
+        try:
+            out = canvases.dispatch(ROOT, ctx.get("ws"), _canvas_actor(ctx), cmd, dict(params or {}))
+        except canvases.NeedsApproval as e:
+            return self._send(200, {"ok": False, "error": str(e), "needs_approval": True})
+        except canvases.Refused as e:
+            return self._send(200, {"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001 - one bad call never takes the request thread down
+            traceback.print_exc()
+            return self._send(500, {"ok": False, "error": "internal error"})
+        return self._send(200, {"ok": True, **out} if isinstance(out, dict) else {"ok": True, "result": out})
+
     def _handle_gate(self):
         """May this tool run now? Asked by the Claude Code web hook and by osctl in an Auto job
         (dashboard/taint.py). Only ever adds taint; a bad or late token gets a 403 (they deny)."""
@@ -2979,7 +3050,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
-        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH):
+        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH, CANVAS_PATH):
             return self._send(405, {"error": "method not allowed"})
         if not self._authorized(require_origin=True):
             return self._send(403, {"error": "forbidden"})
@@ -3229,6 +3300,7 @@ class Handler(BaseHTTPRequestHandler):
             # A turn already running here ends too: close their session, cut its osctl token.
             stop_person_chat(pid, ws)
             os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
+            CANVAS_TOKENS.revoke_where(ws=ws, sender=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
@@ -3502,6 +3574,7 @@ class Handler(BaseHTTPRequestHandler):
             if answer in ("approved", "rejected"):
                 card_bot = approvals.asking_bot(chat_id, ROOT)
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
+            _canvas_holds_answered(chat_id, answer, viewer)
         sess.workspace = ws
         sess.deny_dirs = _workspace_deny_dirs(ws, projects)
         sess.deny_files = _workspace_deny_files(ws)
@@ -3848,9 +3921,21 @@ class Handler(BaseHTTPRequestHandler):
                 turn.saw_outside()
                 if mode_was == "auto":
                     s_.job_mode = "approval"
+            # This run's canvas token: the endpoint takes the actor from it alone (revoked below).
+            canvas_kw = {}
+            if isinstance(port, int):
+                canvas_kw = {"canvas_token": CANVAS_TOKENS.mint({
+                    "ws": ws, "actor": "bot", "bot": msg.get("bot"), "job": job["id"] if job else None,
+                    "job_mode": getattr(s_, "job_mode", None), "chat": getattr(sess, "session_id", None),
+                    "room": (room or {}).get("id"), "shared": bool(shared),
+                    "people": _room_people(ws, room) if shared else (), "turn": turn, "gated": gated,
+                    "readonly": bool(getattr(s_, "readonly", False)), "sender": sender}),
+                    "canvas_port": port}
+                if kw.get("os_token"):  # osctl over the relay gets the same token (os_relay.env_for)
+                    os_relay.TOKENS.update(kw["os_token"], **canvas_kw)
             try:
                 for kind, payload in s_.ask(prompt_, with_web=web_, model=model_, web_domains=web_domains,
-                                            **kw, **gate_kw):
+                                            **kw, **gate_kw, **canvas_kw):
                     if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
                         so_far = payload.get("cost")
                         if so_far is None:
@@ -3873,6 +3958,8 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 if gate_kw:
                     taint.GATES.revoke(gate_kw["gate_token"])
+                if canvas_kw:
+                    CANVAS_TOKENS.revoke(canvas_kw["canvas_token"])
                 if getattr(s_, "job_mode", None) != mode_was:
                     s_.job_mode = mode_was
                 # The thread keeps what its context now holds: taint only ever grows.
@@ -4433,7 +4520,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if not path.startswith("/api/"):
             return self._send(404, {"error": "not found"})
-        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH):
+        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH, CANVAS_PATH):
             return self._send(405, {"error": "method not allowed"})  # no server-sent stream
         if not self._authorized():
             person = None if self._valid_cookie() else self._person_authorized()
@@ -4632,6 +4719,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_os_relay()
         if path == taint.GATE_PATH:  # a bot run's web hook or osctl: gate token only
             return self._handle_gate()
+        if path == CANVAS_PATH:  # osctl canvas commands: canvas token only
+            return self._handle_canvas_internal()
         if path.startswith(RUNNER_PREFIX):  # a person's Mac: runner token, no cookie
             return self._handle_runner(path)
         if path.startswith("/join/"):  # the invite form (no cookie yet)
@@ -4835,6 +4924,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Turns still running for the deleted workspace lose their tokens and sessions now.
                 os_relay.TOKENS.revoke_where(ws=out["slug"])
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
+                CANVAS_TOKENS.revoke_where(ws=out["slug"])
                 # Tidying only: its old-epoch browsers close and their saved logins go. A reused slug
                 # has a new epoch, so it never reaches them whatever is left (the startup sweep).
                 # Its children are killed now; their engine close and the rest of the tidy run in the
@@ -5096,6 +5186,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path == "/api/approvals/dismiss":
                 approvals.resolve_chat(str(body.get("chat") or ""), "rejected", ROOT)
+                _canvas_holds_answered(str(body.get("chat") or ""), "rejected", OWNER)
                 return self._send(200, {"ok": True})
             if path in ("/api/rooms", "/api/rooms/delete"):
                 return self._rooms_post(path, body, OWNER)

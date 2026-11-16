@@ -659,7 +659,8 @@ class ToolBox:
         return {"ws": p.workspace or "hq", "readonly": p.readonly, "apps_used": p.apps_used,
                 "shared": p.shared, "engine": self.engine_id,
                 "chat": p.chat, "job": p.job, "job_mode": p.job_mode, "code_folder": p.code_folder,
-                "gate_token": getattr(t, "gate_token", None), "gate_port": getattr(t, "gate_port", None)}
+                "gate_token": getattr(t, "gate_token", None), "gate_port": getattr(t, "gate_port", None),
+                "canvas_token": getattr(t, "canvas_token", None), "canvas_port": getattr(t, "canvas_port", None)}
 
     def run(self, name, arguments):
         """(text, is_error) for one tool call. Never raises for the model's own mistakes."""
