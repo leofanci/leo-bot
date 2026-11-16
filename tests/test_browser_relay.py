@@ -938,8 +938,8 @@ class TypedFields(unittest.TestCase):
         self.handle(call(P + "open", url=self.other()))
         self.handle(call(P + "fill", selector="@e1", text="Hi"))
         self.handle(call(P + "fill", selector="@e1", text=""))
-        self.assertEqual(self.typed(), {"typed": "", "aside": "", "by": {}})
-        reply = self.handle(call(P + "click", selector="@e2"))  # nothing typed: a plain click
+        self.assertEqual(self.typed(), {"typed": "", "aside": "Hi", "by": {}})  # the field read decides
+        reply = self.handle(call(P + "click", selector="@e2"))  # the field is empty: a plain click
         self.assertFalse(reply["result"].get("isError"), reply)
 
     def test_a_fill_that_failed_keeps_the_old_text(self):
@@ -967,6 +967,16 @@ class TypedFields(unittest.TestCase):
         for other in (key, key[2:], "#" + key[2:], browser_relay.UNKNOWN_FIELD, browser_relay.NO_SELECTOR):
             self.handle(call(P + "fill", selector=other, text=""))
         self.assertEqual(self.typed()["typed"], "Hi")
+
+    def test_an_empty_fill_through_a_moved_selector_does_not_hide_the_message(self):
+        self.level("write")
+        self.handle(call(P + "open", url=self.other()))
+        self.handle(call(P + "type", selector=":focus", text="unplanned"))  # values[0]: the message box
+        self.up.typing = False  # focus moved: the next fill clears another, empty field
+        self.handle(call(P + "fill", selector=":focus", text=""))
+        self.assertEqual(self.typed()["typed"], "")
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@send"))), browser_relay.FIELD_NO_PLAN)
+        self.assertNotIn(P + "click", self.up.calls())
 
     def test_type_adds_and_two_fields_both_count(self):
         self.level("write")

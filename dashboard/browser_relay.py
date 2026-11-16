@@ -743,10 +743,15 @@ def _gate(frame, ctx, sid, upstream, root):
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
         field = _field_key(args.get("selector")) if name in TYPE_TOOLS else None
+        replaced = tt["by"].get(field, "") if name == FILL else ""
         if name in TYPE_TOOLS:  # counted before it runs: a failed call still leaves the field touched
             # Added, raw and unseparated, so two parts of one word stay one word. A fill clears
             # its field first (engine facts), but only a fill that worked replaces the text below:
             # one that failed may have left the old text in place. Text under UNKNOWN_FIELD stays.
+            # Even a fill that worked sets the old text aside rather than dropping it: a selector
+            # names an element only at the moment it runs (":focus", a renumbered @ref), so the
+            # old text may still sit in another field, and set-aside text makes every commit
+            # read the page's fields.
             by = dict(tt["by"])
             by[field] = by.get(field, "") + args["text"]
             if not by[field]:
@@ -771,6 +776,8 @@ def _gate(frame, ctx, sid, upstream, root):
             else:
                 del by[field]
             tt["by"], tt["typed"] = by, _typed_of(by)
+            if replaced:
+                tt["aside"] = _join(tt["aside"], replaced)
         if name in (OPEN, NEW_TAB) and not same_doc:
             _put_aside(tt)
         elif name in RESTORES:
