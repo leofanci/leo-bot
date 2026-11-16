@@ -340,7 +340,7 @@ _ARTIFACT_ROUTES = {
 def _app_html_bytes() -> bytes:
     """Serve app.html with cache-busted asset URLs (mtime) so UI updates land."""
     html = APP_HTML.read_text(encoding="utf-8")
-    for name in ("ui-tokens.css", "app.css", "app.js", "os-ids.js", "post-copy.js", "content-view.js", "logo.svg"):
+    for name in ("ui-tokens.css", "app.css", "app.js", "os-ids.js", "post-copy.js", "content-view.js", "canvas-view.js", "logo.svg"):
         v = int((HERE / name).stat().st_mtime)
         html = html.replace(f"/{name}\"", f"/{name}?v={v}\"")
     return html.encode("utf-8")
@@ -4639,7 +4639,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/join/"):
             return self._join_page(path[len("/join/"):])
 
-        if path in ("/ui-tokens.css", "/app.css", "/app.js", "/os-ids.js", "/post-copy.js", "/content-view.js", "/logo.svg"):
+        if path in ("/ui-tokens.css", "/app.css", "/app.js", "/os-ids.js", "/post-copy.js", "/content-view.js", "/canvas-view.js", "/logo.svg"):
             f = HERE / path.lstrip("/")
             ctype = (
                 "text/css" if path.endswith(".css")
