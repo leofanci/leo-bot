@@ -949,7 +949,9 @@ async function renderFiles(){
 // means someone changed it first, so the page reloads and says so.
 const CANVAS_STALE = "Changed by someone else: reloaded";
 const CANVAS_PINS = { key: null, list: null, at: 0, pending: null };
-let CANVAS = null;        // the open canvas: {id, ws, doc, lists, missing, editing, drafts, preview, editCell, colForm, limits, history}
+// The open canvas: {id, ws, doc, lists and missing (by list block id), editing, drafts, preview,
+// conflict (text blocks someone else changed mid-edit), editCell, colForm, limits (by block), history}.
+let CANVAS = null;
 
 // Canvases pinned in `room`, in pin order; null while the first load runs.
 // Loads in the background and redraws the canvas bar when it lands.
@@ -967,29 +969,38 @@ function canvasPins(room){
       .catch(() => [])
       .then(list => {
         if (CANVAS_PINS.pending !== key) return;
+        const sig = l => JSON.stringify((l || []).map(c => [c.id, c.title]));
+        const changed = CANVAS_PINS.key !== key || sig(CANVAS_PINS.list) !== sig(list);
         Object.assign(CANVAS_PINS, { key, list, at: Date.now(), pending: null });
-        if (`${_WS}|${window.ChatRooms?.current()}` === key) renderCanvasNav();
+        // Redraw only on a change: the poll below must not close an open menu.
+        if (changed && `${_WS}|${window.ChatRooms?.current()}` === key) renderCanvasNav();
       });
   }
   return have;
 }
 const dropCanvasPins = () => Object.assign(CANVAS_PINS, { key: null, list: null, at: 0, pending: null });
+// Bots and coworkers pin canvases too: the open room's tabs refresh every 30 s while shown.
+setInterval(() => {
+  const room = window.ChatRooms?.current();
+  if (document.visibilityState === "visible" && room && STATE.view !== "settings" && !$("#canvas-nav")?.hidden) canvasPins(room);
+}, 30000);
 
 async function cvFetch(url, opts){
   const r = await fetch(url, opts);
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(j.error || `Error ${r.status}`); e.status = r.status; throw e; }
+  if (!r.ok) { const e = new Error(j.error || "Error " + r.status); e.status = r.status; throw e; }
   return j;
 }
 const cvQuery = (extra = {}) => new URLSearchParams({ ws: _WS, ...extra }).toString();
 
-// One canvas command. Answers null when it did not land (and says why).
-async function canvasCmd(cmd, params){
+// One canvas command. Answers null when it did not land (and says why). `onStale`
+// runs on a 409 before the reload, so a caller can keep what the viewer typed.
+async function canvasCmd(cmd, params, onStale){
   try {
     return await cvFetch("/api/canvases", { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ws: _WS, cmd, params }) });
   } catch (e) {
-    if (e.status === 409) { toast(CANVAS_STALE); await reloadCanvas(); return null; }
+    if (e.status === 409) { onStale?.(); toast(CANVAS_STALE); await reloadCanvas(); return null; }
     if (e.status === 404) { toast("Not found: it was deleted or is no longer shared with you"); await reloadCanvas(); return null; }
     toast(e.message || "Could not save");
     return null;
@@ -1023,11 +1034,11 @@ async function createCanvas(template){
   if (!out?.id) return;
   dropCanvasPins();
   window.ChatRooms?.showCanvas();
-  navigate(`#/canvas/${out.id}`);
+  navigate("#/canvas/" + encodeURIComponent(out.id));
 }
 
 const isoAge = iso => { const t = Date.parse(iso || ""); return Number.isFinite(t) ? relAge(t / 1000) : ""; };
-const myCanvasTag = () => isPerson() ? `person:${_ME.id}` : "owner";
+const myCanvasTag = () => isPerson() ? "person:" + _ME.id : "owner";
 function canvasWho(tag){
   const t = String(tag || "");
   if (t === "owner") return isPerson() ? "Owner" : "You";
@@ -1039,7 +1050,7 @@ function canvasWho(tag){
 const roomLabel = id => { const r = roomById(id); return r ? (r.kind === "dm" ? r.name : "#" + r.name) : String(id || "").split("/").pop(); };
 function canvasViewRoutes(){
   if (isPerson() || _WS === "hq") return [];
-  return SECTIONS.map(x => [`#/project/${_WS}/${x.key}`, x.label]);
+  return SECTIONS.map(x => ["#/project/" + _WS + "/" + x.key, x.label]);
 }
 function canvasHelpers(doc){
   const canEdit = !isPerson() || doc.coworkers !== "view";
@@ -1054,25 +1065,29 @@ async function loadCanvas(st){
     ? cvFetch(`/api/canvases?${cvQuery({ room })}`).then(d => (d.pins || []).includes(st.id)).catch(() => false)
     : Promise.resolve(false);
   try {
-    st.doc = await cvFetch(`/api/canvases/${st.id}?${cvQuery()}`);
+    st.doc = await cvFetch(`/api/canvases/${encodeURIComponent(st.id)}?${cvQuery()}`);
   } catch (e) {
     st.doc = null;
     st.error = e.status === 404 ? "gone" : (e.message || "error");
     return;
   }
   st.error = null;
-  const lists = {}, missing = {};
+  // Each list block gets the rows of its own saved filter, sort and page size. Blocks
+  // asking the very same thing share one fetch.
+  const lists = {}, missing = {}, fetches = {};
   const blocks = (st.doc.blocks || []).filter(b => b.type === "list" && b.list && !b.summary?.deleted);
   await Promise.all(blocks.map(async b => {
-    if (lists[b.list]) return;
     const view = b.view || {};
-    const q = { limit: String(st.limits[b.list] || 100) };
+    const q = { limit: String(st.limits[b.id] || 100) };
     if (view.filter && Object.keys(view.filter).length) q.filter = JSON.stringify(view.filter);
     if (view.sort) q.sort = view.sort;
-    try { lists[b.list] = await cvFetch(`/api/lists/${b.list}?${cvQuery(q)}`); }
-    catch (e) { if (e.status === 404) missing[b.list] = true; }
+    const url = `/api/lists/${encodeURIComponent(b.list)}?${cvQuery(q)}`;
+    fetches[url] = fetches[url] || cvFetch(url);
+    try { lists[b.id] = await fetches[url]; }
+    catch (e) { if (e.status === 404) missing[b.id] = true; }
   }));
   st.lists = lists; st.missing = missing;
+  st.projects = {}; st.viewDone = {};   // view blocks redraw from fresh data once per load
   st.pinnedHere = await pinsP;
   // A bot or coworker pinned or unpinned it since the tabs loaded: reload them.
   const tabs = CANVAS_PINS.key === `${_WS}|${room}` ? CANVAS_PINS.list : null;
@@ -1081,7 +1096,7 @@ async function loadCanvas(st){
 }
 
 async function loadCanvasHistory(st){
-  const ids = [st.id, ...Object.keys(st.lists || {})];
+  const ids = [st.id, ...new Set(Object.values(st.lists || {}).map(d => d.id))];
   const all = await Promise.all(ids.map(fid =>
     cvFetch(`/api/${fid.startsWith("cv") ? "canvases" : "lists"}/${fid}/history?${cvQuery({ limit: "50" })}`)
       .then(d => (d.entries || []).map(e => ({ ...e, fid }))).catch(() => [])));
@@ -1091,8 +1106,8 @@ async function loadCanvasHistory(st){
 async function renderCanvas(cv){
   const stillOn = routeGuard();
   if (!CANVAS || CANVAS.id !== cv || CANVAS.ws !== _WS) {
-    CANVAS = { id: cv, ws: _WS, doc: null, lists: {}, missing: {}, editing: {}, drafts: {}, preview: {},
-      editCell: null, colForm: null, limits: {}, history: false, entries: [] };
+    CANVAS = { id: cv, ws: _WS, doc: null, lists: {}, missing: {}, editing: {}, drafts: {}, preview: {}, conflict: {},
+      editCell: null, colForm: null, limits: {}, history: false, entries: [], projects: {}, viewHtml: {}, viewDone: {} };
     $("#main").innerHTML = `<div class="scroll"><div class="empty">Loading canvas…</div></div>`;
   }
   const st = CANVAS;
@@ -1142,7 +1157,8 @@ function drawCanvas(){
   const h = canvasHelpers(doc);
   const room = st.room;
   const pinned = !!st.pinnedHere;
-  const mayDelete = !isPerson() || doc.created_by === myCanvasTag();
+  // Same rule as core/canvases.py: a person deletes any canvas the owner did not create.
+  const mayDelete = !isPerson() || doc.created_by !== "owner";
   const outside = doc.outside ? `<span class="tag cv-outside" title="Written by a coworker, or by a bot after it read outside content">Outside content</span>` : "";
   const trustAll = !isPerson() && (doc.outside || (doc.blocks || []).some(b => b.outside || (b.items || []).some(i => i.outside)))
     ? `<button type="button" class="btn sm" data-cv-trustall>Trust all</button>` : "";
@@ -1154,7 +1170,9 @@ function drawCanvas(){
     : `<label class="cv-note">Coworkers <select class="cv-input" data-cv-coworkers aria-label="What coworkers may do">
         <option value="edit"${doc.coworkers !== "view" ? " selected" : ""}>can edit</option>
         <option value="view"${doc.coworkers === "view" ? " selected" : ""}>can view</option></select></label>`;
-  const pinBtn = room && h.canEdit && !(isPerson() && roomById(room)?.kind === "dm")
+  // A person pins into another room only a canvas they created (core/canvases.py _pin_check).
+  const personPin = !isPerson() || (roomById(room)?.kind !== "dm" && (pinned || doc.created_by === myCanvasTag()));
+  const pinBtn = room && h.canEdit && personPin
     ? `<button type="button" class="btn ghost sm" data-cv-pin="${pinned ? "off" : "on"}">${pinned ? "Unpin from" : "Pin to"} ${esc(roomLabel(room))}</button>` : "";
   const blocks = (doc.blocks || []).map(b => CanvasView.blockHtml(b, st, h)).join("")
     || `<div class="empty">This canvas is empty.${h.canEdit ? " Add a block below." : ""}</div>`;
@@ -1182,7 +1200,8 @@ function canvasHistoryHtml(st){
   const mine = myCanvasTag();
   const rows = (st.entries || []).map(e => {
     const can = !isPerson() || e.by === mine;
-    const where = e.fid === st.id ? "" : ` · ${esc((st.lists[e.fid] || {}).title || e.fid)}`;
+    const list = Object.values(st.lists || {}).find(d => d.id === e.fid);
+    const where = e.fid === st.id ? "" : ` · ${esc(list?.title || e.fid)}`;
     const undo = can && e.op !== "undo" ? `<button type="button" class="btn ghost sm" data-cv-undo="${esc(e.id)}" data-fid="${esc(e.fid)}">Undo</button>` : "";
     return `<li><div><b>${esc(CanvasView.historyLabel(e))}</b><small>${esc(canvasWho(e.by))}${where} · ${esc(isoAge(e.at))}</small></div>${undo}</li>`;
   }).join("");
@@ -1191,35 +1210,47 @@ function canvasHistoryHtml(st){
     ${rows ? `<ul>${rows}</ul>` : `<p class="cv-note">No changes yet.</p>`}</aside>`;
 }
 
-// View blocks: a project section drawn read-only (inert) inside the block.
+// View blocks: a project section (any workspace's) drawn read-only (inert) inside the
+// block. Other pages (Content, Calendar, ...) draw only into the main view, with
+// fetches and handlers of their own, so they keep an Open link instead.
+// The project is fetched once per load and the drawing kept across redraws.
 async function fillViewBlocks(){
   const st = CANVAS;
   const boxes = [...$("#main").querySelectorAll("[data-cv-view]")];
   if (!boxes.length) return;
-  const projects = {};
   if (!isPerson()) await ensureIdRegistry();
   for (const box of boxes) {
-    const b = (st.doc.blocks || []).find(x => x.id === box.dataset.cvView);
-    const m = (b?.route || "").match(/^#\/project\/([^/]+)\/([^/]+)$/);
-    if (isPerson()) { box.innerHTML = `<p class="cv-note">Views show to the owner only.</p>`; continue; }
-    if (!m || m[1] !== _WS || !SECTIONS.some(x => x.key === m[2])) {
-      box.innerHTML = `<p class="cv-note">This view shows only on its own page: use Open.</p>`;
-      continue;
+    const bk = box.dataset.cvView;
+    const b = (st.doc.blocks || []).find(x => x.id === bk);
+    const route = b?.route || "";
+    const m = route.match(/^#\/project\/([a-z0-9][a-z0-9-]*)\/([^/]+)$/);
+    let html;
+    if (isPerson()) html = `<p class="cv-note">Views show to the owner only.</p>`;
+    else if (!m || !SECTIONS.some(x => x.key === m[2]))
+      html = `<p class="cv-note">Only project sections draw inside a canvas. Open shows this page.</p>`;
+    else if (st.viewDone[bk] === route) continue;
+    else {
+      try {
+        st.projects[m[1]] = st.projects[m[1]] || api(`/api/project/${encodeURIComponent(m[1])}`);
+        html = sectionBodyHtml(m[1], await st.projects[m[1]], m[2]);
+      } catch (e) {
+        html = `<p class="cv-note">Could not load this view: ${esc(e.message)}</p>`;
+      }
+      if (CANVAS !== st) return;
     }
-    try {
-      projects[m[1]] = projects[m[1]] || api(`/api/project/${encodeURIComponent(m[1])}`);
-      const p = await projects[m[1]];
-      if (CANVAS !== st || !box.isConnected) return;
-      box.innerHTML = sectionBodyHtml(m[1], p, m[2]);
-    } catch (e) {
-      if (box.isConnected) box.innerHTML = `<p class="cv-note">Could not load this view: ${esc(e.message)}</p>`;
-    }
+    st.viewDone[bk] = route;
+    st.viewHtml[bk] = { route, html };
+    const now = $("#main").querySelector(`[data-cv-view="${CSS.escape(bk)}"]`);   // a redraw may have replaced it
+    if (now && now.innerHTML !== html) now.innerHTML = html;
   }
 }
 
 const cvBlock = bk => (CANVAS?.doc?.blocks || []).find(b => b.id === bk);
-const cvList = ls => CANVAS?.lists?.[ls];
-const cvRow = (ls, rw) => (cvList(ls)?.rows || []).find(r => r.id === rw);
+// List data and rows are kept per list block (each block has its own filter).
+const cvBk = el => el.closest(".cv-block")?.dataset.bk || "";
+const cvList = bk => CANVAS?.lists?.[bk];
+const cvRow = (bk, rw) => (cvList(bk)?.rows || []).find(r => r.id === rw);
+const cvCellSel = (bk, rw, key) => `.cv-block[data-bk="${CSS.escape(bk)}"] [data-rw="${CSS.escape(rw)}"] [data-cv-cell="${CSS.escape(key)}"]`;
 
 // update-block on one block, with the canvas version and the block's own.
 async function cvUpdateBlock(bk, patch){
@@ -1234,20 +1265,32 @@ async function cvItemsOp(bk, ops){
   if (out) await reloadCanvas();
   return out;
 }
+// Save one cell. The editor stays open until the write lands: on a 409 it shows the
+// value someone else saved and keeps what the viewer typed (Enter saves it, Escape drops it).
 async function cvSaveCell(td, input){
   const st = CANVAS;
-  const tr = td.closest("[data-rw]"), table = td.closest("[data-ls]");
-  const ls = table.dataset.ls, rw = tr.dataset.rw, key = td.dataset.cvCell;
-  const data = cvList(ls), row = cvRow(ls, rw);
+  const bk = cvBk(td), rw = td.closest("[data-rw]").dataset.rw, key = td.dataset.cvCell;
+  const data = cvList(bk), row = cvRow(bk, rw);
   const col = (data?.columns || []).find(c => c.key === key);
+  const edit = st.editCell;
   if (!row || !col) return;
   const parsed = CanvasView.parseCell(col, input.value);
   if (parsed.error) { toast(parsed.error); input._done = false; input.focus(); return; }
-  st.editCell = null;
-  st.focusNext = `[data-ls="${CSS.escape(ls)}"] [data-rw="${CSS.escape(rw)}"] [data-cv-cell="${CSS.escape(key)}"]`;
-  if (((row.cells || {})[key] ?? null) === parsed.value) return drawCanvas();
-  const out = await canvasCmd("update-row", { id: ls, row: rw, version: data.version, item_version: row.v, cells: { [key]: parsed.value } });
-  if (out) await reloadCanvas();
+  const mine = () => st.editCell === edit;
+  if (((row.cells || {})[key] ?? null) === parsed.value) {
+    if (mine()) { st.editCell = null; st.focusNext = cvCellSel(bk, rw, key); drawCanvas(); }
+    return;
+  }
+  const keep = () => { if (edit) { edit.draft = input.value; edit.conflict = true; } };
+  const out = await canvasCmd("update-row", { id: data.id, row: rw, version: data.version, item_version: row.v, cells: { [key]: parsed.value } }, keep);
+  if (out) {
+    if (mine()) { st.editCell = null; st.focusNext = cvCellSel(bk, rw, key); }
+    await reloadCanvas();
+  } else if (mine() && edit) {
+    if (edit.draft == null) edit.draft = input.value;   // refused (not a 409): keep the typing too
+    st.focusNext = `.cv-block[data-bk="${CSS.escape(bk)}"] [data-cv-celledit]`;
+    drawCanvas();
+  }
 }
 
 function wireCanvas(root, h){
@@ -1299,13 +1342,16 @@ function wireCanvas(root, h){
       const ta = root.querySelector(`[data-cv-md="${CSS.escape(bk)}"]`);
       const md = ta ? ta.value : (st.drafts[bk] ?? "");
       st.drafts[bk] = md;
-      const out = await canvasCmd("update-block", { id: cv, block: bk, version: st.doc.version, item_version: cvBlock(bk)?.v, blocks: { md } });
-      if (out) { delete st.editing[bk]; delete st.drafts[bk]; st.focusNext = `[data-cv-editmd="${CSS.escape(bk)}"]`; await reloadCanvas(); }
+      // A 409 keeps the editor and draft open and shows their version (st.conflict): the
+      // next Save, now on the fresh version, is the viewer's explicit choice to replace it.
+      const out = await canvasCmd("update-block", { id: cv, block: bk, version: st.doc.version, item_version: cvBlock(bk)?.v, blocks: { md } },
+        () => { st.conflict[bk] = true; st.focusNext = `[data-cv-savemd="${CSS.escape(bk)}"]`; });
+      if (out) { delete st.editing[bk]; delete st.drafts[bk]; delete st.conflict[bk]; st.focusNext = `[data-cv-editmd="${CSS.escape(bk)}"]`; await reloadCanvas(); }
       return;
     }
     if (t.matches("[data-cv-cancelmd]")) {
       const bk = d.cvCancelmd;
-      delete st.editing[bk]; delete st.drafts[bk];
+      delete st.editing[bk]; delete st.drafts[bk]; delete st.conflict[bk];
       st.focusNext = `[data-cv-editmd="${CSS.escape(bk)}"]`;
       return drawCanvas();
     }
@@ -1321,24 +1367,24 @@ function wireCanvas(root, h){
       return;
     }
     if (t.matches("[data-cv-delrow]")) {
-      const ls = t.closest("[data-ls]")?.dataset.ls || "";
-      const row = cvRow(ls, d.cvDelrow);
+      const bk = cvBk(t), data = cvList(bk);
+      const row = cvRow(bk, d.cvDelrow);
       if (!row || !confirm("Delete this row? You can undo it from History.")) return;
-      if (await canvasCmd("delete-row", { id: ls, row: row.id, version: cvList(ls).version, item_version: row.v })) await reloadCanvas();
+      if (await canvasCmd("delete-row", { id: data.id, row: row.id, version: data.version, item_version: row.v })) await reloadCanvas();
       return;
     }
     if (t.matches("[data-cv-addrow]")) {
-      const ls = d.cvAddrow;
-      const out = await canvasCmd("add-row", { id: ls, version: cvList(ls).version, cells: {} });
+      const bk = d.cvAddrow, data = cvList(bk);
+      const out = await canvasCmd("add-row", { id: data.id, version: data.version, cells: {} });
       if (!out) return;
       await reloadCanvas();
-      const cell = out.row && $("#main").querySelector(`[data-ls="${CSS.escape(ls)}"] [data-rw="${CSS.escape(out.row)}"] td[data-cv-cell]`);
+      const cell = out.row && $("#main").querySelector(`.cv-block[data-bk="${CSS.escape(bk)}"] [data-rw="${CSS.escape(out.row)}"] td[data-cv-cell]`);
       if (cell) startCellEdit(cell);
       return;
     }
-    if (t.matches("[data-cv-addcol]")) { st.colForm = { ls: d.cvAddcol }; st.focusNext = "[data-cv-colform] input[name=label]"; return drawCanvas(); }
-    if (t.matches("[data-cv-col]")) { st.colForm = { ls: d.ls, key: d.cvCol }; st.focusNext = "[data-cv-colform] input[name=label]"; return drawCanvas(); }
-    if (t.matches("[data-cv-colcancel]")) { st.colForm = null; return drawCanvas(); }
+    if (t.matches("[data-cv-addcol]")) { st.colForm = { bk: d.cvAddcol }; st.focusNext = "[data-cv-colform] input[name=label]"; return drawCanvas(); }
+    if (t.matches("[data-cv-col]")) { st.colForm = { bk: cvBk(t), key: d.cvCol }; st.focusNext = "[data-cv-colform] input[name=label]"; return drawCanvas(); }
+    if (t.matches("[data-cv-colcancel]")) return closeColumnForm();
     if (t.matches("[data-cv-more]")) { st.limits[d.cvMore] = (st.limits[d.cvMore] || 100) + 100; return reloadCanvas(); }
     if (t.matches("[data-cv-delpath]")) {
       const b = cvBlock(d.bk);
@@ -1393,10 +1439,10 @@ function wireCanvas(root, h){
       const it = (cvBlock(d.bk)?.items || []).find(i => i.id === d.cvItem);
       if (it) await cvItemsOp(d.bk, [{ id: it.id, done: t.checked, item_version: it.v }]);
     } else if (t.matches("[data-cv-cellbox]")) {
-      const ls = t.closest("[data-ls]").dataset.ls, rw = t.closest("[data-rw]").dataset.rw;
-      const row = cvRow(ls, rw);
+      const bk = cvBk(t), rw = t.closest("[data-rw]").dataset.rw;
+      const data = cvList(bk), row = cvRow(bk, rw);
       if (!row) return;
-      const out = await canvasCmd("update-row", { id: ls, row: rw, version: cvList(ls).version, item_version: row.v, cells: { [d.cvCellbox]: t.checked } });
+      const out = await canvasCmd("update-row", { id: data.id, row: rw, version: data.version, item_version: row.v, cells: { [d.cvCellbox]: t.checked } });
       if (out) await reloadCanvas();
     } else if (t.matches("[data-cv-route]")) {
       await cvUpdateBlock(d.cvRoute, { blocks: { route: t.value } });
@@ -1423,8 +1469,8 @@ function wireCanvas(root, h){
       const b = cvBlock(f.dataset.cvAddpath);
       await cvUpdateBlock(f.dataset.cvAddpath, { blocks: { paths: [...(b?.paths || []), full] } });
     } else if (f.matches("[data-cv-colform]")) {
-      const ls = f.dataset.cvColform;
-      const data = cvList(ls);
+      const data = cvList(f.dataset.cvColform);
+      const ls = data?.id;
       const label = f.elements.label.value.trim();
       const type = f.elements.type.value;
       if (!label || !data) return;
@@ -1432,7 +1478,9 @@ function wireCanvas(root, h){
       const col = { label, type, ...(options ? { options } : {}) };
       const cols = (data.columns || []).map(c => ({ ...c }));
       const columns = f.dataset.key ? cols.map(c => c.key === f.dataset.key ? { key: c.key, ...col } : c) : [...cols, col];
-      if (await canvasCmd("update-list", { id: ls, version: data.version, columns })) { st.colForm = null; await reloadCanvas(); }
+      if (await canvasCmd("update-list", { id: ls, version: data.version, columns })) {
+        st.colForm = null; st.focusNext = colOpenerSel(f.dataset.cvColform, f.dataset.key); await reloadCanvas();
+      }
     } else if (f.matches("[data-cv-renameform]")) {
       const title = f.elements.title.value.trim();
       if (!title) return;
@@ -1449,11 +1497,13 @@ function wireCanvas(root, h){
       else if (e.key === "Escape") {
         e.preventDefault(); e.stopPropagation(); t._done = true;
         const td = t.closest("td");
-        st.focusNext = `[data-ls="${CSS.escape(td.closest("[data-ls]").dataset.ls)}"] [data-rw="${CSS.escape(td.closest("[data-rw]").dataset.rw)}"] [data-cv-cell="${CSS.escape(td.dataset.cvCell)}"]`;
+        st.focusNext = cvCellSel(cvBk(td), td.closest("[data-rw]").dataset.rw, td.dataset.cvCell);
         st.editCell = null; drawCanvas();
       }
     } else if (t.matches("[data-cv-colform] *") && e.key === "Escape") {
-      e.stopPropagation(); st.colForm = null; drawCanvas();
+      e.stopPropagation(); closeColumnForm();
+    } else if (t.matches("[data-cv-renameform] *") && e.key === "Escape") {
+      e.stopPropagation(); st.renaming = false; st.focusNext = "[data-cv-rename]"; drawCanvas();
     }
   };
   // Leaving a cell editor saves it, like a spreadsheet; Escape already cancelled.
@@ -1466,9 +1516,19 @@ function wireCanvas(root, h){
 }
 
 function startCellEdit(td){
-  const ls = td.closest("[data-ls]").dataset.ls, rw = td.closest("[data-rw]").dataset.rw;
-  CANVAS.editCell = { ls, rw, key: td.dataset.cvCell };
-  CANVAS.focusNext = `[data-ls="${CSS.escape(ls)}"] [data-rw="${CSS.escape(rw)}"] [data-cv-celledit]`;
+  const bk = cvBk(td), rw = td.closest("[data-rw]").dataset.rw;
+  CANVAS.editCell = { bk, rw, key: td.dataset.cvCell };
+  CANVAS.focusNext = `.cv-block[data-bk="${CSS.escape(bk)}"] [data-rw="${CSS.escape(rw)}"] [data-cv-celledit]`;
+  drawCanvas();
+}
+// The column form closes back onto the button that opened it.
+const colOpenerSel = (bk, key) => key
+  ? `.cv-block[data-bk="${CSS.escape(bk)}"] [data-cv-col="${CSS.escape(key)}"]`
+  : `[data-cv-addcol="${CSS.escape(bk)}"]`;
+function closeColumnForm(){
+  const form = CANVAS.colForm;
+  CANVAS.colForm = null;
+  if (form) CANVAS.focusNext = colOpenerSel(form.bk, form.key);
   drawCanvas();
 }
 
@@ -6471,6 +6531,10 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       replies.forEach(r => { const row = r.bubble.closest(".msg"); row.classList.remove("streaming"); decorateReply(row, r.meta); });
       // You approved and the teammate saved it: show you the result.
       const saved = replies.flatMap(r => r.meta.deliverables || []);
+      if (saved.some(d => d.kind === "canvas")) {   // a bot made or changed a canvas: tabs and page follow
+        dropCanvasPins(); renderCanvasNav();
+        if (/^#\/canvas\//.test(location.hash || "")) void reloadCanvas();
+      }
       if (extra?.approval === "approved" && saved.length)
         openDeliverable({ ...saved[0], bot: replies.find(r => r.meta.deliverables?.length)?.meta.bot });
       if (hadPending || heldThisTurn || replies.some(r => r.meta.approval)) renderRail().catch(() => {});   // inbox count

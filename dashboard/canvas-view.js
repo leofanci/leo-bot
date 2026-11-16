@@ -135,7 +135,7 @@
     const kind = TYPE_LABEL[b.type] || "Block";
     let title = b.title || "";
     if (b.type === "list") {
-      const data = (state.lists || {})[b.list];
+      const data = (state.lists || {})[b.id];
       title = (data && data.title) || (b.summary && b.summary.title) || title;
     }
     const heading = title ? h.esc(title) : h.esc(kind);
@@ -151,15 +151,19 @@
     if (editing) {
       const draft = (state.drafts || {})[b.id] ?? b.md ?? "";
       const preview = (state.preview || {})[b.id];
+      const conflict = (state.conflict || {})[b.id]
+        ? `<div class="cv-conflict" role="alert"><p><b>Someone else changed this block while you edited.</b>
+            Their version is below and your draft is kept. Save replaces their version; Keep theirs drops your draft.</p>
+            <div class="cv-md">${h.md(b.md) || "<p class=\"cv-note\">Their version is empty.</p>"}</div></div>` : "";
       const pane = preview
         ? `<div class="cv-md cv-preview" aria-live="polite">${h.md(draft) || "<p class=\"cv-note\">Nothing to preview yet.</p>"}</div>`
         : `<textarea class="cv-input cv-mdedit" data-cv-md="${id}" aria-label="Markdown" rows="10">${h.esc(draft)}</textarea>`;
       return `<div class="cv-tabs" role="group" aria-label="Edit or preview">
           <button type="button" class="chip${preview ? "" : " on"}" data-cv-mode="edit" data-bk="${id}" aria-pressed="${preview ? "false" : "true"}">Edit</button>
           <button type="button" class="chip${preview ? " on" : ""}" data-cv-mode="preview" data-bk="${id}" aria-pressed="${preview ? "true" : "false"}">Preview</button>
-        </div>${pane}
-        <div class="cv-actions"><button type="button" class="btn primary sm" data-cv-savemd="${id}">Save</button>
-          <button type="button" class="btn ghost sm" data-cv-cancelmd="${id}">Cancel</button></div>`;
+        </div>${conflict}${pane}
+        <div class="cv-actions"><button type="button" class="btn primary sm" data-cv-savemd="${id}">${conflict ? "Replace their version" : "Save"}</button>
+          <button type="button" class="btn ghost sm" data-cv-cancelmd="${id}">${conflict ? "Keep theirs" : "Cancel"}</button></div>`;
     }
     const body = b.md ? h.md(b.md) : `<p class="cv-note">Empty.</p>`;
     const edit = h.canEdit ? `<div class="cv-actions"><button type="button" class="btn sm" data-cv-editmd="${id}">Edit</button></div>` : "";
@@ -184,21 +188,27 @@
     return list + add;
   }
 
-  function cellEditor(col, v, h) {
+  // The editor of one cell. `edit.draft` is what the viewer typed (kept when a save
+  // did not land); `edit.conflict` shows the value someone else saved meanwhile.
+  function cellEditor(col, v, h, edit) {
     const t = col.type || "text";
     const label = h.esc(col.label);
+    const cur = edit && edit.draft != null ? edit.draft : v;
+    const now = cellHtml(col, v, h) || "(empty)";
+    const note = edit && edit.conflict
+      ? `<small class="cv-note" role="alert">Changed meanwhile to: ${now}. Enter saves yours, Escape keeps theirs.</small>` : "";
     if (t === "select") {
       const opts = [`<option value="">(empty)</option>`].concat((col.options || []).map(o =>
-        `<option value="${h.esc(o)}"${o === v ? " selected" : ""}>${h.esc(o)}</option>`)).join("");
-      return `<select class="cv-input" data-cv-celledit aria-label="${label}">${opts}</select>`;
+        `<option value="${h.esc(o)}"${o === cur ? " selected" : ""}>${h.esc(o)}</option>`)).join("");
+      return `<select class="cv-input" data-cv-celledit aria-label="${label}">${opts}</select>${note}`;
     }
     const type = t === "number" ? "number" : t === "date" ? "date" : t === "url" ? "url" : "text";
     const extra = t === "person" ? ` placeholder="owner, person:id or bot:id"` : t === "number" ? ` step="any"` : "";
-    const value = v == null ? "" : h.esc(String(v));
-    return `<input class="cv-input" type="${type}" data-cv-celledit aria-label="${label}" value="${value}"${extra} maxlength="10000">`;
+    const value = cur == null ? "" : h.esc(String(cur));
+    return `<input class="cv-input" type="${type}" data-cv-celledit aria-label="${label}" value="${value}"${extra} maxlength="10000">${note}`;
   }
 
-  function columnForm(ls, form, cols, h) {
+  function columnForm(bk, ls, form, cols, h) {
     const col = form.key ? cols.find(c => c.key === form.key) : null;
     const type = (col && col.type) || "text";
     const label = col ? h.esc(col.label) : "";
@@ -206,7 +216,7 @@
     const types = COLUMN_TYPES.map(t => `<option value="${t}"${t === type ? " selected" : ""}>${COLUMN_LABEL[t]}</option>`).join("");
     const keyAttr = col ? ` data-key="${h.esc(col.key)}"` : "";
     const heading = col ? "Edit column" : "New column";
-    return `<form class="cv-colform" data-cv-colform="${h.esc(ls)}"${keyAttr} aria-label="${heading}">
+    return `<form class="cv-colform" data-cv-colform="${h.esc(bk)}" data-ls="${h.esc(ls)}"${keyAttr} aria-label="${heading}">
         <label>Name <input class="cv-input" name="label" value="${label}" required maxlength="200" autocomplete="off"></label>
         <label>Type <select class="cv-input" name="type">${types}</select></label>
         <label>Options <input class="cv-input" name="options" value="${options}" placeholder="For Select: new, sent, won" autocomplete="off"></label>
@@ -216,18 +226,20 @@
   }
 
   function listBlock(b, state, h) {
-    const data = (state.lists || {})[b.list];
-    if ((b.summary && b.summary.deleted) || (state.missing || {})[b.list]) {
+    const data = (state.lists || {})[b.id];
+    if ((b.summary && b.summary.deleted) || (state.missing || {})[b.id]) {
       return `<p class="cv-note">This list was deleted. Undo its delete from History, or remove this block.</p>`;
     }
     if (!data) return `<p class="cv-note">Loading list…</p>`;
     const ls = h.esc(data.id);
+    const bk = h.esc(b.id);
+    const hint = `cv-hint-${bk}`;
     const cols = data.columns || [];
     const edit = (state.editCell || {});
     const head = cols.map(c => {
       const inner = `${h.esc(c.label)} <small>${h.esc(COLUMN_LABEL[c.type] || c.type)}</small>`;
       return h.canEdit
-        ? `<th scope="col"><button type="button" class="cv-colbtn" data-cv-col="${h.esc(c.key)}" data-ls="${ls}" aria-label="Edit column ${h.esc(c.label)}">${inner}</button></th>`
+        ? `<th scope="col"><button type="button" class="cv-colbtn" data-cv-col="${h.esc(c.key)}" aria-label="Edit column ${h.esc(c.label)}">${inner}</button></th>`
         : `<th scope="col">${inner}</th>`;
     }).join("");
     const rows = (data.rows || []).map(r => {
@@ -238,10 +250,11 @@
         if (c.type === "checkbox" && h.canEdit) {
           return `<td><input type="checkbox" data-cv-cellbox="${key}" aria-label="${h.esc(c.label)}"${v ? " checked" : ""}></td>`;
         }
-        if (edit.ls === data.id && edit.rw === r.id && edit.key === c.key) {
-          return `<td class="cv-editing" data-cv-cell="${key}">${cellEditor(c, v, h)}</td>`;
+        if (edit.bk === b.id && edit.rw === r.id && edit.key === c.key) {
+          return `<td class="cv-editing" data-cv-cell="${key}">${cellEditor(c, v, h, edit)}</td>`;
         }
-        const live = h.canEdit ? ` tabindex="0" role="button" aria-label="${h.esc(c.label)}: press Enter to edit"` : "";
+        // A real cell: its name is its value; the edit hint is a description.
+        const live = h.canEdit ? ` tabindex="0" aria-describedby="${hint}"` : "";
         return `<td data-cv-cell="${key}"${live}>${cellHtml(c, v, h)}</td>`;
       }).join("");
       const tag = r.outside ? outsideTag(h, attrs(h, { ls: data.id, row: r.id })) : "";
@@ -254,14 +267,15 @@
     const viewNote = b.view && (b.view.sort || Object.keys(b.view.filter || {}).length)
       ? `<span class="cv-note">Saved filter and sort</span>` : "";
     const shown = (data.rows || []).length;
-    const more = data.total > shown ? `<button type="button" class="btn ghost sm" data-cv-more="${ls}">Show more</button>` : "";
+    const more = data.total > shown ? `<button type="button" class="btn ghost sm" data-cv-more="${bk}">Show more</button>` : "";
     const count = `<span class="cv-note">${shown} of ${Number(data.total) || 0} rows</span>`;
-    const foot = (h.canEdit ? `<button type="button" class="btn sm" data-cv-addrow="${ls}">${h.icon("plus")} Add row</button>
-        <button type="button" class="btn ghost sm" data-cv-addcol="${ls}">Add column</button>` : "") + count + more + viewNote;
-    const form = state.colForm && state.colForm.ls === data.id ? columnForm(data.id, state.colForm, cols, h) : "";
+    const foot = (h.canEdit ? `<button type="button" class="btn sm" data-cv-addrow="${bk}">${h.icon("plus")} Add row</button>
+        <button type="button" class="btn ghost sm" data-cv-addcol="${bk}">Add column</button>` : "") + count + more + viewNote;
+    const form = state.colForm && state.colForm.bk === b.id ? columnForm(b.id, data.id, state.colForm, cols, h) : "";
+    const hintEl = h.canEdit ? `<span class="cv-sr" id="${hint}">Press Enter to edit this cell</span>` : "";
     return `${listTag ? `<div class="cv-listtag">${listTag}</div>` : ""}<div class="cv-gridwrap"><table class="cv-grid" data-ls="${ls}">
         <thead><tr>${head}<th scope="col" class="cv-rowact"><span class="cv-sr">Row actions</span></th></tr></thead>
-        <tbody>${rows}${empty}</tbody></table></div>
+        <tbody>${rows}${empty}</tbody></table></div>${hintEl}
       <div class="cv-actions">${foot}</div>${form}`;
   }
 
@@ -276,7 +290,7 @@
       return `<li>${link}<small>${h.esc(p)}</small>${del}</li>`;
     }).join("");
     const list = items ? `<ul class="cv-files">${items}</ul>` : `<p class="cv-note">No files yet.</p>`;
-    const pre = h.ws && h.ws !== "hq" ? `projects/${h.ws}/` : "";
+    const pre = h.ws && h.ws !== "hq" ? "projects/" + h.ws + "/" : "";
     const add = h.canEdit ? `<form class="cv-inline" data-cv-addpath="${id}">
         <input class="cv-input" name="path" aria-label="File path" placeholder="${h.esc(pre)}docs/notes.md" autocomplete="off" maxlength="1000">
         <button class="btn sm" type="submit">Add file</button></form>` : "";
@@ -294,8 +308,11 @@
     const pick = h.canEdit && routes.length
       ? `<select class="cv-input" data-cv-route="${id}" aria-label="Which view">${opts}</select>` : "";
     const open = h.canOpen && safeHref(b.route) ? `<a class="btn ghost sm" href="${h.esc(b.route)}">Open</a>` : "";
+    // The last drawing of this route stays while a fresh one loads (no flash on redraw).
+    const kept = (state.viewHtml || {})[b.id];
+    const inner = kept && kept.route === cur ? kept.html : `<p class="cv-note">Loading view…</p>`;
     return `<div class="cv-viewbar"><span class="cv-note">Read-only: ${label}</span>${pick}${open}</div>
-      <div class="cv-view" data-cv-view="${id}" inert><p class="cv-note">Loading view…</p></div>`;
+      <div class="cv-view" data-cv-view="${id}" inert>${inner}</div>`;
   }
 
   const BLOCKS = { text: textBlock, checklist: checklistBlock, list: listBlock, files: filesBlock, view: viewBlock };

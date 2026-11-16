@@ -82,11 +82,15 @@ class TestCanvasAssets(unittest.TestCase):
 
     def test_css_uses_tokens_only(self):
         css = APP_CSS.read_text(encoding="utf-8")
-        rules = "\n".join(ln for ln in css.splitlines() if ln.startswith(".cv-"))
+        rules = "\n".join(ln for ln in css.splitlines()
+                          if ln.lstrip().startswith((".cv-", ".cn-tab")) and not ln.startswith(".cv-project"))
         self.assertIn(".cv-block{", rules)
         self.assertIn(".cv-grid{", rules)
+        self.assertIn(".cn-tab{", rules)
         self.assertNotRegex(rules, r"#[0-9a-fA-F]{3,8}\b")
         self.assertNotRegex(rules, r"rgba?\(")
+        # sizes come from tokens; 1px (hairlines, the visually-hidden idiom) is the only raw length
+        self.assertEqual(re.findall(r"(?<![\w.-])(?!1px)\d+(?:\.\d+)?px", rules), [])
 
 
 class TestCanvasWrites(unittest.TestCase):
@@ -96,14 +100,73 @@ class TestCanvasWrites(unittest.TestCase):
         self.assertIn("Changed by someone else: reloaded", sec)
         self.assertIn("status === 409", sec)
 
+    # core/canvases.py _VERSIONED: the API refuses these without `version`.
+    VERSIONED = {"update-canvas", "add-block", "update-block", "move-block", "delete-block",
+                 "delete-canvas", "update-list", "add-row", "add-rows", "update-row",
+                 "delete-row", "delete-list"}
+    # writes to one block, row or checklist item also name the version of that item
+    ITEM = {"update-block", "delete-block", "update-row", "delete-row"}
+
+    @staticmethod
+    def _calls(sec):
+        """(cmd, params text) of every canvasCmd("<cmd>", {...}) call."""
+        out = []
+        for m in re.finditer(r'canvasCmd\("([a-z-]+)",\s*\{', sec):
+            i, depth = m.end() - 1, 0
+            for j in range(i, len(sec)):
+                depth += {"{": 1, "}": -1}.get(sec[j], 0)
+                if depth == 0:
+                    out.append((m.group(1), sec[i:j + 1]))
+                    break
+        return out
+
     def test_every_write_sends_versions(self):
         sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
-        self.assertIn("item_version:", sec)
-        self.assertIn("version:", sec)
+        calls = self._calls(sec)
+        seen = set(re.findall(r'canvasCmd\("([a-z-]+)"', sec))
         for cmd in ("update-block", "move-block", "delete-block", "add-block", "update-row",
                     "add-row", "delete-row", "update-list", "update-canvas", "undo", "trust",
-                    "pin-canvas", "unpin-canvas", "delete-canvas"):
-            self.assertIn(f'"{cmd}"', sec, cmd)
+                    "delete-canvas", "create-canvas", "list-templates"):
+            self.assertIn(cmd, seen, cmd)
+        self.assertIn('on ? "pin-canvas" : "unpin-canvas"', sec)
+        for cmd, params in calls:
+            if cmd in self.VERSIONED:
+                self.assertRegex(params, r"\bversion:", f"{cmd}: {params}")
+            if cmd in self.ITEM:
+                # a checklist op carries item_version on each op instead
+                self.assertTrue("item_version:" in params or "items:" in params, f"{cmd}: {params}")
+
+    def test_conflicts_keep_what_the_viewer_typed(self):
+        sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
+        self.assertIn("onStale?.()", sec)
+        save = sec[sec.index('if (t.matches("[data-cv-savemd]"))'):]
+        self.assertIn("st.conflict[bk] = true", save[:1500])
+        cell = _body(sec, "async function cvSaveCell(")
+        self.assertIn("edit.conflict = true", cell)
+        self.assertIn("edit.draft = input.value", cell)
+        self.assertLess(cell.index('canvasCmd("update-row"'), cell.rindex("st.editCell = null; st.focusNext"))
+
+    def test_each_list_block_fetches_its_own_view(self):
+        body = _body(_canvas_section(APP_JS.read_text(encoding="utf-8")), "async function loadCanvas(")
+        self.assertIn("lists[b.id] = await fetches[url]", body)
+        self.assertIn("st.limits[b.id]", body)
+        self.assertNotIn("lists[b.list]", body)
+
+    def test_person_pin_and_delete_follow_the_server(self):
+        body = _body(_canvas_section(APP_JS.read_text(encoding="utf-8")), "function drawCanvas(")
+        self.assertIn('const mayDelete = !isPerson() || doc.created_by !== "owner";', body)
+        self.assertIn("pinned || doc.created_by === myCanvasTag()", body)
+
+    def test_escape_returns_focus_to_the_opener(self):
+        sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
+        self.assertIn("function closeColumnForm(", sec)
+        self.assertIn('[data-cv-renameform] *") && e.key === "Escape"', sec)
+
+    def test_tabs_refresh_while_shown(self):
+        js = APP_JS.read_text(encoding="utf-8")
+        sec = _canvas_section(js)
+        self.assertIn("setInterval(", sec)
+        self.assertIn('saved.some(d => d.kind === "canvas")', js)
 
     def test_trust_is_owner_only_and_outside_is_tagged(self):
         sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
@@ -117,18 +180,25 @@ class TestCanvasWrites(unittest.TestCase):
 class TestCanvasEscaping(unittest.TestCase):
     """Every user, bot or outside string goes through the escape helper."""
 
-    RAW = re.compile(r"\$\{\s*(?!h\.esc\(|esc\(|h\.md\(|formatBlocks\()"
-                     r"[^}]*?\.(md|text|title|label|cells|route|name|by)\b(?!\()")
+    RAW = re.compile(r"\$\{\s*(?!h\.esc\(|esc\(|h\.md\(|formatBlocks\(|encodeURIComponent\(|CSS\.escape\()"
+                     r"[^}]*?\.(md|text|title|label|cells|route|name|by|id|type|bot|key|message|error|options)\b(?!\()")
+    # any bare `${a.b}` / `${a?.b.c}`: a field printed as is (only .length is a number)
+    BARE = re.compile(r"\$\{\s*[A-Za-z_$][\w$]*(?:\??\.[\w$]+)+\s*\}")
+
+    def _bare(self, src):
+        return [m for m in self.BARE.findall(src) if not re.search(r"\.length\s*\}$", m)]
 
     def test_no_raw_strings_in_canvas_view(self):
         cvjs = CANVAS_JS.read_text(encoding="utf-8")
         self.assertEqual(self.RAW.findall(cvjs), [])
+        self.assertEqual(self._bare(cvjs), [])
         self.assertIn("function cellHtml(", cvjs)
         self.assertIn("h.esc(", _body(cvjs, "function cellHtml(", "\n  }\n"))
 
     def test_no_raw_strings_in_app_canvas_section(self):
         sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
         self.assertEqual(self.RAW.findall(sec), [])
+        self.assertEqual(self._bare(sec), [])
 
     def test_canvas_helpers_get_the_existing_escape_helper(self):
         sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
@@ -151,8 +221,14 @@ class TestCanvasViewHelpers(unittest.TestCase):
         self.assertEqual(self.run_js('CV.safeHref("http://acme.example")'), "http://acme.example")
         self.assertEqual(self.run_js('CV.safeHref("/files/x")'), "/files/x")
         for bad in ("javascript:alert(1)", " JavaScript:alert(1)", "data:text/html,x", "vbscript:x",
-                    "//evil.example", "java\\tscript:x", "mailto:a@b"):
+                    "//evil.example", "java\\tscript:x", "mailto:a@b", "\u0001javascript:x",
+                    "javascript:\u0000x"):
             self.assertIsNone(self.run_js(f"CV.safeHref({json.dumps(bad)})"), bad)
+
+    def test_entity_tricks_stay_text(self):
+        # no colon, so it is a relative link; the escape keeps the entity literal
+        got = self.run_js('CV.cellHtml({type:"url"},"javascript&#58;alert(1)",H)')
+        self.assertIn('href="javascript&amp;#58;alert(1)"', got)
 
     def test_file_route(self):
         self.assertEqual(self.run_js('CV.fileRoute("demo","projects/demo/canvases/cv3.json")'), "#/canvas/cv3")
@@ -206,7 +282,7 @@ class TestCanvasViewHelpers(unittest.TestCase):
         self.assertNotIn("<b>x</b>", got)
         self.assertIn('type="checkbox"', got)
         self.assertIn("checked", got)
-        lst = ('{id:"bk3",type:"list",list:"ls1",v:1}', '{ls1:{id:"ls1",version:2,total:1,'
+        lst = ('{id:"bk3",type:"list",list:"ls1",v:1}', '{bk3:{id:"ls1",version:2,total:1,'
                'columns:[{key:"name",label:"<i>Name</i>",type:"text"}],'
                'rows:[{id:"rw1",v:2,cells:{name:"<u>acme</u>"},outside:true}]}}')
         got = self.run_js(f"CV.blockHtml({lst[0]},{{lists:{lst[1]}}},H)")
@@ -215,6 +291,60 @@ class TestCanvasViewHelpers(unittest.TestCase):
         self.assertNotIn("<i>Name</i>", got)
         self.assertNotIn("<u>acme</u>", got)
         self.assertIn("Outside content", got)
+        # a real cell: no button role, no label hiding its value, the hint is a description
+        self.assertNotIn('role="button"', got)
+        self.assertIn('tabindex="0" aria-describedby="cv-hint-bk3"', got)
+        self.assertIn('id="cv-hint-bk3">Press Enter to edit this cell<', got)
+        self.assertNotRegex(got, r'<td[^>]*aria-label')
+
+    def test_list_rows_come_from_the_block_not_the_list(self):
+        blk = '{id:"bk4",type:"list",list:"ls1",v:1}'
+        other = '{bk3:{id:"ls1",version:2,total:1,columns:[{key:"name",label:"Name",type:"text"}],rows:[{id:"rw1",v:2,cells:{name:"other"}}]}}'
+        got = self.run_js(f"CV.blockHtml({blk},{{lists:{other}}},H)")
+        self.assertNotIn("other", got)
+        self.assertIn("Loading list", got)
+
+    def test_person_view_has_no_edit_controls_or_links(self):
+        P = "Object.assign({},H,{owner:false,canEdit:false,canOpen:false})"
+        state = ('{lists:{bk3:{id:"ls1",version:2,total:1,columns:[{key:"name",label:"Name",type:"text"},'
+                 '{key:"site",label:"Site",type:"url"}],rows:[{id:"rw1",v:2,cells:{name:"acme",site:"https://acme.example"},outside:true}]}}}')
+        blocks = ['{id:"bk1",type:"text",md:"x",v:1,outside:true}',
+                  '{id:"bk2",type:"checklist",v:1,items:[{id:"i1",text:"x",done:false,v:1}]}',
+                  '{id:"bk3",type:"list",list:"ls1",v:1}',
+                  '{id:"bk4",type:"files",v:1,paths:["projects/demo/technical.md"]}',
+                  '{id:"bk5",type:"view",route:"#/project/demo/gtm",v:1}']
+        for b in blocks:
+            got = self.run_js(f"CV.blockHtml({b},{state},{P})")
+            for attr in ("data-cv-bmenu", "data-cv-editmd", "data-cv-additem", "data-cv-delitem",
+                         "data-cv-addrow", "data-cv-addcol", "data-cv-delrow", "data-cv-col=",
+                         "data-cv-cellbox", "data-cv-addpath", "data-cv-delpath", "data-cv-route",
+                         "data-cv-trust", "tabindex", 'href="#'):
+                self.assertNotIn(attr, got, f"{b}: {attr}")
+            if '"checklist"' in b:
+                self.assertIn("disabled", got)
+            if '"list"' in b:
+                self.assertIn("Outside content", got)   # the tag still shows
+
+    def test_text_conflict_shows_their_version_and_keeps_the_draft(self):
+        blk = '{id:"bk1",type:"text",md:"their <b>words</b>",v:3}'
+        st = '{editing:{bk1:true},drafts:{bk1:"my draft"},conflict:{bk1:true}}'
+        got = self.run_js(f"CV.blockHtml({blk},{st},H)")
+        self.assertIn('role="alert"', got)
+        self.assertIn("their &lt;b&gt;words&lt;/b&gt;", got)
+        self.assertIn(">my draft</textarea>", got)
+        self.assertIn("Replace their version", got)
+        self.assertIn("Keep theirs", got)
+        plain = self.run_js(f'CV.blockHtml({blk},{{editing:{{bk1:true}},drafts:{{bk1:"d"}}}},H)')
+        self.assertNotIn("Replace their version", plain)
+
+    def test_cell_conflict_keeps_the_typed_value_and_shows_theirs(self):
+        blk = '{id:"bk3",type:"list",list:"ls1",v:1}'
+        st = ('{lists:{bk3:{id:"ls1",version:3,total:1,columns:[{key:"name",label:"Name",type:"text"}],'
+              'rows:[{id:"rw1",v:3,cells:{name:"<i>theirs</i>"}}]}},'
+              'editCell:{bk:"bk3",rw:"rw1",key:"name",draft:"mine \\"x\\"",conflict:true}}')
+        got = self.run_js(f"CV.blockHtml({blk},{st},H)")
+        self.assertIn('value="mine &quot;x&quot;"', got)
+        self.assertIn("Changed meanwhile to: &lt;i&gt;theirs&lt;/i&gt;", got)
 
     def test_unknown_types_have_a_hook(self):
         got = self.run_js('CV.blockHtml({id:"bk6",type:"browser",bot:"research",v:1},{},H)')

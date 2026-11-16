@@ -177,6 +177,14 @@
   --ui-terminal-font-size: 12px;
   --ui-calendar-day-min: 96px;
   --ui-editor-min-height: 120px;
+  /* Canvas page: tab, field, grid cell, view block and history drawer sizes. */
+  --ui-icon-small: 13px;
+  --ui-canvas-tab-max: 220px;
+  --ui-canvas-field-min: 160px;
+  --ui-canvas-input-min: 220px;
+  --ui-canvas-cell-min: 96px;
+  --ui-canvas-view-max: 480px;
+  --ui-canvas-drawer: 300px;
   /* CSS media queries mirror these breakpoints because custom properties are not valid media-query operands. */
   --ui-breakpoint-canvas-overlay: 1280px;
   --ui-breakpoint-nav-drawer: 860px;
