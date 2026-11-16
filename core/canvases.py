@@ -129,6 +129,9 @@ class Actor:
         return out
 
 
+EMBEDDED_MSG = "this list is embedded in a canvas; remove the block first"
+
+
 class Refused(Exception):
     pass
 
@@ -1119,7 +1122,10 @@ def _delete_canvas(r: _Run) -> dict:
         if r.actor.kind == "person" and doc.get("created_by") == "owner":
             raise Refused("only the owner deletes a canvas the owner created")
         r.guard(doc, f"delete {cid}")
-        cs.to_trash(r.root, r.ws, cid, held=True)
+        try:
+            cs.to_trash(r.root, r.ws, cid, held=True)
+        except LookupError:  # gone meanwhile (a trash race)
+            raise NotFound(f"no such canvas or list: {cid}") from None
         change = r.log(cid, {"op": "delete-canvas", "kind": "trash", "target": cid,
                              "before": None, "after": None})
     return {"id": cid, "version": doc.get("version"), "change": change}
@@ -1346,10 +1352,12 @@ def _delete_list(r: _Run) -> dict:
                    if b.get("type") == "list" and b.get("list") == lid]
             if bks:
                 embeds.append((cid, cdoc, bks))
-        if not _private(r.actor):  # first: the count below then names only canvases it sees
+        if not _private(r.actor) and embeds:
+            # One answer whether the embeds are visible or not: a hidden canvas never shows.
             vis = set(visible_canvas_ids(r.root, r.ws, r.actor, r._team_obj))
-            if any(cid not in vis or cdoc.get("coworkers") == "view" for cid, cdoc, _ in embeds):
-                raise Refused(f"{lid} is embedded where only the owner can remove it")
+            if not r.p.get("force_unembed") or any(
+                    cid not in vis or cdoc.get("coworkers") == "view" for cid, cdoc, _ in embeds):
+                raise Refused(EMBEDDED_MSG)
         if embeds and not r.p.get("force_unembed"):
             raise Refused(f"{lid} is embedded in {len(embeds)} canvas(es): pass --force-unembed "
                           "to remove those embeds too")

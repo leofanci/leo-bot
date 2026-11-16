@@ -209,6 +209,31 @@ class CanvasApi(Base):
         self.assertNotIn("2 canvas", data["error"])
         self.assertNotIn("canvas(es)", data["error"])
 
+    def test_delete_list_hidden_embed_reads_like_a_visible_one(self):
+        rooms.save_topic("acme", "secret", ["cos"], "cos", self.root, private=True, people=["p-other"])
+        cols = [{"key": "name", "label": "Name"}]
+        seen = self.make("Seen", pin="acme/general", blocks=[{"type": "list", "title": "A", "columns": cols}])
+        lid_a = self.owner("GET", f"/api/canvases/{seen}?ws=acme")[1]["blocks"][0]["list"]
+        both = self.make("Both", pin="acme/general", blocks=[{"type": "list", "title": "B", "columns": cols}])
+        lid_b = self.owner("GET", f"/api/canvases/{both}?ws=acme")[1]["blocks"][0]["list"]
+        self.make("Hidden", pin="acme/t-secret", blocks=[{"type": "list", "list": lid_b}])
+        out = []
+        for lid in (lid_a, lid_b):
+            v = self.person("GET", f"/api/lists/{lid}?ws=acme")[1]["version"]
+            out.append(self.run_cmd("person", "delete-list", {"id": lid, "version": v}))
+        self.assertEqual(out[0], out[1])
+        self.assertEqual(out[0][0], 403)
+        # the owner keeps the detailed count
+        v = self.owner("GET", f"/api/lists/{lid_b}?ws=acme")[1]["version"]
+        code, data = self.run_cmd("owner", "delete-list", {"id": lid_b, "version": v})
+        self.assertIn("2 canvas(es)", data["error"])
+
+    def test_trash_race_is_404(self):
+        cid = self.make("Open")
+        with mock.patch.object(server.canvases.cs, "to_trash", side_effect=LookupError(cid)):
+            code, data = self.run_cmd("owner", "delete-canvas", {"id": cid, "version": self.version(cid)})
+        self.assertEqual(code, 404, data)
+
     def test_person_write_needs_same_origin(self):
         cid = self.make("Open", pin="acme/general")
         before = cs.read(self.root, "acme", cid)
