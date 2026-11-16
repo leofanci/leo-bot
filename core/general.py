@@ -10,6 +10,7 @@
 import math
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
@@ -103,11 +104,34 @@ def adopt_browser_timezone(zone):
     this machine's clock is on another zone (a server is often on UTC), save the browser's once.
     A saved choice, "This machine's" included, is never changed. True when it saved."""
     zone = zone.strip() if isinstance(zone, str) else ""
-    if not zone or not valid_timezone(zone) or "timezone" in updater.settings():
+    if not zone or not valid_timezone(zone):
         return False
-    if zone == machine_timezone():
+    saved = updater.settings().get("timezone")
+    if isinstance(saved, str) and valid_timezone(saved):  # a broken hand edit counts as never set
+        return False
+    if same_zone(zone, machine_timezone()):
         return False
     update({"timezone": zone})
+    return True
+
+
+def same_zone(a, b):
+    """True when two zone names keep the same clock, aliases included (a browser may still say
+    Asia/Calcutta where the machine says Asia/Kolkata): same offset at each month of two years."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    try:
+        za, zb = ZoneInfo(a), ZoneInfo(b)
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+    year = time.gmtime().tm_year
+    for y in (year, year + 1):
+        for m in range(1, 13):
+            at = datetime(y, m, 15, 12, tzinfo=timezone.utc)
+            if at.astimezone(za).utcoffset() != at.astimezone(zb).utcoffset():
+                return False
     return True
 
 

@@ -397,6 +397,20 @@ async function loadMe(){
 }
 // A server's clock is often on UTC: the owner's browser zone is saved once while none was ever picked.
 function browserZone(){ try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } }
+// Two names for one clock (Asia/Calcutta, Asia/Kolkata): same wall time at each month of two years.
+function sameZone(a, b){
+  if (!a || !b) return false;
+  if (a === b) return true;
+  try {
+    const y = new Date().getUTCFullYear();
+    for (let i = 0; i < 24; i++) {
+      const at = new Date(Date.UTC(y + Math.floor(i / 12), i % 12, 15, 12));
+      const fmt = z => at.toLocaleString("en-US", { timeZone: z, hourCycle: "h23" });
+      if (fmt(a) !== fmt(b)) return false;
+    }
+    return true;
+  } catch { return false; }
+}
 async function adoptBrowserZone(){
   const zone = browserZone();
   if (isPerson() || !zone) return;
@@ -2036,7 +2050,7 @@ async function renderGeneral(){
       <small>${help}${env ? " Set on this machine by an environment variable, which wins over this box." : ""}</small></div>`;
   };
   const zone = browserZone(), clock = g.timezone || g.machine_timezone || "";
-  const zoneHint = zone && clock && zone !== clock && (g.timezones || []).includes(zone) ? zone : "";
+  const zoneHint = zone && clock && !sameZone(zone, clock) && (g.timezones || []).includes(zone) ? zone : "";
   box.innerHTML = `
     <section class="integ-group"><h3>You</h3>
       <div class="eng-choice gen-about"><label for="gen-about"><span>About you</span></label>
