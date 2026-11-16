@@ -578,5 +578,83 @@ class Round3Walls(unittest.TestCase):
         self.assertTrue(runs(f"{shlex.quote(sys.executable)} -c 'import tempfile; tempfile.mkstemp()'", False))
 
 
+
+class Round4PythonDirs(unittest.TestCase):
+    """Round 4: the Python dirs are walled like the rest (ancestors too), site-packages included."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = os.path.realpath(self.tmp.name)
+        self.home = os.path.join(base, "home")
+        self.root = os.path.join(self.home, "data", "d")
+        self.work = os.path.join(self.home, "work")  # the edit folder
+        self.venv = os.path.join(self.work, "a", "b", "venv")  # nested 2+ levels inside it
+        self.site = os.path.join(self.venv, "lib", "site-packages")
+        for d in (os.path.join(self.home, ".agent-browser"), os.path.join(self.root, "run"),
+                  os.path.join(self.root, "team", "sandbox"), os.path.join(self.home, "app"), self.site):
+            os.makedirs(d)
+        self.pdir = os.path.join(self.root, "team", "sandbox")
+
+    def walls(self):
+        with unittest.mock.patch.object(shell_rules, "REPO", Path(os.path.join(self.home, "app"))), \
+                unittest.mock.patch.object(shell_rules, "_python_dirs", return_value=[self.venv, self.site]):
+            return shell_rules.browser_walls(self.root, required=True, home=self.home, profile_dir=self.pdir)
+
+    def test_python_dirs_get_ancestor_denies(self):
+        w = self.walls()
+        for a in (os.path.join(self.work, "a", "b"), os.path.join(self.work, "a"), self.work, self.venv):
+            self.assertIn(a, w["ancestors"])
+        self.assertNotIn(self.home, w["ancestors"])
+
+    def test_site_packages_join_the_python_dirs(self):
+        import site
+        import tempfile
+        outside = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(__import__("shutil").rmtree, outside, True)
+        target = os.path.join(outside, "real-site-packages")
+        os.makedirs(target)
+        link = os.path.join(outside, "linked-site-packages")
+        os.symlink(target, link)
+        user = os.path.join(outside, "user-site")
+        with unittest.mock.patch.object(site, "getsitepackages", return_value=[link]), \
+                unittest.mock.patch.object(site, "getusersitepackages", return_value=user):
+            dirs = shell_rules._python_dirs()
+        self.assertIn(target, dirs)  # the symlink's real target, outside sys.prefix
+        self.assertNotIn(link, dirs)
+        self.assertIn(user, dirs)
+        with unittest.mock.patch.object(site, "getsitepackages", return_value=[link]), \
+                unittest.mock.patch.object(site, "getusersitepackages", return_value=user):
+            w = shell_rules.browser_walls(self.root, home=self.home)
+        self.assertIn(target, w["write_paths"])
+        self.assertIn(outside, w["ancestors"])
+
+    @unittest.skipUnless(os.path.exists(shell_rules.SANDBOX_EXEC), "macOS sandbox only")
+    def test_live_venv_inside_the_edit_folder(self):
+        import shlex
+        import subprocess
+        import tempfile
+        walls = self.walls()
+        park = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, park, True)
+
+        def runs(script, outside):
+            cmd = shell_rules.sandboxed(script, [self.work], profile_dir=self.pdir, browser=walls, outside=outside)
+            return subprocess.run(cmd, shell=True, cwd=self.work, capture_output=True).returncode == 0
+        q = shlex.quote
+        for outside in (False, True):
+            for src in (os.path.join(self.work, "a", "b"), os.path.join(self.work, "a")):
+                self.assertFalse(runs(f"mv {q(src)} {q(src + '-moved')}", outside), (src, outside))
+            # to temp and back
+            self.assertFalse(runs(f"mv {q(self.venv)} {q(os.path.join(park, 'v'))} && "
+                                  f"mv {q(os.path.join(park, 'v'))} {q(self.venv)}", outside), outside)
+            self.assertFalse(runs(f"echo x > {q(os.path.join(self.site, 'evil.pth'))}", outside), outside)
+            self.assertTrue(runs(f"echo ok > {q(os.path.join(self.work, 'ok.txt'))}", outside), outside)
+        self.assertTrue(os.path.isdir(self.site))
+        self.assertFalse(os.path.exists(os.path.join(self.site, "evil.pth")))
+        self.assertEqual(os.listdir(park), [])
+
+
 if __name__ == "__main__":
     unittest.main()

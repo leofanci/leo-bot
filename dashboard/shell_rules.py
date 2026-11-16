@@ -27,7 +27,7 @@ browser's own CDP port, whatever port they use), the engine's folder ~/.agent-br
 session sockets and saved logins: no read, write or connect), Leo Bot's <data>/run (the engine
 key, the typed text) and writes to <data>/team (approvals, browser settings, the sandbox
 profiles), Leo Bot's own code (REPO) and the Python that runs osctl (sys.prefix, sys.base_prefix,
-the folder of sys.executable). Writes go only to the edit and temp folders from the first
+the folder of sys.executable, its site-packages folders). Writes go only to the edit and temp folders from the first
 command, and no folder above a walled one can be renamed (each ancestor up to the home folder
 or / is denied as itself: a rename otherwise moves the folder out from under its path rule).
 Before outside content the internet stays open. With no sandbox, a browser level that can send (write, act) refuses the command (and
@@ -186,10 +186,22 @@ def _sb_str(path):
 
 
 def _python_dirs():
-    """Where the Python that runs osctl lives: sys.prefix, sys.base_prefix and the folder of
-    sys.executable (its site-packages, a .pth, the interpreter itself), as real paths."""
-    return sorted({os.path.realpath(d) for d in (sys.prefix, sys.base_prefix,
-                                                 os.path.dirname(os.path.realpath(sys.executable))) if d})
+    """Where the Python that runs osctl lives: sys.prefix, sys.base_prefix, the folder of
+    sys.executable, and its site-packages folders (site.getsitepackages, plus the user one when
+    there is one), as real paths: a site-packages linked from outside the prefix counts too."""
+    import site
+    dirs = [sys.prefix, sys.base_prefix, os.path.dirname(os.path.realpath(sys.executable))]
+    try:
+        dirs += list(site.getsitepackages())
+    except (AttributeError, OSError):  # some virtualenvs have no getsitepackages
+        pass
+    try:
+        user = site.getusersitepackages()
+    except (AttributeError, OSError):
+        user = None
+    if isinstance(user, str) and user:
+        dirs.append(user)
+    return sorted({os.path.realpath(d) for d in dirs if isinstance(d, str) and d})
 
 
 def _ancestors(path, home):
@@ -214,8 +226,9 @@ def browser_walls(root, required=False, home=None, profile_dir=None):
     real = lambda p: os.path.realpath(str(p))  # noqa: E731 - one short helper
     agent, run, team, data = real(home / ".agent-browser"), real(Path(root) / "run"), real(Path(root) / "team"), real(root)
     pdir = real(profile_dir) if profile_dir else None
-    writes = sorted({team, real(REPO), *_python_dirs()} | ({pdir} if pdir else set()))
-    walled = [team, run, agent, real(REPO), data] + ([pdir] if pdir else [])
+    python = _python_dirs()
+    writes = sorted({team, real(REPO), *python} | ({pdir} if pdir else set()))
+    walled = [team, run, agent, real(REPO), data, *python] + ([pdir] if pdir else [])
     ancestors = sorted({a for p in walled for a in _ancestors(p, home)})
     return {"paths": sorted({agent, run}), "write_paths": writes, "ancestors": ancestors,
             "home": real(home), "required": bool(required)}
