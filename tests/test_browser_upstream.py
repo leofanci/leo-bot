@@ -838,3 +838,15 @@ class ChromeUrl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InsideTest(unittest.TestCase):
+    def test_inside_keeps_plain_names(self):
+        from dashboard import browser_upstream as bu
+        self.assertEqual(bu._inside("/tmp/x", "demo--b1.pid"), Path("/tmp/x/demo--b1.pid"))
+
+    def test_inside_refuses_escapes(self):
+        from dashboard import browser_upstream as bu
+        for bad in ("../y.pid", "a/b.pid", "/etc/passwd", "..", ""):
+            with self.assertRaises(ValueError, msg=bad):
+                bu._inside("/tmp/x", bad)

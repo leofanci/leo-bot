@@ -1073,6 +1073,15 @@ def run_dir(home=None):
     return Path(_home(home) or "/nonexistent") / ".agent-browser" / "namespaces" / NAMESPACE / "run"
 
 
+def _inside(folder, name):
+    """`folder/name`, refused (ValueError) unless it stays directly inside `folder`."""
+    base = os.path.normpath(str(folder))
+    full = os.path.normpath(os.path.join(base, name))
+    if not full.startswith(base + os.sep) or os.sep in full[len(base) + 1:]:
+        raise ValueError("invalid session file name")
+    return Path(full)
+
+
 def state_names(session):
     """The exact state file names a session can have: the restore key is the session name
     (<key>-<session>), or the namespace when the engine picks it."""
@@ -1222,14 +1231,18 @@ def _is_session(pid, session, daemon=False):
 def daemon_pid(session, home=None):
     """The pid of this session's daemon, only when that process really is it, else None."""
     try:
-        pid = int((run_dir(home) / f"{session}.pid").read_text().strip())
+        pid = int(_inside(run_dir(home), f"{session}.pid").read_text().strip())
     except (OSError, ValueError):
         return None
     return pid if _is_session(pid, session, daemon=True) else None
 
 
 def daemon_alive(session, home=None):
-    return _socket_live(run_dir(home) / f"{session}.sock") or daemon_pid(session, home) is not None
+    try:
+        sock = _inside(run_dir(home), f"{session}.sock")
+    except ValueError:
+        return False
+    return _socket_live(sock) or daemon_pid(session, home) is not None
 
 
 def _children(pid):
@@ -1449,7 +1462,10 @@ def export_login(ws, bot, root, home=None, pool=None, busy=None):
         key = _read_key(root)
         if key is None:
             raise _Failed(NO_KEY)
-        path = state_dir(home) / f"{sess}-{sess}.json.enc"
+        try:
+            path = _inside(state_dir(home), f"{sess}-{sess}.json.enc")
+        except ValueError:
+            raise _Failed(NO_LOGIN) from None
         try:
             if path.is_symlink():
                 raise _Failed(NO_LOGIN)
@@ -1499,11 +1515,15 @@ def import_login(ws, bot, blob, root, epoch, home=None, pool=None, busy=None):
         folder = state_dir(home)
         folder.mkdir(parents=True, exist_ok=True)
         target = f"{sess}-{sess}.json.enc"
+        try:
+            dest = _inside(folder, target)
+        except ValueError:
+            raise _Failed("The login could not be saved here.") from None
         fd, tmp = tempfile.mkstemp(dir=folder, prefix=".leobot-", suffix=".tmp")
         try:
             with os.fdopen(fd, "wb") as f:
                 f.write(sealed)
-            os.replace(tmp, folder / target)
+            os.replace(tmp, dest)
         except OSError:
             try:
                 os.unlink(tmp)
@@ -1513,9 +1533,10 @@ def import_login(ws, bot, blob, root, epoch, home=None, pool=None, busy=None):
         for name in state_names(sess):  # only now: any other file of this session is never restored
             if name != target:
                 try:
-                    if (folder / name).is_symlink() or (folder / name).is_file():
-                        (folder / name).unlink()
-                except OSError:
+                    old = _inside(folder, name)
+                    if old.is_symlink() or old.is_file():
+                        old.unlink()
+                except (OSError, ValueError):
                     traceback.print_exc()
         return len(state["cookies"]), dropped
     finally:
