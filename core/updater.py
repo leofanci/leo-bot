@@ -129,10 +129,17 @@ def _log(msg: str, err: bool = False) -> None:
 
 # ----------------------------------------------------------------------- git
 
+# Git on Leo Bot's own code runs as the owner, outside every sandbox: it reads no global or system
+# config (a bot could have written ~/.gitconfig before the code wall, or a coworker's tool), runs no
+# hook and no fsmonitor, so no config can make it run a program or write the checkout.
+GIT_ISOLATION = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+
+
 def _git(code: Path, *args, timeout=GIT_TIMEOUT) -> subprocess.CompletedProcess:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
     try:
-        return subprocess.run(["git", "-C", str(code), *args], capture_output=True, text=True,
+        return subprocess.run(["git", *GIT_ISOLATION, "-C", str(code), *args], capture_output=True, text=True,
                               stdin=subprocess.DEVNULL, timeout=timeout, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(args, 127, "", str(e))

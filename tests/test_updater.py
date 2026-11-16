@@ -1096,5 +1096,36 @@ class CliTests(UpdaterBase):
         self.assertEqual(self.head(), self.sha("v0.2.0"))
 
 
+class GitIsolationTests(unittest.TestCase):
+    """The updater's git never reads a git config a bot could write (the code wall's last door):
+    no global or system config, no hooks, no fsmonitor."""
+
+    def test_git_ignores_global_config_hooks_and_fsmonitor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(os.path.realpath(tmp))
+            code, home, mark = tmp / "code", tmp / "home", tmp / "ran"
+            home.mkdir()
+            code.mkdir()
+            git(code, "init", "-q")
+            (code / "VERSION").write_text("1\n")
+            git(code, "add", "VERSION")
+            git(code, "commit", "-qm", "one")
+            script = tmp / "monitor.sh"
+            script.write_text(f"#!/bin/sh\ntouch {mark}\n")
+            script.chmod(0o755)
+            (home / ".gitconfig").write_text(f"[core]\n\tfsmonitor = {script}\n\thooksPath = {tmp / 'hooks'}\n")
+            (tmp / "hooks").mkdir()
+            hook = tmp / "hooks" / "post-checkout"
+            hook.write_text(f"#!/bin/sh\ntouch {mark}\n")
+            hook.chmod(0o755)
+            git(code, "config", "core.hooksPath", str(tmp / "hooks"))  # a repo-local hook path too
+            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            env.update({"HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")})
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(updater._git(code, "status", "--porcelain").returncode, 0)
+                self.assertEqual(updater._git(code, "checkout", "--quiet", "--detach", "HEAD").returncode, 0)
+            self.assertFalse(mark.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

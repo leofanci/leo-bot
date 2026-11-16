@@ -442,6 +442,63 @@ class CodeWalls(unittest.TestCase):
             with mock.patch.object(shell_rules, "REPO", self.repo):
                 self.assertIn(str(self.repo), shell_rules.code_walls()["write_paths"])
 
+    # --- review round 2 -------------------------------------------------------------------------
+
+    def test_git_config_and_fish_are_walled(self):
+        home = Path.home()
+        walls = shell_rules.code_walls()
+        self.assertIn(os.path.realpath(str(home / ".gitconfig")), walls["literals"])
+        for sub in (".config/git", ".config/fish"):
+            self.assertIn(os.path.realpath(str(home / sub)), walls["write_paths"])
+        edit = str(self.edit)
+        for cmd in ("echo x >> ~/.gitconfig", "touch ~/.config/git/config", "cp a ~/.config/fish/config.fish",
+                    "git config --global core.fsmonitor x", "git config --system a.b c"):
+            self.assertTrue(shell_rules.writes_code(cmd, edit), cmd)
+        for cmd in ("git config --get user.name", "git config user.name x", "cat ~/.gitconfig"):
+            self.assertFalse(shell_rules.writes_code(cmd, edit), cmd)
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_git_config_and_fish_cannot_be_written(self):
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        (home / ".config").mkdir(parents=True)
+        code = shell_rules.code_walls(home=home)
+        q = shlex.quote
+        for outside in (False, True):
+            profile = shell_rules.sandbox_profile((str(self.edit), str(home)), outside=outside, code=code)
+            for cmd in (f"echo x >> {q(str(home / '.gitconfig'))}", f"mkdir -p {q(str(home / '.config/git'))}",
+                        f"mkdir -p {q(str(home / '.config/fish'))}"):
+                self.assertNotEqual(self._sandbox(profile, cmd).returncode, 0, cmd)
+            self.assertEqual(self._sandbox(profile, f"mkdir -p {q(str(home / '.config/other'))}").returncode, 0)
+        self.assertFalse((home / ".gitconfig").exists())
+        self.assertFalse((home / ".config" / "git").exists())
+
+    def test_output_option_only_where_it_writes(self):
+        repo = os.path.realpath(str(shell_rules.REPO))
+        edit = str(self.edit)
+        for cmd in (f"ls -o {repo}", f"grep -o x {repo}/README.md", f"find {repo} -name a -o -name b",
+                    f"rg -o x {repo}", f"ls -o{repo}"):
+            self.assertFalse(shell_rules.writes_code(cmd, edit), cmd)
+        self.assertTrue(shell_rules.writes_code(f"git diff --output={repo}/x", edit))
+
+    def test_attached_relative_option_path(self):
+        repo = os.path.realpath(str(shell_rules.REPO))
+        parent, name = os.path.split(repo)
+        other = os.path.join(parent, "other-app")
+        for cmd in (f"gcc -o../{name}/x a.c", f"sort -o../{name}/x a", "cc -o./x a.c"):
+            cwd = repo if cmd.startswith("cc") else other
+            self.assertTrue(shell_rules.writes_code(cmd, cwd), cmd)
+        self.assertFalse(shell_rules.writes_code("gcc -o../build/x a.c", str(self.edit)))
+
+    def test_link_chain_is_read_again_each_call(self):
+        link, hop, real = self._python_link()
+        newer = real.parent / "python3.13"
+        newer.write_text("#!/bin/sh\n")
+        with mock.patch.object(shell_rules.sys, "executable", str(link)):
+            self.assertNotIn(str(newer), shell_rules.code_walls()["literals"])
+            hop.unlink()
+            hop.symlink_to(newer)  # an upgrade moves the link on, the server keeps running
+            self.assertIn(str(newer), shell_rules.code_walls()["literals"])
+
 
 if __name__ == "__main__":
     unittest.main()

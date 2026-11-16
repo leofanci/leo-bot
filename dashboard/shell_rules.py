@@ -229,9 +229,11 @@ def _ancestors(path, home):
     return out
 
 
-# Files the owner's shell runs at its next start: a write there would run later, as the owner,
-# outside every sandbox. Each is denied as itself (literal), with ~/Library/LaunchAgents as a folder.
-STARTUP_FILES = (".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile")
+# Files the owner's shell or git reads at its next start: a write there would run a program later,
+# as the owner, outside every sandbox. Each file is denied as itself (literal), each folder whole.
+STARTUP_FILES = (".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile",
+                 ".gitconfig")
+STARTUP_DIRS = ("Library/LaunchAgents", ".config/git", ".config/fish")
 _WALLS_CACHE = {}
 
 
@@ -257,23 +259,26 @@ def _link_chain(path):
 
 def code_walls(home=None):
     """What no bot command may write, on every level (module notes): {"write_paths" (Leo Bot's
-    code, the Python that runs osctl, the turns' working folder, ~/Library/LaunchAgents: sorted
-    real paths, no write under them), "literals" (sys.executable and each link hop to the real
-    binary, the shell startup files: no write on each as itself; the folder that holds them stays
+    code, the Python that runs osctl, the turns' working folder, STARTUP_DIRS: sorted real paths,
+    no write under them), "literals" (sys.executable and each link hop to the real binary,
+    STARTUP_FILES and where they link: no write on each as itself; the folder that holds them stays
     usable, a Homebrew bin folder for one), "ancestors" (each folder above all of them, denied as
-    itself: no rename), "home"}. Built once per process for each (REPO, TURN_CWD, home, Python)."""
+    itself: no rename), "home"}. The folders are built once per process for each (REPO, TURN_CWD,
+    home, Python and its real binary); the link chains are read again on every call, so an upgrade
+    that moves a link, or a startup file that becomes one, is walled at once."""
     from core import paths
     home = Path.home() if home is None else Path(home)
-    key = (str(REPO), str(paths.TURN_CWD), str(home), sys.executable, _python_dirs)
-    cached = _WALLS_CACHE.get(key)
-    if cached is None:
-        writes = sorted({os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD)),
-                         os.path.realpath(str(home / "Library" / "LaunchAgents"))})
-        literals = sorted({*_link_chain(sys.executable), *(p for n in STARTUP_FILES for p in _link_chain(home / n))})
-        ancestors = sorted({a for p in writes + literals for a in _ancestors(p, home)})
-        cached = _WALLS_CACHE[key] = {"write_paths": writes, "literals": literals, "ancestors": ancestors,
-                                      "home": os.path.realpath(str(home))}
-    return {k: (list(v) if isinstance(v, list) else v) for k, v in cached.items()}
+    key = (str(REPO), str(paths.TURN_CWD), str(home), sys.executable, os.path.realpath(sys.executable),
+           _python_dirs)
+    writes = _WALLS_CACHE.get(key)
+    if writes is None:
+        writes = _WALLS_CACHE[key] = sorted({
+            os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD)),
+            *(os.path.realpath(str(home / d)) for d in STARTUP_DIRS)})
+    writes = list(writes)
+    literals = sorted({*_link_chain(sys.executable), *(p for n in STARTUP_FILES for p in _link_chain(home / n))})
+    ancestors = sorted({a for p in writes + literals for a in _ancestors(p, home)})
+    return {"write_paths": writes, "literals": literals, "ancestors": ancestors, "home": os.path.realpath(str(home))}
 
 
 def _fold(path):
@@ -569,6 +574,20 @@ def _glob_walled(word, cwd, walls):
     return False
 
 
+def _git_config_outside(args):
+    """`git config --global|--system|--file ...` (or `git config` under a -c/-C prefix): a write to a
+    git config outside the repo, which the owner's git reads later (STARTUP_FILES)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in ("-C", "-c") else 1
+    if i >= len(args) or args[i] != "config":
+        return False
+    rest = args[i + 1:]
+    reads = {"--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin", "--show-scope"}
+    return (any(a in ("--global", "--system", "--file", "-f") or a.startswith("--file=") for a in rest)
+            and not any(a in reads for a in rest))
+
+
 def _script_of(prog, args):
     """The command string a shell (`bash -c "..."`, `sh -lc`, `eval ...`) runs, or None."""
     if prog == "eval":
@@ -614,6 +633,9 @@ def writes_code(command, cwd=None, _depth=0):
             cut = [i for i in (w.find("/"), w.find("~")) if i > 0]
             if cut:
                 out.append(w[min(cut):])
+            m = re.match(r"^-[A-Za-z]+(?=[.~/])(.+)$", w)  # -o../x, -o./x: the path after the letters
+            if m:
+                out.append(m.group(1))
         return out
 
     for seg in segments:
@@ -627,7 +649,11 @@ def writes_code(command, cwd=None, _depth=0):
         if prog in ("cd", "pushd"):
             dest = next((w for w in words if not w.startswith("-")), "~")
             cwd = _resolve(dest, cwd) or cwd
+        if prog == "git" and _git_config_outside(args):
+            return True
         if _read_only(prog, args):
+            if prog != "git":  # ls -o, grep -o, find -o, rg -o only read
+                continue
             for i, w in enumerate(words):
                 if _OUTPUT_OPT.match(w):
                     value = re.sub(r"^(?:--output(?:-file)?|--out|-o)=?", "", w)

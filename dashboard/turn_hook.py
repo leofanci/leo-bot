@@ -7,10 +7,11 @@ command asks. Standard library only, nothing from the bot's folders. Claude Code
 for it, so the answer holds at the moment the tool would run. Any failure (no token, server
 unreachable, a bad reply) denies: the gate fails closed. An allow prints nothing, so the
 engine's own permission rules still apply (fetch stays limited to typed hosts, Approve for me
-still asks the engine's reviewer). After outside content, a shell command comes back from the
-gate rewritten to run in the OS sandbox (dashboard/shell_rules.py; before outside content for
-the code wall alone): the hook passes that one on and allows it. Claude Code's own reviewer refuses any rewritten command, and a sandboxed one can
-change only the edit folders, which Auto-accept edits allows already, so nothing is lost.
+still asks the engine's reviewer). A shell command comes back from the gate rewritten to run in
+the OS sandbox (dashboard/shell_rules.py: from the first command for the code wall, and after
+outside content also offline and write-limited): the hook passes that one on and allows it.
+Claude Code's own reviewer refuses any rewritten command, and a sandboxed one can change only
+what the sandbox leaves open, so nothing a level allows is lost.
 """
 import json
 import os
