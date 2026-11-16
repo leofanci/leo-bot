@@ -838,6 +838,7 @@ def _canvas_place(path, data):
     return None
 
 
+_REL_PIECE = re.compile(r"(?<![\w.~$/-])(?:[\w.-]+/)*(?:canvases|lists)(?:/[^\s'\"`;|&<>()]*)?")
 _PATH_PIECE = re.compile(r"(?:~|\$HOME|/)[^\s'\"`;|&<>()]*")
 
 
@@ -902,7 +903,12 @@ def reads_canvases(command, cwd=None, data_root=None, _depth=0):
     if any("in" in places(w, cwd) for w in pieces):
         return True
     for seg in segments:
-        if cwd and _canvas_place(os.path.realpath(cwd), data) == "in":
+        here = _canvas_place(os.path.realpath(cwd), data) if cwd else None
+        if here == "in":
+            return True
+        # From the data folder or one between it and a canvas folder, a relative path inside inline
+        # code or a VAR=value reaches a canvas too (`python3 -c 'open("canvases/cv1.json")'`).
+        if here == "holds" and any("in" in places(m.group(0), cwd) for w in seg for m in _REL_PIECE.finditer(w)):
             return True
         prog, args = _program(seg)
         script = _script_of(prog, args)

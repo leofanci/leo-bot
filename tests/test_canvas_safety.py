@@ -170,6 +170,18 @@ class NoSandbox(unittest.TestCase):
             self.assertEqual(reason, shell_rules.CANVAS_OFF)
         self.assertTrue(self.plan(f"python3 -c 'print(open(\"{self.data}/projects/demo/docs/x.md\").read())'")[0])
 
+    def test_relative_canvas_paths_from_a_workspace_folder(self):
+        ws = os.path.join(self.data, "projects", "demo")
+        for cmd, cwd in (("python3 -c 'open(\"canvases/cv1.json\")'", ws),
+                         (f"cd {ws} && python3 -c 'print(open(\"canvases/cv1.json\").read())'", None),
+                         ("D=canvases; cat $D/cv1.json", ws), ("F=lists/ls1.json python3 x.py", ws)):
+            allow, reason, _ = self.plan(cmd, cwd=cwd)
+            self.assertFalse(allow, (cmd, cwd))
+            self.assertEqual(reason, shell_rules.CANVAS_OFF)
+        for cmd, cwd in (("cat docs/x.md", ws), ("python3 -c 'print(1)'", ws), ("rg title", self.work),
+                         ("python3 -c 'open(\"canvases/cv1.json\")'", self.work)):
+            self.assertTrue(self.plan(cmd, cwd=cwd)[0], (cmd, cwd))
+
     def test_allowed(self):
         d = self.data
         for cmd in (f"cat {d}/projects/demo/docs/x.md", f"ls {d}/projects/demo", "echo canvases/cv1.json",
