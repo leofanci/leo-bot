@@ -55,9 +55,13 @@ def run(argv, env=None, reply=None, stdin=None):
                      "body": json.loads(req.data)})
         return Resp(reply if reply is not None else {"ok": True})
 
+    class Opener:
+        def open(self, req, timeout=None):
+            return fake(req, timeout)
+
     out = io.StringIO()
     with mock.patch.dict(os.environ, env if env is not None else TOKEN_ENV), \
-            mock.patch("urllib.request.urlopen", fake), contextlib.redirect_stdout(out), \
+            mock.patch.object(osctl, "_local_opener", lambda: Opener()), contextlib.redirect_stdout(out), \
             mock.patch("sys.stdin", io.StringIO(stdin or "")):
         osctl.main(argv)
     return json.loads(out.getvalue().strip().splitlines()[-1]), sent
@@ -142,15 +146,33 @@ class Commands(Base):
         env = {**TOKEN_ENV, "LEOBOT_CANVAS_URL": "http://evil.example/api/internal/canvas"}
         out, sent = run(["get-canvas", "--id", "cv1"], env=env)
         self.assertFalse(out["ok"])
+        self.assertEqual(out["error"], "canvas commands run only in a bot's turn")
         self.assertEqual(sent, [])
+
+    def test_local_opener_ignores_proxy_env(self):
+        import urllib.request
+        with mock.patch.dict(os.environ, {"http_proxy": "http://proxy.example:3128",
+                                          "HTTP_PROXY": "http://proxy.example:3128"}), \
+                mock.patch("urllib.request.build_opener", wraps=urllib.request.build_opener) as bo:
+            opener = osctl._local_opener()
+        handlers = bo.call_args.args
+        self.assertEqual(len(handlers), 1)
+        self.assertIsInstance(handlers[0], urllib.request.ProxyHandler)
+        self.assertEqual(handlers[0].proxies, {})
+
+    def test_update_block_has_no_type_flag(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            run(["update-block", "--id", "cv1", "--block", "bk1", "--type", "list"])
 
     def test_bad_json_never_reaches_the_server(self):
         for argv in (["create-list", "--project", "acme", "--title", "L", "--columns-json", "{nope"],
-                     ["add-row", "--id", "ls1", "--cells-json", "x" * (1024 * 1024 + 1)],
+                     ["add-row", "--id", "ls1", "--cells-json", '"' + "\u00e9" * (512 * 1024) + '"'],
                      ["add-block", "--id", "cv1", "--type", "files", "--paths-json", "[1,"]):
             out, sent = run(argv)
             self.assertFalse(out["ok"], argv)
             self.assertEqual(sent, [], argv)
+        out, _ = run(["add-row", "--id", "ls1", "--cells-json", '"' + "\u00e9" * (512 * 1024) + '"'])
+        self.assertIn("too large", out["error"])
 
     def test_server_error_becomes_an_action_error(self):
         out, _ = run(["get-canvas", "--id", "cv9"], reply={"ok": False, "error": "no such canvas or list: cv9"})

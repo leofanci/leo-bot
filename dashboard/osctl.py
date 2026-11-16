@@ -1076,18 +1076,18 @@ def _build_parser():
     p.add_argument("--path", required=True)
     def _read_file(a):
         data_root = fileops.ROOT
-        target = _code_file(a.path) or (data_root / a.path).resolve()
-        if not (target.is_relative_to(data_root.resolve()) or _code_file(a.path)):
+        code = _code_file(a.path)
+        target = code or (data_root / a.path).resolve()
+        if not (target.is_relative_to(data_root.resolve()) or code):
             raise fileops.ActionError("path outside the data folder")
         # Same secret-file policy as the chat agent's Read deny rules.
         # Case-blind, as a Mac disk is: .AUTH-TOKEN opens .auth-token.
         name = target.name.lower()
         if any(fnmatch.fnmatchcase(name, g.lower()) for g in chat_session.SECRET_FILE_GLOBS):
             raise fileops.ActionError("secret files are not readable")
-        if not _code_file(a.path):
-            _refuse_canvas_path(target.relative_to(data_root.resolve()).as_posix())
-        if not _code_file(a.path):  # HQ too (a workspace's _guard says the same): stores and machine state
+        if not code:  # HQ too (a workspace's _guard says the same): stores and machine state
             rel = target.relative_to(data_root.resolve()).as_posix().lower()
+            _refuse_canvas_path(rel)
             if rel.startswith(_PRIVATE_PREFIXES) or rel.endswith(_PRIVATE_SUFFIXES):
                 raise fileops.ActionError("that file holds every workspace's data or this machine's state; "
                                           "use the commands (get-memory, recall, get-busy) instead")
@@ -1210,6 +1210,12 @@ def _label_outside(value):
     return value
 
 
+def _local_opener():
+    """No proxy: a proxy in the environment would carry the token and content off this machine."""
+    import urllib.request
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _canvas_call(cmd, params):
     token = os.environ.get("LEOBOT_CANVAS_TOKEN") or ""
     url = os.environ.get("LEOBOT_CANVAS_URL") or ""
@@ -1223,7 +1229,7 @@ def _canvas_call(cmd, params):
         url, data=json.dumps({"cmd": cmd, "params": params}).encode(), method="POST",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310  (127.0.0.1 only, above)
+        with _local_opener().open(req, timeout=60) as resp:  # 127.0.0.1 only, above
             body = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -1244,7 +1250,7 @@ def _canvas_call(cmd, params):
 def _json_arg(value, flag):
     if value is None:
         return None
-    if len(value) > CANVAS_JSON_MAX:
+    if len(value.encode()) > CANVAS_JSON_MAX:
         raise fileops.ActionError(f"{flag}: too large (max 1 MB)")
     try:
         return json.loads(value)
@@ -1268,8 +1274,8 @@ def _add_canvas_parsers(sub):
             return _canvas_call(name, build(a))
         p.set_defaults(_run=run)
 
-    def plain(*names, ints=()):
-        """Params straight from flags: every given flag, JSON flags parsed, ints converted."""
+    def plain(*names):
+        """Params straight from flags: every given flag, JSON flags parsed."""
         def build(a):
             out = {}
             for n in names:
@@ -1278,8 +1284,6 @@ def _add_canvas_parsers(sub):
                     continue
                 if n.endswith("_json"):
                     out[n[:-5]] = _json_arg(v, "--" + n[:-5].replace("_", "-") + "-json")
-                elif n in ints:
-                    out[n] = v
                 else:
                     out[n] = _text_arg(v) if n == "md" else v
             return out
@@ -1301,17 +1305,16 @@ def _add_canvas_parsers(sub):
         [ID, ("--title", {}), ("--coworkers", {"choices": ["edit", "view"]}), VERSION],
         plain("id", "title", "coworkers", "version"))
 
-    block_flags = [("--type", {"choices": ["text", "checklist", "list", "files", "view", "browser"]}),
-                   ("--md", {"help": "text block body; - reads stdin"}), ("--title", {}),
+    block_flags = [("--md", {"help": "text block body; - reads stdin"}), ("--title", {}),
                    ("--items-json", {"dest": "items_json"}), ("--list", {}),
                    ("--view-json", {"dest": "view_json"}), ("--paths-json", {"dest": "paths_json"}),
                    ("--route", {}), ("--bot", {})]
 
-    def spec_of(a, skip_type=False):
+    def spec_of(a):
         spec = {}
         for key in ("type", "md", "title", "list", "route", "bot"):
             v = getattr(a, key, None)
-            if v is not None and not (skip_type and key == "type"):
+            if v is not None:
                 spec[key] = _text_arg(v) if key == "md" else v
         for key in ("view", "paths"):
             v = _json_arg(getattr(a, f"{key}_json", None), f"--{key}-json")
@@ -1320,8 +1323,6 @@ def _add_canvas_parsers(sub):
         return spec
 
     def add_block(a):
-        if not a.type:
-            raise fileops.ActionError("add-block: --type is required")
         spec = spec_of(a)
         items = _json_arg(a.items_json, "--items-json")
         if items is not None:
@@ -1332,11 +1333,12 @@ def _add_canvas_parsers(sub):
         return params
 
     cmd("add-block", "Add one block (text, checklist, list, files, view or browser)",
-        [ID, ("--after", {})] + block_flags, add_block)
+        [ID, ("--after", {}), ("--type", {"required": True, "choices": [
+            "text", "checklist", "list", "files", "view", "browser"]})] + block_flags, add_block)
 
     def update_block(a):
         params = {"id": a.id, "block": a.block}
-        spec = spec_of(a, skip_type=True)
+        spec = spec_of(a)
         if spec:
             params["blocks"] = [spec]
         items = _json_arg(a.items_json, "--items-json")
@@ -1442,7 +1444,7 @@ def _gate_refuses_save():
             raise ValueError("gate address")
         req = urllib.request.Request(url, data=_json.dumps({"tool": "osctl-write"}).encode(), method="POST",
                                      headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310  (127.0.0.1 only, above)
+        with _local_opener().open(req, timeout=10) as resp:  # 127.0.0.1 only, above
             answer = _json.loads(resp.read() or b"{}")
     except Exception:  # noqa: BLE001
         return READONLY_TEXT["approval"]

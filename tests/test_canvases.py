@@ -67,6 +67,17 @@ class Base(unittest.TestCase):
         return next(r for r in doc["rows"] if r["id"] == rid)
 
 
+class TestProjectParam(Base):
+    def test_project_must_match_the_turn_workspace(self):
+        with self.assertRaises(cv.Refused) as e:
+            self.d(OWNER, "create-canvas", title="X", project="acme")
+        self.assertIn("this turn's workspace is demo", str(e.exception))
+        with self.assertRaises(cv.Refused):
+            self.d(OWNER, "create-canvas", ws="hq", title="X", project="acme")
+        self.assertTrue(self.d(OWNER, "create-canvas", title="X", project="demo")["id"])
+        self.assertTrue(self.d(OWNER, "create-canvas", ws="hq", title="X", project="hq")["id"])
+
+
 class TestLabels(Base):
     def test_create_canvas_records_creator_and_label(self):
         c1 = self.canvas(bot())

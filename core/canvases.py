@@ -336,6 +336,9 @@ def dispatch(root, ws, actor, cmd: str, params: dict, team=None, source: str = "
     if source not in ("osctl", "api"):
         raise Refused(f"unknown source: {source!r}")
     params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
+    proj = params.get("project")
+    if proj is not None and str(proj).strip().lower() != str(ws).lower():
+        raise Refused(f"this turn's workspace is {ws}; --project {proj} does not match")
     return _dispatch(Path(root), ws, actor, cmd, params, team, approved=False, source=source)
 
 
