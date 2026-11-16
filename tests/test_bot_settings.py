@@ -176,6 +176,18 @@ class General(SettingsFile):
         v = general.view()
         self.assertEqual((v["about_me"], v["timezone"], v["caps"]), ("", "", {"workspace": 7.0}))
 
+    def test_browser_zone_saved_once_when_unset(self):
+        with mock.patch.object(general, "machine_timezone", return_value="UTC"):
+            for bad in ("", "Mars/Base", "America", None, "UTC"):  # UTC: same as this machine
+                self.assertFalse(general.adopt_browser_timezone(bad), bad)
+            self.assertNotIn("timezone", json.loads(paths.SETTINGS.read_text()) if paths.SETTINGS.exists() else {})
+            self.assertTrue(general.adopt_browser_timezone(" Asia/Tokyo "))
+            self.assertEqual((general.view()["timezone"], os.environ.get("TZ")), ("Asia/Tokyo", "Asia/Tokyo"))
+            self.assertFalse(general.adopt_browser_timezone("Europe/Paris"))  # once saved, never again
+            general.update({"timezone": ""})  # "This machine's", picked on purpose
+            self.assertFalse(general.adopt_browser_timezone("Europe/Paris"))
+            self.assertEqual(general.view()["timezone"], "")
+
     def test_reply_language_goes_in_the_rail(self):
         self.assertNotIn("## Reply language", server.rail())
         general.update({"reply_language": "Italiano"})
@@ -264,6 +276,21 @@ class Endpoints(Base):
                                  origin="https://evil.example")[0], 403)
         member = self.join()
         self.assertNotEqual(request("GET", "/api/settings/general", member=member)[0], 200)
+        self.assertNotEqual(request("POST", "/api/settings/general", {"about_me": "x"}, member=member)[0], 200)
+
+    def test_browser_timezone_endpoint(self):
+        tz = os.environ.get("TZ")
+        self.addCleanup(lambda: (os.environ.pop("TZ", None) if tz is None else os.environ.update(TZ=tz), time.tzset()))
+        member = self.join()
+        self.assertNotEqual(request("POST", "/api/settings/browser-timezone", {"zone": "Asia/Tokyo"},
+                                    member=member)[0], 200)
+        self.assertEqual(request("POST", "/api/settings/browser-timezone", {"zone": "Asia/Tokyo"}, owner=True,
+                                 origin="https://evil.example")[0], 403)
+        with mock.patch.object(general, "machine_timezone", return_value="UTC"):
+            code, data, _ = request("POST", "/api/settings/browser-timezone", {"zone": "Asia/Tokyo"}, owner=True)
+            self.assertEqual((code, data), (200, {"adopted": True, "timezone": "Asia/Tokyo"}))
+            code, data, _ = request("POST", "/api/settings/browser-timezone", {"zone": "Europe/Paris"}, owner=True)
+            self.assertEqual((code, data), (200, {"adopted": False, "timezone": "Asia/Tokyo"}))
 
 
 if __name__ == "__main__":

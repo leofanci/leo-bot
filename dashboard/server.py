@@ -4650,6 +4650,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, general.update(body))
                 except ValueError as e:
                     return self._send(400, {"error": str(e)})
+            if path == "/api/settings/browser-timezone":  # the owner's browser zone, saved once when unset
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                adopted = general.adopt_browser_timezone(body.get("zone"))
+                return self._send(200, {"adopted": adopted, "timezone": general.view()["timezone"]})
             if path.startswith("/api/profile/") and path.endswith("/posts"):
                 slug = path[len("/api/profile/"):-len("/posts")]
                 return self._send(200, {"ok": True, **fileops.add_post(slug, body)})

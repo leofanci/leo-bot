@@ -316,6 +316,8 @@ the channel's lead, and that bot decides what it needs:
   workspace first, then the workspace's own.
 - **General.** Settings, General holds About you (every bot reads it in your private
   threads), the reply language, your timezone (scheduled jobs run on it) and the spending caps.
+  The timezone starts as the machine's. On a server whose clock is on another zone, your
+  browser's zone is saved the first time you open the dashboard.
 
 ### Dashboard (macOS app)
 
