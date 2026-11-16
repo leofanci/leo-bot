@@ -151,6 +151,33 @@ class HandoffTurn(unittest.TestCase):
         bot = next(e["bot"] for e in events(out) if "bot" in e)
         self.assertEqual(bot["id"], "research")
 
+    def test_failed_handoff_run_keeps_its_reason_in_the_thread(self):
+        test = self
+
+        def ask(self_, text, **kw):
+            test.runs.append({"text": text})
+            if len(test.runs) == 1:
+                yield ("delta", "Passing it on.\nHANDOFF @research: size the market")
+                yield ("done", {"tokens": 1, "cost": 0.0})
+            else:
+                yield ("error", "engine refused")
+        with mock.patch.object(type(self.sess), "ask", ask), \
+                mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            _, rec = self.ask("market?", [])
+        last = rec["messages"][-1]
+        self.assertEqual(last["bot"], "research")
+        self.assertIn("engine refused", " ".join(last["notices"]))
+
+    def test_internal_error_is_saved_in_the_thread(self):
+        def ask(self_, text, **kw):
+            raise RuntimeError("boom")
+            yield
+        with mock.patch.object(type(self.sess), "ask", ask), \
+                mock.patch.object(server.chat_session.ChatSession, "ask", ask), \
+                mock.patch("traceback.print_exc"):
+            _, rec = self.ask("market?", [])
+        self.assertIn("internal error", " ".join(rec["messages"][-1].get("notices") or []))
+
     def test_cos_persona_hands_off_by_name(self):
         text = (Path(server.__file__).resolve().parents[1] / "bots" / "cos.md").read_text()
         self.assertIn("HANDOFF @handle", text)
@@ -180,6 +207,7 @@ class HandoffTurn(unittest.TestCase):
         out, rec = self.ask("x?", ["Sure.\nHANDOFF @social: posts"])
         self.assertEqual(len(self.runs), 1)
         self.assertEqual(rec["messages"][-1]["content"], "Sure.")
+        self.assertIn("Could not pass this on", " ".join(rec["messages"][-1].get("notices") or []))
 
     def test_consults_run_before_the_handoff(self):
         out, rec = self.ask("x?", ["CONSULT @cmo: tone?\nHANDOFF @research: size it", "warm", "follow-up", "sized"])

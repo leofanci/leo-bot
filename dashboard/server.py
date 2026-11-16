@@ -1006,7 +1006,7 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         peers = [o for o in team.ordered() if o.active and o.id != bot_id
                  and (members is None or o.id in members)]
         if peers:
-            lines.append("In this channel (HANDOFF work outside your skills to its owner):\n"
+            lines.append("In this channel (teammates; hand off only when asked, or when routing is your role):\n"
                          + "\n".join(team.roster_line(o.id) + (f" · apps: {a}" if (a := apps_of(o.id)) else "")
                                      for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
@@ -3814,6 +3814,9 @@ class Handler(BaseHTTPRequestHandler):
                         emit({"tool": payload})
                     elif kind == "error":
                         emit({"error": payload})
+                        # Saved on the reply too: a reload keeps why it stopped (a handed-off run
+                        # that failed would otherwise vanish without a trace).
+                        msg.setdefault("notices", []).append(f"Run failed: {str(payload)[:300]}")
                         failed = True
                     elif kind == "done":
                         fin = payload or {}
@@ -3873,9 +3876,12 @@ class Handler(BaseHTTPRequestHandler):
                     ROOT, ws, b2, invited=bool(person), shared=shared)
             except EngineRefused as e:  # this teammate's own engine can't run here
                 emit({"error": str(e)})
+                msg.setdefault("notices", []).append(f"Run failed: {str(e)[:300]}")  # kept on reload
                 raise _RunFailed from None
             if job and not engine_registry.metered(c.engine):  # its spend would escape the job's cap
-                emit({"error": JOB_MATE_UNMETERED.format(bot=b2, label=c.engine.label)})
+                why = JOB_MATE_UNMETERED.format(bot=b2, label=c.engine.label)
+                emit({"error": why})
+                msg.setdefault("notices", []).append(f"Run failed: {why[:300]}")
                 raise _RunFailed
             # Its prompt quotes the lead's reply: app data once the lead has read an app.
             c.apps_used = bool(getattr(sess, "apps_used", False) or turn.app_data)
@@ -3989,10 +3995,15 @@ class Handler(BaseHTTPRequestHandler):
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
+            named_handoff = bool(_HANDOFF_RE.search(lead_text))
             lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
+            if named_handoff and not handoff and not job:
+                # The line is stripped from the reply: without this the user reads "passing it on" and
+                # nothing follows (teammate off, not in this room, or the bot named itself).
+                notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
             answers = []
             for b2, question, asked_by in _plan_teammates(team, bot_id, handoff_from, user_msg, asks):
                 if not may_run():
@@ -4123,6 +4134,8 @@ class Handler(BaseHTTPRequestHandler):
             live["status"] = "failed"
             traceback.print_exc()
             emit({"error": "internal error"})
+            if msgs:  # saved too: a reload would otherwise show a reply that just stops
+                msgs[-1].setdefault("notices", []).append("Run failed: internal error")
         finally:
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
