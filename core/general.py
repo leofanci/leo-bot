@@ -98,6 +98,19 @@ def update(body):
     return view()
 
 
+def adopt_browser_timezone(zone):
+    """The owner's browser reports its zone on each visit. While no timezone was ever saved and
+    this machine's clock is on another zone (a server is often on UTC), save the browser's once.
+    A saved choice, "This machine's" included, is never changed. True when it saved."""
+    zone = zone.strip() if isinstance(zone, str) else ""
+    if not zone or not valid_timezone(zone) or "timezone" in updater.settings():
+        return False
+    if zone == machine_timezone():
+        return False
+    update({"timezone": zone})
+    return True
+
+
 def cap(kind):
     """The saved cap for `kind` in dollars, or None when the owner saved none."""
     try:

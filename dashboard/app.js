@@ -395,7 +395,17 @@ async function loadMe(){
     history.replaceState(null, "", location.pathname + location.hash);
   }
 }
-async function boot(){ await loadMe(); loadUpdate(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+// A server's clock is often on UTC: the owner's browser zone is saved once while none was ever picked.
+function browserZone(){ try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch { return ""; } }
+async function adoptBrowserZone(){
+  const zone = browserZone();
+  if (isPerson() || !zone) return;
+  try {
+    const r = await jpost("/api/settings/browser-timezone", { zone });
+    if (r.adopted) toast(`Timezone set to ${r.timezone} from your browser. Change it in Settings, General.`);
+  } catch {}
+}
+async function boot(){ await loadMe(); loadUpdate(); adoptBrowserZone(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -2025,6 +2035,8 @@ async function renderGeneral(){
         aria-label="${esc(label)}, dollars per 24 hours"${env ? " disabled" : ""}></label>
       <small>${help}${env ? " Set on this machine by an environment variable, which wins over this box." : ""}</small></div>`;
   };
+  const zone = browserZone(), clock = g.timezone || g.machine_timezone || "";
+  const zoneHint = zone && clock && zone !== clock && (g.timezones || []).includes(zone) ? zone : "";
   box.innerHTML = `
     <section class="integ-group"><h3>You</h3>
       <div class="eng-choice gen-about"><label for="gen-about"><span>About you</span></label>
@@ -2044,7 +2056,7 @@ async function renderGeneral(){
       <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
           <option value="">This machine's${g.machine_timezone ? ` (${esc(g.machine_timezone)})` : ""}</option>
           ${(g.timezones || []).map(z => `<option value="${esc(z)}"${z === g.timezone ? " selected" : ""}>${esc(z)}</option>`).join("")}</select></label>
-        <small>Scheduled jobs run on this clock.</small></div>
+        <small>Scheduled jobs run on this clock.${zoneHint ? ` Your browser is in ${esc(zoneHint)}. <button class="btn sm" type="button" id="gen-tz-browser">Use it</button>` : ""}</small></div>
     </section>
     <section class="integ-group"><h3>Daily spending caps</h3>
       <p class="eng-hint">Dollars per 24 hours, estimated from list prices. A run that would go over pauses and tells you when room frees up. Empty or 0: no cap.</p>
@@ -2056,6 +2068,8 @@ async function renderGeneral(){
   $("#gen-lang").onchange = e => save({ reply_language: e.target.value });
   $("#gen-short").onchange = e => save({ short_replies: e.target.checked }, e.target.checked ? "Short replies on ✓" : "Short replies off ✓");
   $("#gen-tz").onchange = e => save({ timezone: e.target.value });
+  const useZone = $("#gen-tz-browser");
+  if (useZone) useZone.onclick = async () => { if (await save({ timezone: zoneHint })) renderGeneral(); };
   box.querySelectorAll("[data-cap]").forEach(inp => inp.onchange = async () => {
     const raw = inp.value.trim();
     if (!await save({ caps: { [inp.dataset.cap]: raw === "" ? null : Number(raw) } })) inp.value = g.caps?.[inp.dataset.cap] ?? "";
