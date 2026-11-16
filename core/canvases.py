@@ -401,6 +401,12 @@ class _Run:
             return False
         return bool(old)
 
+    def undo_label(self, before, current) -> bool:
+        """An undo never lowers a label, except a clean owner's, which restores exactly."""
+        if self.actor.kind == "owner" and not self.outside:
+            return bool(before)
+        return bool(before) or bool(current) or self.outside
+
     def touch(self, item: dict, full: bool) -> None:
         item["by"], item["at"], item["v"] = self.tag, _now(), self.new_v
         item["outside"] = self.relabel(item.get("outside"), full)
@@ -415,7 +421,8 @@ class _Run:
             raise Stale(STALE_MSG)
 
     def fresh_meta(self, doc: dict) -> None:
-        if self.api and int(doc.get("meta_v") or 0) > _int(self.p.get("version"), "version"):
+        # undo is keyed by its change id, not by a version read
+        if self.api and self.cmd != "undo" and int(doc.get("meta_v") or 0) > _int(self.p.get("version"), "version"):
             raise Stale(STALE_MSG)
 
     def guard(self, item: dict, what: str) -> None:
@@ -684,14 +691,17 @@ def _cell_error(col: dict, v) -> str | None:
     return None
 
 
-def _cell_safe(col: dict, v) -> bool:
+def _cell_safe(col: dict, v, known: set) -> bool:
     """A labeled row's value an ungated engine may still see: only values that
-    cannot carry free text (a select needs its options to bound it)."""
+    cannot carry free text (a select needs its options to bound it, a person must
+    be one of `known`: owner, the workspace's people and its team's bots)."""
     t = col.get("type")
     if v is None:
         return True
     if t == "select":
         return isinstance(v, str) and v in (col.get("options") or [])
+    if t == "person":
+        return v in known
     return t in _KEEP_COLS and _cell_error(col, v) is None
 
 
@@ -721,13 +731,13 @@ def _label_block(b: dict, gated: bool) -> tuple[dict, bool]:
     return b, seen
 
 
-def _label_row(r: dict, columns: list, gated: bool) -> dict:
+def _label_row(r: dict, columns: list, gated: bool, known: set = frozenset()) -> dict:
     r = copy.deepcopy(r)
     if r.get("outside"):
         r["outside_content"] = OUTSIDE_NOTE
         if not gated:
             cols = {c["key"]: c for c in columns}
-            r["cells"] = {k: (v if k in cols and _cell_safe(cols[k], v) else HIDDEN)
+            r["cells"] = {k: (v if k in cols and _cell_safe(cols[k], v, known) else HIDDEN)
                           for k, v in (r.get("cells") or {}).items()}
     return r
 
@@ -837,7 +847,10 @@ def _get_list(r: _Run) -> dict:
     out = {"id": lid, "title": doc.get("title"), "version": doc.get("version"),
            "columns": copy.deepcopy(cols), "total": total, "offset": offset, "limit": limit}
     marked = _label_doc(doc, out, r.actor.gated)
-    out["rows"] = [_label_row(x, cols, r.actor.gated) for x in page]
+    known: set = set()
+    if not r.actor.gated and any(x.get("outside") for x in page):
+        known = _known_people(r)
+    out["rows"] = [_label_row(x, cols, r.actor.gated, known) for x in page]
     if marked or any(x.get("outside") for x in page):
         r.actor.mark_outside()
     return out
@@ -848,6 +861,14 @@ def _templates(r: _Run) -> list[dict]:
     the saved templates they made (a template copies canvases they cannot see)."""
     return [t for t in cs.templates(r.root, r.ws)
             if t.get("shipped") or _private(r.actor) or t.get("created_by") == r.tag]
+
+
+def _known_people(r: _Run) -> set:
+    known = {"owner"}
+    if r.ws != bots.HQ:
+        known |= {f"person:{x['id']}" for x in people.people_in(r.root, r.ws)}
+    known |= {f"bot:{b.id}" for b in r.team().ordered()}
+    return known
 
 
 def _list_templates(r: _Run) -> dict:
@@ -908,10 +929,19 @@ def _create_canvas(r: _Run) -> dict:
     pending: list = []
     for spec in specs:
         blocks.append(r.new_block(spec, blocks, pending))
-    r.make_lists(pending)
     doc = {"title": title, "created_by": r.tag, "created_at": _now(), "coworkers": "edit",
            "outside": r.outside or title_outside, "meta_v": 1, "blocks": blocks}
-    doc = cs.create(r.root, r.ws, "cv", doc)
+    try:
+        r.make_lists(pending)
+        doc = cs.create(r.root, r.ws, "cv", doc)
+    except Exception:
+        for b, _ in pending:  # no canvas: the lists made for it go too
+            if b.get("list"):
+                try:
+                    cs.to_trash(r.root, r.ws, b["list"])
+                except (LookupError, OSError):
+                    pass
+        raise
     change = r.log(doc["id"], {"op": "create-canvas", "kind": "create", "target": doc["id"],
                                "before": None, "after": None})
     if pin:
@@ -1019,6 +1049,9 @@ def _checklist_ops(r: _Run, b: dict, ops, single_iv: bool) -> None:
             raise Refused("item: not an item id")
         i, it = r.find(items, op["id"], "item")
         if single_iv:
+            if len(ops) > 1 and r.p.get("item_version") is not None and "item_version" not in op:
+                raise Refused("--item-version names one item: with several items, put "
+                              "item_version on each one")
             iv = op.get("item_version", r.p.get("item_version") if len(ops) == 1 else None)
             r.fresh(it, iv=iv)
         if op.get("delete"):
@@ -1434,6 +1467,9 @@ def _undo(r: _Run) -> dict:
                     rank = {bid: i for i, bid in enumerate(v)}
                     doc["blocks"] = sorted(doc.get("blocks") or [],
                                            key=lambda b: rank.get(b["id"], len(rank)))
+                elif k == "outside":
+                    cur[k] = doc.get(k)
+                    doc[k] = r.undo_label(v, doc.get(k))
                 else:
                     cur[k] = copy.deepcopy(doc.get(k))
                     doc[k] = copy.deepcopy(v)
@@ -1475,6 +1511,12 @@ def _undo(r: _Run) -> dict:
                 del coll[idx]
         else:
             restored["v"] = r.new_v
+            restored["outside"] = r.undo_label(restored.get("outside"),
+                                               (cur or {}).get("outside"))
+            now_items = {i.get("id"): i for i in (cur or {}).get("items") or []}
+            for it in restored.get("items") or []:
+                it["outside"] = r.undo_label(it.get("outside"),
+                                             (now_items.get(it.get("id")) or {}).get("outside"))
             if idx is not None:
                 coll[idx] = restored
             else:
@@ -1486,9 +1528,11 @@ def _undo(r: _Run) -> dict:
         return [{**head, "before": cur, "after": copy.deepcopy(restored)}], {}
     out = r.mutate(fid, fn, access)
     for lid in made_list:  # the undone block had created its list: trash it unless used elsewhere
-        if not _embedded_anywhere(r, lid):
+        with cs.locked(r.root, r.ws, lid):
+            if _embedded_anywhere(r, lid):
+                continue
             try:
-                cs.to_trash(r.root, r.ws, lid)
+                cs.to_trash(r.root, r.ws, lid, held=True)
             except LookupError:
                 continue
             r.log(lid, {"op": "delete-list", "kind": "trash", "target": lid,

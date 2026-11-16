@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from core import bots, canvas_store as cs, canvases as cv, rooms
 from core.canvases import Actor, NeedsApproval, Refused, Stale
@@ -574,6 +575,71 @@ class TestRound1(Base):
         ch = self.d(P1, "update-row", id=lid, row=r, cells={"notes": "p1"})["change"]
         self.d(P1, "undo", id=lid, change=ch)
         self.assertNotIn("notes", self.row(lid, r)["cells"])
+
+
+class TestRound2(Base):
+    """Regressions for review round 2."""
+
+    def test_undo_never_lowers_a_label(self):  # I1
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.lst(OWNER, c)
+        ch = self.d(bot(), "update-list", id=lid, title="Bot")["change"]
+        cols = cs.read(self.root, "demo", lid)["columns"]
+        self.d(P1, "update-list", id=lid, columns=cols + [{"key": "x", "label": "IGNORE RULES"}])
+        self.d(bot(), "undo", id=lid, change=ch)
+        self.assertTrue(cs.read(self.root, "demo", lid)["outside"])
+        out = self.d(bot(gated=False), "get-list", id=lid)
+        self.assertNotIn("IGNORE RULES", json.dumps(out))
+        # item path: a tainted edit then a clean bot undo keeps the label
+        r = self.d(OWNER, "add-row", id=lid, cells={"name": "a"})["row"]
+        ch = self.d(bot(tainted=lambda: True), "update-row", id=lid, row=r,
+                    cells={"notes": "n"})["change"]
+        self.d(bot(), "undo", id=lid, change=ch)
+        self.assertTrue(self.row(lid, r)["outside"])
+        # a clean owner undo restores exactly
+        ch = self.d(bot(tainted=lambda: True), "update-row", id=lid, row=r,
+                    cells={"notes": "m"})["change"]
+        self.d(OWNER, "undo", id=lid, change=ch)
+        self.assertTrue(self.row(lid, r)["outside"])  # before state was already labeled
+
+    def test_api_undo_of_create(self):  # a
+        made = self.d(OWNER, "create-canvas", title="X")
+        self.d(OWNER, "undo", id=made["id"], change=made["change"], source="api")
+        with self.assertRaises(LookupError):
+            cs.read(self.root, "demo", made["id"])
+
+    def test_item_version_with_several_items_refused(self):  # b
+        c = self.canvas(OWNER)
+        ck = self.d(OWNER, "add-block", id=c, blocks={"type": "checklist",
+                                                      "items": ["a", "b"]})["block"]
+        with self.assertRaises(Refused) as e:
+            self.d(OWNER, "update-block", id=c, block=ck, item_version=1,
+                   items=[{"id": "i1", "done": True}, {"id": "i2", "done": True}])
+        self.assertIn("item_version", str(e.exception))
+
+    def test_failed_create_canvas_leaves_no_list(self):  # c
+        real = cs.create
+
+        def boom(root, ws, prefix, doc):
+            if prefix == "cv":
+                raise OSError("disk full")
+            return real(root, ws, prefix, doc)
+        with mock.patch.object(cv.cs, "create", boom):
+            with self.assertRaises(OSError):
+                self.d(OWNER, "create-canvas", title="T",
+                       blocks=[{"type": "list", "title": "L", "columns": COLS}])
+        self.assertEqual(cs.list_ids(self.root, "demo", "ls"), [])
+
+    def test_ungated_person_cells_only_known(self):  # e
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.d(OWNER, "create-list", title="L", columns=[
+            {"key": "who", "label": "Who", "type": "person"}])["id"]
+        self.d(OWNER, "add-block", id=c, blocks={"type": "list", "list": lid})
+        for who in ("person:p1", "bot:research", "person:" + "x" * 60):
+            self.d(P1, "add-row", id=lid, cells={"who": who})
+        rows = self.d(bot(gated=False), "get-list", id=lid)["rows"]
+        self.assertEqual([x["cells"]["who"] for x in rows],
+                         ["person:p1", "bot:research", cv.HIDDEN])
 
 
 class TestLimits(Base):
