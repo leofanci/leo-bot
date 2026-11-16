@@ -458,6 +458,7 @@ let _ROOMS = [];   // current workspace's rooms: [{id, kind, name, members, lead
 let _APPROVALS = [];  // pending approvals visible here (HQ: every workspace)
 let _RECEIPTS = [];   // jobs bots set up lately: shown in their thread with Undo and Pause
 let _SENT = [];       // browser sends that ran this week: listed on Approvals
+let _APPROVED = [];   // browser sends approved and not sent yet: listed on Approvals with Withdraw
 const fmtTokens = n => !n ? "" : n >= 1e6 ? `${(n/1e6).toFixed(1)}M tok` : n >= 1000 ? `${(n/1000).toFixed(1)}k tok` : `${n} tok`;
 const fmtCost = c => c ? `$${c < 0.01 ? c.toFixed(4) : c.toFixed(2)}` : "";
 const fmtUsage = (tokens, cost) => [fmtTokens(tokens), fmtCost(cost)].filter(Boolean).join(" · ");
@@ -551,7 +552,7 @@ async function renderRail(){
   [_BOTS, _ROOMS, _APPROVALS] = await Promise.all([
     api("/api/bots" + q).then(d => d.bots || []).catch(() => []),
     api("/api/rooms" + q).then(d => d.rooms || []).catch(() => []),
-    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; _SENT = d.sent || []; return d.approvals || []; }).catch(() => []),
+    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; _SENT = d.sent || []; _APPROVED = d.approved || []; return d.approvals || []; }).catch(() => []),
   ]);
   renderWsBar();
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
@@ -1280,7 +1281,7 @@ async function renderTeam(){
           ${!person && web ? `<div class="td-sec"><h4>Browser</h4><div class="app-grants">
             <label>Level <select data-brw-bot="${esc(b.id)}" data-brw-k="level">${browserOptionsHtml(brw.levels || ["off", "read", "write", "act"], browserLevelLabel, web.level)}</select></label>
             <label>Opens in <select data-brw-bot="${esc(b.id)}" data-brw-k="mode">${browserOptionsHtml(brw.modes || ["bot", "my_chrome"], browserModeLabel, web.mode)}</select></label></div>
-            <small>Reads only: opens and reads pages. Read + write: types on pages, and every send waits for your Approve. Acts on its own: sends at once, within each site's daily limit. Bot browser: its own browser, with the logins you save for it in Settings, Browser. My Chrome: its own tab in your Chrome, with your logins.</small></div>` : ""}
+            <small>${browserLevelHelp()}</small></div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;
@@ -1460,6 +1461,9 @@ async function renderApprovals(){
       <button class="go" data-out-read>Read</button>
       <button class="go primary-go" data-out-trust hidden>Trust</button>
     </div>`).join("")}</div>` : ""}
+    ${_APPROVED.length ? `<h4 class="sec-h">Approved, not sent yet</h4>
+    <div class="help">Browser sends you approved that the bot has not sent yet. Each can be used once, for 7 days after you approved it. Withdraw one to stop it going out.</div>
+    <div class="rowc">${_APPROVED.map(r => browserApprovedRowHtml(r, botById(r.bot) || { id: r.bot, name: r.bot }, wsById(r.ws)?.name || r.ws)).join("")}</div>` : ""}
     ${_SENT.length ? `<h4 class="sec-h">Sent from the browser</h4>
     <div class="help">What bots sent from a browser this week: sends you approved and sends of bots that act on their own.</div>
     <div class="rowc">${_SENT.map(r => {
@@ -1497,6 +1501,15 @@ async function renderApprovals(){
   });
   $("#main").querySelectorAll("[data-app-id]").forEach(row =>
     wireAppCard(row.querySelector(".app-card"), find(row.dataset.appId)));
+  $("#main").querySelectorAll("[data-withdraw]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await jpost(`/api/approvals/${encodeURIComponent(b.dataset.withdraw)}/withdraw`, {});
+      _APPROVED = _APPROVED.filter(r => r.id !== b.dataset.withdraw);
+      toast("Withdrawn. It will not be sent.");
+      renderApprovals();
+    } catch (e) { b.disabled = false; toast("✗ " + e.message); }
+  });
 }
 
 // ── Connected apps: held app actions (cards) and the Integrations panel.
@@ -1524,6 +1537,19 @@ function grantLabel(scope){
 // The bot browser: a bot's level and where it browses (Team), the sites list and My Chrome (Settings, Browser).
 function browserLevelLabel(level){
   return level === "act" ? "Acts on its own" : level === "write" ? "Read + write" : level === "read" ? "Reads only" : "Off";
+}
+// The Team screen's note under a bot's browser level.
+function browserLevelHelp(){
+  return "Reads only: opens and reads pages, and follows links. Read + write: types on pages, and every send waits for your Approve. Acts on its own: sends at once, within the daily limit of listed sites (other sites have none). Bot browser: its own browser, with the logins you save for it in Settings, Browser. My Chrome: its own tab in your Chrome, with your logins.";
+}
+// One approved browser send the bot has not sent yet, with Withdraw.
+function browserApprovedRowHtml(r, bot, wsName){
+  const args = (r.action && r.action.arguments) || {};
+  return `<div class="post approval-row sent-row">
+      ${botAvatar(bot)}
+      <div class="t">${esc(args.text || "")}<small>Approved, not sent yet · ${esc(args.site || "")} · ${esc(bot.name)} · ${esc(wsName)} · ${relAge(r.approved_at || r.created)}</small></div>
+      <button class="more" data-withdraw="${esc(r.id)}">Withdraw</button>
+    </div>`;
 }
 function browserModeLabel(mode){
   return mode === "my_chrome" ? "My Chrome" : "Bot browser";

@@ -2495,9 +2495,10 @@ BROWSER_APPROVED = "Approved. The bot sends it on its next run."
 
 
 def approvals_view(ws):
-    """/api/approvals: open cards, job receipts with Undo, and the browser sends that ran."""
+    """/api/approvals: open cards, job receipts with Undo, the browser sends approved and not
+    sent yet (each can be withdrawn), and the browser sends that ran."""
     return {"ws": ws, "approvals": approvals.pending(ROOT, ws), "receipts": approvals.receipts(ROOT, ws),
-            "sent": approvals.browser_sent(ROOT, ws)}
+            "approved": approvals.browser_approved(ROOT, ws), "sent": approvals.browser_sent(ROOT, ws)}
 
 
 def _approve_browser_send(rec, arguments=None):
@@ -4880,7 +4881,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(403, {"error": "forbidden"})
                 return self._browser_post(path, body)
             if path.startswith("/api/integrations/") or (
-                    path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject", "/undo"))):
+                    path.startswith("/api/approvals/") and path.endswith(("/approve", "/reject", "/undo", "/withdraw"))):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 if path == "/api/integrations/key":
@@ -4959,6 +4960,10 @@ class Handler(BaseHTTPRequestHandler):
                             return self._send(200, out)
                         if path.endswith("/reject"):
                             return self._send(200, approvals.reject(aid, ROOT))
+                        if path.endswith("/withdraw"):  # an approved browser send not used yet: cancelled
+                            if approvals.get(aid, ROOT) is None:
+                                raise LookupError("no such browser send")
+                            return self._send(200, approvals.withdraw_send(aid, ROOT))
                         held = approvals.get(aid, ROOT) or {}
                         if held.get("kind") == approvals.VERDICT:
                             return self._send(200, _approve_verdict_card(aid))

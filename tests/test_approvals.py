@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, bots
+from core import approvals, bots, browser
 import dashboard.chat_session as chat_session
 import dashboard.server as server
 
@@ -401,6 +401,65 @@ class BrowserSent(unittest.TestCase):
         self.assertIn("s3d", ids)  # a 3-day-old send is still in the log
         self.assertNotIn("s8d", ids)  # past the week it goes with the rest
         self.assertEqual([r["id"] for r in approvals.browser_sent(self.root, "acme")], ["s3d"])
+
+    def test_approved_send_listed_until_used_and_withdrawable(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"},
+                                              {"url": self.page, "text": "bye", "site": "acme.test"}])
+        self.assertEqual(approvals.browser_approved(self.root, "acme"), [])  # pending: still a card
+        for r in held:
+            approvals.approve_send(r["id"], self.root)
+        self.assertEqual({r["id"] for r in approvals.browser_approved(self.root, "acme")}, {r["id"] for r in held})
+        self.assertEqual(approvals.browser_approved(self.root, "demo"), [])
+        self.assertEqual(len(approvals.browser_approved(self.root, bots.HQ)), 2)
+        out = approvals.withdraw_send(held[0]["id"], self.root)
+        self.assertEqual(out["status"], "rejected")
+        self.assertEqual([r["id"] for r in approvals.browser_approved(self.root, "acme")], [held[1]["id"]])
+        # a withdrawn send can no longer be used, and a second withdraw is refused
+        self.assertIsNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="hi"))
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(held[0]["id"], self.root)
+        # only an approved browser send: a used one or another card is not withdrawn
+        self.assertIsNotNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="bye"))
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(held[1]["id"], self.root)
+        other = approvals.add(self.root, ws="acme", room=None, chat="c1", bot="b1", summary="x")
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(other["id"], self.root)
+
+    def test_approved_send_past_its_week_not_listed(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"}])
+        approvals.approve_send(held[0]["id"], self.root)
+        later = time.time() + approvals.PLAN_TTL + 1
+        self.assertEqual(approvals.browser_approved(self.root, "acme", now=later), [])
+
+    def test_housekept_send_counts_from_when_it_started(self):
+        rec = self.send("acme", "hung", ok=None)
+        rows = approvals.load(self.root)
+        for r in rows:
+            if r["id"] == rec["id"]:
+                r["started"] = time.time() - approvals.DAY + 30  # a click that hung almost a day ago
+        approvals._save(self.root, rows)
+        approvals.claim_send(self.root, ws="acme", bot="b1", url=self.page, text="next", planned=False)  # housekeeps
+        self.assertEqual(approvals.get(rec["id"], self.root)["status"], "failed")
+        site = browser.site_of(self.page, self.root) or browser.host_of(self.page)
+        self.assertEqual(approvals.sends_today(site, self.root), 2)
+        self.assertEqual(approvals.sends_today(site, self.root, now=time.time() + 60), 1)  # 24 h from its start
+
+    def test_workspace_delete_keeps_the_last_day_of_sends(self):
+        self.send("acme", "today")
+        self.send("acme", "failed today", ok=False)
+        old = self.send("acme", "two days ago", now=time.time() - 2 * approvals.DAY)
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "planned", "site": "acme.test"}])
+        approvals.forget_workspace("acme", self.root)
+        site = browser.host_of(self.page)
+        self.assertEqual(approvals.sends_today(site, self.root), 2)  # a recreated slug keeps the cap
+        ids = {r["id"] for r in approvals.load(self.root)}
+        self.assertNotIn(held[0]["id"], ids)  # its plans and cards go
+        self.assertNotIn(old["id"], ids)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # never shown to the new workspace
 
     def test_api_returns_sent(self):
         self.send("acme", "one")

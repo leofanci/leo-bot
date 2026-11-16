@@ -153,6 +153,26 @@ class ApproveSends(Base):
         self.assertEqual(self.status(self.recs[0]), "pending")
         self.assertEqual(approvals.get(rid, self.root)["action"]["arguments"]["text"], "hello one")
 
+    def test_approved_send_listed_and_withdrawn_by_the_owner_only(self):
+        rid = self.recs[0]["id"]
+        self.assertEqual(request("POST", f"/api/approvals/{rid}/approve", {})[0], 200)
+        code, data = request("GET", "/api/approvals?ws=acme")
+        self.assertEqual(code, 200)
+        self.assertEqual([r["id"] for r in data["approved"]], [rid])
+        _, invite = people.create_invite(self.root, ws="acme", role="admin", by="ceo")
+        _, member = people.join(self.root, invite, "Pat")
+        self.assertEqual(request("POST", f"/api/approvals/{rid}/withdraw", {}, owner=False, member=member)[0],
+                         MEMBER_POST)
+        self.assertEqual(request("POST", f"/api/approvals/{rid}/withdraw", {}, origin="")[0], 403)
+        self.assertEqual(self.status(self.recs[0]), "approved")
+        code, data = request("POST", f"/api/approvals/{rid}/withdraw", {})
+        self.assertEqual((code, data["status"]), (200, "rejected"))
+        self.assertEqual(request("GET", "/api/approvals?ws=acme")[1]["approved"], [])
+        self.assertEqual(request("POST", f"/api/approvals/{rid}/withdraw", {})[0], 409)  # once
+        self.assertEqual(request("POST", f"/api/approvals/{self.recs[1]['id']}/withdraw", {})[0], 409)  # pending
+        self.assertEqual(request("POST", "/api/approvals/nope/withdraw", {})[0], 404)
+        self.assertIsNone(approvals.take_send(self.root, ws="acme", bot="cmo", url=PAGE, text="hello one"))
+
     def test_approve_needs_origin(self):
         self.assertEqual(request("POST", f"/api/approvals/{self.recs[0]['id']}/approve", {}, origin="")[0], 403)
         self.assertEqual(self.status(self.recs[0]), "pending")
@@ -612,6 +632,23 @@ class Screens(unittest.TestCase):
         self.assertNotIn('data-app="edit"', web)
         self.assertIn("Approve lets the bot send it on its next run", web)
         self.assertIn('data-app="edit"', app)
+
+    def test_approved_send_row_has_withdraw(self):
+        row = _run(["relAge", "browserApprovedRowHtml"],
+                   '(globalThis.botAvatar = () => "", browserApprovedRowHtml({id: "a<1", approved_at: 0, action: '
+                   '{arguments: {text: "<i>hi", site: "acme.example"}}}, {id: "cmo", name: "CMO"}, "Acme"))')
+        self.assertIn('data-withdraw="a&lt;1"', row)
+        self.assertIn(">Withdraw<", row)
+        self.assertIn("Approved, not sent yet", row)
+        self.assertNotIn("<i>hi", row)
+        self.assertIn("Approved, not sent yet", _fn("renderApprovals"))
+        self.assertIn("/withdraw", _fn("renderApprovals"))
+
+    def test_level_help_names_the_link_rule_and_unlisted_sites(self):
+        text = _run(["browserLevelHelp"], "browserLevelHelp()")
+        self.assertIn("follows links", text)
+        self.assertIn("within the daily limit of listed sites (other sites have none)", text)
+        self.assertNotIn("\u2014", text)
 
     def test_settings_has_a_browser_tab_and_route(self):
         self.assertIn('["browser", "Browser"]', APP_JS)
