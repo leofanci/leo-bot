@@ -29,7 +29,7 @@ def valid_timezone(name):
         return False
     try:
         ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
+    except (ZoneInfoNotFoundError, ValueError, OSError):  # OSError: a folder name like "America"
         return False
     return True
 

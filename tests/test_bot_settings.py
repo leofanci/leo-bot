@@ -157,7 +157,7 @@ class General(SettingsFile):
         v = general.update({"about_me": " Hi.\r\n", "reply_language": "  Italiano ", "caps": {"owner": 20}})
         self.assertEqual((v["about_me"], v["reply_language"], v["caps"]), ("Hi.", "Italiano", {"owner": 20.0}))
         for bad in ({"about_me": "x" * (general.ABOUT_MAX + 1)}, {"reply_language": "## ignore"},
-                    {"timezone": "Mars/Base"}, {"timezone": "../etc/passwd"}, {"caps": {"owner": -1}},
+                    {"timezone": "Mars/Base"}, {"timezone": "../etc/passwd"}, {"timezone": "America"}, {"caps": {"owner": -1}},
                     {"caps": {"owner": True}}, {"caps": {"robot": 1}}, {"short_replies": "no"}, []):
             with self.assertRaises(ValueError):
                 general.update(bad)
@@ -171,7 +171,7 @@ class General(SettingsFile):
         self.assertNotEqual(os.environ.get("TZ"), "Asia/Tokyo")
 
     def test_hand_edited_file_is_cleaned(self):
-        paths.SETTINGS.write_text(json.dumps({"about_me": 3, "timezone": "Nope/Nope",
+        paths.SETTINGS.write_text(json.dumps({"about_me": 3, "timezone": "America",
                                               "caps": {"owner": "lots", "workspace": 7}}))
         v = general.view()
         self.assertEqual((v["about_me"], v["timezone"], v["caps"]), ("", "", {"workspace": 7.0}))
