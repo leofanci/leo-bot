@@ -30,13 +30,19 @@ class Base(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         (self.root / "projects" / "demo").mkdir(parents=True)
+        (self.root / "projects" / "acme").mkdir(parents=True)
+        (self.root / "team").mkdir()
+        (self.root / "team" / "people.json").write_text(json.dumps({"people": {
+            "p1": {"name": "A", "ws": {"demo": "member"}},
+            "p2": {"name": "B", "ws": {"demo": "member"}},
+            "p3": {"name": "C", "ws": {"acme": "member"}}}}))
         rooms.save_topic("demo", "launch", ["research"], "research", self.root,
                          private=True, people=["p1"])
         self.team = bots.team(self.root, "demo", {"slug": "demo"})
         self.shared = bot("writer", shared=True, room=ROOM, people=("p1",), chat="c2")
 
-    def d(self, actor, cmd, ws="demo", **params):
-        return cv.dispatch(self.root, ws, actor, cmd, params, self.team)
+    def d(self, actor, cmd, ws="demo", source="osctl", **params):
+        return cv.dispatch(self.root, ws, actor, cmd, params, self.team, source=source)
 
     def canvas(self, actor=OWNER, pin=None, **kw):
         p = {"title": "Plan", "blocks": [{"type": "text", "md": "hello"}]}
@@ -249,17 +255,17 @@ class TestVersions(Base):
         r2 = self.d(OWNER, "add-row", id=lid, cells={"name": "b"})["row"]
         v = cs.read(self.root, "demo", lid)["version"]
         self.d(OWNER, "update-row", id=lid, row=r1, cells={"notes": "first"}, version=v,
-               _source="api")
+               source="api")
         with self.assertRaises(Stale) as e:
             self.d(OWNER, "update-row", id=lid, row=r1, cells={"notes": "second"}, version=v,
-                   _source="api")
+                   source="api")
         self.assertIn("changed since you read it", str(e.exception))
         self.d(OWNER, "update-row", id=lid, row=r2, cells={"notes": "other"}, version=v,
-               _source="api")
+               source="api")
         self.assertEqual(self.row(lid, r1)["cells"]["notes"], "first")
         self.assertEqual(self.row(lid, r2)["cells"]["notes"], "other")
         with self.assertRaises(Refused):  # API write without version
-            self.d(OWNER, "update-row", id=lid, row=r2, cells={"notes": "x"}, _source="api")
+            self.d(OWNER, "update-row", id=lid, row=r2, cells={"notes": "x"}, source="api")
         # osctl: no version needed; item_version checked when given
         iv = self.row(lid, r1)["v"]
         self.d(bot(), "update-row", id=lid, row=r1, cells={"notes": "third"}, item_version=iv)
@@ -384,6 +390,190 @@ class TestMore(Base):
         self.assertTrue(self.block(c2, ck)["items"][0]["done"])
         with self.assertRaises(NeedsApproval):
             self.d(bot(), "update-block", id=c2, block=ck, items=[{"id": "i1", "delete": True}])
+
+
+class TestRound1(Base):
+    """Regressions for review round 1."""
+
+    def test_meta_undo_restores_only_its_keys_and_refuses_after_later_change(self):  # I1
+        c = self.canvas(OWNER)
+        ch = self.d(bot(), "update-canvas", id=c, title="Bot title")["change"]
+        self.d(OWNER, "update-canvas", id=c, coworkers="view")
+        self.d(bot(), "undo", id=c, change=ch)
+        doc = cs.read(self.root, "demo", c)
+        self.assertEqual((doc["title"], doc["coworkers"]), ("Plan", "view"))
+        ch = self.d(bot(), "update-canvas", id=c, title="Again")["change"]
+        self.d(OWNER, "update-canvas", id=c, title="Owner")
+        with self.assertRaises(Refused):
+            self.d(bot(), "undo", id=c, change=ch)
+        lid = self.lst(OWNER)
+        lch = self.d(bot(), "update-list", id=lid, title="Bot list")["change"]
+        cols = cs.read(self.root, "demo", lid)["columns"]
+        self.d(OWNER, "update-list", id=lid, columns=cols + [{"key": "z", "label": "Z"}])
+        self.d(bot(), "undo", id=lid, change=lch)
+        doc = cs.read(self.root, "demo", lid)
+        self.assertEqual(doc["title"], "Leads")
+        self.assertIn("z", [x["key"] for x in doc["columns"]])
+
+    def test_free_text_never_reaches_ungated_through_value_columns(self):  # I2
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.d(OWNER, "create-list", title="L", columns=[
+            {"key": "tag", "label": "Tag", "type": "select"},
+            {"key": "note", "label": "Note", "type": "text"}])["id"]
+        self.d(OWNER, "add-block", id=c, blocks={"type": "list", "list": lid})
+        r1 = self.d(P1, "add-row", id=lid, cells={"tag": "free words", "note": "secret"})["row"]
+        rows = self.d(bot(gated=False), "get-list", id=lid)["rows"]
+        self.assertEqual(rows[0]["cells"]["tag"], cv.HIDDEN)
+        ch = self.d(OWNER, "update-list", id=lid, columns=[
+            {"key": "tag", "label": "Tag", "type": "select"},
+            {"key": "note", "label": "Note", "type": "date"}])["change"]
+        self.assertNotIn("note", self.row(lid, r1)["cells"])
+        self.d(OWNER, "undo", id=lid, change=ch)
+        self.assertEqual(self.row(lid, r1)["cells"]["note"], "secret")
+
+    def test_person_outside_workspace_sees_nothing(self):  # I3
+        self.canvas(OWNER, pin=f"demo/general")
+        p3 = Actor("person", "p3")
+        with self.assertRaises(Refused):
+            cv.visible_canvas_ids(self.root, "demo", p3, self.team)
+        with self.assertRaises(Refused):
+            self.d(p3, "list-canvases")
+        self.assertEqual(len(cv.visible_canvas_ids(self.root, "demo", P2, self.team)), 1)
+
+    def test_templates_carry_labels_and_stay_with_their_maker(self):  # I4
+        c = self.canvas(P1, pin=ROOM)
+        tp = self.d(P1, "save-template", **{"from": c, "name": "P1 layout"})["id"]
+        self.assertTrue(cs.read(self.root, "demo", tp)["outside"])
+        marks = []
+        out = self.d(bot(gated=False, mark_outside=lambda: marks.append(1)), "list-templates")
+        row = next(t for t in out["templates"] if t["id"] == tp)
+        self.assertEqual(row["title"], cv.HIDDEN)
+        self.assertTrue(marks)
+        self.assertNotIn(tp, [t["id"] for t in self.d(P2, "list-templates")["templates"]])
+        owner_tp = self.d(OWNER, "save-template", **{"from": c, "name": "Owner"})["id"]
+        self.assertNotIn(owner_tp, [t["id"] for t in self.d(P1, "list-templates")["templates"]])
+        with self.assertRaises(Refused):
+            self.d(P1, "create-canvas", template=owner_tp, pin=ROOM)
+        c2 = self.d(OWNER, "create-canvas", template=tp)["id"]
+        self.assertTrue(cs.read(self.root, "demo", c2)["outside"])
+        self.assertTrue(self.block(c2)["outside"])
+
+    def test_tainted_owner_write_keeps_label(self):  # I5
+        c = self.canvas(OWNER)
+        tainted_owner = Actor("owner", tainted=lambda: True)
+        self.d(tainted_owner, "update-block", id=c, block="bk1", blocks={"md": "x"})
+        self.assertTrue(self.block(c)["outside"])
+        self.d(tainted_owner, "update-canvas", id=c, title="T")
+        self.assertTrue(cs.read(self.root, "demo", c)["outside"])
+        self.d(OWNER, "update-block", id=c, block="bk1", blocks={"md": "y"})
+        self.assertFalse(self.block(c)["outside"])
+
+    def test_person_pin_rules(self):  # R3, R4, M7
+        owner_c = self.canvas(OWNER, pin=ROOM)
+        with self.assertRaises(Refused):
+            self.d(P1, "pin-canvas", id=owner_c, room="demo/general")
+        with self.assertRaises(Refused):
+            self.d(P1, "create-canvas", title="Nowhere")
+        mine = self.d(P1, "create-canvas", title="Mine", pin=ROOM)["id"]
+        self.d(P1, "pin-canvas", id=mine, room="demo/general")
+        self.d(OWNER, "update-canvas", id=owner_c, coworkers="view")
+        with self.assertRaises(Refused):
+            self.d(P1, "unpin-canvas", id=owner_c, room=ROOM)
+        side = rooms.save_topic("demo", "side", ["research"], "research", self.root,
+                                private=True, people=["p1"])
+        ch = self.d(P1, "unpin-canvas", id=mine, room=side)["change"]  # no-op, records it
+        ch = self.d(P1, "pin-canvas", id=mine, room=side)["change"]
+        self.d(P1, "unpin-canvas", id=mine, room=side)
+        rooms.save_topic("demo", "side", ["research"], "research", self.root, replace="side",
+                         private=True, people=[])
+        with self.assertRaises(Refused):
+            self.d(P1, "undo", id=mine, change=ch)
+
+    def test_undo_of_create_deletes(self):  # R5
+        c = self.d(OWNER, "create-canvas", title="X")
+        self.d(OWNER, "undo", id=c["id"], change=c["change"])
+        with self.assertRaises(LookupError):
+            cs.read(self.root, "demo", c["id"])
+        made = self.d(bot(), "create-list", title="B", columns=COLS)
+        self.d(bot(), "undo", id=made["id"], change=made["change"])
+        with self.assertRaises(LookupError):
+            cs.read(self.root, "demo", made["id"])
+
+    def test_run_holds_survives_a_broken_hold_and_rechecks_visibility(self):  # M2
+        c = self.canvas(OWNER)
+        for md in ("one", "two", "three"):
+            with self.assertRaises(NeedsApproval):
+                self.d(bot(), "update-block", id=c, block="bk1", blocks={"md": md})
+        p = self.root / "team" / "canvas_holds.json"
+        data = json.loads(p.read_text())
+        data["c1"][0]["params"] = 5
+        data["c1"][1]["actor"].update(shared=True, room="demo/t-launch")  # lost visibility
+        p.write_text(json.dumps(data))
+        res = cv.run_holds(self.root, "c1")
+        self.assertEqual([x["ok"] for x in res], [False, False, True])
+        self.assertEqual(self.block(c)["md"], "three")
+        pend = cv.pending_holds(self.root, "c1")
+        self.assertEqual(pend, [])
+        with self.assertRaises(NeedsApproval):
+            self.d(bot(), "delete-block", id=c, block="bk1")
+        h = cv.pending_holds(self.root, "c1")[0]
+        self.assertEqual((h["cmd"], h["target"], h["by"]), ("delete-block", f"{c}/bk1",
+                                                            "bot:research"))
+        self.assertTrue(h["created_at"])
+
+    def test_bad_checklist_items_refused(self):  # M3, M4
+        c = self.canvas(OWNER)
+        with self.assertRaises(Refused):
+            self.d(OWNER, "add-block", id=c, blocks={"type": "checklist", "items": 5})
+        with self.assertRaises(Refused):
+            self.d(OWNER, "add-block", id=c, blocks={"type": "checklist",
+                                                     "items": ["x"] * (cv.ITEMS_MAX + 1)})
+        lid = self.lst(OWNER)
+        with self.assertRaises(Refused):
+            self.d(OWNER, "add-block", id=c, blocks={"type": "list", "list": lid,
+                                                     "view": {"filter": {"name": "x" * 3000}}})
+
+    def test_checklist_items_merge_by_item_version(self):  # M6
+        c = self.canvas(OWNER)
+        ck = self.d(OWNER, "add-block", id=c, blocks={"type": "checklist",
+                                                      "items": ["a", "b"]})["block"]
+        v = cs.read(self.root, "demo", c)["version"]
+        self.d(OWNER, "update-block", id=c, block=ck, items=[{"id": "i1", "done": True}],
+               version=v, source="api")
+        self.d(OWNER, "update-block", id=c, block=ck, items=[{"id": "i2", "done": True}],
+               version=v, source="api")
+        with self.assertRaises(Stale):
+            self.d(OWNER, "update-block", id=c, block=ck, items=[{"id": "i1", "done": False}],
+                   version=v, source="api")
+
+    def test_force_unembed_needs_a_true_value(self):  # M10
+        c = self.canvas(OWNER)
+        lid = self.lst(OWNER, c)
+        for no in ("no", "false", "0", 0):
+            with self.assertRaises(Refused):
+                self.d(OWNER, "delete-list", id=lid, force_unembed=no)
+        self.d(OWNER, "delete-list", id=lid, force_unembed="true")
+
+    def test_add_block_list_no_orphan_and_undo_trashes_it(self):  # M5
+        c = self.canvas(OWNER)
+        with self.assertRaises(Refused):
+            self.d(OWNER, "add-block", id=c, after="bk9",
+                   blocks={"type": "list", "title": "L", "columns": COLS})
+        self.assertEqual(cs.list_ids(self.root, "demo", "ls"), [])
+        res = self.d(OWNER, "add-block", id=c, blocks={"type": "list", "title": "L",
+                                                       "columns": COLS})
+        lid = self.block(c, res["block"])["list"]
+        self.d(OWNER, "undo", id=c, change=res["change"])
+        self.assertEqual(cs.list_ids(self.root, "demo", "ls"), [])
+        self.assertIn(lid, [h["target"] for h in cs.history(self.root, "demo", lid)])
+
+    def test_person_undoes_own_list_change(self):
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.lst(OWNER, c)
+        r = self.d(OWNER, "add-row", id=lid, cells={"name": "a"})["row"]
+        ch = self.d(P1, "update-row", id=lid, row=r, cells={"notes": "p1"})["change"]
+        self.d(P1, "undo", id=lid, change=ch)
+        self.assertNotIn("notes", self.row(lid, r)["cells"])
 
 
 class TestLimits(Base):

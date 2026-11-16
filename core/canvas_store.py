@@ -252,17 +252,22 @@ def history(root: Path, ws: str, file_id: str) -> list[dict]:
     return out
 
 
-def to_trash(root: Path, ws: str, file_id: str) -> None:
+def to_trash(root: Path, ws: str, file_id: str, *, held: bool = False) -> None:
+    """Move a file to .trash. `held`: the caller already holds `locked()` for it
+    (the lock file is then left in place for the caller to release)."""
     p = _path(root, ws, file_id)
-    if not p.is_file():
-        raise LookupError(file_id)
     td = _trash_dir(root, ws, _file_id(file_id).group(1))
     td.mkdir(parents=True, exist_ok=True)
     dest = td / p.name
-    with locked(root, ws, file_id):
-        os.replace(p, dest)
-        os.utime(dest, None)
-    _drop_lock(p)
+    try:
+        with contextlib.nullcontext() if held else locked(root, ws, file_id):
+            if not p.is_file():
+                raise LookupError(file_id)
+            os.replace(p, dest)
+            os.utime(dest, None)
+    finally:
+        if not held:
+            _drop_lock(p)
 
 
 def from_trash(root: Path, ws: str, file_id: str) -> None:
@@ -315,11 +320,17 @@ def set_pins(root: Path, ws: str, pins: dict) -> None:
     _atomic_write(_pins_path(root, ws), json.dumps(pins, ensure_ascii=False, indent=2) + "\n")
 
 
+def pins_lock(root: Path, ws: str):
+    """Hold this around every read-modify-write of pins.json."""
+    return _flock(_pins_path(root, ws))
+
+
 def drop_room_pins(root: Path, ws: str, room_id: str) -> None:
-    cur = pins(root, ws)
-    if room_id in cur:
-        del cur[room_id]
-        set_pins(root, ws, cur)
+    with pins_lock(root, ws):
+        cur = pins(root, ws)
+        if room_id in cur:
+            del cur[room_id]
+            set_pins(root, ws, cur)
 
 
 def templates(root: Path, ws: str) -> list[dict]:

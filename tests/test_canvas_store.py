@@ -106,6 +106,28 @@ class TestCanvasStore(unittest.TestCase):
         cs.drop_room_pins(self.root, "demo", "room1")
         self.assertEqual(cs.pins(self.root, "demo"), {"room2": ["ls1"]})
 
+    def test_drop_room_pins_waits_for_pins_lock(self):
+        cs.set_pins(self.root, "demo", {"room1": ["cv1"]})
+        done = threading.Event()
+        with cs.pins_lock(self.root, "demo"):
+            t = threading.Thread(target=lambda: (cs.drop_room_pins(self.root, "demo", "room1"),
+                                                 done.set()))
+            t.start()
+            self.assertFalse(done.wait(0.3))
+        t.join(5)
+        self.assertTrue(done.is_set())
+        self.assertEqual(cs.pins(self.root, "demo"), {})
+
+    def test_to_trash_held_by_caller(self):
+        self._make("demo", "cv1")
+        with cs.locked(self.root, "demo", "cv1"):
+            cs.to_trash(self.root, "demo", "cv1", held=True)
+        with self.assertRaises(LookupError):
+            cs.read(self.root, "demo", "cv1")
+        with self.assertRaises(LookupError):
+            cs.to_trash(self.root, "demo", "cv9")
+        self.assertFalse((cs.base(self.root, "demo") / "canvases" / "cv9.json.lock").exists())
+
     def test_shipped_templates_load(self):
         ts = cs.templates(self.root, "demo")
         self.assertEqual({t["id"] for t in ts},

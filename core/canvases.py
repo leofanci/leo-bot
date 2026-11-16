@@ -8,7 +8,8 @@ Params: osctl flag names with dashes turned into underscores (`id`, `block`, `ro
 `item`, `title`, `coworkers`, `blocks`, `cells`, `rows`, `columns`, `filter`, `sort`,
 `limit`, `offset`, `pin`, `room`, `template`, `after`, `change`, `force_unembed`,
 `items`, `name`, `from`, `version`, `item_version`). `<key>_json` strings are parsed
-into `<key>`. Keys starting with `_` are dropped, except `_source`.
+into `<key>`. Keys starting with `_` are dropped. `source` is a keyword of
+`dispatch`, never a param: "osctl" (default) or "api" (dashboard REST API and UI).
 
 Block payloads (`blocks`): `create-canvas` takes a list of block specs; `add-block`
 one spec (`{"type": "text", "md": "..."}`), placed after `after` when given;
@@ -20,23 +21,34 @@ create its list in the same call (templates do this).
 
 Versions: every block, checklist item and row keeps `v`, the doc version that last
 wrote it. A write may pass `item_version` (that item's `v` as read): a moved item is
-`Stale`. Dashboard API and UI writes pass `_source="api"` and must pass `version` (the
-doc version they read): missing, refused; an item whose `v` is above it is `Stale`;
-writes to other items merge. osctl writes re-read inside the lock and check only
-`item_version` when given.
+`Stale` (a checklist op may carry its own `item_version`). API writes
+(`source="api"`) must pass `version` (the doc version they read): missing, refused; an
+item whose `v` is above it is `Stale`; writes to other items merge. Doc-level changes
+(title, coworkers, block order, columns) check the doc's `meta_v`. osctl writes re-read
+inside the lock and check only `item_version` when given.
 
-Labels: new items get `outside = actor.kind == "person" or actor.tainted()`. A write
-by the owner clears the label; a full replace (text of a text block or checklist item,
-every column of a row) sets it to the writer's state; a partial edit keeps it. Reads
-of labeled items call `actor.mark_outside()`, add `outside_content`, and, when
-`actor.gated` is false, replace their text with `HIDDEN`.
+Labels: new items get `outside = actor.kind == "person" or actor.tainted()`. A
+labeled writer always labels. A clean owner write clears the label; a clean full
+replace (text of a text block or checklist item, every column of a row) clears it; a
+clean partial edit keeps it. Templates carry their maker's label and each block's.
+Reads of labeled items call `actor.mark_outside()`, add `outside_content`, and, when
+`actor.gated` is false, replace their text with `HIDDEN` (a row keeps only cells that
+validate as number, date, checkbox, person, or a select value among its options).
+Retyping a column clears the cells that no longer fit (kept in history for undo).
 
-Visibility: persons see canvases pinned in a general or topic room of `ws` they can
-see (`rooms.can_see`; DM-room pins stay with the owner and private bots), and lists
-only through such a canvas. Shared-thread bots see canvases pinned in their own room;
+Visibility: persons act only in workspaces they joined (`people.get`), see canvases
+pinned in a general or topic room of `ws` they can see (`rooms.can_see`; DM-room pins
+stay with the owner and private bots), and lists only through such a canvas. A
+person's new canvas must be pinned into such a room; a person pins a canvas into
+another room only if they created it, and never pins or unpins a view-only canvas.
+Persons and shared-thread bots see shipped templates and their own saved ones. Shared-thread bots see canvases pinned in their own room;
 `coworkers: view` is read-only for them too, and they may rewrite or delete only items
 that they or a person in their thread created. A list an actor created may be embedded
 by that actor even before it is visible.
+
+Undo: the owner undoes anything; others only their own changes (shared threads never).
+Undo of a create deletes it under the actor's delete rules. Undo is refused when the
+item or doc fields changed after that change.
 
 Approvals: a private bot or job action that needs the owner's OK is stored as a hold
 in `<data>/team/canvas_holds.json` (keyed by chat, 7-day expiry) and raises
@@ -55,7 +67,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from core import bots, canvas_store as cs, rooms
+from core import bots, canvas_store as cs, people, rooms
 
 TITLE_MAX = 200
 MD_MAX = 100_000
@@ -64,6 +76,8 @@ BLOCKS_MAX = 200
 COLUMNS_MAX = 50
 ROWS_MAX = 5_000
 BATCH_MAX = 500
+ITEMS_MAX = 500
+VIEW_MAX = 2_000
 PAGE_DEFAULT = 100
 PAGE_MAX = 500
 HOLD_DAYS = 7
@@ -78,7 +92,7 @@ STALE_MSG = "changed since you read it: get it again"
 BLOCK_TYPES = ("text", "checklist", "list", "files", "view", "browser")
 COLUMN_TYPES = ("text", "number", "date", "select", "checkbox", "url", "person")
 _KEEP_COLS = {"number", "date", "select", "checkbox", "person"}  # shown on ungated reads
-_HIDE_BLOCK = ("md", "title", "paths", "route")
+_HIDE_BLOCK = ("md", "title", "paths", "route", "view")
 
 _WS_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _ACTOR_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -166,6 +180,15 @@ def _check_actor(actor: Actor) -> None:
         raise Refused("unknown actor")
 
 
+def _check_person(root: Path, ws: str, actor: Actor) -> None:
+    """A person acts only inside a workspace they joined."""
+    if actor.kind != "person":
+        return
+    rec = people.get(root, actor.id)
+    if not rec or ws not in (rec.get("ws") or {}):
+        raise Refused(f"unknown workspace: {ws!r}")
+
+
 def _team(root: Path, ws: str, team):
     return team if team is not None else bots.team(root, ws)
 
@@ -185,6 +208,7 @@ def visible_canvas_ids(root, ws, actor, team=None) -> list[str]:
     root = Path(root)
     _check_actor(actor)
     _check_ws(root, ws, actor)
+    _check_person(root, ws, actor)
     ids = cs.list_ids(root, ws, "cv")
     if _private(actor):
         return ids
@@ -241,9 +265,25 @@ def _hold(root: Path, ws: str, actor: Actor, cmd: str, params: dict) -> NeedsApp
     return NeedsApproval(APPROVAL_MSG.format(hold=hid), hid)
 
 
+def _actor_tag(a: dict) -> str:
+    return "owner" if a.get("kind") == "owner" else f"{a.get('kind')}:{a.get('id')}"
+
+
 def pending_holds(root, chat) -> list[dict]:
+    """Live holds of a chat, each with what the owner needs to judge it:
+    {"id", "ws", "cmd", "target", "by", "job", "created_at", "params"}."""
     now = time.time()
-    return [h for h in _holds_load(Path(root)).get(chat) or [] if isinstance(h, dict) and _live(h, now)]
+    out = []
+    for h in _holds_load(Path(root)).get(chat) or []:
+        if not isinstance(h, dict) or not _live(h, now):
+            continue
+        a = h.get("actor") or {}
+        prm = h.get("params") or {}
+        target = "/".join(str(prm[k]) for k in ("id", "block", "row") if prm.get(k))
+        out.append({"id": h.get("id"), "ws": h.get("ws"), "cmd": h.get("cmd"),
+                    "target": target or None, "by": _actor_tag(a), "job": a.get("job"),
+                    "created_at": h.get("created_at"), "params": prm})
+    return out
 
 
 def drop_holds(root, chat) -> int:
@@ -277,10 +317,11 @@ def run_holds(root, chat) -> list[dict]:
                           people=tuple(a.get("people") or ()), tainted=lambda t=taint: t,
                           gated=True, chat=a.get("chat"), job_mode=a.get("job_mode"))
             res = _dispatch(root, h.get("ws"), actor, h.get("cmd"), dict(h.get("params") or {}),
-                            None, approved=True)
+                            None, approved=True, source="osctl")
             out.append({"hold": h.get("id"), "cmd": h.get("cmd"), "ok": True, "result": res})
-        except (Refused, LookupError, ValueError, OSError) as e:
-            out.append({"hold": h.get("id"), "cmd": h.get("cmd"), "ok": False, "error": str(e)})
+        except Exception as e:  # one bad hold never stops the rest: they are already popped
+            out.append({"hold": h.get("id"), "cmd": h.get("cmd"), "ok": False,
+                        "error": str(e) or type(e).__name__})
     return out
 
 
@@ -291,15 +332,17 @@ _VERSIONED = {"update-canvas", "add-block", "update-block", "move-block", "delet
               "delete-row", "delete-list"}
 
 
-def dispatch(root, ws, actor, cmd: str, params: dict, team=None) -> dict:
-    params = {k: v for k, v in (params or {}).items()
-              if not str(k).startswith("_") or k == "_source"}
-    return _dispatch(Path(root), ws, actor, cmd, params, team, approved=False)
+def dispatch(root, ws, actor, cmd: str, params: dict, team=None, source: str = "osctl") -> dict:
+    if source not in ("osctl", "api"):
+        raise Refused(f"unknown source: {source!r}")
+    params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
+    return _dispatch(Path(root), ws, actor, cmd, params, team, approved=False, source=source)
 
 
-def _dispatch(root, ws, actor, cmd, params, team, approved):
+def _dispatch(root, ws, actor, cmd, params, team, approved, source):
     _check_actor(actor)
     _check_ws(root, ws, actor)
+    _check_person(root, ws, actor)
     fn = _COMMANDS.get(cmd)
     if fn is None:
         raise Refused(f"unknown canvas command: {cmd!r}")
@@ -316,7 +359,10 @@ def _dispatch(root, ws, actor, cmd, params, team, approved):
                 params[k] = json.loads(v)
             except ValueError:
                 raise Refused(f"--{k}-json: not valid JSON") from None
-    api = params.get("_source") == "api"
+    if "force_unembed" in params:
+        v = params["force_unembed"]
+        params["force_unembed"] = v is True or (isinstance(v, str) and v.lower() in ("true", "1", "yes"))
+    api = source == "api"
     if api and cmd in _VERSIONED and params.get("version") is None:
         raise Refused("missing version: get it again and resend with its version")
     run = _Run(root, ws, actor, params, team, approved, cmd, api)
@@ -346,18 +392,23 @@ class _Run:
         return {"created_by": self.tag, "by": self.tag, "at": _now(),
                 "outside": self.outside or extra_outside is True, "v": self.new_v}
 
+    def relabel(self, old, full: bool) -> bool:
+        """A tainted or person write labels; a clean owner write, or a clean full
+        replace, clears; a clean partial edit keeps the label it found."""
+        if self.outside:
+            return True
+        if self.actor.kind == "owner" or full:
+            return False
+        return bool(old)
+
     def touch(self, item: dict, full: bool) -> None:
         item["by"], item["at"], item["v"] = self.tag, _now(), self.new_v
-        if self.actor.kind == "owner":
-            item["outside"] = False
-        elif full:
-            item["outside"] = self.outside
-        else:
-            item["outside"] = bool(item.get("outside")) or self.outside
+        item["outside"] = self.relabel(item.get("outside"), full)
 
-    def fresh(self, item: dict) -> None:
+    def fresh(self, item: dict, iv="param") -> None:
         v = int(item.get("v") or 0)
-        iv = self.p.get("item_version")
+        if iv == "param":
+            iv = self.p.get("item_version")
         if iv is not None and v != _int(iv, "item_version"):
             raise Stale(STALE_MSG)
         if self.api and v > _int(self.p.get("version"), "version"):
@@ -379,13 +430,7 @@ class _Run:
         if not self.approved:
             raise _hold(self.root, self.ws, a, self.cmd, self.p)
 
-    def file_id(self, kind: str, key: str = "id") -> str:
-        v = self.p.get(key)
-        if not cs.valid(kind, v):
-            raise Refused(f"--{key}: not a {kind} id")
-        return v
-
-    def child_id(self, kind: str, key: str) -> str:
+    def ident(self, kind: str, key: str = "id") -> str:
         v = self.p.get(key)
         if not cs.valid(kind, v):
             raise Refused(f"--{key}: not a {kind} id")
@@ -454,8 +499,7 @@ class _Run:
         return rid
 
     def set_pin(self, cid: str, rid: str, on: bool) -> bool:
-        p = cs._pins_path(self.root, self.ws)
-        with cs._flock(p):
+        with cs.pins_lock(self.root, self.ws):
             pins = cs.pins(self.root, self.ws)
             cur = pins.get(rid, [])
             was = cid in cur
@@ -509,26 +553,9 @@ class _Run:
             col = cols.get(k)
             if col is None:
                 raise Refused(f"unknown column: {k!r} (columns: {', '.join(cols)})")
-            t = col["type"]
-            if v is None:
-                continue
-            if t == "number":
-                if isinstance(v, bool) or not isinstance(v, (int, float)):
-                    raise Refused(f"cell {k}: a number")
-            elif t == "checkbox":
-                if not isinstance(v, bool):
-                    raise Refused(f"cell {k}: true or false")
-            else:
-                if not isinstance(v, str):
-                    raise Refused(f"cell {k}: a string")
-                if len(v) > CELL_MAX:
-                    raise Refused(f"cell {k}: max {CELL_MAX} characters")
-                if t == "select" and col.get("options") and v not in col["options"]:
-                    raise Refused(f"cell {k}: one of {', '.join(col['options'])}")
-                if t == "date" and v and not _DATE_RE.match(v):
-                    raise Refused(f"cell {k}: a date YYYY-MM-DD")
-                if t == "person" and v and not _PERSON_RE.match(v):
-                    raise Refused(f"cell {k}: owner, person:<id> or bot:<id>")
+            err = _cell_error(col, v)
+            if err:
+                raise Refused(f"cell {k}: {err}")
         return dict(cells)
 
     def block_fields(self, t: str, spec: dict, new: bool) -> dict:
@@ -548,6 +575,8 @@ class _Run:
                     or not isinstance(view.get("sort", ""), (str, type(None))):
                 raise Refused("view: {\"filter\": {...}, \"sort\": \"key\"}")
             out["view"] = {k: view[k] for k in ("filter", "sort") if view.get(k) is not None}
+            if len(json.dumps(out["view"], ensure_ascii=False)) > VIEW_MAX:
+                raise Refused(f"view: max {VIEW_MAX} characters")
         elif t == "files" and ("paths" in spec or new):
             paths = spec.get("paths") or []
             pre = "" if self.ws == bots.HQ else f"projects/{self.ws}/"
@@ -574,7 +603,10 @@ class _Run:
             raise Refused(f"checklist item: max {CELL_MAX} characters")
         return text
 
-    def new_block(self, spec, blocks: list) -> dict:
+    def new_block(self, spec, blocks: list, pending: list) -> dict:
+        """Validate a block spec and build the block. A list block that brings its
+        own columns is queued in `pending` as (block, list doc): `make_lists` creates
+        those lists once every block of the call has validated."""
         if not isinstance(spec, dict):
             raise Refused("block: a JSON object")
         t = spec.get("type")
@@ -584,7 +616,12 @@ class _Run:
         b.update(self.block_fields(t, spec, new=True))
         if t == "checklist":
             b["items"] = []
-            for it in spec.get("items") or []:
+            specs = spec.get("items") or []
+            if not isinstance(specs, list):
+                raise Refused("items: a JSON list")
+            if len(specs) > ITEMS_MAX:
+                raise Refused(f"too many checklist items: max {ITEMS_MAX}")
+            for it in specs:
                 it = it if isinstance(it, dict) else {"text": it}
                 b["items"].append({"id": cs.next_child_id(b["items"], "i"),
                                    "text": self.check_item(it.get("text", "")),
@@ -604,19 +641,58 @@ class _Run:
                        "columns": self.columns(spec["columns"]), "rows": [],
                        "created_by": self.tag, "created_at": _now(),
                        "outside": self.outside or spec.get("outside") is True}
-                made = cs.create(self.root, self.ws, "ls", doc)
-                self.log(made["id"], {"op": "create-list", "kind": "create", "target": made["id"],
-                                      "before": None, "after": None})
-                b["list"] = made["id"]
+                b["list"] = None
+                pending.append((b, doc))
             else:
                 raise Refused("list block: give list or columns")
         return b
+
+    def make_lists(self, pending: list) -> None:
+        for b, doc in pending:
+            made = cs.create(self.root, self.ws, "ls", doc)
+            self.log(made["id"], {"op": "create-list", "kind": "create", "target": made["id"],
+                                  "before": None, "after": None})
+            b["list"] = made["id"]
+            b["made_list"] = True
 
     def find(self, items: list, iid: str, what: str) -> tuple[int, dict]:
         for i, it in enumerate(items or []):
             if it.get("id") == iid:
                 return i, it
         raise Refused(f"no such {what}: {iid}")
+
+
+def _cell_error(col: dict, v) -> str | None:
+    """Why `v` does not fit column `col` on a write, or None."""
+    t = col.get("type")
+    if v is None:
+        return None
+    if t == "number":
+        return None if isinstance(v, (int, float)) and not isinstance(v, bool) else "a number"
+    if t == "checkbox":
+        return None if isinstance(v, bool) else "true or false"
+    if not isinstance(v, str):
+        return "a string"
+    if len(v) > CELL_MAX:
+        return f"max {CELL_MAX} characters"
+    if t == "select" and col.get("options") and v not in col["options"]:
+        return f"one of {', '.join(col['options'])}"
+    if t == "date" and v and not _DATE_RE.match(v):
+        return "a date YYYY-MM-DD"
+    if t == "person" and v and not _PERSON_RE.match(v):
+        return "owner, person:<id> or bot:<id>"
+    return None
+
+
+def _cell_safe(col: dict, v) -> bool:
+    """A labeled row's value an ungated engine may still see: only values that
+    cannot carry free text (a select needs its options to bound it)."""
+    t = col.get("type")
+    if v is None:
+        return True
+    if t == "select":
+        return isinstance(v, str) and v in (col.get("options") or [])
+    return t in _KEEP_COLS and _cell_error(col, v) is None
 
 
 def _key_of(label: str) -> str:
@@ -650,8 +726,8 @@ def _label_row(r: dict, columns: list, gated: bool) -> dict:
     if r.get("outside"):
         r["outside_content"] = OUTSIDE_NOTE
         if not gated:
-            types = {c["key"]: c["type"] for c in columns}
-            r["cells"] = {k: (v if types.get(k) in _KEEP_COLS else HIDDEN)
+            cols = {c["key"]: c for c in columns}
+            r["cells"] = {k: (v if k in cols and _cell_safe(cols[k], v) else HIDDEN)
                           for k, v in (r.get("cells") or {}).items()}
     return r
 
@@ -698,7 +774,7 @@ def _list_canvases(r: _Run) -> dict:
 
 
 def _get_canvas(r: _Run) -> dict:
-    cid = r.file_id("canvas")
+    cid = r.ident("canvas")
     doc = r.canvas(cid, write=False)
     out = {k: doc.get(k) for k in ("id", "title", "created_by", "created_at", "coworkers",
                                    "version")}
@@ -734,7 +810,7 @@ def _sort_key(v):
 
 
 def _get_list(r: _Run) -> dict:
-    lid = r.file_id("list")
+    lid = r.ident("list")
     doc = r.lst(lid, write=False)
     cols = doc.get("columns") or []
     keys = {c["key"] for c in cols}
@@ -767,10 +843,23 @@ def _get_list(r: _Run) -> dict:
     return out
 
 
+def _templates(r: _Run) -> list[dict]:
+    """Shipped templates plus saved ones; persons and shared-thread bots see only
+    the saved templates they made (a template copies canvases they cannot see)."""
+    return [t for t in cs.templates(r.root, r.ws)
+            if t.get("shipped") or _private(r.actor) or t.get("created_by") == r.tag]
+
+
 def _list_templates(r: _Run) -> dict:
-    return {"templates": [{"id": t.get("id"), "title": t.get("title"), "shipped": t.get("shipped"),
-                           "blocks": len(t.get("blocks") or [])}
-                          for t in cs.templates(r.root, r.ws)]}
+    out, marked = [], False
+    for t in _templates(r):
+        row = {"id": t.get("id"), "title": t.get("title"), "shipped": t.get("shipped"),
+               "blocks": len(t.get("blocks") or [])}
+        marked |= _label_doc(t, row, r.actor.gated)
+        out.append(row)
+    if marked:
+        r.actor.mark_outside()
+    return {"templates": out}
 
 
 def _list_history(r: _Run) -> dict:
@@ -798,24 +887,30 @@ def _create_canvas(r: _Run) -> dict:
         raise Refused("blocks: a JSON list")
     title = r.p.get("title")
     tid = r.p.get("template")
+    title_outside = False
     if tid:
-        tpl = next((t for t in cs.templates(r.root, r.ws) if t.get("id") == tid), None)
+        tpl = next((t for t in _templates(r) if t.get("id") == tid), None)
         if tpl is None:
             raise Refused(f"no such template: {tid!r}")
         specs = list(tpl.get("blocks") or []) + specs
-        title = title or tpl.get("title")
+        if not title:
+            title, title_outside = tpl.get("title"), bool(tpl.get("outside"))
     title = _title(title)
     if len(specs) > BLOCKS_MAX:
         raise Refused(f"too many blocks: max {BLOCKS_MAX} per canvas")
     if r.actor.kind == "bot" and r.actor.shared:
         r.p["pin"] = r.actor.room  # a shared thread's canvas lives in its own room
+    if r.actor.kind == "person" and not r.p.get("pin"):
+        raise Refused("pick a room to pin it in, or nobody can see it")
     pin = r.room() if r.p.get("pin") else None
     r.new_v = 1
     blocks: list[dict] = []
-    for s in specs:
-        blocks.append(r.new_block(s, blocks))
+    pending: list = []
+    for spec in specs:
+        blocks.append(r.new_block(spec, blocks, pending))
+    r.make_lists(pending)
     doc = {"title": title, "created_by": r.tag, "created_at": _now(), "coworkers": "edit",
-           "outside": r.outside, "meta_v": 1, "blocks": blocks}
+           "outside": r.outside or title_outside, "meta_v": 1, "blocks": blocks}
     doc = cs.create(r.root, r.ws, "cv", doc)
     change = r.log(doc["id"], {"op": "create-canvas", "kind": "create", "target": doc["id"],
                                "before": None, "after": None})
@@ -825,7 +920,7 @@ def _create_canvas(r: _Run) -> dict:
 
 
 def _update_canvas(r: _Run) -> dict:
-    cid = r.file_id("canvas")
+    cid = r.ident("canvas")
     if r.p.get("coworkers") is not None:
         if r.actor.kind != "owner":
             raise Refused("only the owner changes --coworkers")
@@ -833,23 +928,28 @@ def _update_canvas(r: _Run) -> dict:
             raise Refused("--coworkers: edit or view")
     title = _title(r.p["title"]) if r.p.get("title") is not None else None
 
+    keys = (("title", "outside") if title is not None else ()) + (
+        ("coworkers",) if r.p.get("coworkers") is not None else ())
+    if not keys:
+        raise Refused("nothing to change: give --title or --coworkers")
+
     def fn(doc):
         r.fresh_meta(doc)
-        before = {k: doc.get(k) for k in ("title", "coworkers", "outside")}
+        before = {k: doc.get(k) for k in keys}
         if title is not None:
             doc["title"] = title
-            doc["outside"] = False if r.actor.kind == "owner" else r.outside
+            doc["outside"] = r.relabel(doc.get("outside"), full=True)
         if r.p.get("coworkers") is not None:
             doc["coworkers"] = r.p["coworkers"]
         doc["meta_v"] = r.new_v
-        after = {k: doc.get(k) for k in ("title", "coworkers", "outside")}
+        after = {k: doc.get(k) for k in keys}
         return [{"op": "update-canvas", "kind": "meta", "target": cid,
                  "before": before, "after": after}], {}
     return r.mutate(cid, fn, lambda f: r.canvas(f, write=True))
 
 
 def _add_block(r: _Run) -> dict:
-    cid = r.file_id("canvas")
+    cid = r.ident("canvas")
     spec = r.p.get("blocks")
     if isinstance(spec, list):
         if len(spec) != 1:
@@ -860,10 +960,12 @@ def _add_block(r: _Run) -> dict:
         blocks = doc.setdefault("blocks", [])
         if len(blocks) >= BLOCKS_MAX:
             raise Refused(f"too many blocks: max {BLOCKS_MAX} per canvas")
-        b = r.new_block(spec, blocks)
         pos = len(blocks)
         if r.p.get("after"):
-            pos = r.find(blocks, r.child_id("block", "after"), "block")[0] + 1
+            pos = r.find(blocks, r.ident("block", "after"), "block")[0] + 1
+        pending: list = []
+        b = r.new_block(spec, blocks, pending)
+        r.make_lists(pending)
         blocks.insert(pos, b)
         return [{"op": "add-block", "kind": "item", "target": f"{cid}/{b['id']}", "pos": pos,
                  "before": None, "after": copy.deepcopy(b)}], {"block": b["id"]}
@@ -871,8 +973,8 @@ def _add_block(r: _Run) -> dict:
 
 
 def _update_block(r: _Run) -> dict:
-    cid = r.file_id("canvas")
-    bid = r.child_id("block", "block")
+    cid = r.ident("canvas")
+    bid = r.ident("block", "block")
     spec = r.p.get("blocks")
     if isinstance(spec, list) and len(spec) == 1:
         spec = spec[0]
@@ -883,21 +985,23 @@ def _update_block(r: _Run) -> dict:
 
     def fn(doc):
         _, b = r.find(doc.get("blocks"), bid, "block")
-        r.fresh(b)
+        if not (b["type"] == "checklist" and set(spec) == {"items"}):
+            r.fresh(b)  # an items-only patch checks each item it touches instead
         if b["type"] == "text":
             r.guard(b, f"rewrite {bid}")
         before = copy.deepcopy(b)
         fields = r.block_fields(b["type"], spec, new=False)
         b.update(fields)
         if b["type"] == "checklist" and spec.get("items") is not None:
-            _checklist_ops(r, b, spec["items"])
+            _checklist_ops(r, b, spec["items"], single_iv=set(spec) == {"items"})
         r.touch(b, full=b["type"] == "text" and "md" in fields)
         return [{"op": "update-block", "kind": "item", "target": f"{cid}/{bid}",
                  "before": before, "after": copy.deepcopy(b)}], {"block": bid}
     return r.mutate(cid, fn, lambda f: r.canvas(f, write=True))
 
 
-def _checklist_ops(r: _Run, b: dict, ops) -> None:
+def _checklist_ops(r: _Run, b: dict, ops, single_iv: bool) -> None:
+    """Item ops; each may carry its own `item_version` (a lone op takes --item-version)."""
     if not isinstance(ops, list):
         raise Refused("items: a JSON list")
     items = b.setdefault("items", [])
@@ -905,6 +1009,8 @@ def _checklist_ops(r: _Run, b: dict, ops) -> None:
         if not isinstance(op, dict):
             raise Refused("items: each one a JSON object")
         if op.get("id") is None:
+            if len(items) >= ITEMS_MAX:
+                raise Refused(f"too many checklist items: max {ITEMS_MAX}")
             items.append({"id": cs.next_child_id(items, "i"),
                           "text": r.check_item(op.get("text", "")),
                           "done": bool(op.get("done")), **r.stamp()})
@@ -912,6 +1018,9 @@ def _checklist_ops(r: _Run, b: dict, ops) -> None:
         if not cs.valid("item", op["id"]):
             raise Refused("item: not an item id")
         i, it = r.find(items, op["id"], "item")
+        if single_iv:
+            iv = op.get("item_version", r.p.get("item_version") if len(ops) == 1 else None)
+            r.fresh(it, iv=iv)
         if op.get("delete"):
             r.guard(it, f"delete {op['id']}")
             del items[i]
@@ -925,8 +1034,8 @@ def _checklist_ops(r: _Run, b: dict, ops) -> None:
 
 
 def _move_block(r: _Run) -> dict:
-    cid = r.file_id("canvas")
-    bid = r.child_id("block", "block")
+    cid = r.ident("canvas")
+    bid = r.ident("block", "block")
 
     def fn(doc):
         r.fresh_meta(doc)
@@ -936,7 +1045,7 @@ def _move_block(r: _Run) -> dict:
         del blocks[i]
         pos = 0
         if r.p.get("after"):
-            pos = r.find(blocks, r.child_id("block", "after"), "block")[0] + 1
+            pos = r.find(blocks, r.ident("block", "after"), "block")[0] + 1
         blocks.insert(pos, b)
         doc["meta_v"] = r.new_v
         return [{"op": "move-block", "kind": "meta", "target": cid, "before": {"order": before},
@@ -945,8 +1054,8 @@ def _move_block(r: _Run) -> dict:
 
 
 def _delete_block(r: _Run) -> dict:
-    cid = r.file_id("canvas")
-    bid = r.child_id("block", "block")
+    cid = r.ident("canvas")
+    bid = r.ident("block", "block")
 
     def fn(doc):
         i, b = r.find(doc.get("blocks"), bid, "block")
@@ -959,23 +1068,34 @@ def _delete_block(r: _Run) -> dict:
 
 
 def _delete_canvas(r: _Run) -> dict:
-    cid = r.file_id("canvas")
-    doc = r.canvas(cid, write=True)
-    r.fresh_meta(doc)
-    if r.actor.kind == "person" and doc.get("created_by") == "owner":
-        raise Refused("only the owner deletes a canvas the owner created")
-    r.guard(doc, f"delete {cid}")
-    cs.to_trash(r.root, r.ws, cid)
-    change = r.log(cid, {"op": "delete-canvas", "kind": "trash", "target": cid,
-                         "before": None, "after": None})
+    cid = r.ident("canvas")
+    with cs.locked(r.root, r.ws, cid):
+        doc = r.canvas(cid, write=True)
+        r.fresh_meta(doc)
+        if r.actor.kind == "person" and doc.get("created_by") == "owner":
+            raise Refused("only the owner deletes a canvas the owner created")
+        r.guard(doc, f"delete {cid}")
+        cs.to_trash(r.root, r.ws, cid, held=True)
+        change = r.log(cid, {"op": "delete-canvas", "kind": "trash", "target": cid,
+                             "before": None, "after": None})
     return {"id": cid, "version": doc.get("version"), "change": change}
+
+
+def _pin_check(r: _Run, cid: str, rid: str, on: bool) -> dict:
+    """Coworkers and shared-thread bots: not on a view-only canvas; a person pins a
+    canvas into a new room only when they created it (never widens others' canvases)."""
+    doc = r.canvas(cid, write=not _private(r.actor))
+    if r.actor.kind == "person" and on and doc.get("created_by") != r.tag \
+            and cid not in cs.pins(r.root, r.ws).get(rid, []):
+        raise Refused("you can pin into another room only a canvas you created")
+    return doc
 
 
 def _pin(on: bool):
     def cmd(r: _Run) -> dict:
-        cid = r.file_id("canvas")
-        doc = r.canvas(cid, write=False)
+        cid = r.ident("canvas")
         rid = r.room()
+        doc = _pin_check(r, cid, rid, on)
         was = r.set_pin(cid, rid, on)
         change = r.log(cid, {"op": "pin-canvas" if on else "unpin-canvas", "kind": "pin",
                              "target": cid, "before": {"room": rid, "pinned": was},
@@ -985,7 +1105,7 @@ def _pin(on: bool):
 
 
 def _save_template(r: _Run) -> dict:
-    src = r.file_id("canvas", "from")
+    src = r.ident("canvas", "from")
     doc = r.canvas(src, write=False)
     name = _title(r.p.get("name"), "name")
     blocks = []
@@ -1011,7 +1131,8 @@ def _save_template(r: _Run) -> dict:
             t["outside"] = True
         blocks.append(t)
     made = cs.create(r.root, r.ws, "tp", {"title": name, "created_by": r.tag,
-                                          "created_at": _now(), "blocks": blocks})
+                                          "created_at": _now(), "outside": r.outside,
+                                          "blocks": blocks})
     change = r.log(made["id"], {"op": "save-template", "kind": "create", "target": made["id"],
                                 "before": None, "after": None})
     return {"id": made["id"], "version": made["version"], "change": change}
@@ -1029,28 +1150,46 @@ def _create_list(r: _Run) -> dict:
 
 
 def _update_list(r: _Run) -> dict:
-    lid = r.file_id("list")
+    lid = r.ident("list")
     title = _title(r.p["title"]) if r.p.get("title") is not None else None
+    cols_in = r.p.get("columns")
+    keys = (("title",) if title is not None else ()) + (("columns",) if cols_in is not None else ())
+    if not keys:
+        raise Refused("nothing to change: give --title or --columns")
+    keys += ("outside",)
 
     def fn(doc):
         r.fresh_meta(doc)
-        before = {k: copy.deepcopy(doc.get(k)) for k in ("title", "columns", "outside")}
-        if r.p.get("columns") is not None:
-            doc["columns"] = r.columns(r.p["columns"], old=doc.get("columns") or [])
+        before = {k: copy.deepcopy(doc.get(k)) for k in keys}
+        cleared: dict = {}
+        if cols_in is not None:
+            old = {c["key"]: c for c in doc.get("columns") or []}
+            doc["columns"] = r.columns(cols_in, old=list(old.values()))
+            for col in doc["columns"]:
+                if old.get(col["key"]) == col:
+                    continue
+                # retyped or new options: a cell that no longer fits is cleared (kept in history)
+                for row in doc.get("rows") or []:
+                    v = (row.get("cells") or {}).get(col["key"])
+                    if v is not None and _cell_error(col, v):
+                        cleared.setdefault(row["id"], {})[col["key"]] = v
+                        del row["cells"][col["key"]]
+                        row["v"] = r.new_v
         if title is not None:
             doc["title"] = title
-        if title is not None or r.p.get("columns") is not None:
-            doc["outside"] = False if r.actor.kind == "owner" else (
-                bool(doc.get("outside")) or r.outside)
+        doc["outside"] = r.relabel(doc.get("outside"), full=len(keys) == 3)
         doc["meta_v"] = r.new_v
-        after = {k: copy.deepcopy(doc.get(k)) for k in ("title", "columns", "outside")}
-        return [{"op": "update-list", "kind": "meta", "target": lid,
-                 "before": before, "after": after}], {}
+        after = {k: copy.deepcopy(doc.get(k)) for k in keys}
+        entry = {"op": "update-list", "kind": "meta", "target": lid, "before": before,
+                 "after": after}
+        if cleared:
+            entry["cleared"] = cleared
+        return [entry], {}
     return r.mutate(lid, fn, lambda f: r.lst(f, write=True))
 
 
 def _add_rows(r: _Run, batch: list) -> dict:
-    lid = r.file_id("list")
+    lid = r.ident("list")
 
     def fn(doc):
         rows = doc.setdefault("rows", [])
@@ -1085,8 +1224,8 @@ def _add_rows_cmd(r: _Run) -> dict:
 
 
 def _update_row(r: _Run) -> dict:
-    lid = r.file_id("list")
-    rid = r.child_id("row", "row")
+    lid = r.ident("list")
+    rid = r.ident("row", "row")
 
     def fn(doc):
         _, row = r.find(doc.get("rows"), rid, "row")
@@ -1103,8 +1242,8 @@ def _update_row(r: _Run) -> dict:
 
 
 def _delete_row(r: _Run) -> dict:
-    lid = r.file_id("list")
-    rid = r.child_id("row", "row")
+    lid = r.ident("list")
+    rid = r.ident("row", "row")
 
     def fn(doc):
         i, row = r.find(doc.get("rows"), rid, "row")
@@ -1116,47 +1255,77 @@ def _delete_row(r: _Run) -> dict:
     return r.mutate(lid, fn, lambda f: r.lst(f, write=True))
 
 
-def _delete_list(r: _Run) -> dict:
-    lid = r.file_id("list")
-    doc = r.lst(lid, write=True)
-    r.fresh_meta(doc)
-    embeds = []
-    for cid in cs.list_ids(r.root, r.ws, "cv"):
-        try:
-            cdoc = cs.read(r.root, r.ws, cid)
-        except LookupError:
-            continue
-        bks = [b for b in cdoc.get("blocks") or [] if b.get("type") == "list" and b.get("list") == lid]
-        if bks:
-            embeds.append((cid, cdoc, bks))
-    if embeds and not r.p.get("force_unembed"):
-        raise Refused(f"{lid} is embedded in {len(embeds)} canvas(es): pass --force-unembed "
-                      "to remove those embeds too")
-    if not _private(r.actor):
-        vis = set(visible_canvas_ids(r.root, r.ws, r.actor, r._team_obj))
-        if any(cid not in vis or cdoc.get("coworkers") == "view" for cid, cdoc, _ in embeds):
-            raise Refused(f"{lid} is embedded where only the owner can remove it")
-    r.guard(doc, f"delete {lid}")
-    for _, _, bks in embeds:
-        for b in bks:
-            r.guard(b, f"unembed {b['id']}")
-    for cid, _, bks in embeds:
-        gone = {b["id"] for b in bks}
+def _unembed(r: _Run, cid: str, lid: str, gone: set) -> list:
+    """Remove list blocks `gone` from canvas `cid`; returns [(pos, block)] removed."""
+    removed: list = []
 
-        def fn(cdoc, gone=gone, cid=cid):
-            entries = []
-            for i in range(len(cdoc.get("blocks") or []) - 1, -1, -1):
-                b = cdoc["blocks"][i]
-                if b.get("id") in gone and b.get("list") == lid:
-                    del cdoc["blocks"][i]
-                    entries.insert(0, {"op": "delete-block", "kind": "item",
-                                       "target": f"{cid}/{b['id']}", "pos": i,
-                                       "before": b, "after": None})
-            return entries, {}
-        r.mutate(cid, fn, r.read)
-    cs.to_trash(r.root, r.ws, lid)
-    change = r.log(lid, {"op": "delete-list", "kind": "trash", "target": lid,
-                         "before": None, "after": None})
+    def fn(cdoc):
+        entries = []
+        for i in range(len(cdoc.get("blocks") or []) - 1, -1, -1):
+            b = cdoc["blocks"][i]
+            if b.get("id") in gone and b.get("list") == lid:
+                del cdoc["blocks"][i]
+                removed.insert(0, (i, b))
+                entries.insert(0, {"op": "delete-block", "kind": "item",
+                                   "target": f"{cid}/{b['id']}", "pos": i,
+                                   "before": b, "after": None})
+        return entries, {}
+    r.mutate(cid, fn, r.read)
+    return removed
+
+
+def _reembed(r: _Run, cid: str, removed: list) -> None:
+    def fn(cdoc):
+        entries = []
+        for pos, b in removed:
+            if any(x.get("id") == b["id"] for x in cdoc.get("blocks") or []):
+                continue
+            cdoc.setdefault("blocks", []).insert(min(pos, len(cdoc["blocks"])), b)
+            entries.append({"op": "restore-block", "kind": "item", "target": f"{cid}/{b['id']}",
+                            "pos": pos, "before": None, "after": copy.deepcopy(b)})
+        return entries, {}
+    r.mutate(cid, fn, r.read)
+
+
+def _delete_list(r: _Run) -> dict:
+    lid = r.ident("list")
+    with cs.locked(r.root, r.ws, lid):
+        doc = r.lst(lid, write=True)
+        r.fresh_meta(doc)
+        embeds = []
+        for cid in cs.list_ids(r.root, r.ws, "cv"):
+            try:
+                cdoc = cs.read(r.root, r.ws, cid)
+            except LookupError:
+                continue
+            bks = [b for b in cdoc.get("blocks") or []
+                   if b.get("type") == "list" and b.get("list") == lid]
+            if bks:
+                embeds.append((cid, cdoc, bks))
+        if embeds and not r.p.get("force_unembed"):
+            raise Refused(f"{lid} is embedded in {len(embeds)} canvas(es): pass --force-unembed "
+                          "to remove those embeds too")
+        if not _private(r.actor):
+            vis = set(visible_canvas_ids(r.root, r.ws, r.actor, r._team_obj))
+            if any(cid not in vis or cdoc.get("coworkers") == "view" for cid, cdoc, _ in embeds):
+                raise Refused(f"{lid} is embedded where only the owner can remove it")
+        # every check before any change: then unembed, then trash
+        r.guard(doc, f"delete {lid}")
+        for _, _, bks in embeds:
+            for b in bks:
+                r.guard(b, f"unembed {b['id']}")
+        done: list = []
+        try:
+            for cid, _, bks in embeds:
+                done.append((cid, _unembed(r, cid, lid, {b["id"] for b in bks})))
+            cs.to_trash(r.root, r.ws, lid, held=True)
+        except Exception:
+            for cid, removed in done:
+                if removed:
+                    _reembed(r, cid, removed)
+            raise
+        change = r.log(lid, {"op": "delete-list", "kind": "trash", "target": lid,
+                             "before": None, "after": None})
     return {"id": lid, "version": doc.get("version"), "change": change}
 
 
@@ -1185,11 +1354,11 @@ def _trust(r: _Run) -> dict:
     fid = _fid_of(r)
     scope = None
     if r.p.get("block"):
-        scope = r.child_id("block", "block")
+        scope = r.ident("block", "block")
         if r.p.get("item"):
-            scope += "/" + r.child_id("item", "item")
+            scope += "/" + r.ident("item", "item")
     elif r.p.get("row"):
-        scope = r.child_id("row", "row")
+        scope = r.ident("row", "row")
 
     def fn(doc):
         paths = []
@@ -1208,7 +1377,7 @@ def _trust(r: _Run) -> dict:
 
 def _undo(r: _Run) -> dict:
     fid = _fid_of(r)
-    cid = r.child_id("change", "change")
+    cid = r.ident("change", "change")
     entry = next((e for e in cs.history(r.root, r.ws, fid) if e.get("id") == cid), None)
     if entry is None:
         raise Refused(f"no such change: {cid}")
@@ -1228,24 +1397,38 @@ def _undo(r: _Run) -> dict:
         head["kind"] = "untrash"
         change = r.log(fid, {**head, "before": None, "after": None})
         return {"id": fid, "version": r.read(fid).get("version"), "change": change}
+    if kind == "create":
+        # undoing a create deletes it, under the same delete rules for this actor
+        return _delete_canvas(r) if cs.valid("canvas", fid) else _delete_list(r)
     if kind == "pin":
-        if r.actor.kind != "owner":
-            r.canvas(fid, write=False)
         rid, on = entry["before"]["room"], bool(entry["before"]["pinned"])
+        if r.actor.kind != "owner":
+            r.p["room"] = rid
+            r.room()
+            _pin_check(r, fid, rid, on)
         was = r.set_pin(fid, rid, on)
         change = r.log(fid, {**head, "before": {"room": rid, "pinned": was},
                              "after": {"room": rid, "pinned": on}})
         return {"id": fid, "version": r.read(fid).get("version"), "change": change}
-    if kind not in ("item", "meta", "rows", "trust"):
+    if kind not in ("item", "meta", "rows", "trust"):  # untrash, unrows, untrust: final
         raise Refused("this change cannot be undone")
     access = r.read if r.actor.kind == "owner" else (
         (lambda f: r.canvas(f, write=True)) if cs.valid("canvas", fid)
         else (lambda f: r.lst(f, write=True)))
 
+    made_list: list = []
+
     def fn(doc):
         if kind == "meta":
+            after = entry.get("after") or {}
+            for k in after:
+                now = ([b["id"] for b in doc.get("blocks") or []] if k == "order" else doc.get(k))
+                if k != "outside" and now != after[k]:
+                    raise Refused(f"{k} changed after that change: undo the later changes first")
             cur = {}
             for k, v in (entry.get("before") or {}).items():
+                if k == "coworkers" and r.actor.kind != "owner":
+                    continue
                 if k == "order":
                     cur["order"] = [b["id"] for b in doc.get("blocks") or []]
                     rank = {bid: i for i, bid in enumerate(v)}
@@ -1254,6 +1437,12 @@ def _undo(r: _Run) -> dict:
                 else:
                     cur[k] = copy.deepcopy(doc.get(k))
                     doc[k] = copy.deepcopy(v)
+            for rid, cells in (entry.get("cleared") or {}).items():
+                row = next((x for x in doc.get("rows") or [] if x.get("id") == rid), None)
+                if row is not None:
+                    for k, v in cells.items():
+                        row.setdefault("cells", {}).setdefault(k, v)
+                    row["v"] = r.new_v
             doc["meta_v"] = r.new_v
             return [{**head, "before": cur, "after": copy.deepcopy(entry.get("before"))}], {}
         if kind == "rows":
@@ -1281,6 +1470,8 @@ def _undo(r: _Run) -> dict:
         restored = copy.deepcopy(entry.get("before"))
         if restored is None:
             if idx is not None:
+                if cur.get("made_list") and cur.get("list"):
+                    made_list.append(cur["list"])
                 del coll[idx]
         else:
             restored["v"] = r.new_v
@@ -1293,7 +1484,27 @@ def _undo(r: _Run) -> dict:
                 pos = len(coll) if not isinstance(pos, int) else min(max(pos, 0), len(coll))
                 coll.insert(pos, restored)
         return [{**head, "before": cur, "after": copy.deepcopy(restored)}], {}
-    return r.mutate(fid, fn, access)
+    out = r.mutate(fid, fn, access)
+    for lid in made_list:  # the undone block had created its list: trash it unless used elsewhere
+        if not _embedded_anywhere(r, lid):
+            try:
+                cs.to_trash(r.root, r.ws, lid)
+            except LookupError:
+                continue
+            r.log(lid, {"op": "delete-list", "kind": "trash", "target": lid,
+                        "before": None, "after": None})
+    return out
+
+
+def _embedded_anywhere(r: _Run, lid: str) -> bool:
+    for cid in cs.list_ids(r.root, r.ws, "cv"):
+        try:
+            cdoc = cs.read(r.root, r.ws, cid)
+        except LookupError:
+            continue
+        if any(b.get("list") == lid for b in cdoc.get("blocks") or [] if b.get("type") == "list"):
+            return True
+    return False
 
 
 _COMMANDS = {
