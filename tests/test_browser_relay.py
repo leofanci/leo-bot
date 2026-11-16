@@ -889,6 +889,20 @@ class Round2(FinalReview):
         self.assertEqual(text_of(self.handle(call(P + "click", selector="@e1"), up)), "ok")
 
 
+class Round3(FinalReview):
+    def test_refs_never_kept_when_the_page_is_unknown(self):
+        # C3: a snapshot on a page the engine cannot name stores no refs, and an unknown page clears them
+        self.level("read")
+        up = FakeUpstream(None, redirects={"about:blank": None})
+        up.refs = {"e1": {"name": "Next", "role": "link"}}
+        st = browser_relay._state(up)
+        st["refs_url"] = None
+        st["refs"] = {"e1": "link"}
+        self.handle(call(P + "snapshot"), up)
+        self.assertEqual(st["refs"], {})
+        self.assertIsNone(st.get("refs_url"))
+
+
 class Preview(unittest.TestCase):
     def test_send_preview_shows_page_and_full_text(self):
         from core import app_preview

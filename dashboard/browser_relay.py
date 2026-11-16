@@ -608,7 +608,7 @@ def _gate(frame, ctx, sid, upstream, root):
         here = None
         if name not in NAV_TOOLS:  # a late redirect may have moved the tab since the last call
             here = _current(upstream)
-            if here != st.get("refs_url"):  # moved by itself (a script, a timer): old refs point anywhere
+            if here is None or here != st.get("refs_url"):  # moved by itself, or unknown: refs point anywhere
                 st["refs"] = {}
             bad = UNKNOWN_PAGE if here is None else _mode_refusal(browser.site_of(here, root), mode, root)
             refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if bad else None
@@ -664,8 +664,8 @@ def _gate(frame, ctx, sid, upstream, root):
             _save_typed(bkey, tt, root)
         same_doc = name == OPEN and _same_document(args.get("url"), _current(upstream) if "url" in args else None)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
-        if name == SNAPSHOT:
-            st["refs"], st["refs_url"] = _refs_of(reply), here
+        if name == SNAPSHOT:  # refs only from a page the engine can name
+            st["refs"], st["refs_url"] = (_refs_of(reply), here) if here is not None else ({}, None)
         elif name in NAV_TOOLS or name in COMMIT_TOOLS or "url" in args:
             st["refs"] = {}  # the page may have changed: an old ref could point anywhere
         fresh = typed_state(bkey, root)  # the upstream may have set it aside (set_aside)

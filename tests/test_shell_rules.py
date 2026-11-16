@@ -2,6 +2,7 @@
 import os
 import unittest
 import unittest.mock
+from pathlib import Path
 
 from dashboard import shell_rules
 
@@ -290,7 +291,7 @@ class BrowserWall(unittest.TestCase):
                      f'(remote unix-socket (subpath "{self.home}/.agent-browser"))'):
             self.assertIn(part, prof)
         self.assertNotIn("(deny network-outbound (remote ip))", prof)  # the internet stays, as before
-        self.assertNotIn("(deny file-write*)", prof)
+        self.assertIn("(deny file-write*)", prof)  # write-limited from the first command (round 3)
 
     def test_profile_after_outside_content_denies_every_localhost_port(self):
         prof = shell_rules.sandbox_profile(["/work/acme"], browser=self.walls(), outside=True)
@@ -444,7 +445,7 @@ class Round2Walls(unittest.TestCase):
 
     def test_walls_and_profiles(self):
         w = self.walls()
-        self.assertEqual(w["write_paths"], [os.path.join(self.root, "team")])
+        self.assertIn(os.path.join(self.root, "team"), w["write_paths"])
         self.assertNotIn("ports", w)
         for outside in (False, True):
             prof = shell_rules.sandbox_profile([self.work], browser=w, outside=outside, profile_dir=self.pdir)
@@ -486,6 +487,95 @@ class Round2Walls(unittest.TestCase):
         # the profile file itself stays out of reach of a command it wraps
         self.assertFalse(runs(f"open({os.path.join(self.pdir, 'y.sb')!r}, 'w').write('x')", True, browser=False))
         self.assertFalse(os.path.exists(approvals))
+
+
+
+class Round3Walls(unittest.TestCase):
+    """Round 3: a browser turn's shell writes only in its edit folders and temp from the first
+    command, never Leo Bot's code or Python, and never renames a walled folder's parent."""
+
+    def setUp(self):
+        import tempfile
+        # Under the home folder like real data, so the ancestor walk stops at a home it can see.
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = os.path.realpath(self.tmp.name)
+        self.home = os.path.join(base, "home")
+        self.root = os.path.join(self.home, "data", "d")  # a data-like dir two levels below home
+        self.work = os.path.join(self.home, "work")
+        self.repo = os.path.join(self.home, "app")  # a REPO-like dir
+        self.site = os.path.join(base, "py", "lib", "site-packages")  # a site-packages-like dir
+        for d in (os.path.join(self.home, ".agent-browser"), os.path.join(self.root, "run"),
+                  os.path.join(self.root, "team", "sandbox"), self.work, os.path.join(self.repo, "dashboard"),
+                  self.site):
+            os.makedirs(d)
+        self.pdir = os.path.join(self.root, "team", "sandbox")
+
+    def walls(self):
+        with unittest.mock.patch.object(shell_rules, "REPO", Path(self.repo)), \
+                unittest.mock.patch.object(shell_rules, "_python_dirs", return_value=[self.site]):
+            return shell_rules.browser_walls(self.root, required=True, home=self.home, profile_dir=self.pdir)
+
+    def test_walls_list_code_python_and_ancestors(self):
+        w = self.walls()
+        for d in (self.repo, self.site, os.path.join(self.root, "team"), os.path.join(self.root, "run"),
+                  os.path.join(self.home, ".agent-browser"), self.pdir):
+            self.assertIn(d, w["write_paths"] + w["paths"])
+        for a in (self.root, os.path.join(self.home, "data"), os.path.join(self.root, "team")):
+            self.assertIn(a, w["ancestors"])
+        self.assertNotIn(self.home, w["ancestors"])  # stops before the home folder
+        self.assertNotIn("/", w["ancestors"])
+        prof = shell_rules.sandbox_profile([self.work], browser=w, outside=False, profile_dir=self.pdir)
+        self.assertIn("(deny file-write*)", prof)  # write-limited before outside content too
+        self.assertNotIn("(deny network-outbound (remote ip))", prof)  # the internet stays before outside content
+        self.assertIn(f'(deny file-write* (literal "{self.root}"))', prof)
+        # denies come after the allow, so an edit folder that holds a walled path does not open it
+        wide = shell_rules.sandbox_profile([self.home], browser=w, outside=False, profile_dir=self.pdir)
+        self.assertGreater(wide.index(f'(deny file-write* (subpath "{self.repo}"))'), wide.index("(allow file-write*"))
+
+    def test_plain_profile_guards_its_profile_folder_ancestors(self):
+        prof = shell_rules.sandbox_profile([self.work], profile_dir=self.pdir, home=self.home)
+        self.assertIn(f'(deny file-write* (literal "{os.path.join(self.root, "team")}"))', prof)
+        self.assertIn(f'(deny file-write* (literal "{self.root}"))', prof)
+
+    def test_python_dirs_are_the_running_interpreter(self):
+        import sys
+        dirs = shell_rules._python_dirs()
+        for d in (sys.prefix, sys.base_prefix, os.path.dirname(os.path.realpath(sys.executable))):
+            self.assertIn(os.path.realpath(d), dirs)
+
+    @unittest.skipUnless(os.path.exists(shell_rules.SANDBOX_EXEC), "macOS sandbox only")
+    def test_live(self):
+        import shlex
+        import subprocess
+        import sys
+        walls = self.walls()
+
+        def runs(script, outside, edit=None):
+            cmd = shell_rules.sandboxed(script, [edit or self.work], profile_dir=self.pdir, browser=walls,
+                                        outside=outside)
+            return subprocess.run(cmd, shell=True, cwd=self.work, capture_output=True).returncode == 0
+        team = os.path.join(self.root, "team")
+        data = os.path.join(self.home, "data")
+        for outside in (False, True):
+            self.assertFalse(runs(f"echo x > {shlex.quote(os.path.join(self.repo, 'dashboard', 'osctl.py'))}", outside))
+            self.assertFalse(runs(f"echo x > {shlex.quote(os.path.join(self.site, 'evil.pth'))}", outside))
+            probe = os.path.join(os.path.expanduser("~"), ".leobot-sandbox-probe-r3")  # outside edit and temp
+            self.addCleanup(lambda: os.path.exists(probe) and os.remove(probe))
+            self.assertFalse(runs(f"echo x > {shlex.quote(probe)}", outside), outside)
+            self.assertFalse(os.path.exists(probe))
+            # no rename of a walled folder or any of its parents
+            for src in (self.root, data, team):
+                self.assertFalse(runs(f"mv {shlex.quote(src)} {shlex.quote(src + '-moved')}", outside), (src, outside))
+                self.assertTrue(os.path.isdir(src))
+            # an edit folder that holds a walled one does not open it
+            self.assertFalse(runs(f"echo x > {shlex.quote(os.path.join(self.repo, 'dashboard', 'x.py'))}", outside,
+                                  edit=self.home))
+            self.assertTrue(runs(f"echo ok > {shlex.quote(os.path.join(self.work, 'ok.txt'))}", outside))
+        self.assertFalse(os.path.exists(os.path.join(self.repo, "dashboard", "osctl.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.site, "evil.pth")))
+        self.assertTrue(os.path.exists(os.path.join(self.work, "ok.txt")))
+        self.assertTrue(runs(f"{shlex.quote(sys.executable)} -c 'import tempfile; tempfile.mkstemp()'", False))
 
 
 if __name__ == "__main__":

@@ -26,11 +26,15 @@ first one, outside content or not, and the sandbox also denies the browser's bac
 browser's own CDP port, whatever port they use), the engine's folder ~/.agent-browser (its
 session sockets and saved logins: no read, write or connect), Leo Bot's <data>/run (the engine
 key, the typed text) and writes to <data>/team (approvals, browser settings, the sandbox
-profiles). With no sandbox, a browser level that can send (write, act) refuses the command (and
+profiles), Leo Bot's own code (REPO) and the Python that runs osctl (sys.prefix, sys.base_prefix,
+the folder of sys.executable). Writes go only to the edit and temp folders from the first
+command, and no folder above a walled one can be renamed (each ancestor up to the home folder
+or / is denied as itself: a rename otherwise moves the folder out from under its path rule).
+Before outside content the internet stays open. With no sandbox, a browser level that can send (write, act) refuses the command (and
 server.py refuses the turn up front); at Reads only the command runs as before.
 
-Every profile Leo Bot writes to a file also denies writes to that file's folder, so no command
-it wraps can swap the profile of the next one.
+Every profile Leo Bot writes to a file also denies writes to that file's folder, and the
+rename of each folder above it, so no command it wraps can swap the profile of the next one.
 
 The one command that runs outside the sandbox, a plain `python3 -m dashboard.osctl ...`, is
 rewritten to run Leo Bot's own osctl only: this server's own Python (sys.executable) in
@@ -181,13 +185,40 @@ def _sb_str(path):
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def browser_walls(root, required=False, home=None):
+def _python_dirs():
+    """Where the Python that runs osctl lives: sys.prefix, sys.base_prefix and the folder of
+    sys.executable (its site-packages, a .pth, the interpreter itself), as real paths."""
+    return sorted({os.path.realpath(d) for d in (sys.prefix, sys.base_prefix,
+                                                 os.path.dirname(os.path.realpath(sys.executable))) if d})
+
+
+def _ancestors(path, home):
+    """The folders above `path`, up to and excluding the home folder and /: a deny on each stops
+    a rename of a parent from moving a walled folder out from under its path rule."""
+    out = []
+    stop = {"/", os.path.realpath(str(home)), os.path.realpath(os.path.expanduser("~"))}
+    cur = os.path.dirname(path)
+    while cur and cur not in stop and cur != os.path.dirname(cur):
+        out.append(cur)
+        cur = os.path.dirname(cur)
+    return out
+
+
+def browser_walls(root, required=False, home=None, profile_dir=None):
     """What a run with a browser keeps its shell from (module notes): {"paths" (no read, write
-    or socket), "write_paths" (no write), "required"}. `required`: the browser can send, so a
-    command with no sandbox is refused. Every localhost port is denied as well."""
+    or socket), "write_paths" (no write), "ancestors" (no write on the folder itself: no rename),
+    "home", "required"}. `required`: the browser can send, so a command with no sandbox is
+    refused. Every localhost port is denied as well, and writes go only to the edit and temp
+    folders (sandbox_profile)."""
     home = Path.home() if home is None else Path(home)
-    paths = sorted({os.path.realpath(str(home / ".agent-browser")), os.path.realpath(str(Path(root) / "run"))})
-    return {"paths": paths, "write_paths": [os.path.realpath(str(Path(root) / "team"))], "required": bool(required)}
+    real = lambda p: os.path.realpath(str(p))  # noqa: E731 - one short helper
+    agent, run, team, data = real(home / ".agent-browser"), real(Path(root) / "run"), real(Path(root) / "team"), real(root)
+    pdir = real(profile_dir) if profile_dir else None
+    writes = sorted({team, real(REPO), *_python_dirs()} | ({pdir} if pdir else set()))
+    walled = [team, run, agent, real(REPO), data] + ([pdir] if pdir else [])
+    ancestors = sorted({a for p in walled for a in _ancestors(p, home)})
+    return {"paths": sorted({agent, run}), "write_paths": writes, "ancestors": ancestors,
+            "home": real(home), "required": bool(required)}
 
 
 def _browser_denies(browser):
@@ -197,45 +228,51 @@ def _browser_denies(browser):
         lines.append(f"(deny network-outbound (remote unix-socket (subpath {_sb_str(p)})))")
     for p in browser.get("write_paths") or ():
         lines.append(f"(deny file-write* (subpath {_sb_str(p)}))")
+    for p in browser.get("ancestors") or ():
+        lines.append(f"(deny file-write* (literal {_sb_str(p)}))")
     return lines
 
 
-def _own_denies(profile_dir):
-    """The folder the profile file is written to: never writable from inside it."""
-    return [f"(deny file-write* (subpath {_sb_str(os.path.realpath(str(profile_dir)))}))"] if profile_dir else []
+def _own_denies(profile_dir, home=None):
+    """The folder the profile file is written to: never writable from inside it, nor any folder
+    above it renamed."""
+    if not profile_dir:
+        return []
+    pdir = os.path.realpath(str(profile_dir))
+    return [f"(deny file-write* (subpath {_sb_str(pdir)}))"] + [
+        f"(deny file-write* (literal {_sb_str(a)}))" for a in _ancestors(pdir, Path.home() if home is None else home)]
 
 
-def sandbox_profile(writable=(), browser=None, outside=True, profile_dir=None):
-    """The sandbox-exec profile for a command run after outside content (see the module notes).
-    `browser` (browser_walls): also keep the command from the browser; with `outside` False the
-    profile is that wall alone (no other limit before outside content). `profile_dir`: where the
-    profile file goes, denied to writes."""
-    handoff = ["(deny appleevent-send)",
-               "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")"]
-    if browser is not None and not outside:
-        return "".join(["(version 1)", "(allow default)"] + handoff + _browser_denies(browser)
-                       + _own_denies(profile_dir))
+def _write_limit(writable):
+    """Writes only in the edit folders and the temp folders (never a .git hook or config)."""
     temps = {os.path.realpath(p) for p in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders")
              if p and os.path.isdir(p)}
     dirs = sorted({os.path.realpath(str(d)) for d in writable if d} | temps)
-    lines = [
-        "(version 1)",
-        "(allow default)",
-        "(deny network-outbound (remote ip))",
-    ]
-    if browser is None:  # with a browser no localhost port either
-        lines.append('(allow network-outbound (remote ip "localhost:*"))')
-    lines += [
-        '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
-        *handoff,
-        "(deny file-write*)",
-        "(allow file-write* " + " ".join(f"(subpath {_sb_str(d)})" for d in dirs)
-        + ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd"))',
-        '(deny file-write* (regex #"/\\.git/(hooks|config$)"))',
-    ]
+    return ["(deny file-write*)",
+            "(allow file-write* " + " ".join(f"(subpath {_sb_str(d)})" for d in dirs)
+            + ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd"))',
+            '(deny file-write* (regex #"/\\.git/(hooks|config$)"))']
+
+
+def sandbox_profile(writable=(), browser=None, outside=True, profile_dir=None, home=None):
+    """The sandbox-exec profile for a command run after outside content (see the module notes).
+    `browser` (browser_walls): also keep the command from the browser, write-limited from the
+    first command; with `outside` False the internet stays (only localhost is denied).
+    `profile_dir`: where the profile file goes, denied to writes with every folder above it.
+    The denies come last, so an edit folder that holds a walled path never opens it."""
+    handoff = ["(deny appleevent-send)",
+               "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")"]
+    home = (browser or {}).get("home") if home is None else home
+    lines = ["(version 1)", "(allow default)"]
+    if browser is None or outside:
+        lines.append("(deny network-outbound (remote ip))")
+        if browser is None:  # with a browser no localhost port either
+            lines.append('(allow network-outbound (remote ip "localhost:*"))')
+        lines.append('(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))')
+    lines += handoff + _write_limit(writable)
     if browser is not None:
         lines += _browser_denies(browser)
-    return "".join(lines + _own_denies(profile_dir))
+    return "".join(lines + _own_denies(profile_dir, home))
 
 
 def can_sandbox():
