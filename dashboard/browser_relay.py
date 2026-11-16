@@ -5,7 +5,9 @@ agent-browser child for that bot. The relay decides what passes:
 
   tools/list   only the engine tools in core/browser_engine.py's four sets, plus PLAN_TOOL,
                without the engine-wide inputs a bot must not set
-  tools/call   unknown tool: refused. Level off: refused. Level read: reads and navigation only.
+  tools/call   unknown tool: refused. Level off: refused. Level read: reads, navigation, and a
+               click on a ref the last snapshot calls a link (refs go stale at every
+               navigation or click).
                A url argument must be a full web address (or about:blank) whose site is not
                bound to the other browser mode; read takes no url. press passes only keys that
                type nothing, plus Enter; fill and type take one line of text. Typing is
@@ -21,11 +23,14 @@ What was typed belongs to the tab it went into (Upstream.typed_key: a bot's own 
 or that bot's own pinned tab in the owner's Chrome), not to an MCP session, and is kept on
 disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls on one real browser
 run one at a time (Upstream.lock_key: the owner Chrome is one lock for every my_chrome bot). Opening a page or a new tab
-sets the typed text aside; history, reload and tab moves bring it back, because the
-browser restores what was in those fields. A refused send keeps it too: the text is still
-in the field, so a second click is still a send. On a listed site every commit first reads
-the page's text field values (the relay's own fixed eval, FIELDS_SCRIPT): one filled field
-is the send text whatever was typed, more than one is refused. Residual risk: a send that
+sets the typed text aside, except an open of the same page with a #fragment (the same
+document, its fields keep their text); history, reload and tab moves bring it back, because
+the browser restores what was in those fields. A refused send keeps it too: the text is still
+in the field, so a second click is still a send. On a listed site, and on any site while
+text is set aside, every commit first reads the page's text field values (the relay's own
+fixed eval, FIELDS_SCRIPT): one filled field is the send text whatever was typed, more than
+one is refused. Every call but navigation first checks the page the engine is on, so a late
+redirect onto a site bound to the other mode is never read or typed on. Residual risk: a send that
 needs no typing (a one-click canned reply) is not detected, nor text in cross-origin
 frames or closed shadow roots.
 """
@@ -37,6 +42,7 @@ import re
 import threading
 import unicodedata
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from core import approvals, bots, browser
 from core.browser_engine import COMMIT_TOOLS, NAV_TOOLS, READ_TOOLS, TYPE_TOOLS
@@ -56,6 +62,9 @@ OPEN = "agent_browser_open"
 NEW_TAB = "agent_browser_tab_new"
 READ = "agent_browser_read"
 PRESS = "agent_browser_press"
+CLICK = "agent_browser_click"
+SNAPSHOT = "agent_browser_snapshot"
+LINK_ROLE = "link"  # the role a snapshot's data.refs gives a link (probed on 0.41.0)
 EVAL = "agent_browser_eval"  # the relay's own field check only: no bot ever gets eval
 EVAL_TIMEOUT_MS = 10000
 # The page's text field values, for the relay alone (docs/browser.md, "Reading field values").
@@ -96,6 +105,10 @@ MODE_LABELS = {"bot": "the bot browser", "my_chrome": "the owner's Chrome"}
 SITE_MODE = "{site} is set to open only in {mode_label}. This bot uses {other_label}, so it did not open it."
 NO_PLAN = ("This would send what you typed, and no approved send plan matches it. Call leobot_plan_sends with "
            "the page address and the exact text, then stop: the owner approves it in Approvals.")
+FIELD_NO_PLAN = ("A field on this page holds text, so this click could send it, and no approved send plan matches "
+                 "that text. To send it, call leobot_plan_sends with the page address and the exact text, then "
+                 "stop: the owner approves it in Approvals. Otherwise clear the field with fill and an empty text, "
+                 "then click again. Nothing was clicked.")
 CAPPED = ("{site} reached today's limit of {daily} sends. Nothing was sent. Try again tomorrow or ask the owner "
           "to raise the limit in Settings, Browser.")
 REPORT_ONLY = "This scheduled job only reports, so it does not send. Nothing was sent."
@@ -126,6 +139,12 @@ NEW_TAB_ARG = "newTab"
 CHROME_NEW_TAB = ("New tabs are off in the owner's Chrome, so this bot stays in its own tab. Click without "
                   "newTab, or open the link's address with agent_browser_open. This call was not performed.")
 READ_URL = "Open the page first with agent_browser_open, then read it without a url. This call was not performed."
+READ_CLICK = ("This bot may only read in the browser, so it clicks links only: take agent_browser_snapshot, then "
+              "click a link by its @ref from that snapshot (a click or a page change makes the refs stale). "
+              "This call was not performed.")
+READ_SEND = ("A field on this page holds text, so this click could send it, and this bot may only read in the "
+             "browser. Nothing was clicked.")
+NO_TOOLS = "The browser's tools could not be read, so this call was not performed. Try again in a moment."
 UNKNOWN_PAGE = "The browser could not tell which page it is on, so the result was withheld. Open a page to go on."
 NO_CHECK = "The page could not be checked for typed text, so nothing was clicked."
 HIDDEN_TYPED = ("What you typed is not in any field this page shows, so it could go out unseen. Open the page "
@@ -236,6 +255,10 @@ class Upstream:
         """The engine's own URL for the active tab, or None when it cannot tell."""
         raise NotImplementedError
 
+    def known_tools(self):
+        """The engine's last tools/list (a list of tools) without starting anything, or None."""
+        return None
+
 
 _BROWSER_LOCKS = {}
 
@@ -245,7 +268,7 @@ def _state(upstream):
     with _LOCK:
         st = getattr(upstream, "_gate_state", None)
         if st is None:
-            st = {"blocked": None, "schemas": {}}
+            st = {"blocked": None, "schemas": {}, "refs": {}}  # refs: {ref: role} of the last snapshot
             upstream._gate_state = st
         return st
 
@@ -493,8 +516,9 @@ def _plan(rid, arguments, ctx, setting, mode, root):
     return _text(rid, HELD_PLAN.format(n=len(held)), False)
 
 
-def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root):
-    """A commit after typing: it would send `typed` from the page at `url`."""
+def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root, no_plan=NO_PLAN):
+    """A commit after typing: it would send `typed` from the page at `url`. `no_plan`: the line
+    when no plan matches (what the bot typed, or text that was already in the page's field)."""
     if ctx.get("report"):
         return _text(rid, REPORT_ONLY), sid
     site = browser.site_of(url, root)
@@ -508,7 +532,7 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     if status == "capped":
         return _text(rid, CAPPED.format(site=site, daily=daily)), sid
     if status != "ok":
-        return _text(rid, NO_PLAN), sid
+        return _text(rid, no_plan), sid
     # From here the click is sent: whatever comes back, the typed text may have gone out.
     tt["typed"] = tt["aside"] = ""
     _save_typed(bkey, tt, root)
@@ -537,7 +561,7 @@ def _gate(frame, ctx, sid, upstream, root):
     level = setting["level"]
     if level == "off":
         return _text(rid, OFF), sid
-    if level == "read" and name not in READ_TOOLS and name not in NAV_TOOLS:
+    if level == "read" and name not in READ_TOOLS and name not in NAV_TOOLS and name != CLICK:
         return _text(rid, READ_LEVEL.format(name=name)), sid
     mode = _mode_of(upstream, setting)
     if mode == "my_chrome" and name in CHROME_TAB_TOOLS:
@@ -549,6 +573,12 @@ def _gate(frame, ctx, sid, upstream, root):
     if name == READ and "url" in arguments:  # a fetch of another page is a hidden navigation
         return _text(rid, READ_URL), sid
     st = _state(upstream)
+    lkey, bkey = _keys_of(upstream, mode, ctx, root)  # bkey: where this tab's typed text lives
+    if not st["schemas"]:  # a fresh upstream: learn every tool's inputs before the first call passes
+        with _browser_lock(lkey):
+            sid = _seed_schemas(upstream, rid, sid)
+        if not st["schemas"]:
+            return _text(rid, NO_TOOLS), sid
     args = _clean(arguments, st["schemas"].get(name))
     if mode == "my_chrome":
         args.pop(NEW_TAB_ARG, None)
@@ -561,7 +591,6 @@ def _gate(frame, ctx, sid, upstream, root):
         if _has_control(args["text"]):
             return _text(rid, CONTROL_TEXT), sid
     sends = name in COMMIT_TOOLS and key != "safe"  # click, select, check, uncheck, Enter
-    lkey, bkey = _keys_of(upstream, mode, ctx, root)  # bkey: where this tab's typed text lives
     with _browser_lock(lkey):
         if "url" in args:
             refusal = _url_refusal(args["url"], mode, root)
@@ -569,6 +598,15 @@ def _gate(frame, ctx, sid, upstream, root):
                 return _text(rid, refusal), sid
         if st["blocked"] and name not in NAV_TOOLS:
             return _text(rid, st["blocked"]), sid
+        if name not in NAV_TOOLS:  # a late redirect may have moved the tab since the last call
+            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _page_refusal(upstream, mode, root) else None
+            if refusal:
+                return _text(rid, refusal), sid
+        if level == "read" and name == CLICK:
+            sel = args.get("selector")
+            ref = sel[1:] if isinstance(sel, str) and sel.startswith("@") else None
+            if ref is None or st["refs"].get(ref) != LINK_ROLE:
+                return _text(rid, READ_CLICK), sid
         tt = typed_state(bkey, root)
         unknown_typed = tt is None
         if unknown_typed:  # a corrupt record: typing still works and writes a clean one
@@ -580,9 +618,11 @@ def _gate(frame, ctx, sid, upstream, root):
             if url is None:
                 return _text(rid, NO_PAGE if tt["typed"] else UNKNOWN_PAGE), sid
             typed = " ".join(tt["typed"].split())  # kept raw, compared normalized
-            if browser.site_of(url, root):
+            from_field = False
+            if browser.site_of(url, root) or tt["aside"]:
                 # On a listed site the page's own fields decide: text can sit there without a
-                # type call (prefilled, restored, typed onto), so it is what would go out.
+                # type call (prefilled, restored, typed onto), so it is what would go out. On any
+                # site while text is set aside too: a page can keep it in a field after a move.
                 fields, sid = _read_fields(upstream, rid, sid, ctx)
                 if fields is None:
                     return _text(rid, NO_CHECK), sid
@@ -595,9 +635,13 @@ def _gate(frame, ctx, sid, upstream, root):
                 if typed and fields[0] != typed:
                     return _text(rid, TYPED_MISMATCH), sid
                 if fields:
-                    typed = fields[0]
+                    from_field, typed = not typed, fields[0]
+            if typed and level == "read":  # nothing is typed at read: this is text the page holds
+                return _text(rid, READ_SEND), sid
             if typed:
-                reply, sid = _send(rid, name, args, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root)
+                reply, sid = _send(rid, name, args, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root,
+                                   no_plan=FIELD_NO_PLAN if from_field else NO_PLAN)
+                st["refs"] = {}
                 refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _ok(reply) else None
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
@@ -606,11 +650,16 @@ def _gate(frame, ctx, sid, upstream, root):
                 return _text(rid, TOO_LONG), sid
             tt["typed"] += args["text"]  # raw and unseparated: two parts of one word stay one word
             _save_typed(bkey, tt, root)
+        same_doc = name == OPEN and _same_document(args.get("url"), _current(upstream) if "url" in args else None)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
+        if name == SNAPSHOT:
+            st["refs"] = _refs_of(reply)
+        elif name in NAV_TOOLS or name in COMMIT_TOOLS or "url" in args:
+            st["refs"] = {}  # the page may have changed: an old ref could point anywhere
         fresh = typed_state(bkey, root)  # the upstream may have set it aside (set_aside)
         if fresh is not None:
             tt, before = fresh, dict(fresh)
-        if name in (OPEN, NEW_TAB):
+        if name in (OPEN, NEW_TAB) and not same_doc:
             tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
         elif name in RESTORES:
             tt["typed"], tt["aside"] = _join(tt["aside"], tt["typed"]), ""
@@ -621,6 +670,51 @@ def _gate(frame, ctx, sid, upstream, root):
             if refusal:
                 return _text(rid, refusal), sid
         return reply, sid
+
+
+def _same_document(target, current):
+    """An open of `target` from `current` stays in the same document: a #fragment move on the
+    same address (scheme, host, path and query alike). Such a page keeps its fields' text."""
+    if not isinstance(target, str) or "#" not in target or not isinstance(current, str):
+        return False
+    try:
+        a, b = urlsplit(target.strip()), urlsplit(current.strip())
+    except ValueError:
+        return False
+    return (a.scheme.lower(), a.netloc.lower(), a.path or "/", a.query) == \
+        (b.scheme.lower(), b.netloc.lower(), b.path or "/", b.query)
+
+
+def _refs_of(reply):
+    """{ref: role} from a snapshot reply's structuredContent.response.data.refs ({} when absent)."""
+    if not _ok(reply):
+        return {}
+    sc = reply["result"].get("structuredContent")
+    resp = sc.get("response") if isinstance(sc, dict) else None
+    data = resp.get("data") if isinstance(resp, dict) else None
+    refs = data.get("refs") if isinstance(data, dict) else None
+    if not isinstance(refs, dict):
+        return {}
+    return {k: v["role"] for k, v in refs.items()
+            if isinstance(k, str) and isinstance(v, dict) and isinstance(v.get("role"), str)}
+
+
+def _seed_schemas(upstream, rid, sid):
+    """Learn the engine's tool inputs: its last known tools/list, else one tools/list now."""
+    try:
+        tools = upstream.known_tools()
+    except Exception:  # noqa: BLE001 - unknown is the same as none: ask the engine
+        tools = None
+    if not isinstance(tools, list) or not tools:
+        try:
+            reply, sid = upstream.forward({"jsonrpc": "2.0", "id": rid, "method": "tools/list", "params": {}}, sid)
+        except Exception:  # noqa: BLE001 - the caller refuses when nothing was learned
+            return sid
+        result = reply.get("result") if isinstance(reply, dict) else None
+        tools = result.get("tools") if isinstance(result, dict) else None
+    if isinstance(tools, list):
+        learn_schemas(upstream, tools)
+    return sid
 
 
 def _strip_schema(tool, schemas):
@@ -662,6 +756,8 @@ def handle(frame, ctx, mcp_session_id, upstream, root=bots.ROOT):
         setting = browser.bot_setting(ctx["ws"], ctx["bot"], root)
         chrome = _mode_of(upstream, setting) == "my_chrome"
         hidden = CHROME_TAB_TOOLS if chrome else frozenset()
+        if setting["level"] == "read":  # always refused there; click stays (links only)
+            hidden = hidden | ((TYPE_TOOLS | COMMIT_TOOLS) - {CLICK})
         # The plan tool only where a send can happen: at read (or off) it is refused anyway.
         plan = [dict(PLAN_SCHEMA)] if setting["level"] in ("write", "act") else []
         listed = [_strip_schema(t, schemas) for t in tools

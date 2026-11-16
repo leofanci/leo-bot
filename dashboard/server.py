@@ -2244,12 +2244,13 @@ BROWSER_NOTE = (
     "The send rule: after you type on a page, any click or key press there is a send. At Read + write, a "
     "send needs an approved send plan first: call `leobot_plan_sends` with each page address and the exact "
     "text, then stop; the owner approves it in Approvals and you send it on your next run. At Acts on its "
-    "own, a send goes out at once and counts toward that site's daily limit; past the limit it is refused "
-    "until tomorrow.\n"
+    "own, a send goes out at once and counts toward a listed site's daily limit; past the limit it is "
+    "refused until tomorrow.\n"
     "Your level: {level}.{report}")
 _BROWSER_WHERE = {"bot": "your own browser, with the logins the owner saved for you",
                   "my_chrome": "your own tab of the owner's Chrome (tab tools are off there)"}
-_BROWSER_LEVELS = {"read": "Reads only (open and read pages; no typing, no clicks that change a page)",
+_BROWSER_LEVELS = {"read": "Reads only (open and read pages, and follow links: snapshot, then click a link by its @ref; "
+                           "no typing, no other clicks)",
                    "write": "Read + write", "act": "Acts on its own"}
 _BROWSER_REPORT = " This scheduled job only reports, so nothing is sent."
 

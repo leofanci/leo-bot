@@ -136,6 +136,26 @@ class Install(unittest.TestCase):
         self.assertEqual([c[0] == "npm" for c in calls], [True, False])
         self.assertEqual(calls[1][1:], ["install"])
 
+    def test_engine_install_that_deletes_the_binary_reads_missing(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        data = Path(d.name) / "data"
+        binary = data / "tools" / "agent-browser" / be.VERSION / "node_modules" / ".bin" / "agent-browser"
+        ok = mock.Mock(returncode=0, stderr="", stdout="")
+
+        def fake(argv, **kw):
+            if argv[0] == "npm":
+                _exe(binary)
+            else:  # `<binary> install` ends fine but leaves no binary behind
+                binary.unlink()
+            return ok
+
+        with mock.patch.object(paths, "DATA", data), mock.patch("subprocess.run", fake), \
+                mock.patch("shutil.which", return_value=None):
+            st = be.install()
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("engine binary is missing", st["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()

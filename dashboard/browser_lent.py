@@ -185,6 +185,12 @@ class RunnerChromeUpstream(browser_relay.Upstream):
             browser_relay.set_aside(self.typed_key, self.root)
         return reply, mcp_session_id
 
+    def known_tools(self):
+        """This person's runner's last tools/list, kept on the server, or None."""
+        if self.shared:
+            return None
+        return copy.deepcopy(_saved_tools(self.root, self.owner))
+
     def current_url(self):
         if self.shared or self.closed:
             return None

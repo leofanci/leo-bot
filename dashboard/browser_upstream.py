@@ -4,15 +4,18 @@ One child per (workspace, bot), started on the first call and kept in POOL. It r
 `agent-browser mcp --tools core` (core/browser_engine.mcp_argv) and speaks line-delimited
 JSON-RPC over stdin and stdout; stderr is drained so a chatty child never blocks.
 
-  bot        the bot's own headless browser. Session "<ws>--<bot>" in namespace "leobot",
+  bot        the bot's own headless browser. Session "<ws>-<epoch>--<bot>" in namespace "leobot",
              logins saved and restored under the session's own name (encrypted with
              key_file's key, kept 365 days).
   my_chrome  the owner's running Chrome, attached over its remote debugging port
              (find_chrome_debug_url, checked again on every call), each bot in its own pinned
-             tab. Session "<ws>--<bot>--chrome", so it never shares a daemon with the bot
+             tab. Session "<ws>-<epoch>--<bot>--chrome", so it never shares a daemon with the bot
              browser. Chrome off: every call answers CHROME_OFF and nothing starts. Chrome
              quit or restarted: the session is closed and, when Chrome is back, started again.
              The engine's close leaves an attached Chrome running.
+
+The epoch is the workspace's (core/browser.py epochs), so a recreated slug never meets an old
+session; a name over 24 characters is hashed (browser_relay.session_name).
 
 The engine reads ~/.agent-browser/config.json and ./agent-browser.json on its own, and its
 environment only overrides keys that are set. So the child gets Leo Bot's own config file
@@ -67,7 +70,7 @@ import traceback
 from pathlib import Path
 from urllib.parse import urlparse
 
-from core import aes_gcm, bots, browser, browser_engine
+from core import aes_gcm, bots, browser, browser_engine, runners
 from dashboard import browser_proxy, browser_relay, deployment
 from dashboard.browser_relay import MAX_SESSION, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
@@ -559,6 +562,11 @@ class BrowserUpstream(browser_relay.Upstream):
 
     # -- the Upstream interface ---------------------------------------------------------------
 
+    def known_tools(self):
+        """The engine's last tools/list for this binary (memory, then <data>/run), or None."""
+        listed = self._cached_tools()
+        return listed.get("tools") if listed else None
+
     def forward(self, frame, mcp_session_id):
         if not isinstance(frame, dict):
             return _call_error({}, "invalid request"), mcp_session_id
@@ -777,7 +785,12 @@ class Pool:
                 self._logins.pop(sess).stop.set()  # its window's daemon is settled by the delete tidy
         for up in lent:  # the owner's runners close that workspace's tabs now, not after 10 minutes
             up.close(WS_DELETED)
-        for hub, owner in {(up.hub, up.owner) for up in lent}:
+        told = {(up.hub, up.owner) for up in lent}
+        if deployment.mode() == "server":
+            # The owner's lending runners hear it too when this process kept no lent row for them
+            # (a restart since the tab was lent): their tabs of that epoch close now as well.
+            told.add((runners.HUB, "owner"))  # the owner's own runners (core/runners.py)
+        for hub, owner in told:
             for rid in hub.lenders(owner):
                 hub.notify(owner, {"op": "close", "ws": ws, "epoch": epoch, "runner": rid})
         ups = [up for _, up in items]

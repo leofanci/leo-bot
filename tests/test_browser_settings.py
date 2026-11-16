@@ -21,6 +21,19 @@ class Settings(unittest.TestCase):
         self.assertEqual(browser.bot_setting("demo", "b1", self.root), {"level": "read", "mode": "my_chrome"})
         self.assertEqual(browser.bot_setting("demo", "b2", self.root), {"level": "off", "mode": "bot"})
 
+    def test_unicode_site_name_matches_its_pages(self):
+        def u(rest):
+            return "https" + "://" + rest
+        browser.set_site("b\u00fccher.test", None, 5, self.root)
+        browser.set_site("\uff41\uff43\uff4d\uff45.test", None, 3, self.root)  # fullwidth letters
+        self.assertIn("xn--bcher-kva.test", browser.sites(self.root))
+        self.assertIn("acme.test", browser.sites(self.root))
+        self.assertEqual(browser.site_of(u("www.b\u00fccher.test/x"), self.root), "xn--bcher-kva.test")
+        self.assertEqual(browser.site_of(u("xn--bcher-kva.test/x"), self.root), "xn--bcher-kva.test")
+        self.assertEqual(browser.site_of(u("acme.test/"), self.root), "acme.test")
+        self.assertTrue(browser.remove_site("B\u00dcCHER.test", self.root))
+        self.assertNotIn("xn--bcher-kva.test", browser.sites(self.root))
+
     def test_rejects_unknown_level(self):
         with self.assertRaises(ValueError):
             browser.set_bot("demo", "b1", "root", "bot", self.root)

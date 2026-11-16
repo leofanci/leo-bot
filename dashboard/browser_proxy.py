@@ -25,6 +25,7 @@ Nothing here logs a proxy address. Errors name the site only.
 """
 import base64
 import hmac
+import os
 import secrets
 import select
 import socket
@@ -211,21 +212,29 @@ class _Handler(socketserver.BaseRequestHandler):
             body = self._body(headers, rest)
             if body is None:
                 return
+        up = None
         try:
             if proxy is not None:
                 up = self._via(proxy, host, port, method, target, version, headers, rest if method == "CONNECT" else body)
             else:
                 up = socket.create_connection((host, port), timeout=CONNECT_SECONDS)
-                if method == "CONNECT":
-                    client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
-                    up.sendall(rest)
-                else:
+                if method != "CONNECT":
                     up.sendall(self._request(method, path, version, headers, None) + body)
         except OSError:
+            if up is not None:
+                _close_quietly(up)
             line = f"The proxy for {site} did not answer." if proxy is not None else "The site did not answer."
             return self._reply(502, line)
         if up is None:
             return
+        if proxy is None and method == "CONNECT":
+            # Past the 200 the client reads a tunnel: a failure now closes it, never a 502 inside it.
+            try:
+                client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                up.sendall(rest)
+            except OSError:
+                _close_quietly(up, client)
+                return
         with up:
             up.settimeout(None)
             client.settimeout(None)
@@ -247,6 +256,11 @@ class _Handler(socketserver.BaseRequestHandler):
             return None
         need = int(raw)
         body = rest[:need]
+        if names.get("expect", "").lower() == "100-continue" and len(body) < need:
+            try:  # the browser waits for this before it sends the body
+                self.request.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+            except OSError:
+                return None
         try:
             while len(body) < need:
                 chunk = self.request.recv(min(65536, need - len(body)))
@@ -261,7 +275,7 @@ class _Handler(socketserver.BaseRequestHandler):
         """The request head sent on: no proxy headers of the browser, Connection: close (one
         request per connection, so a kept-alive connection never reaches another host)."""
         keep = [h for h in headers if h and h.split(":", 1)[0].strip().lower()
-                not in ("proxy-authorization", "proxy-connection", "connection", "keep-alive")]
+                not in ("proxy-authorization", "proxy-connection", "connection", "keep-alive", "expect")]
         lines = [f"{method} {target} {version}"] + keep + ["Connection: close"]
         if proxy_auth:
             lines.append("Proxy-Authorization: " + proxy_auth)
@@ -293,19 +307,31 @@ class _Handler(socketserver.BaseRequestHandler):
                 up.close()
                 self._reply(502, "The proxy refused the connection.")
                 return None
-            self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n" + extra)
-            if rest:  # what the browser sent right after its CONNECT goes on through the tunnel
-                up.sendall(rest)
-            return up
         except OSError:
             up.close()
             raise
+        try:  # past the 200 a failure closes the tunnel, never a 502 inside it
+            self.request.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n" + extra)
+            if rest:  # what the browser sent right after its CONNECT goes on through the tunnel
+                up.sendall(rest)
+        except OSError:
+            _close_quietly(up, self.request)
+            return None
+        return up
 
     def _reply(self, code, line, extra=""):
         body = line.encode()
         try:
             self.request.sendall((f"HTTP/1.1 {code} {line}\r\n{extra}Content-Type: text/plain\r\n"
                                   f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n").encode() + body)
+        except OSError:
+            pass
+
+
+def _close_quietly(*socks):
+    for s in socks:
+        try:
+            s.close()
         except OSError:
             pass
 
@@ -352,22 +378,27 @@ class Router:
 _ROUTERS = {}
 _LOCK = threading.Lock()
 _CACHE = {}  # str(root) -> (browser.json stat key, (sites, proxies))
+_stat = os.stat  # its own name, so a test can hold the stat still
 
 
 def _settings(root):
     """(sites, site proxies) of this data root, read again only when team/browser.json changed
-    (it is always replaced whole, so its inode, size or mtime moves)."""
+    (it is always replaced whole, so its inode, size, mtime or ctime moves; a write in this
+    process also bumps browser.GENERATION, in case a reused inode keeps all four). The stat is
+    taken before the one read, so a write between them is read again next time."""
+    gen = browser.GENERATION
     try:
-        st = browser._path(root).stat()
-        stamp = (st.st_ino, st.st_size, st.st_mtime_ns)
+        st = _stat(browser._path(root))
+        stamp = (st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, gen)
     except OSError:
-        stamp = None
+        stamp = (None, gen)
     key = str(root)
     with _LOCK:
         hit = _CACHE.get(key)
         if hit is not None and hit[0] == stamp:
             return hit[1]
-    value = (browser.sites(root), browser.site_proxies(root))
+    data = browser.load(root)
+    value = (browser.sites_from(data), browser.site_proxies_from(data))
     with _LOCK:
         _CACHE[key] = (stamp, value)
     return value

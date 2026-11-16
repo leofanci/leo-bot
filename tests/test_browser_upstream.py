@@ -582,6 +582,17 @@ class SharedChrome(Base):
         self.assertTrue(held and all(held))
 
 
+class KnownTools(Base):
+    def test_known_tools_come_from_the_last_list_without_a_start(self):
+        up = self.pool.get("acme", "b1", "bot", self.root)
+        self.assertIsNone(up.known_tools())
+        tools = [{"name": P + "open", "inputSchema": {"type": "object", "properties": {"url": {}}}}]
+        (self.root / "run").mkdir(exist_ok=True)
+        (self.root / "run" / bu.TOOLS_NAME).write_text(json.dumps({"binary": str(FAKE), "tools": tools}))
+        self.assertEqual(up.known_tools(), tools)
+        self.assertEqual(self.log("start"), [])  # nothing started to know them
+
+
 class Sweeper(Base):
     def test_sweeper_thread_sweeps_until_close_all(self):
         swept = threading.Event()

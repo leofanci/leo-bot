@@ -62,6 +62,25 @@ class AesGcm(unittest.TestCase):
         self.assertEqual(aes_gcm.encrypt(bytes(32), bytes(12), bytes(16)).hex(),
                          "cea7403d4d606b6e074ec5d3baf39d18d0d1c8a799996bf0265b98b5d48ab919")  # GCM test 14
 
+    def test_gcm_test_case_16(self):
+        # McGrew and Viega, GCM test case 16: AES-256, 96-bit IV, AAD, four blocks with a partial last one.
+        key = bytes.fromhex("feffe9928665731c6d6a8f9467308308" * 2)
+        iv = bytes.fromhex("cafebabefacedbaddecaf888")
+        plain = bytes.fromhex("d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a72"
+                              "1c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b39")
+        aad = bytes.fromhex("feedfacedeadbeeffeedfacedeadbeefabaddad2")
+        sealed = aes_gcm.encrypt(key, iv, plain, aad)
+        self.assertEqual(sealed[:-16].hex(), "522dc1f099567d07f47f37a32a84427d643a8cdcbfe5c0c97598a2bd2555d1aa"
+                                             "8cb08e48590dbb3da7b08b1056828838c5f61e6393ba7a0abcc9f662")
+        self.assertEqual(sealed[-16:].hex(), "76fc6ece0f4e1768cddf8853bb2d551b")
+        self.assertEqual(aes_gcm.decrypt(key, iv, sealed, aad), plain)
+        bad = bytearray(aad)
+        bad[-1] ^= 1  # tampered AAD: the tag no longer checks
+        with self.assertRaises(ValueError):
+            aes_gcm.decrypt(key, iv, sealed, bytes(bad))
+        with self.assertRaises(ValueError):
+            aes_gcm.decrypt(key, iv, sealed)  # AAD left out
+
     def test_tag_is_checked(self):
         key = "ab" * 32
         blob = aes_gcm.seal_file(key, bytes(12), b'{"cookies": []}')
@@ -515,6 +534,8 @@ class _KeepAlive:
 
     def __init__(self):
         self.requests = []
+        self.heads = []  # every request head, whole
+        self.bodies = []
         self.sock = socket.socket()
         self.sock.bind((LOOPBACK, 0))
         self.sock.listen(5)
@@ -543,6 +564,16 @@ class _KeepAlive:
                 while b"\r\n\r\n" in data:
                     head, _, data = data.partition(b"\r\n\r\n")
                     self.requests.append(head.split(b"\r\n")[0].decode())
+                    self.heads.append(head.decode())
+                    length = next((int(h.split(b":", 1)[1]) for h in head.split(b"\r\n")[1:]
+                                   if h.lower().startswith(b"content-length:")), 0)
+                    while len(data) < length:
+                        more = conn.recv(4096)
+                        if not more:
+                            return
+                        data += more
+                    self.bodies.append(data[:length])
+                    data = data[length:]
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
 
     def close(self):
@@ -606,10 +637,66 @@ class RouterOneRequest(Base):
         s2.sendall(f"POST {HTTP}{LOOPBACK}:1/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\nProxy-Authorization: {auth}\r\n\r\n".encode())
         self.assertIn(b" 501 ", s2.recv(4096))
 
+    def test_expect_100_continue_is_answered_and_not_forwarded(self):
+        origin = _KeepAlive()
+        self.addCleanup(origin.close)
+        port, auth = self.router()
+        s = socket.create_connection((LOOPBACK, port), timeout=10)
+        self.addCleanup(s.close)
+        s.sendall((f"POST {HTTP}{LOOPBACK}:{origin.port}/f HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n"
+                   f"Expect: 100-continue\r\nProxy-Authorization: {auth}\r\n\r\n").encode())
+        self.assertEqual(s.recv(4096), b"HTTP/1.1 100 Continue\r\n\r\n")  # the body waits for this
+        s.sendall(b"abc")
+        got = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            got += chunk
+        self.assertTrue(got.endswith(b"ok"))
+        time.sleep(0.2)
+        self.assertEqual(origin.bodies, [b"abc"])
+        self.assertNotIn("expect", origin.heads[0].lower())
+
+    def test_direct_connect_failure_after_200_closes_quietly(self):
+        port, auth = self.router()
+        real = socket.create_connection
+
+        class Dead:
+            def sendall(self, data):
+                raise BrokenPipeError("gone")
+
+            def close(self):
+                pass
+
+        def fake(addr, *a, **kw):
+            return Dead() if addr == ("other.example", 443) else real(addr, *a, **kw)
+        with mock.patch.object(browser_proxy.socket, "create_connection", side_effect=fake):
+            s = real((LOOPBACK, port), timeout=10)
+            self.addCleanup(s.close)
+            s.sendall((f"CONNECT other.example:443 HTTP/1.1\r\nHost: other.example:443\r\n"
+                       f"Proxy-Authorization: {auth}\r\n\r\nhello").encode())
+            got = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                got += chunk
+        self.assertEqual(got, b"HTTP/1.1 200 Connection established\r\n\r\n")  # no 502 inside the tunnel
+
+    def test_settings_seen_when_a_write_keeps_the_stat(self):
+        browser.set_site(SITE, "bot", None, self.local, proxy=HTTP + LOOPBACK + ":9")
+        self.addCleanup(browser_proxy.close_all)
+        fixed = os.stat(browser._path(self.local))
+        with mock.patch.object(browser_proxy, "_stat", return_value=fixed):
+            self.assertIsNotNone(browser_proxy.router_url(self.local))
+            browser.set_site(SITE, "bot", None, self.local)  # a reused inode with the same size and times
+            self.assertIsNone(browser_proxy.router_url(self.local))
+
     def test_settings_read_only_when_changed(self):
         browser.set_site(SITE, "bot", None, self.local, proxy=HTTP + LOOPBACK + ":9")
         self.addCleanup(browser_proxy.close_all)
-        with mock.patch.object(browser_proxy.browser, "site_proxies", wraps=browser.site_proxies) as read:
+        with mock.patch.object(browser_proxy.browser, "site_proxies_from", wraps=browser.site_proxies_from) as read:
             first = browser_proxy.router_url(self.local)
             for _ in range(5):
                 self.assertEqual(browser_proxy.router_url(self.local), first)

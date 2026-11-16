@@ -10,8 +10,10 @@
   retired           epochs of deleted workspaces whose sessions may still be on disk: the only
                     names the start sweep touches (other Leo Bot data roots share the namespace)
 
-Bots default to level off, mode bot. Sites hold per-site overrides: a mode that
-beats the bot's, and a daily action cap. A site with neither stays listed.
+Bots default to level off, mode bot. Sites hold per-site overrides: a mode the site opens
+in only (a bot in the other mode is refused there, never moved to that mode), and a daily
+action cap. A site with neither stays listed. Site names are stored as host_of reads a
+host (NFKC, IDNA ascii), so a Unicode name matches the pages of that site.
 Hosts match by suffix, so www.linkedin.com belongs to linkedin.com but
 evil-linkedin.com does not. Stored sites replace the defaults once saved.
 
@@ -29,6 +31,9 @@ from urllib.parse import unquote, urlsplit
 from core import bots
 
 LOCK = threading.Lock()
+# Bumped by every write in this process: a reader caching browser.json by its stat also keys on
+# it, so a rewrite that lands on a reused inode with the same size and times is still seen.
+GENERATION = 0
 LEVELS = ("off", "read", "write", "act")
 MODES = ("bot", "my_chrome")
 DEFAULT_SITES = {
@@ -52,7 +57,9 @@ def load(root=bots.ROOT):
 
 
 def _save(root, data):
+    global GENERATION
     bots._atomic_write(_path(root), json.dumps(data, indent=2) + "\n")
+    GENERATION += 1
 
 
 def _update(root, fn):
@@ -91,7 +98,12 @@ def set_bot(ws, bot, level, mode, root=bots.ROOT):
 
 
 def sites(root=bots.ROOT):
-    stored = load(root).get("sites")
+    return sites_from(load(root))
+
+
+def sites_from(data):
+    """sites() of one load() result, so a caller can take sites and proxies from one read."""
+    stored = _dict(data).get("sites")
     src = stored if isinstance(stored, dict) else DEFAULT_SITES
     src = {k: v for k, v in src.items() if isinstance(k, str)}
     out = {}
@@ -106,16 +118,18 @@ def sites(root=bots.ROOT):
 
 
 def _host(value):
+    """A site name as stored: the host host_of reads from it (NFKC, IDNA ascii), so the name
+    matches the pages of that site whatever form it was typed in."""
     if not isinstance(value, str):
         return None
-    text = value.strip().lower()
+    text = value.strip()
     if not text:
         return None
-    try:
-        host = urlsplit(text if "//" in text else "//" + text).hostname
-    except ValueError:
-        return None
-    return host.rstrip(".") if host else None
+    if text.startswith("//"):
+        text = "http:" + text
+    elif "//" not in text:
+        text = "http://" + text + "/"
+    return host_of(text)
 
 
 PROXY_MAX = 500
@@ -163,7 +177,12 @@ def mask_proxy(url):
 
 def site_proxies(root=bots.ROOT):
     """{site: proxy URL} of the listed sites with a proxy, unmasked: for the proxy router only."""
-    stored = load(root).get("sites")
+    return site_proxies_from(load(root))
+
+
+def site_proxies_from(data):
+    """site_proxies() of one load() result."""
+    stored = _dict(data).get("sites")
     if not isinstance(stored, dict):
         return {}
     out = {}

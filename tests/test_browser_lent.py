@@ -407,6 +407,35 @@ class CloseOnDelete(Base):
         self.assertEqual([j for j in other.jobs if j["op"] == "close"], [])  # only the person who lent
         self.assertEqual(self.hub._turns, {})  # a close note is not kept waiting for an answer
 
+    def test_delete_notifies_the_owners_lenders_with_no_lent_row_here(self):
+        # A server restarted since the tab was lent keeps no _lent row: the owner's runners still
+        # hear about the delete, and close that workspace's tabs at once.
+        r = self.runner("rn-o", "owner", answer=lambda job: None)
+        pool = bu.Pool()
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "server"}), \
+                mock.patch.object(bu.runners, "HUB", self.hub):
+            pool.kill_where("demo", EPOCH)
+        deadline = time.time() + 2
+        while not any(j["op"] == "close" for j in r.jobs) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual([(j["ws"], j["epoch"], j["runner"]) for j in r.jobs if j["op"] == "close"],
+                         [("demo", EPOCH, "rn-o")])
+
+    def test_delete_on_a_local_install_notifies_no_runner(self):
+        r = self.runner("rn-o", "owner", answer=lambda job: None)
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}), \
+                mock.patch.object(bu.runners, "HUB", self.hub):
+            bu.Pool().kill_where("demo", EPOCH)
+        time.sleep(0.3)
+        self.assertEqual([j for j in r.jobs if j["op"] == "close"], [])
+
+    def test_known_tools_are_the_saved_list(self):
+        tools = [{"name": P + "get_title", "inputSchema": {"type": "object", "properties": {"x": {}}}}]
+        self.assertIsNone(self.lent().known_tools())
+        browser_lent._save_tools(self.root, "owner", tools)
+        self.assertEqual(self.lent().known_tools(), tools)
+        self.assertIsNone(self.lent(shared=True).known_tools())
+
     def test_close_note_untaken_expires(self):
         self.hub.notify("owner", {"op": "close", "ws": "demo", "epoch": EPOCH})
         with mock.patch.object(runners, "NOTE_SECONDS", 0):
