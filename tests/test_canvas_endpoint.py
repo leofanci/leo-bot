@@ -195,8 +195,10 @@ class Env(unittest.TestCase):
         with mock.patch.dict(os.environ, leak):
             env = claude_code.ClaudeCodeEngine().turn_env(TurnPolicy(), toks)
             self.assertEqual((env["LEOBOT_CANVAS_TOKEN"], env["LEOBOT_CANVAS_URL"]), ("ct1", url))
+            # Codex reaches osctl only through the os relay, which carries the vars: never its own env.
             env = codex.CodexEngine().turn_env(TurnPolicy(), toks)
-            self.assertEqual((env["LEOBOT_CANVAS_TOKEN"], env["LEOBOT_CANVAS_URL"]), ("ct1", url))
+            self.assertNotIn("LEOBOT_CANVAS_TOKEN", env)
+            self.assertNotIn("LEOBOT_CANVAS_URL", env)
             for e in (claude_code.ClaudeCodeEngine().turn_env(TurnPolicy(), TurnTokens()),
                       codex.CodexEngine().turn_env(TurnPolicy(), TurnTokens()),
                       server.os_relay.env_for({"ws": "demo"})):
@@ -211,8 +213,10 @@ class Env(unittest.TestCase):
 class Turn(Base):
     """Through _handle_ask: run() mints a canvas token per run and revokes it after."""
 
-    def run_turn(self, body=None, during=None):
+    def run_turn(self, body=None, during=None, replies=(), engine=None):
         seen = []
+        replies = list(replies)
+        self.out = ""
 
         class S:
             _started = False
@@ -238,20 +242,54 @@ class Turn(Base):
                 pass
 
             def ask(self, prompt, **kw):
-                seen.append(kw)
+                seen.append({**kw, "_prompt": prompt, "_readonly": getattr(self, "readonly", False)})
                 if during:
                     during(kw)
-                yield ("delta", "ok")
+                yield ("delta", replies.pop(0) if replies else "ok")
                 yield ("done", {})
         h = server.Handler.__new__(server.Handler)
         h.wfile = io.BytesIO()
         h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
         h.log_message = lambda *a: None
         h.server = SimpleNamespace(server_address=("127.0.0.1", PORT))
-        with mock.patch.object(server, "get_chat_session", return_value=S()), \
-                mock.patch.object(server.chat_session, "ChatSession", S):
+        patches = [mock.patch.object(server, "get_chat_session", return_value=S()),
+                   mock.patch.object(server.chat_session, "ChatSession", S)]
+        if engine is not None:
+            patches.append(mock.patch.object(server.engine_registry, "pick", return_value=engine))
+        for p in patches:
+            p.start()
+        try:
             h._handle_ask({"messages": [{"role": "user", "content": "hello"}], **(body or {})})
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        self.out = h.wfile.getvalue().decode()
         return seen
+
+    def test_os_relay_ctx_gets_the_runs_canvas_token(self):
+        live = []
+
+        def during(kw):
+            live.append((kw.get("canvas_token"), server.os_relay.TOKENS.lookup(kw["os_token"])))
+        seen = self.run_turn(during=during, engine=codex.CodexEngine())  # full disk: osctl over the relay
+        tok, os_ctx = live[0]
+        self.assertTrue(seen[0].get("os_token"))
+        self.assertEqual((os_ctx["canvas_token"], os_ctx["canvas_port"]), (tok, PORT))
+        self.assertEqual(request({"cmd": "list-canvases", "params": {}}, token=os_ctx["canvas_token"])[0], 403)
+
+    def test_consulted_teammate_ctx_is_readonly(self):
+        ctxs = []
+        server.bots.set_active("research", True, self.root, "hq")
+        seen = self.run_turn(replies=["CONSULT @research: numbers?", "42", "done"],
+                             during=lambda kw: ctxs.append(server.CANVAS_TOKENS.lookup(kw["canvas_token"])))
+        self.assertGreaterEqual(len(seen), 2, self.out)
+        self.assertTrue(seen[1]["_readonly"])
+        self.assertEqual((ctxs[1]["bot"], ctxs[1]["readonly"]), ("research", True))
+        self.assertFalse(ctxs[0]["readonly"])
+        self.assertIsNone(server.CANVAS_TOKENS.lookup(seen[1]["canvas_token"]))  # revoked after its run
+        cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
+        tok, _ = self.mint(**{k: v for k, v in ctxs[1].items() if k != "ws"})  # the same ctx, live
+        self.assertIn("read-only", self.call(tok, "delete-canvas", id=cid)[1]["error"])
 
     def test_run_mints_then_revokes(self):
         live = []
@@ -290,6 +328,41 @@ class Turn(Base):
         self.assertEqual(code, 200)
         self.assertEqual(cv.pending_holds(self.root, CHAT), [])
         self.assertIn(cid, cs.list_ids(self.root, "demo", "cv"))
+
+    def test_approve_tells_the_bot_and_the_owner_what_ran(self):
+        cid = self.hold()  # will run: delete-canvas cid
+        gone = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Old"})["id"]
+        with self.assertRaises(cv.NeedsApproval):
+            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas", {"id": gone})
+        cv.dispatch(self.root, "demo", cv.Actor("owner"), "delete-canvas", {"id": gone})  # its hold will fail
+        seen = self.run_turn({"chat_id": CHAT, "approval": "approved"})
+        prompt = seen[0]["_prompt"]
+        self.assertTrue(prompt.startswith("Approved canvas actions already ran: "), prompt[:200])
+        self.assertIn(f"delete-canvas {cid}: done", prompt)
+        self.assertIn(f"delete-canvas {gone}: failed (", prompt)
+        self.assertIn("Do not repeat them.", prompt)
+        notices = [json.loads(line[6:])["notice"] for line in self.out.splitlines()
+                   if line.startswith("data: {") and '"notice"' in line]
+        self.assertIn(f"Approved canvas action delete-canvas {cid}: done", notices)
+        self.assertTrue(any(n.startswith(f"Approved canvas action delete-canvas {gone}: failed (") for n in notices),
+                        notices)
+        self.assertNotIn(cid, cs.list_ids(self.root, "demo", "cv"))
+        rec = server.chat_store.load(CHAT)
+        saved = " ".join(n for m in (rec or {}).get("messages", []) for n in m.get("notices") or [])
+        self.assertIn(f"delete-canvas {cid}: done", saved)
+
+    def test_no_summary_without_held_actions(self):
+        seen = self.run_turn({"chat_id": CHAT, "approval": "approved"})
+        self.assertNotIn("Approved canvas actions", seen[0]["_prompt"])
+
+    def test_malformed_holds_file_never_stops_the_turn(self):
+        import time
+        (self.root / "team" / "canvas_holds.json").write_text(json.dumps(
+            {CHAT: [{"id": "hdx", "actor": "bad", "created_at": time.time()}]}))
+        with mock.patch("traceback.print_exc"):
+            for answer in ("approved", "rejected", None):
+                seen = self.run_turn({"chat_id": CHAT, **({"approval": answer} if answer else {})})
+                self.assertEqual(len(seen), 1, answer)
 
     def test_a_person_never_runs_holds(self):
         self.hold()

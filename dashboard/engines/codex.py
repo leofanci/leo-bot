@@ -27,8 +27,7 @@ from pathlib import Path
 
 from dashboard import shell_rules
 from dashboard.engines import prices
-from dashboard.engines.base import (TURN_ENV, Engine, SessionLost, canvas_vars, drain, gate_vars, stop_child,
-                                    turn_vars)
+from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, gate_vars, stop_child, turn_vars
 from dashboard.engines.claude_code import (
     APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, BROWSER_MCP_PATH, BROWSER_TOKEN_ENV, ENGINE_ENV, HOOK_COMMAND,
     OS_MCP_PATH, OS_TOKEN_ENV, RUNNER_TOKEN_ENV,
@@ -178,8 +177,7 @@ class CodexEngine(Engine):
                 **({APPS_TOKEN_ENV: tokens.apps_token} if tokens.apps_token else {}),
                 **({BROWSER_TOKEN_ENV: tokens.browser_token} if self._browser(policy, tokens) else {}),
                 **({APPS_USED_ENV: "1"} if policy.apps_used else {}),
-                **(gate_vars(tokens) if self.shell_dirs(policy, tokens) else {}),
-                **canvas_vars(tokens)}
+                **(gate_vars(tokens) if self.shell_dirs(policy, tokens) else {})}
 
     def turn(self, session, text, policy, model, tokens):
         self.check(policy)

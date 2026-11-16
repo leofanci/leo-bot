@@ -1414,16 +1414,27 @@ def _room_people(ws, room):
 
 def _canvas_holds_answered(chat, answer, viewer):
     """A thread's pending approval was answered: the owner's Approve runs its held canvas
-    actions once (as their original actor); Reject, a new message, or anyone else drops them."""
+    actions once (as their original actor); Reject, a new message, or anyone else drops them.
+    Returns what ran: [{"cmd", "target", "ok", "error"}] (empty when nothing ran). A bad holds
+    file never stops the chat turn."""
     if not isinstance(chat, str) or not chat:
-        return None
+        return []
     try:
         if answer == "approved" and (viewer or {}).get("kind") == "owner":
-            return canvases.run_holds(ROOT, chat)
+            targets = {h.get("id"): h.get("target") for h in canvases.pending_holds(ROOT, chat)}
+            return [{"cmd": r.get("cmd"), "target": targets.get(r.get("hold")), "ok": bool(r.get("ok")),
+                     "error": None if r.get("ok") else str(r.get("error") or "failed")}
+                    for r in canvases.run_holds(ROOT, chat)]
         canvases.drop_holds(ROOT, chat)
-    except OSError:
+    except Exception:  # noqa: BLE001 - the owner's message still gets its reply
         traceback.print_exc()
-    return None
+    return []
+
+
+def _canvas_holds_lines(ran):
+    """One line per held canvas action that ran: `cmd target: done` or `cmd target: failed (why)`."""
+    return [" ".join(x for x in (str(r.get("cmd") or "?"), r.get("target") or "") if x)
+            + (": done" if r.get("ok") else f": failed ({str(r.get('error') or '')[:200]})") for r in ran]
 
 
 def _relay_rpc(tokens, sessions, handle, upstream_of, ended, token, method, params):
@@ -3569,12 +3580,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             sess = get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked)
         card_bot = None
+        held_ran = []
         if chat_id:
             answer = body.get("approval")
             if answer in ("approved", "rejected"):
                 card_bot = approvals.asking_bot(chat_id, ROOT)
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
-            _canvas_holds_answered(chat_id, answer, viewer)
+            held_ran = _canvas_holds_answered(chat_id, answer, viewer)
         sess.workspace = ws
         sess.deny_dirs = _workspace_deny_dirs(ws, projects)
         sess.deny_files = _workspace_deny_files(ws)
@@ -3820,6 +3832,9 @@ class Handler(BaseHTTPRequestHandler):
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
         )
+        if held_ran:  # the owner's Approve already ran them: the bot must not ask or do them again
+            text = ("Approved canvas actions already ran: " + "; ".join(_canvas_holds_lines(held_ran))
+                    + ". Do not repeat them.\n\n" + text)
         # What crosses between engines: the thread's visible messages, never a transcript.
         sess.recap = chat_store.recap(saved_rec)
         missed = "" if compacted else chat_store.recap(saved_rec, engine.id)  # the recap has it all
@@ -4127,6 +4142,8 @@ class Handler(BaseHTTPRequestHandler):
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
+            for line in _canvas_holds_lines(held_ran):  # the owner sees each approved action's outcome
+                notice(f"Approved canvas action {line}")
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_kw = {"skill_": skill, "reason_": reason}
             lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)
