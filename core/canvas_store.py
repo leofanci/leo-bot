@@ -128,19 +128,28 @@ def read(root: Path, ws: str, file_id: str) -> dict:
 
 
 @contextlib.contextmanager
-def locked(root: Path, ws: str, file_id: str):
-    p = _path(root, ws, file_id)
-    key = str(p)
+def _flock(target: Path):
+    """Per-path threading.Lock plus fcntl.flock on `<target>.lock` (threads and processes)."""
+    key = str(target)
     with _path_locks_guard:
         tl = _path_locks.setdefault(key, threading.Lock())
     with tl:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(f"{p}.lock", "a") as lf:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(f"{target}.lock", "a") as lf:
             fcntl.flock(lf, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(lf, fcntl.LOCK_UN)
+
+
+def locked(root: Path, ws: str, file_id: str):
+    return _flock(_path(root, ws, file_id))
+
+
+def _drop_lock(target: Path) -> None:
+    with contextlib.suppress(OSError):
+        Path(f"{target}.lock").unlink()
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -157,10 +166,57 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def write(root: Path, ws: str, doc: dict) -> dict:
+    """Atomic write that bumps `version` by 1 and returns doc.
+
+    Protocol: the caller holds `locked()` and has re-read the doc under that lock,
+    so the bump is applied to the on-disk version. A doc older than the file on disk
+    is refused (ValueError). A doc whose file does not exist yet is created
+    exclusively: FileExistsError if the file appeared meanwhile (id collision).
+    """
     p = _path(root, ws, doc.get("id", ""))
-    doc["version"] = int(doc.get("version") or 0) + 1
-    _atomic_write(p, json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
+    cur = int(doc.get("version") or 0)
+    exists = p.exists()
+    if exists and cur == 0:
+        raise FileExistsError(str(p))
+    if exists:
+        try:
+            disk = int(json.loads(p.read_text(encoding="utf-8")).get("version") or 0)
+        except (OSError, ValueError, AttributeError):
+            disk = 0
+        if cur < disk:
+            raise ValueError(f"stale doc {doc.get('id')}: version {cur} < on disk {disk}")
+    doc["version"] = cur + 1
+    text = json.dumps(doc, ensure_ascii=False, indent=2) + "\n"
+    if exists or cur > 0:
+        _atomic_write(p, text)
+    else:
+        try:
+            _create_exclusive(p, text)
+        except FileExistsError:
+            doc["version"] = cur
+            raise
     return doc
+
+
+def _create_exclusive(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.link(tmp, path)  # fails with FileExistsError if path exists
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+
+
+def create(root: Path, ws: str, prefix: str, doc: dict) -> dict:
+    """Allocate the next id for `prefix`, set doc["id"] and write it, race-free."""
+    d = _dir(root, ws, prefix)
+    with _flock(d / f".create-{prefix}"):
+        doc["id"] = next_id(root, ws, prefix)
+        doc["version"] = 0
+        return write(root, ws, doc)
 
 
 def _hist_path(root: Path, ws: str, file_id: str, rotated: bool = False) -> Path:
@@ -175,7 +231,7 @@ def history_append(root: Path, ws: str, file_id: str, entry: dict) -> str:
     cid = "ch" + secrets.token_hex(6)
     rec = {**entry, "id": cid,
            "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    with _history_lock:
+    with _history_lock, _flock(p):
         if p.exists() and p.stat().st_size >= HISTORY_MAX_BYTES:
             os.replace(p, _hist_path(root, ws, file_id, rotated=True))
         with open(p, "a", encoding="utf-8") as f:
@@ -203,8 +259,10 @@ def to_trash(root: Path, ws: str, file_id: str) -> None:
     td = _trash_dir(root, ws, _file_id(file_id).group(1))
     td.mkdir(parents=True, exist_ok=True)
     dest = td / p.name
-    os.replace(p, dest)
-    os.utime(dest, None)
+    with locked(root, ws, file_id):
+        os.replace(p, dest)
+        os.utime(dest, None)
+    _drop_lock(p)
 
 
 def from_trash(root: Path, ws: str, file_id: str) -> None:
@@ -212,7 +270,8 @@ def from_trash(root: Path, ws: str, file_id: str) -> None:
     src = _trash_dir(root, ws, _file_id(file_id).group(1)) / p.name
     if not src.is_file():
         raise LookupError(file_id)
-    os.replace(src, p)
+    with locked(root, ws, file_id):
+        os.replace(src, p)
 
 
 def purge_trash(root: Path, ws: str, days: int = TRASH_DAYS, now: float | None = None) -> list[str]:
@@ -225,11 +284,14 @@ def purge_trash(root: Path, ws: str, days: int = TRASH_DAYS, now: float | None =
         for f in sorted(td.glob(f"{prefix}*.json")):
             if not _FILE_RE.match(f.stem) or now - f.stat().st_mtime < days * 86400:
                 continue
-            f.unlink()
-            hdir = _history_dir(root, ws, prefix)
-            for h in (hdir / f"{f.stem}.jsonl", hdir / f"{f.stem}.1.jsonl"):
-                with contextlib.suppress(OSError):
-                    h.unlink()
+            with locked(root, ws, f.stem):
+                f.unlink()
+                hdir = _history_dir(root, ws, prefix)
+                for h in (hdir / f"{f.stem}.jsonl", hdir / f"{f.stem}.1.jsonl"):
+                    with contextlib.suppress(OSError):
+                        h.unlink()
+                    _drop_lock(h)
+            _drop_lock(_path(root, ws, f.stem))
             gone.append(f.stem)
     return gone
 
@@ -267,5 +329,5 @@ def templates(root: Path, ws: str) -> list[dict]:
             out.append({**json.loads(p.read_text(encoding="utf-8")), "id": p.stem, "shipped": True})
     for tid in list_ids(root, ws, "tp"):
         with contextlib.suppress(LookupError):
-            out.append(read(root, ws, tid))
+            out.append({**read(root, ws, tid), "shipped": False})
     return out

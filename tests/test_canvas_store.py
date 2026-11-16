@@ -2,7 +2,9 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -118,6 +120,84 @@ class TestCanvasStore(unittest.TestCase):
             cs.write(self.root, "demo", _doc("tp1"))
         self.assertIn("tp1", {t["id"] for t in cs.templates(self.root, "demo")})
         self.assertEqual(cs.next_id(self.root, "demo", "tp"), "tp2")
+
+    def test_locked_no_lost_update(self):
+        self._make("demo", "cv1")
+
+        def bump():
+            for _ in range(20):
+                with cs.locked(self.root, "demo", "cv1"):
+                    d = cs.read(self.root, "demo", "cv1")
+                    d["n"] = d.get("n", 0) + 1
+                    cs.write(self.root, "demo", d)
+
+        ts = [threading.Thread(target=bump) for _ in range(2)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        d = cs.read(self.root, "demo", "cv1")
+        self.assertEqual(d["n"], 40)
+        self.assertEqual(d["version"], 41)
+
+    def test_write_failure_leaves_original(self):
+        self._make("demo", "cv1")
+        d = cs.read(self.root, "demo", "cv1")
+        d["title"] = "changed"
+        with mock.patch("core.canvas_store.os.replace", side_effect=OSError("boom")):
+            with self.assertRaises(OSError):
+                cs.write(self.root, "demo", d)
+        self.assertEqual(cs.read(self.root, "demo", "cv1")["title"], "T")
+        self.assertEqual(list((self.root / "projects" / "demo").rglob("*.tmp")), [])
+
+    def test_hq_round_trip(self):
+        self._make(bots.HQ, "cv1")
+        self.assertEqual(cs.read(self.root, bots.HQ, "cv1")["id"], "cv1")
+        self.assertEqual(cs.list_ids(self.root, bots.HQ, "cv"), ["cv1"])
+        self.assertTrue((self.root / "team" / "canvases" / "cv1.json").exists())
+
+    def test_create_concurrent_distinct_ids(self):
+        ids = []
+        lk = threading.Lock()
+
+        def mk():
+            for _ in range(10):
+                d = cs.create(self.root, "demo", "cv", {"title": "x", "blocks": []})
+                with lk:
+                    ids.append(d["id"])
+
+        ts = [threading.Thread(target=mk) for _ in range(4)]
+        [t.start() for t in ts]
+        [t.join() for t in ts]
+        self.assertEqual(len(set(ids)), 40)
+
+    def test_write_new_existing_file_refused(self):
+        self._make("demo", "cv1")
+        with self.assertRaises(FileExistsError):
+            cs.write(self.root, "demo", _doc("cv1"))
+        self.assertEqual(cs.read(self.root, "demo", "cv1")["version"], 1)
+
+    def test_write_stale_doc_refused(self):
+        self._make("demo", "cv1")
+        with cs.locked(self.root, "demo", "cv1"):
+            d = cs.read(self.root, "demo", "cv1")
+            cs.write(self.root, "demo", dict(d))
+            with self.assertRaises(ValueError):
+                cs.write(self.root, "demo", d)
+
+    def test_trash_and_purge_remove_lock_files(self):
+        self._make("demo", "cv1")
+        cs.to_trash(self.root, "demo", "cv1")
+        cdir = self.root / "projects" / "demo" / "canvases"
+        self.assertFalse((cdir / "cv1.json.lock").exists())
+        os.utime(cdir / ".trash" / "cv1.json", (0, 0))
+        cs.purge_trash(self.root, "demo")
+        self.assertEqual([p.name for p in cdir.rglob("cv1*")], [])
+
+    def test_saved_templates_not_shipped(self):
+        with cs.locked(self.root, "demo", "tp1"):
+            cs.write(self.root, "demo", _doc("tp1"))
+        by = {t["id"]: t for t in cs.templates(self.root, "demo")}
+        self.assertFalse(by["tp1"]["shipped"])
+        self.assertTrue(by["tracker"]["shipped"])
 
 
 if __name__ == "__main__":

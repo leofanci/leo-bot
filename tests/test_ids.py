@@ -47,6 +47,18 @@ class TestIds(unittest.TestCase):
                 self.assertIn(cid, reg.by_id)
             self.assertIn("pr1.cv1.bk1", reg.by_id)
 
+    def test_canvas_duplicate_child_ids_skipped(self):
+        tree = [{"slug": "demo", "name": "Demo", "profiles": [], "products": []}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cdir = root / "projects" / "demo" / "canvases"
+            cdir.mkdir(parents=True)
+            (cdir / "cv1.json").write_text(json.dumps(
+                {"id": "cv1", "title": "A", "blocks": [
+                    {"id": "bk1", "title": "first"}, {"id": "bk1", "title": "second"}]}))
+            reg = build_id_registry(tree, [], root=root)
+            self.assertIn("pr1.cv1.bk1", reg.by_id)
+
     def test_registry_project_and_sections(self):
         tree = [{
             "slug": "acme", "name": "Acme", "kind": "venture",

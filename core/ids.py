@@ -530,9 +530,11 @@ class IdRegistry:
                         _cid = f"{pr_id}.{_fid}"
                         reg._add(_cid, _doc.get("title") or _fid, kind=_kind, parent=pr_id,
                                  ref={"project": pslug, _kind: _fid})
+                        _seen: set[str] = set()
                         for _it in (_doc.get("blocks") if _pfx == "cv" else _doc.get("rows")) or []:
                             _iid = str((_it or {}).get("id") or "")
-                            if _cs.valid(_ckind, _iid):
+                            if _cs.valid(_ckind, _iid) and _iid not in _seen:
+                                _seen.add(_iid)
                                 reg._add(f"{_cid}.{_iid}", _iid, kind=_ckind, parent=_cid,
                                          ref={"project": pslug, _kind: _fid, _ckind: _iid})
                 # GTM phases (time-boxed bets) → strategies (channel-motions) nested under them.
