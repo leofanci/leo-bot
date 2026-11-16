@@ -201,7 +201,7 @@ const ROUTES = [
   [/^\/operations$/,                            ()       => { setState("operations"); renderOperations(); }],
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
-  [/^\/settings(?:\/(engines|bots|integrations|access))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
+  [/^\/settings(?:\/(engines|bots|integrations|browser|access))?$/, ([t]) => { setState("settings",{tab:t||"engines"}); renderSettings(t||"engines"); }],
   [/^\/settings\/folders$/,                     ()       => location.replace("#/folders")],
   [/^\/(engines|integrations)$/,                ([t])    => location.replace(`#/settings/${t}`)],
   [/^\/folders$/,                               ()       => { setState("folders"); renderFolders(); }],
@@ -457,6 +457,8 @@ try { _WS = localStorage.getItem("wsId") || "hq"; } catch {}
 let _ROOMS = [];   // current workspace's rooms: [{id, kind, name, members, lead}]
 let _APPROVALS = [];  // pending approvals visible here (HQ: every workspace)
 let _RECEIPTS = [];   // jobs bots set up lately: shown in their thread with Undo and Pause
+let _SENT = [];       // browser sends that ran this week: listed on Approvals
+let _APPROVED = [];   // browser sends approved and not sent yet: listed on Approvals with Withdraw
 const fmtTokens = n => !n ? "" : n >= 1e6 ? `${(n/1e6).toFixed(1)}M tok` : n >= 1000 ? `${(n/1000).toFixed(1)}k tok` : `${n} tok`;
 const fmtCost = c => c ? `$${c < 0.01 ? c.toFixed(4) : c.toFixed(2)}` : "";
 const fmtUsage = (tokens, cost) => [fmtTokens(tokens), fmtCost(cost)].filter(Boolean).join(" · ");
@@ -550,7 +552,7 @@ async function renderRail(){
   [_BOTS, _ROOMS, _APPROVALS] = await Promise.all([
     api("/api/bots" + q).then(d => d.bots || []).catch(() => []),
     api("/api/rooms" + q).then(d => d.rooms || []).catch(() => []),
-    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; return d.approvals || []; }).catch(() => []),
+    person ? [] : api("/api/approvals" + q).then(d => { _RECEIPTS = d.receipts || []; _SENT = d.sent || []; _APPROVED = d.approved || []; return d.approvals || []; }).catch(() => []),
   ]);
   renderWsBar();
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
@@ -1220,6 +1222,7 @@ async function renderTeam(){
   const stillOn = routeGuard();
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
+  let brw = null;  // this workspace's bot browser levels and modes (owner only)
   let pv = null, link = "";
   let jobList = [];
   const person = isPerson();
@@ -1253,9 +1256,11 @@ async function renderTeam(){
       const boss = b.reports_to === "ceo" ? "You" : (botById(b.reports_to)?.name || b.reports_to);
       const c = costs.bots[b.id];
       const apps = wsApps.filter(s => grantsOf(b)[s]).map(appName);
+      const web = brw?.bots?.[b.id];
       const meta = [`Reports to ${esc(boss)}`,
         !person && c?.turns ? `${c.turns} ${c.turns === 1 ? "reply" : "replies"}${c.cost ? `, ${fmtCost(c.cost)}` : ""}` : "",
-        apps.length ? esc(apps.join(", ")) : ""].filter(Boolean).join(" · ");
+        apps.length ? esc(apps.join(", ")) : "",
+        web && web.level !== "off" ? `Browser: ${esc(browserLevelLabel(web.level))}, ${esc(browserModeLabel(web.mode))}` : ""].filter(Boolean).join(" · ");
       const own = new Set(b.skills);
       const covered = b.effective_skills.filter(s => !own.has(s));
       const open = opened.has(b.id);
@@ -1273,6 +1278,10 @@ async function renderTeam(){
             return `<label>${appLogoHtml(slug, integ.apps_meta?.[slug])}${esc(appName(slug))} <select data-grant-bot="${esc(b.id)}" data-grant-app="${esc(slug)}">
               ${["", "read", "write", "act"].map(s => `<option value="${s}"${(scope || "") === s ? " selected" : ""}>${grantLabel(s || undefined)}</option>`).join("")}</select></label>`;
           }).join("")}</div><small>Sending on your behalf. Asks every time: anything that isn't a read waits for your click. Sends without asking: it sends, posts and messages on its own, even after reading mail or pages, and each one shows in Approvals as done or failed. Deletes, payments, ads, databases, code, sharing and paid lookups always ask.</small></div>` : ""}
+          ${!person && web ? `<div class="td-sec"><h4>Browser</h4><div class="app-grants">
+            <label>Level <select data-brw-bot="${esc(b.id)}" data-brw-k="level">${browserOptionsHtml(brw.levels || ["off", "read", "write", "act"], browserLevelLabel, web.level)}</select></label>
+            <label>Opens in <select data-brw-bot="${esc(b.id)}" data-brw-k="mode">${browserOptionsHtml(brw.modes || ["bot", "my_chrome"], browserModeLabel, web.mode)}</select></label></div>
+            <small>${browserLevelHelp()}</small></div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;
@@ -1316,6 +1325,12 @@ async function renderTeam(){
         // New objects with own keys: a name like __proto__ can't reach Object.prototype.
         integ.grants = { ...integ.grants, [_WS]: { ...integ.grants?.[_WS], [bot]: r.apps } };
       } catch (e) { toast("✗ " + e.message); draw(); }
+    });
+    $("#team-list").querySelectorAll("[data-brw-bot]").forEach(sel => sel.onchange = async () => {
+      const bot = sel.dataset.brwBot, cur = brw?.bots?.[bot] || { level: "off", mode: "bot" };
+      try { brw = await jpost("/api/browser/settings", { ws: _WS, bot, ...cur, [sel.dataset.brwK]: sel.value }); }
+      catch (e) { toast("✗ " + e.message); }
+      draw();
     });
     $("#team-list").querySelectorAll("[data-bot-toggle]").forEach(btn => btn.onclick = async () => {
       try {
@@ -1402,6 +1417,7 @@ async function renderTeam(){
   if (!person) {
     costs = await api(`/api/costs?ws=${encodeURIComponent(_WS)}`).catch(() => costs);
     integ = await api("/api/integrations").catch(() => integ);
+    brw = await api(`/api/browser/settings?ws=${encodeURIComponent(_WS)}`).catch(() => null);
     jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
   }
   if (stillOn()) draw();
@@ -1444,7 +1460,19 @@ async function renderApprovals(){
         <pre class="outside-text" hidden></pre></div>
       <button class="go" data-out-read>Read</button>
       <button class="go primary-go" data-out-trust hidden>Trust</button>
-    </div>`).join("")}</div>` : ""}</div>`;
+    </div>`).join("")}</div>` : ""}
+    ${_APPROVED.length ? `<h4 class="sec-h">Approved, not sent yet</h4>
+    <div class="help">Browser sends you approved that the bot has not sent yet. Each can be used once, for 7 days after you approved it. Withdraw one to stop it going out.</div>
+    <div class="rowc">${_APPROVED.map(r => browserApprovedRowHtml(r, botById(r.bot) || { id: r.bot, name: r.bot }, wsById(r.ws)?.name || r.ws)).join("")}</div>` : ""}
+    ${_SENT.length ? `<h4 class="sec-h">Sent from the browser</h4>
+    <div class="help">What bots sent from a browser this week: sends you approved and sends of bots that act on their own.</div>
+    <div class="rowc">${_SENT.map(r => {
+      const b = botById(r.bot) || { id: r.bot, name: r.bot }, args = (r.action && r.action.arguments) || {};
+      const state = r.status === "done" ? (r.result || "Sent from the browser.") : r.status === "running" ? "Sending now." : (r.result || "May or may not have gone out.");
+      return `<div class="post approval-row sent-row">
+      ${botAvatar(b)}
+      <div class="t">${esc(args.text || "")}<small>${esc(state)} · ${esc(args.site || "")} · ${esc(b.name)} · ${esc(wsById(r.ws)?.name || r.ws)} · ${relAge(r.started || r.created)}${r.auto ? " · on its own" : ""}</small></div>
+    </div>`; }).join("")}</div>` : ""}</div>`;
   $("#main").querySelectorAll(".outside-row").forEach(row => {
     const pre = row.querySelector(".outside-text"), trust = row.querySelector("[data-out-trust]");
     let sig = null;
@@ -1473,6 +1501,15 @@ async function renderApprovals(){
   });
   $("#main").querySelectorAll("[data-app-id]").forEach(row =>
     wireAppCard(row.querySelector(".app-card"), find(row.dataset.appId)));
+  $("#main").querySelectorAll("[data-withdraw]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await jpost(`/api/approvals/${encodeURIComponent(b.dataset.withdraw)}/withdraw`, {});
+      _APPROVED = _APPROVED.filter(r => r.id !== b.dataset.withdraw);
+      toast("Withdrawn. It will not be sent.");
+      renderApprovals();
+    } catch (e) { b.disabled = false; toast("✗ " + e.message); }
+  });
 }
 
 // ── Connected apps: held app actions (cards) and the Integrations panel.
@@ -1497,6 +1534,65 @@ function heldEditable(a){
 function grantLabel(scope){
   return scope === "act" ? "Sends without asking" : scope === "write" ? "Asks every time" : scope === "read" ? "Read" : "Off";
 }
+// The bot browser: a bot's level and where it browses (Team), the sites list and My Chrome (Settings, Browser).
+function browserLevelLabel(level){
+  return level === "act" ? "Acts on its own" : level === "write" ? "Read + write" : level === "read" ? "Reads only" : "Off";
+}
+// The Team screen's note under a bot's browser level.
+function browserLevelHelp(){
+  return "Reads only: opens and reads pages, and follows links. Read + write: types on pages, and every send waits for your Approve. Acts on its own: sends at once, within the daily limit of listed sites (other sites have none). Bot browser: its own browser, with the logins you save for it in Settings, Browser. My Chrome: its own tab in your Chrome, with your logins.";
+}
+// One approved browser send the bot has not sent yet, with Withdraw.
+function browserApprovedRowHtml(r, bot, wsName){
+  const args = (r.action && r.action.arguments) || {};
+  return `<div class="post approval-row sent-row">
+      ${botAvatar(bot)}
+      <div class="t">${esc(args.text || "")}<small>Approved, not sent yet · ${esc(args.site || "")} · ${esc(bot.name)} · ${esc(wsName)} · ${relAge(r.approved_at || r.created)}</small></div>
+      <button class="more" data-withdraw="${esc(r.id)}">Withdraw</button>
+    </div>`;
+}
+function browserModeLabel(mode){
+  return mode === "my_chrome" ? "My Chrome" : "Bot browser";
+}
+function browserOptionsHtml(values, label, current){
+  return values.map(v => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(label(v))}</option>`).join("");
+}
+// One row of the sites table: the site, where it opens (empty: each bot's own choice), its daily limit.
+function browserSiteRowHtml(s, maxDaily){
+  const opens = [["", "Bot's choice"], ["bot", "Bot browser"], ["my_chrome", "My Chrome"]];
+  return `<div class="post brw-site" data-site="${esc(s.site)}"><div class="t"><b>${esc(s.site)}</b></div>
+    <label>Opens in <select data-site-mode>${opens.map(([v, l]) => `<option value="${v}"${(s.mode || "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label>Daily limit <input data-site-daily type="number" min="1" max="${+maxDaily || 500}" step="1" inputmode="numeric" placeholder="None" value="${s.daily ? esc(String(s.daily)) : ""}" aria-label="Daily limit for ${esc(s.site)} (empty: none)"></label>
+    ${s.mode === "my_chrome" ? "" : s.proxy
+      ? `<span class="brw-proxy"><small>Proxy: ${esc(s.proxy)}</small><button class="more" data-site-proxy-rm>Remove proxy</button></span>`
+      : `<label>Proxy <input data-site-proxy type="password" placeholder="http://proxy.example:3128" autocomplete="new-password" spellcheck="false" aria-label="Proxy for ${esc(s.site)}, bot browser only, an http address with user:password@ before the host if it needs one (empty: none)"></label>`}
+    <button class="more" data-site-rm>Remove</button></div>`;
+}
+// Is this site already in the list? Same reading as the server: lowercase, no scheme, path or trailing dot.
+function browserSiteListed(sites, value){
+  const host = String(value || "").trim().toLowerCase().replace(/^[a-z][a-z0-9+.-]*:\/\//, "").split(/[\/?#:]/)[0].replace(/\.$/, "");
+  return !!host && (sites || []).some(s => s.site === host);
+}
+// Settings, Browser: is Chrome reachable for My Chrome bots, and how to turn remote debugging on.
+function chromeCheckHtml(on, server){
+  if (server) {
+    const lent = on
+      ? `<span class="eng-state on">Your computer lends its Chrome</span>`
+      : `<span class="eng-state">No computer lends its Chrome right now</span>`;
+    return `<div class="post brw-chrome"><div class="t">${lent}
+    <small>My Chrome bots here use their own tab of your Chrome, through the Leo Bot runner on your computer. On that computer, run the runner with --lend-chrome on (it stays off until you turn it on there), and keep Chrome open with remote debugging on.</small>
+    <small>With --browser-only the runner lends Chrome and takes no turns, so your chats keep running here and can use it.</small></div>
+    <button class="btn sm" data-chrome-check>Check again</button></div>`;
+  }
+  const state = on
+    ? `<span class="eng-state on">Chrome is open with remote debugging on</span>`
+    : `<span class="eng-state">Chrome is not open with remote debugging on</span>`;
+  return `<div class="post brw-chrome"><div class="t">${state}
+    <small>My Chrome bots work in their own tab of your everyday Chrome, with your logins. Chrome must be open with remote debugging on.</small>
+    <small>Chrome 136 and later ignore the --remote-debugging-port flag on your everyday profile. Turn it on inside Chrome instead: open chrome://inspect, then switch on Remote debugging. Or start a separate Chrome profile with the flag, for example: --user-data-dir=/path/to/folder --remote-debugging-port=9222.</small>
+    <small>While it is on, any program on this Mac can control that Chrome. Turn it on only on a machine you trust.</small></div>
+    <button class="btn sm" data-chrome-check>Check again</button></div>`;
+}
 function appStatusLabel(app, connected){
   const n = connected === true ? 1 : +connected || 0;
   return n > 1 ? `${n} accounts` : n ? "Connected" : app && app.auth === "own_app" ? "Needs setup" : "Connect";
@@ -1519,8 +1615,11 @@ function appCardHtml(a, n){
   const p = a.preview || { title: a.action?.slug || a.summary || "App action", fields: [] };
   const all = a.batch && n > 1 ? `<button class="btn sm primary" data-app="approve-all">Approve all ${n}</button>
       <button class="btn sm ghost" data-app="reject-all">No to all</button>` : "";
-  const sub = a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict" ? "Nothing changes until you approve." : "Not run yet. It runs only when you approve.";
-  const edit = a.kind === "contradiction" || a.kind === "verdict" ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
+  // A browser send is never run from here: Approve lets the bot's own click send exactly that text.
+  const web = a.action?.toolkit === "browser";
+  const sub = a.kind === "job" || a.kind === "contradiction" || a.kind === "verdict" ? "Nothing changes until you approve."
+    : web ? "Not sent yet. Approve lets the bot send it on its next run." : "Not run yet. It runs only when you approve.";
+  const edit = a.kind === "contradiction" || a.kind === "verdict" || web ? "" : `<button class="btn sm" data-app="edit">Edit</button>`;
   return `<div class="app-card-h"><b>${esc(p.title)}</b><small>${sub}</small></div>
     <dl class="app-fields">${(p.fields || []).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     <div class="app-btns"><button class="btn sm primary" data-app="approve">Approve</button>
@@ -1573,8 +1672,9 @@ function wireAppCard(el, a){
       const res = r.results || [];
       _APPROVALS = _APPROVALS.filter(x => x.batch !== a.batch);
       document.querySelectorAll(`.app-card[data-batch="${CSS.escape(a.batch)}"]`).forEach(x => { if (x !== el) (x.closest(".app-row") || x).remove(); });
-      const ok = res.filter(x => x.status === "done").length;
-      el.innerHTML = `<div class="app-result">${esc(verb === "reject" ? "None sent." : `${ok} of ${res.length} done.${ok < res.length ? " Check the others in the thread." : ""}`)}</div>`;
+      const web = a.action?.toolkit === "browser", word = web ? "approved" : "done";
+      const ok = res.filter(x => x.status === word).length;
+      el.innerHTML = `<div class="app-result">${esc(verb === "reject" ? "None sent." : `${ok} of ${res.length} ${word}.${web && ok ? " The bot sends them on its next run." : ""}${ok < res.length ? " Check the others in the thread." : ""}`)}</div>`;
       renderRail().catch(() => {});
     } catch (e) { toast("✗ " + e.message); lock(false); }
   };
@@ -1720,11 +1820,12 @@ async function mountUpdateCard(){
 
 // Settings: only what applies to the whole machine, across every workspace.
 // What belongs to one project (Linked folders, Team) stays in that project.
-const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["access", "Access"]];
+const SETTINGS_TABS = [["engines", "Engines"], ["bots", "Bots"], ["integrations", "Integrations"], ["browser", "Browser"], ["access", "Access"]];
 const settingsTop = tab => `<div class="topbar settings-top"><div><h1 class="title">Settings</h1>
     <nav class="doc-tabs">${SETTINGS_TABS.map(([k, label]) => `<a href="#/settings/${k}"${k === tab ? ' class="on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav></div></div>`;
 function renderSettings(tab){
-  const out = tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess() : renderEngines(tab);
+  const out = tab === "integrations" ? renderIntegrations() : tab === "access" ? renderAccess()
+    : tab === "browser" ? renderBrowserSettings() : renderEngines(tab);
   mountUpdateCard();
   return out;
 }
@@ -1743,6 +1844,113 @@ async function renderAccess(){
     try { form.url.value = (await jpost("/api/sharing", { url: form.url.value })).public_url || ""; toast("Sharing address saved ✓"); }
     catch (err) { toast("✗ " + err.message); }
   };
+}
+
+// Settings, Browser: the engine, the sites list, the My Chrome check and each bot's first login.
+// Levels and modes are set per bot in each workspace's Team screen.
+async function renderBrowserSettings(){
+  const stillOn = routeGuard();
+  $("#main").innerHTML = `${settingsTop("browser")}<div class="scroll eng-page"><div class="help">Bots open and use web pages in a browser. Give each bot a level and pick where it browses in <a href="#/team">Team</a>: open a bot's Details, Browser.</div><div id="brw"></div></div>`;
+  let loginWs = _WS || "hq", timer = null;
+  const draw = async () => {
+    clearTimeout(timer);
+    const [d, wsList] = await Promise.all([api(`/api/browser/settings?ws=${encodeURIComponent(loginWs)}`).catch(e => ({ error: e.message })),
+      api("/api/workspaces").catch(() => ({ workspaces: [] }))]);
+    const teamBots = (await api(`/api/bots?ws=${encodeURIComponent(loginWs)}`).catch(() => ({}))).bots || [];
+    if (!stillOn()) return;
+    const box = $("#brw");
+    if (d.error) { box.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+    const e = d.engine || {}, ready = e.state === "ready";
+    const failed = e.last_install && e.last_install.state !== "ready" ? `<small class="integ-bad">${esc(e.last_install.detail || "Install failed.")}</small>` : "";
+    const engine = `<section class="integ-group"><h3>Engine</h3><div class="eng-card"><div class="eng-body">
+        <div class="eng-name"><b>agent-browser ${esc(e.version || "")}</b><span class="eng-state${ready ? " on" : ""}">${ready ? "Installed" : e.installing ? "Installing" : "Not installed"}</span></div>
+        <div class="eng-detail">${esc(ready ? e.detail : e.installing ? "This can take a few minutes: it also downloads its own Chrome." : e.detail || "")}</div>${failed}</div>
+        ${ready ? "" : `<div class="eng-actions"><button class="btn sm primary" data-brw-install${e.installing ? " disabled" : ""}>${e.installing ? "Installing" : "Install"}</button></div>`}</div></section>`;
+    const sites = `<section class="integ-group"><h3>Sites</h3>
+      <div class="help">A listed site can set where it opens for every bot, and a daily limit on sends there across all bots. Bot's choice: each bot's own setting. A proxy sends that site's traffic from the bot browser through it (not My Chrome). Its password is never shown again.</div>
+      <div class="rowc">${(d.sites || []).map(s => browserSiteRowHtml(s, d.max_daily)).join("") || `<div class="empty">No sites listed.</div>`}</div>
+      <form class="share-form brw-add"><input name="site" placeholder="site, like example.com" aria-label="Site to add" autocomplete="off"><button class="btn" type="submit">Add site</button></form></section>`;
+    const chrome = `<section class="integ-group"><h3>My Chrome</h3>${chromeCheckHtml(d.chrome, d.deployment === "server")}</section>`;
+    const open = new Set((d.logins || []).filter(l => l.ws === loginWs).map(l => l.bot));
+    const botRow = b => {
+      const set = d.bots?.[b.id] || { level: "off", mode: "bot" };
+      const mine = set.mode === "my_chrome";
+      const act = mine ? `<small>Uses your Chrome, with your own logins.</small>`
+        : open.has(b.id) ? `<span class="tag">Window open</span><button class="btn sm primary" data-login-done="${esc(b.id)}">Done</button>`
+        : `<input data-login-url="${esc(b.id)}" type="url" placeholder="https://" aria-label="Page to log in on for ${esc(b.name)}" autocomplete="off"><button class="btn sm" data-login="${esc(b.id)}">Log in</button><button class="btn sm" data-login-send="${esc(b.id)}" title="Send this bot's saved logins to your Leo Bot server, through this computer's runner">Send to server</button>`;
+      return `<div class="post brw-login"><div class="t"><b>${esc(b.name)}</b><small>${esc(browserLevelLabel(set.level))} · ${esc(browserModeLabel(set.mode))}</small></div>${act}</div>`;
+    };
+    const logins = d.deployment === "server"
+      ? `<div class="help">A login opens a window on the machine Leo Bot runs on, so it is not made on a server. Log the bot in on your computer's Leo Bot, then press Send to server there: the same bot here gets its logins.</div>`
+      : `<div class="help">Log a bot in to a site once: a window of that bot's own browser opens on this Mac. Log in there, then press Done here: closing the window is not enough, Chrome keeps running on a Mac. The bot keeps the login for its later runs. While the window is open, that bot cannot use its browser.</div>
+        <div class="help">Send to server: the same bot on your Leo Bot server gets this bot's saved logins (they replace its own there), through this computer's runner. Start the runner once with --server and --token-file first. Logins of sites that open in My Chrome are never sent.</div>
+        <label class="brw-ws">Workspace <select data-login-ws>${(wsList.workspaces || []).map(w => `<option value="${esc(w.id)}"${w.id === loginWs ? " selected" : ""}>${esc(w.name)}</option>`).join("")}</select></label>
+        <div class="rowc">${teamBots.filter(b => b.active).map(botRow).join("") || `<div class="empty">No bots on in this workspace.</div>`}</div>`;
+    box.innerHTML = engine + sites + chrome + `<section class="integ-group"><h3>Logins</h3>${logins}</section>`;
+    const saveSite = async (site, body) => {
+      try { await jpost("/api/browser/settings", { site, ...body }); } catch (err) { toast("✗ " + err.message); }
+      draw();
+    };
+    box.querySelector("[data-brw-install]")?.addEventListener("click", async ev => {
+      ev.currentTarget.disabled = true;
+      try { await jpost("/api/browser/install", {}); } catch (err) { toast("✗ " + err.message); }
+      draw();
+    });
+    box.querySelectorAll(".brw-site").forEach(row => {
+      const site = row.dataset.site, mode = row.querySelector("[data-site-mode]"), daily = row.querySelector("[data-site-daily]");
+      const save = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null });
+      mode.onchange = save;
+      daily.onchange = save;
+      const proxy = row.querySelector("[data-site-proxy]");
+      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: proxy.value.trim() }); };
+      const proxyRm = row.querySelector("[data-site-proxy-rm]");
+      if (proxyRm) proxyRm.onclick = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: null });
+      row.querySelector("[data-site-rm]").onclick = ev => {
+        const b = ev.currentTarget;
+        if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again: it then has no daily limit"; return; }
+        saveSite(site, { remove: true });
+      };
+    });
+    const add = box.querySelector(".brw-add");
+    add.onsubmit = ev => {
+      ev.preventDefault();
+      const site = add.site.value.trim();
+      if (!site) return;
+      // Adding a listed site again would wipe where it opens and its daily limit.
+      if (browserSiteListed(d.sites, site)) return toast(`${site} is already listed. Change it in its row.`);
+      saveSite(site, { mode: null, daily: null, add: true });
+    };
+    box.querySelector("[data-chrome-check]").onclick = () => draw();
+    const wsSel = box.querySelector("[data-login-ws]");
+    if (wsSel) wsSel.onchange = () => { loginWs = wsSel.value; draw(); };
+    box.querySelectorAll("[data-login]").forEach(b => b.onclick = async () => {
+      const url = box.querySelector(`[data-login-url="${CSS.escape(b.dataset.login)}"]`).value.trim();
+      b.disabled = true;
+      try { await jpost("/api/browser/login", { ws: loginWs, bot: b.dataset.login, url }); toast("Login window opened on this Mac"); }
+      catch (err) { toast("✗ " + err.message); }
+      draw();
+    });
+    box.querySelectorAll("[data-login-send]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        const r = await jpost("/api/browser/login/send", { ws: loginWs, bot: b.dataset.loginSend });
+        const skipped = (r.sent?.skipped || []).length ? ` (not sent: ${r.sent.skipped.join(", ")}, they open in My Chrome)` : "";
+        toast(`Logins sent to the server${skipped}`);
+      } catch (err) { toast("✗ " + err.message); }
+      draw();
+    });
+    box.querySelectorAll("[data-login-done]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { await jpost("/api/browser/login/done", { ws: loginWs, bot: b.dataset.loginDone }); toast("Login saved"); }
+      catch (err) { toast("✗ " + err.message); }
+      draw();
+    });
+    // While installing or a window is open, look again now and then: both end on their own.
+    // A field being typed in is never wiped: that check waits for the next round.
+    const later = () => { timer = setTimeout(() => { if (!stillOn()) return; box.contains(document.activeElement) && document.activeElement.matches("input") ? later() : draw(); }, 4000); };
+    if (e.installing || open.size) later();
+  };
+  draw();
 }
 
 // Settings, Engines: what can run the bots. Settings, Bots: who runs on what.

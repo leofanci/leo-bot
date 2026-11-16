@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- Local fixture for the bot browser live check (docs/browser.md). Serve it on 127.0.0.1 only. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Browser form fixture</title>
+</head>
+<body>
+<h1 id="heading">Fixture form</h1>
+<form id="form">
+  <label for="msg">Message</label>
+  <input id="msg" name="msg" type="text" autocomplete="off">
+  <button id="send" type="submit">Send</button>
+</form>
+<p id="out" role="status"></p>
+<p>
+  <a id="blank-link" href="?popup=link" target="_blank">Open in a new tab</a>
+  <button id="popup" type="button">Open a popup</button>
+</p>
+<script>
+  if (new URLSearchParams(location.search).get("popup")) {
+    document.title = "Fixture popup";
+    document.getElementById("heading").textContent = "Fixture popup";
+  }
+  document.getElementById("form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const box = document.getElementById("msg");
+    document.getElementById("out").textContent = "sent: " + box.value;
+    box.value = "";
+  });
+  document.getElementById("popup").addEventListener("click", () => {
+    window.open("?popup=window", "_blank");
+  });
+</script>
+</body>
+</html>

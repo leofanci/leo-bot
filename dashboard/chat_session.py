@@ -13,8 +13,9 @@ import uuid
 from dashboard.engines.base import EngineRefused, SessionLost, TurnPolicy, TurnTokens
 from dashboard.engines.claude_code import (  # noqa: F401  (the server and osctl read these here)
     APP_ALLOWED_TOOLS, APP_TOOLS, APPS_MCP_PATH, APPS_TOKEN_ENV, APPS_USED_ENV, BASE_ALLOWED_TOOLS,
-    BASE_TOOLS, CHAT_MODEL, ENGINE_ENV, ESCALATED_MODEL, OS_MCP_PATH, OS_TOKEN_ENV, SECRET_FILE_GLOBS,
-    WEB_ALLOWED_TOOLS, WEB_TOOLS, ClaudeCodeEngine, apps_mcp_config, bot_tmpdir, os_mcp_config,
+    BASE_TOOLS, BROWSER_MCP_PATH, BROWSER_TOKEN_ENV, CHAT_MODEL, ENGINE_ENV, ESCALATED_MODEL, OS_MCP_PATH,
+    OS_TOKEN_ENV, SECRET_FILE_GLOBS, WEB_ALLOWED_TOOLS, WEB_TOOLS, ClaudeCodeEngine, apps_mcp_config, bot_tmpdir,
+    browser_mcp_config, os_mcp_config,
     forget_transcripts, private_tmpdir, sweep_stale_tmpdirs, tmp_name,
     parse_event, private_read_rules, remove_bot_tmpdir, user_web_domains, web_fetch_rules,
 )
@@ -97,11 +98,12 @@ class ChatSession:
             "fresh": self.is_fresh(),
         }
 
-    def _policy(self, with_web=False, read_dirs=(), edit_dirs=(), web_domains=(), apps=False):
+    def _policy(self, with_web=False, read_dirs=(), edit_dirs=(), web_domains=(), apps=False, browser=False):
         read_dirs = tuple(str(d) for d in read_dirs or ())
         edit_dirs = tuple(str(d) for d in edit_dirs or () if str(d) in read_dirs)
         return TurnPolicy(shared=self.shared, readonly=self.readonly, web=bool(with_web),
                           web_domains=tuple(web_domains or ()), apps=apps,
+                          browser=bool(browser) and not self.shared,
                           workspace=self.workspace or "hq", read_dirs=read_dirs, edit_dirs=edit_dirs,
                           deny_dirs=tuple(self.deny_dirs),
                           deny_files=tuple(self.deny_files), apps_used=bool(self.apps_used),
@@ -111,14 +113,15 @@ class ChatSession:
                           level="ask" if self.shared else str(getattr(self, "level", "ask") or "ask"))
 
     def _base_cmd(self, with_web=False, model=None, read_dirs=(), edit_dirs=(),
-                  web_domains=(), apps_port=None, os_port=None):
+                  web_domains=(), apps_port=None, os_port=None, browser_port=None):
         """The `claude -p` argv for one turn (ClaudeCodeEngine.build_cmd)."""
-        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains)
-        return ClaudeCodeEngine(self.claude_bin).build_cmd(self, policy, model, apps_port, os_port)
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, browser=bool(browser_port))
+        return ClaudeCodeEngine(self.claude_bin).build_cmd(self, policy, model, apps_port, os_port,
+                                                           browser_port=browser_port)
 
     def ask(self, text, with_web=False, model=None, read_dirs=(), edit_dirs=(),
             web_domains=(), apps_token=None, apps_port=None, os_token=None, os_port=None,
-            gate_token=None, gate_port=None):
+            gate_token=None, gate_port=None, browser_token=None, browser_port=None):
         """Run one turn on self.engine; yield (kind, payload) events.
         `with_web` adds web tools for this turn; `read_dirs` are the linked folders
         it may read and search, `edit_dirs` (a subset) the ones it may change; `model` overrides
@@ -126,10 +129,12 @@ class ChatSession:
         server._needs_web / _pick_model). Any routed skill is already injected
         into `text` by the server. Server injects full snapshot + skill body on
         fresh session start only (no turn cap: a session never auto-resets)."""
-        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token))
+        policy = self._policy(with_web, read_dirs, edit_dirs, web_domains, apps=bool(apps_token),
+                              browser=bool(browser_token))
         if not policy.shared:
             self.folder_paths |= set(policy.read_dirs)
-        tokens = TurnTokens(apps_token, apps_port, os_token, os_port, gate_token=gate_token, gate_port=gate_port)
+        tokens = TurnTokens(apps_token, apps_port, os_token, os_port, gate_token=gate_token, gate_port=gate_port,
+                            browser_token=browser_token, browser_port=browser_port)
         failed = False
         try:
             for ev in self.engine.turn(self, text, policy, model, tokens):

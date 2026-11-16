@@ -24,17 +24,25 @@ A third kind, `job`, is a scheduled-job change (create, change or delete) a bot 
 receipt row (status done, `undo`) that the thread shows with Undo; Undo runs once.
 Older rows may still be pending cards, answered by Approve exactly once.
 
+Browser send plans are app actions too (toolkit `browser`, slug `BROWSER_SEND`): a bot
+plans its sends, the owner approves them (pending -> approved), and the browser relay
+takes one when the bot types the same text on the same page (approved -> done). They are
+never run from the card: only the bot's own click in its browser sends. Until it is used the
+owner can withdraw it (approved -> rejected).
+
 Stored in gitignored team/approvals.json (spans workspaces, so company bots
 are denied Read on team/).
 """
 import json
 import re
+import secrets
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from core import app_preview, bots, integrations
+from core import app_preview, bots, browser, integrations
 
 MARKER_RE = re.compile(r"^[ \t>*_-]*APPROVAL:[*_ \t]*(.+?)[ \t*_]*$", re.M)
 SUMMARY_MAX = 200
@@ -49,6 +57,11 @@ CONTRA = "contradiction"
 VERDICT = "verdict"
 HELD = (APP, JOB, CONTRA, VERDICT)  # answered only through their own card
 APP_TTL = 7 * 86400
+PLAN_TTL = 7 * 86400  # an approved browser send can be used this long after its approval
+BROWSER = "browser"
+BROWSER_SEND = "BROWSER_SEND"
+SENT = "Sent from the browser."
+DAY = 86400
 RUNNING_STALE = 600
 STALE_NOTE = "May or may not have gone out. Check the app."
 JOB_STALE_NOTE = "May or may not be saved. Check Team, Scheduled jobs."
@@ -82,10 +95,20 @@ def _is_held(r):
     return r.get("kind") in HELD
 
 
+def _is_send(r):
+    return r.get("kind") == APP and isinstance(r.get("action"), dict) and r["action"].get("toolkit") == BROWSER
+
+
 def _protected(r):
     # A bot's own runs of the last day stay too: they are its daily limit and the owner's record.
+    # So do approved plans and browser sends of the last week: the site's daily cap counts them,
+    # and Approvals shows them as the "Sent from the browser" log for PLAN_TTL.
+    now = time.time()
     return (_is_held(r) and r.get("status") in ("pending", "running")) or \
-        (r.get("auto") and time.time() - (r.get("resolved") or 0) < AUTO_KEEP)
+        (r.get("auto") and now - (r.get("resolved") or 0) < AUTO_KEEP) or \
+        (_is_send(r) and (r.get("status") == "approved"
+                          or (r.get("status") in ("done", "failed")
+                              and now - (r.get("resolved") or r.get("started") or 0) < PLAN_TTL)))
 
 
 def _save(root, rows):
@@ -135,15 +158,31 @@ def resolve_chat(chat, status, root=bots.ROOT):
         return n
 
 
+def _cap_row(r, now):
+    """A browser send that still counts toward a site's daily cap (done, failed or running in
+    the last day)."""
+    return _is_send(r) and r.get("status") in ("done", "failed", "running") \
+        and 0 <= now - (r.get("started") or r.get("resolved") or 0) < DAY
+
+
 def forget_workspace(ws, root=bots.ROOT):
     """A deleted workspace: its approvals (and held app actions) go, so a project made later
-    with the same slug starts with an empty inbox. A running app action is left to finish."""
+    with the same slug starts with an empty inbox. A running app action is left to finish, and
+    its browser sends of the last day stay (marked ws_gone, never listed again): the site's
+    daily cap counts them, so recreating the slug does not reset it."""
     if not isinstance(ws, str) or not ws or ws == bots.HQ:
         return 0
+    now = time.time()
     with LOCK:
         rows = load(root)
-        keep = [r for r in rows if r.get("ws") != ws or r.get("status") == "running"]
-        if len(keep) != len(rows):
+        keep = []
+        for r in rows:
+            if r.get("ws") != ws:
+                keep.append(r)
+            elif r.get("status") == "running" or _cap_row(r, now):
+                r["ws_gone"] = True
+                keep.append(r)
+        if len(keep) != len(rows) or any(r.get("ws_gone") for r in keep if r.get("ws") == ws):
             _save(root, keep)
         return len(rows) - len(keep)
 
@@ -180,6 +219,8 @@ def _housekeep(rows):
         if not _is_held(r):
             continue
         if r.get("status") == "pending" and now - (r.get("created") or 0) > APP_TTL:
+            r["status"], r["resolved"], changed = "expired", now, True
+        elif r.get("status") == "approved" and _is_send(r) and now - (r.get("approved_at") or 0) > PLAN_TTL:
             r["status"], r["resolved"], changed = "expired", now, True
         elif r.get("status") == "running" and now - (r.get("started") or 0) > RUNNING_STALE:
             r.update(status="failed", result=JOB_STALE_NOTE if r.get("kind") in (JOB, CONTRA, VERDICT) else STALE_NOTE,
@@ -224,6 +265,141 @@ def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, a
         _save(root, rows)
     return rec
 
+
+def _norm(text):
+    return " ".join(text.split()) if isinstance(text, str) else ""
+
+
+def _place(url):
+    """(host, path, query) of a page for matching a send to its plan; a trailing slash on the
+    path and the fragment do not count."""
+    host = browser.host_of(url)
+    if not host:
+        return None
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+    return host, parts.path.rstrip("/") or "/", parts.query
+
+
+def add_send_plan(root=bots.ROOT, *, ws, room, chat, bot, person, items):
+    """Hold a bot's planned browser sends ({"url", "text", "site"} each) under one batch:
+    one Approve all approves them. Approving does not send: the bot's own click does."""
+    batch = secrets.token_hex(6)
+    recs = []
+    for it in items:
+        rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=BROWSER,
+                          slug=BROWSER_SEND, arguments={"url": it["url"], "text": it["text"], "site": it["site"]},
+                          account=None)
+        rec["batch"] = batch
+        recs.append(rec)
+    with LOCK:
+        rows = load(root)
+        rows.extend(recs)
+        _save(root, rows)
+    return recs
+
+
+def withdraw_send(aid, root=bots.ROOT):
+    """approved -> rejected for one planned browser send the bot has not used yet, so it can no
+    longer be sent (the owner changed their mind within its PLAN_TTL)."""
+    def fn(r):
+        if not _is_send(r):
+            raise ValueError("not a browser send")
+        _need(r, "approved")
+        r.update(status="rejected", resolved=time.time(), withdrawn=True)
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def approve_send(aid, root=bots.ROOT):
+    """pending -> approved for one planned browser send, once."""
+    def fn(r):
+        if not _is_send(r):
+            raise ValueError("not a browser send")
+        _need(r, "pending")
+        r.update(status="approved", approved_at=time.time())
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def _send_site(r, root, listed):
+    """The listed site a send counts against, from its page address at count time."""
+    url = (r["action"].get("arguments") or {}).get("url")
+    return browser.site_of(url, root, listed) or browser.host_of(url)
+
+
+def _count_sends(rows, site, root, now):
+    # A failed or running send may have gone out: it counts against the cap too.
+    # Counted from when it started: a row housekept to failed later still counts 24 h from its click.
+    listed = browser.sites(root)
+    return sum(1 for r in rows if _cap_row(r, now) and _send_site(r, root, listed) == site)
+
+
+def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, url, text, daily=None,
+               planned, now=None):
+    """Start one browser send, atomically with the daily cap: ("capped" | "no_plan" | "ok", record).
+
+    Under one lock it counts today's sends of the page's site (every bot, every workspace)
+    against `daily`, then either moves this bot's matching approved plan item (same ws, page
+    by host, path and query, text whitespace aside, approved at most PLAN_TTL ago) to
+    `running` (`planned`), or writes a new `running` record (an act send). The caller sends,
+    then calls end_send. A second browser checking the cap meanwhile sees the running row."""
+    now = time.time() if now is None else now
+    site = browser.site_of(url, root) or browser.host_of(url)
+    place, want = _place(url), _norm(text)
+    with LOCK:
+        rows = load(root)
+        _housekeep(rows)
+        if daily and _count_sends(rows, site, root, now) >= daily:
+            return "capped", None
+        if planned:
+            hits = [] if place is None or not want else [
+                r for r in rows if _is_send(r) and r.get("status") == "approved"
+                and r.get("ws") == ws and r.get("bot") == bot
+                and 0 <= now - (r.get("approved_at") or 0) <= PLAN_TTL
+                and _place((r["action"].get("arguments") or {}).get("url")) == place
+                and _norm((r["action"].get("arguments") or {}).get("text")) == want]
+            if not hits:
+                return "no_plan", None
+            rec = min(hits, key=lambda r: r.get("approved_at") or 0)
+            rec["action"]["arguments"] = {**(rec["action"].get("arguments") or {}), "site": site}
+        else:
+            rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=BROWSER,
+                              slug=BROWSER_SEND, arguments={"url": url, "text": text, "site": site}, account=None)
+            rec["auto"] = True
+            rows.append(rec)
+        rec.update(status="running", started=now)
+        _save(root, rows)
+        return "ok", dict(rec)
+
+
+def end_send(aid, ok, root=bots.ROOT):
+    """running -> done (SENT) or failed (it may or may not have gone out). A row no longer
+    running (housekept to failed while the click hung) keeps what it has."""
+    def fn(r):
+        if r.get("status") != "running":
+            return
+        r.update(status="done" if ok else "failed", result=SENT if ok else STALE_NOTE, resolved=time.time())
+    return _mutate_held(aid, root, fn, kinds=(APP,))
+
+
+def take_send(root=bots.ROOT, *, ws, bot, url, text, now=None):
+    """Use one approved send of this bot that matches the page and text (see claim_send):
+    approved -> done, with its site rewritten from `url`. None when none matches."""
+    status, rec = claim_send(root, ws=ws, bot=bot, url=url, text=text, planned=True, now=now)
+    if status != "ok":
+        return None
+    return end_send(rec["id"], True, root)
+
+
+def sends_today(site, root=bots.ROOT, now=None):
+    """Browser sends of `site` in the last 24 hours, by every bot in every workspace: done,
+    failed or running (a failed click may have gone out). The site comes from each send's
+    page address now, so a site listed later counts its older sends."""
+    if not site:
+        return 0
+    now = time.time() if now is None else now
+    return _count_sends(load(root), site, root, now)
 
 
 def batch_pending(batch, root=bots.ROOT):
@@ -279,6 +455,32 @@ def receipts(root=bots.ROOT, ws=None, now=None):
     rows = [r for r in load(root) if r.get("kind") == JOB and r.get("receipt") and r.get("status") == "done"
             and now - (r.get("created") or 0) <= RECEIPT_TTL and (not ws or ws == bots.HQ or r.get("ws") == ws)]
     return sorted(rows, key=lambda r: r.get("created") or 0, reverse=True)
+
+
+SENT_LIMIT = 50
+
+
+def browser_sent(root=bots.ROOT, ws=None, now=None):
+    """Browser sends that ran in the last PLAN_TTL (done, failed or still running), newest first;
+    `ws` other than HQ narrows. Approvals lists them, so every send is logged there."""
+    now = time.time() if now is None else now
+    rows = [r for r in load(root) if _is_send(r) and r.get("status") in ("done", "failed", "running")
+            and 0 <= now - (r.get("started") or r.get("created") or 0) <= PLAN_TTL
+            and not r.get("ws_gone") and (not ws or ws == bots.HQ or r.get("ws") == ws)]
+    rows.sort(key=lambda r: r.get("started") or r.get("created") or 0, reverse=True)
+    return rows[:SENT_LIMIT]
+
+
+def browser_approved(root=bots.ROOT, ws=None, now=None):
+    """Planned browser sends the owner approved that the bot has not sent yet (still usable,
+    within PLAN_TTL of their approval), newest first; `ws` other than HQ narrows. Approvals lists
+    them under "Approved, not sent yet", each with Withdraw."""
+    now = time.time() if now is None else now
+    rows = [r for r in load(root) if _is_send(r) and r.get("status") == "approved"
+            and 0 <= now - (r.get("approved_at") or 0) <= PLAN_TTL
+            and (not ws or ws == bots.HQ or r.get("ws") == ws)]
+    rows.sort(key=lambda r: r.get("approved_at") or 0, reverse=True)
+    return rows[:SENT_LIMIT]
 
 
 def undo_receipt(aid, apply, root=bots.ROOT, now=None):

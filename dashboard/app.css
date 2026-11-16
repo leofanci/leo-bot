@@ -897,3 +897,14 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .metric-chip{font-size:12px;color:var(--ui-color-text-muted);margin-top:4px}
 .sec-h{margin:var(--ui-space-4) 0 var(--ui-space-1-5)}
 .outside-text{white-space:pre-wrap;max-height:320px;overflow:auto;margin-top:var(--ui-space-1-5);padding:var(--ui-space-1-5);border-radius:var(--ui-radius-small);background:var(--ui-color-neutral-soft);font-size:var(--ui-type-label)}
+
+/* Settings, Browser: sites, the My Chrome check and per-bot logins */
+.brw-site,.brw-login,.brw-chrome{flex-wrap:wrap}
+.brw-site label,.brw-ws{display:inline-flex;align-items:center;gap:var(--ui-space-1-5);font-size:var(--ui-type-label);color:var(--ui-color-text-secondary)}
+.brw-site select,.brw-site input,.brw-login input,.brw-ws select{min-height:var(--ui-control-input);padding:var(--ui-space-1) var(--ui-space-2-5);border:1px solid var(--ui-color-border-strong);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);color:var(--ui-color-text);font:inherit}
+.brw-site select:focus,.brw-site input:focus,.brw-login input:focus,.brw-ws select:focus{outline:none;border-color:var(--ui-color-accent);box-shadow:0 0 0 3px var(--ui-color-accent-soft)}
+.brw-site input[type=number]{width:7em}
+.brw-login input{flex:1 1 220px;min-width:0}
+.brw-chrome .t small{margin-top:var(--ui-space-1-5);line-height:1.5}
+.brw-ws{margin:0 0 var(--ui-space-2)}
+.brw-add{margin-top:var(--ui-space-2)}

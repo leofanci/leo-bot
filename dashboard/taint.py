@@ -46,6 +46,19 @@ class Turn:
         self._lock = threading.Lock()
         self.app_data = bool(app_data)
         self.outside = bool(outside or app_data)
+        self.browser_root = None  # a run of this request has a browser: its data root
+        self.browser_sends = False  # ... at a level that can send (write, act)
+        self.unwalled_shell = None  # {"shell", "engine"} of a run whose shell Leo Bot cannot wall
+
+    def browsing(self, root, sends=False, unwalled=None):
+        """A run of this request has the browser (dashboard/shell_rules.py, the third wall): from
+        now on every shell command runs sandboxed away from it. `unwalled`: that run's shell cannot
+        be walled ({"shell", "engine"} labels), so the browser relay refuses every send. Only ever gains."""
+        with self._lock:
+            self.browser_root = str(root)
+            self.browser_sends = self.browser_sends or bool(sends)
+            if unwalled and self.unwalled_shell is None:
+                self.unwalled_shell = dict(unwalled)
 
     def saw_app_data(self):
         with self._lock:
@@ -67,8 +80,9 @@ class Turn:
         content an allowed command runs sandboxed, as `run`."""
         from dashboard import shell_rules
         with self._lock:
-            outside = self.outside
-        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir)
+            outside, root, sends = self.outside, self.browser_root, self.browser_sends
+        walls = shell_rules.browser_walls(root, required=sends) if root else None
+        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir, browser=walls)
 
     def decide(self, tool, command=None):
         """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an

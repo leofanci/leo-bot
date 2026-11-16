@@ -18,6 +18,30 @@ and no way to hand work to a process outside it (launchd, Apple events, open, os
 crontab). Codex has its own sandbox for this (dashboard/engines/codex.py). A Mac without
 sandbox-exec, or another system, keeps wall 2 alone. Before outside content, Full access means
 the bot runs commands as the owner does.
+
+A third wall while the run has a browser (its level above off, taint.Turn.browsing): the
+browser relay is the only way a bot reaches a browser, so every command runs sandboxed from the
+first one, outside content or not, and the sandbox also denies the browser's back doors
+(`browser_walls`): every localhost port from the first command (a Chrome debug port, the bot
+browser's own CDP port, whatever port they use), the engine's folder ~/.agent-browser (its
+session sockets and saved logins: no read, write or connect), Leo Bot's <data>/run (the engine
+key, the typed text) and writes to <data>/team (approvals, browser settings, the sandbox
+profiles), Leo Bot's own code (REPO) and the Python that runs osctl (sys.prefix, sys.base_prefix,
+the folder of sys.executable, its site-packages folders). Writes go only to the edit and temp folders from the first
+command, and no folder above a walled one can be renamed (each ancestor up to the home folder
+or / is denied as itself: a rename otherwise moves the folder out from under its path rule).
+Before outside content the internet stays open. With no sandbox, a browser level that can send (write, act) refuses the command (and
+server.py refuses the turn up front); at Reads only the command runs as before.
+
+Every profile Leo Bot writes to a file also denies writes to that file's folder, and the
+rename of each folder above it, so no command it wraps can swap the profile of the next one.
+
+The one command that runs outside the sandbox, a plain `python3 -m dashboard.osctl ...`, is
+rewritten to run Leo Bot's own osctl only: this server's own Python (sys.executable) in
+isolated mode (-I: no current folder, no PYTHONPATH, no user site on sys.path) with the repo
+put on sys.path explicitly, from the repo folder. A bot that writes dashboard/osctl.py into its
+edit folder never gets that file run outside the sandbox. (-P needs Python 3.11; Leo Bot
+supports 3.10.)
 """
 import hashlib
 import os
@@ -25,7 +49,9 @@ import posixpath
 import re
 import shlex
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 # Words that run the next word as the command.
 _WRAPPERS = {"sudo", "nohup", "env", "command", "exec", "time", "nice", "ionice", "caffeinate", "doas"}
@@ -42,6 +68,13 @@ _PUBLISH = {"npm", "pnpm", "yarn", "twine", "cargo", "gem", "poetry", "flit", "d
 
 NEVER = "This command could wreck the machine, so Leo Bot never runs it."
 UNREADABLE = "Leo Bot could not read this command (unbalanced quotes): write it plainly."
+BROWSER_SHELL_OFF = ("This did not run: {bot}'s browser is set to {browser} (Settings, Browser) and its shell "
+                     "to {shell} (Team), and on {engine} Leo Bot cannot keep that shell away from the browser, "
+                     "so a command could send past your approvals. Set the browser to Reads only or Off, or "
+                     "the shell to a level without commands, then ask again.")
+NO_SANDBOX = ("This bot's browser can send, and this machine has no sandbox to keep shell commands away from "
+              "the browser, so shell commands are off while it browses. Ask the owner to set the browser to "
+              "Reads only or Off, or the shell level lower.")
 SENDS_OFF = ("This conversation holds outside content or app data, so commands that send things off "
              "this machine (curl, wget, ssh, scp, rsync, git push, a publish, gh, mail) are off. Do the "
              "local work; tell the owner what to push or send.")
@@ -139,6 +172,10 @@ def _sends(prog, args):
 
 
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+REPO = Path(__file__).resolve().parent.parent  # Leo Bot's own code: the osctl it runs
+_OSCTL_PREFIX = re.compile(r"^\s*python3?(?:\.\d+)?\s+-m\s+dashboard\.osctl(?=\s|$)")
+_OSCTL_RUN = ("import runpy, sys; sys.path.insert(0, {repo}); "
+              "runpy.run_module('dashboard.osctl', run_name='__main__', alter_sys=True)")
 # Programs that hand work to a process outside the sandbox: it would run unconfined later.
 _HANDOFF_PROGRAMS = ("/usr/bin/open", "/usr/bin/osascript", "/bin/launchctl", "/usr/bin/crontab",
                      "/usr/bin/at", "/usr/bin/batch", "/usr/bin/automator", "/usr/bin/shortcuts")
@@ -148,25 +185,112 @@ def _sb_str(path):
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sandbox_profile(writable=()):
-    """The sandbox-exec profile for a command run after outside content (see the module notes)."""
+def _python_dirs():
+    """Where the Python that runs osctl lives: sys.prefix, sys.base_prefix, the folder of
+    sys.executable, and its site-packages folders (site.getsitepackages, plus the user one when
+    there is one), as real paths: a site-packages linked from outside the prefix counts too."""
+    import site
+    dirs = [sys.prefix, sys.base_prefix, os.path.dirname(os.path.realpath(sys.executable))]
+    try:
+        dirs += list(site.getsitepackages())
+    except (AttributeError, OSError):  # some virtualenvs have no getsitepackages
+        pass
+    try:
+        user = site.getusersitepackages()
+    except (AttributeError, OSError):
+        user = None
+    if isinstance(user, str) and user:
+        dirs.append(user)
+    return sorted({os.path.realpath(d) for d in dirs if isinstance(d, str) and d})
+
+
+def _ancestors(path, home):
+    """The folders above `path`, up to and excluding the home folder and /: a deny on each stops
+    a rename of a parent from moving a walled folder out from under its path rule."""
+    out = []
+    stop = {"/", os.path.realpath(str(home)), os.path.realpath(os.path.expanduser("~"))}
+    cur = os.path.dirname(path)
+    while cur and cur not in stop and cur != os.path.dirname(cur):
+        out.append(cur)
+        cur = os.path.dirname(cur)
+    return out
+
+
+def browser_walls(root, required=False, home=None, profile_dir=None):
+    """What a run with a browser keeps its shell from (module notes): {"paths" (no read, write
+    or socket), "write_paths" (no write), "ancestors" (no write on the folder itself: no rename),
+    "home", "required"}. `required`: the browser can send, so a command with no sandbox is
+    refused. Every localhost port is denied as well, and writes go only to the edit and temp
+    folders (sandbox_profile)."""
+    home = Path.home() if home is None else Path(home)
+    real = lambda p: os.path.realpath(str(p))  # noqa: E731 - one short helper
+    agent, run, team, data = real(home / ".agent-browser"), real(Path(root) / "run"), real(Path(root) / "team"), real(root)
+    pdir = real(profile_dir) if profile_dir else None
+    python = _python_dirs()
+    writes = sorted({team, real(REPO), *python} | ({pdir} if pdir else set()))
+    walled = [team, run, agent, real(REPO), data, *python] + ([pdir] if pdir else [])
+    ancestors = sorted({a for p in walled for a in _ancestors(p, home)})
+    return {"paths": sorted({agent, run}), "write_paths": writes, "ancestors": ancestors,
+            "home": real(home), "required": bool(required)}
+
+
+def _browser_denies(browser):
+    lines = ['(deny network-outbound (remote ip "localhost:*"))']
+    for p in browser.get("paths") or ():
+        lines.append(f"(deny file-read* file-write* (subpath {_sb_str(p)}))")
+        lines.append(f"(deny network-outbound (remote unix-socket (subpath {_sb_str(p)})))")
+    for p in browser.get("write_paths") or ():
+        lines.append(f"(deny file-write* (subpath {_sb_str(p)}))")
+    for p in browser.get("ancestors") or ():
+        lines.append(f"(deny file-write* (literal {_sb_str(p)}))")
+    return lines
+
+
+def _own_denies(profile_dir, home=None):
+    """The folder the profile file is written to: never writable from inside it, nor any folder
+    above it renamed."""
+    if not profile_dir:
+        return []
+    pdir = os.path.realpath(str(profile_dir))
+    return [f"(deny file-write* (subpath {_sb_str(pdir)}))"] + [
+        f"(deny file-write* (literal {_sb_str(a)}))" for a in _ancestors(pdir, Path.home() if home is None else home)]
+
+
+def _write_limit(writable):
+    """Writes only in the edit folders and the temp folders (never a .git hook or config)."""
     temps = {os.path.realpath(p) for p in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders")
              if p and os.path.isdir(p)}
     dirs = sorted({os.path.realpath(str(d)) for d in writable if d} | temps)
-    lines = [
-        "(version 1)",
-        "(allow default)",
-        "(deny network-outbound (remote ip))",
-        '(allow network-outbound (remote ip "localhost:*"))',
-        '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
-        "(deny appleevent-send)",
-        "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")",
-        "(deny file-write*)",
-        "(allow file-write* " + " ".join(f"(subpath {_sb_str(d)})" for d in dirs)
-        + ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd"))',
-        '(deny file-write* (regex #"/\\.git/(hooks|config$)"))',
-    ]
-    return "".join(lines)
+    return ["(deny file-write*)",
+            "(allow file-write* " + " ".join(f"(subpath {_sb_str(d)})" for d in dirs)
+            + ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd"))',
+            '(deny file-write* (regex #"/\\.git/(hooks|config$)"))']
+
+
+def sandbox_profile(writable=(), browser=None, outside=True, profile_dir=None, home=None):
+    """The sandbox-exec profile for a command run after outside content (see the module notes).
+    `browser` (browser_walls): also keep the command from the browser, write-limited from the
+    first command; with `outside` False the internet stays (only localhost is denied).
+    `profile_dir`: where the profile file goes, denied to writes with every folder above it.
+    The denies come last, so an edit folder that holds a walled path never opens it."""
+    handoff = ["(deny appleevent-send)",
+               "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")"]
+    home = (browser or {}).get("home") if home is None else home
+    lines = ["(version 1)", "(allow default)"]
+    if browser is None or outside:
+        lines.append("(deny network-outbound (remote ip))")
+        if browser is None:  # with a browser no localhost port either
+            lines.append('(allow network-outbound (remote ip "localhost:*"))')
+        lines.append('(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))')
+    lines += handoff + _write_limit(writable)
+    if browser is not None:
+        lines += _browser_denies(browser)
+    return "".join(lines + _own_denies(profile_dir, home))
+
+
+def can_sandbox():
+    """This system can run a command inside sandbox-exec."""
+    return bool(os.path.exists(SANDBOX_EXEC) and shutil.which(SANDBOX_EXEC))
 
 
 def _profile_file(profile, profile_dir):
@@ -185,13 +309,13 @@ def _profile_file(profile, profile_dir):
         return None
 
 
-def sandboxed(command, writable=(), shell="/bin/bash", profile_dir=None):
+def sandboxed(command, writable=(), shell="/bin/bash", profile_dir=None, browser=None, outside=True):
     """`command` wrapped to run inside the sandbox, or None when this system has none.
     `profile_dir`: write the profile there and pass its path (a short command) instead of
-    the whole profile inline."""
-    if not (os.path.exists(SANDBOX_EXEC) and shutil.which(SANDBOX_EXEC)):
+    the whole profile inline. `browser`, `outside`: see sandbox_profile."""
+    if not can_sandbox():
         return None
-    profile = sandbox_profile(writable)
+    profile = sandbox_profile(writable, browser=browser, outside=outside, profile_dir=profile_dir)
     path = _profile_file(profile, profile_dir) if profile_dir else None
     spec = f"-f {shlex.quote(path)}" if path else f"-p {shlex.quote(profile)}"
     return f"{SANDBOX_EXEC} {spec} {shell} -c {shlex.quote(command)}"
@@ -213,13 +337,33 @@ def _osctl_only(command):
             and words[1:3] == ["-m", "dashboard.osctl"])
 
 
-def plan(command, outside=False, writable=(), profile_dir=None):
+def osctl_command(command):
+    """A plain `python3 -m dashboard.osctl <args>` as Leo Bot's own osctl only (module notes),
+    or None when it is not that plain form. The arguments keep their shell text."""
+    m = _OSCTL_PREFIX.match(command)
+    if m is None:
+        return None
+    code = _OSCTL_RUN.format(repo=repr(str(REPO)))
+    return f"cd {shlex.quote(str(REPO))} && {shlex.quote(sys.executable)} -I -c {shlex.quote(code)}{command[m.end():]}"
+
+
+def plan(command, outside=False, writable=(), profile_dir=None, browser=None):
     """(allow, reason, run): `run` is the command to run instead (sandboxed after outside
-    content), or None to run it as written."""
+    content, or from the first command while the run has a browser: `browser`, browser_walls),
+    or None to run it as written."""
     allow, reason = decide(command, outside)
-    if not allow or not outside or _osctl_only(command):
+    if not allow:
         return allow, reason, None
-    return True, "", sandboxed(command, writable, profile_dir=profile_dir)
+    if _osctl_only(command):
+        own = osctl_command(command)
+        if own is not None:
+            return True, "", own
+    if browser is None:
+        return (True, "", sandboxed(command, writable, profile_dir=profile_dir)) if outside else (True, "", None)
+    run = sandboxed(command, writable, profile_dir=profile_dir, browser=browser, outside=outside)
+    if run is None and browser.get("required"):
+        return False, NO_SANDBOX, None
+    return True, "", run
 
 
 def decide(command, outside=False):

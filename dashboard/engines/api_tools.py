@@ -592,7 +592,7 @@ class ToolBox:
         self.engine_id, self.backends = engine_id, backends
         # This request's taint (dashboard/taint.py). Without one, web and apps never share a turn.
         self.turn = taint.GATES.lookup(tokens.gate_token) if getattr(tokens, "gate_token", None) else None
-        self.specs, self._apps = [OSCTL_SPEC], set()
+        self.specs, self._apps, self._browser = [OSCTL_SPEC], set(), set()
         self.review = None   # Approve for me: the engine's reviewer, (command, cwd) -> (allow, reason)
         self.child = None    # the shell command running now (stop() ends it)
         self.stopped = False
@@ -612,6 +612,20 @@ class ToolBox:
                 self.specs.append({"name": tool["name"], "description": tool.get("description") or "",
                                    "input_schema": tool.get("inputSchema") or {"type": "object", "properties": {}}})
                 self._apps.add(tool["name"])
+        # The bot's browser (dashboard/browser_relay.py gates every call), never in a shared thread.
+        if getattr(policy, "browser", False) and not policy.shared and getattr(tokens, "browser_token", None) \
+                and backends.get("browser_list"):
+            taken = {s["name"] for s in self.specs}
+            try:
+                listed = backends["browser_list"](tokens.browser_token)
+            except Exception:  # noqa: BLE001 - a browser that will not list leaves this turn without it
+                listed = []
+            for tool in listed if isinstance(listed, list) else []:
+                if not isinstance(tool, dict) or not isinstance(tool.get("name"), str) or tool["name"] in taken:
+                    continue
+                self.specs.append({"name": tool["name"], "description": tool.get("description") or "",
+                                   "input_schema": tool.get("inputSchema") or {"type": "object", "properties": {}}})
+                self._browser.add(tool["name"])
 
     def add_spent(self, usage):
         """Fold the reviewer's tokens into the turn's `usage` (same provider, same model)."""
@@ -628,10 +642,10 @@ class ToolBox:
 
     def web_open(self):
         """May web search or fetch be offered now? Yes with a gate watching the turn (app data no
-        longer turns it off); apps with nothing watching: no."""
+        longer turns it off); apps or the browser with nothing watching: no."""
         if self.turn is not None:
             return True
-        return not self._apps
+        return not self._apps and not self._browser
 
     def saw_web(self):
         if self.turn is not None:
@@ -678,6 +692,8 @@ class ToolBox:
                 return web_fetch(args.get("url"), self.policy), False
             if name in self._apps:
                 return self.backends["apps_call"](self.tokens.apps_token, name, args)
+            if name in self._browser:
+                return self.backends["browser_call"](self.tokens.browser_token, name, args)
             return f'"{name}" is not available here.', True
         except (ToolError, ValueError) as e:
             return str(e), True

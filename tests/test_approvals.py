@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, bots
+from core import approvals, bots, browser
 import dashboard.chat_session as chat_session
 import dashboard.server as server
 
@@ -338,6 +338,134 @@ class AppActions(unittest.TestCase):
         self.assertEqual(len(approvals.pending(self.root, "hq")), 2)
         approvals.claim(a["id"], self.root)
         self.assertEqual(approvals.get(b["id"], self.root)["status"], "pending")
+
+
+class BrowserSent(unittest.TestCase):
+    """Approvals lists browser sends that ran, so "Sent from the browser" is visible there."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.page = "https" + "://" + "acme.test/inbox"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def send(self, ws, text, ok=True, now=None):
+        status, rec = approvals.claim_send(self.root, ws=ws, bot="b1", url=self.page, text=text,
+                                           planned=False, now=now)
+        self.assertEqual(status, "ok")
+        if ok is not None:
+            approvals.end_send(rec["id"], ok, self.root)
+        return rec
+
+    def test_done_failed_and_running_listed_newest_first_per_workspace(self):
+        self.send("acme", "one")
+        self.send("acme", "two", ok=False)
+        self.send("acme", "three", ok=None)  # still running
+        self.send("demo", "elsewhere")
+        rows = approvals.browser_sent(self.root, "acme")
+        self.assertEqual([(r["action"]["arguments"]["text"], r["status"]) for r in rows],
+                         [("three", "running"), ("two", "failed"), ("one", "done")])
+        self.assertEqual(rows[2]["result"], approvals.SENT)
+        self.assertEqual(len(approvals.browser_sent(self.root, bots.HQ)), 4)  # HQ: every workspace
+        self.assertEqual(approvals.pending(self.root, "acme"), [])  # never a pending card
+
+    def test_planned_send_listed_once_it_ran_only(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"}])
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # pending: not a sent row
+        approvals.approve_send(held[0]["id"], self.root)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # approved, not yet sent
+        self.assertIsNotNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="hi"))
+        self.assertEqual([r["status"] for r in approvals.browser_sent(self.root, "acme")], ["done"])
+
+    def test_older_than_a_week_left_out(self):
+        self.send("acme", "old", now=time.time() - approvals.PLAN_TTL - 60)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])
+
+    def test_sent_log_survives_pruning_for_a_week(self):
+        now = time.time()
+
+        def row(i, age):
+            return {"id": f"s{i}", "kind": approvals.APP, "status": "done", "result": approvals.SENT,
+                    "created": now - age, "started": now - age, "resolved": now - age, "ws": "acme",
+                    "action": {"toolkit": approvals.BROWSER, "slug": approvals.BROWSER_SEND,
+                               "arguments": {"url": self.page, "text": f"t{i}"}}}
+        week = [row("3d", 3 * 86400)]
+        old = [row("8d", 8 * 86400)]
+        filler = [{"id": f"f{i}", "kind": "approval", "status": "answered", "created": now, "ws": "acme",
+                   "summary": "x"} for i in range(approvals.KEEP + 5)]
+        approvals._save(self.root, old + week + filler)
+        ids = {r["id"] for r in approvals.load(self.root)}
+        self.assertIn("s3d", ids)  # a 3-day-old send is still in the log
+        self.assertNotIn("s8d", ids)  # past the week it goes with the rest
+        self.assertEqual([r["id"] for r in approvals.browser_sent(self.root, "acme")], ["s3d"])
+
+    def test_approved_send_listed_until_used_and_withdrawable(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"},
+                                              {"url": self.page, "text": "bye", "site": "acme.test"}])
+        self.assertEqual(approvals.browser_approved(self.root, "acme"), [])  # pending: still a card
+        for r in held:
+            approvals.approve_send(r["id"], self.root)
+        self.assertEqual({r["id"] for r in approvals.browser_approved(self.root, "acme")}, {r["id"] for r in held})
+        self.assertEqual(approvals.browser_approved(self.root, "demo"), [])
+        self.assertEqual(len(approvals.browser_approved(self.root, bots.HQ)), 2)
+        out = approvals.withdraw_send(held[0]["id"], self.root)
+        self.assertEqual(out["status"], "rejected")
+        self.assertEqual([r["id"] for r in approvals.browser_approved(self.root, "acme")], [held[1]["id"]])
+        # a withdrawn send can no longer be used, and a second withdraw is refused
+        self.assertIsNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="hi"))
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(held[0]["id"], self.root)
+        # only an approved browser send: a used one or another card is not withdrawn
+        self.assertIsNotNone(approvals.take_send(self.root, ws="acme", bot="b1", url=self.page, text="bye"))
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(held[1]["id"], self.root)
+        other = approvals.add(self.root, ws="acme", room=None, chat="c1", bot="b1", summary="x")
+        with self.assertRaises(ValueError):
+            approvals.withdraw_send(other["id"], self.root)
+
+    def test_approved_send_past_its_week_not_listed(self):
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "hi", "site": "acme.test"}])
+        approvals.approve_send(held[0]["id"], self.root)
+        later = time.time() + approvals.PLAN_TTL + 1
+        self.assertEqual(approvals.browser_approved(self.root, "acme", now=later), [])
+
+    def test_housekept_send_counts_from_when_it_started(self):
+        rec = self.send("acme", "hung", ok=None)
+        rows = approvals.load(self.root)
+        for r in rows:
+            if r["id"] == rec["id"]:
+                r["started"] = time.time() - approvals.DAY + 30  # a click that hung almost a day ago
+        approvals._save(self.root, rows)
+        approvals.claim_send(self.root, ws="acme", bot="b1", url=self.page, text="next", planned=False)  # housekeeps
+        self.assertEqual(approvals.get(rec["id"], self.root)["status"], "failed")
+        site = browser.site_of(self.page, self.root) or browser.host_of(self.page)
+        self.assertEqual(approvals.sends_today(site, self.root), 2)
+        self.assertEqual(approvals.sends_today(site, self.root, now=time.time() + 60), 1)  # 24 h from its start
+
+    def test_workspace_delete_keeps_the_last_day_of_sends(self):
+        self.send("acme", "today")
+        self.send("acme", "failed today", ok=False)
+        old = self.send("acme", "two days ago", now=time.time() - 2 * approvals.DAY)
+        held = approvals.add_send_plan(self.root, ws="acme", room=None, chat=None, bot="b1", person="ceo",
+                                       items=[{"url": self.page, "text": "planned", "site": "acme.test"}])
+        approvals.forget_workspace("acme", self.root)
+        site = browser.host_of(self.page)
+        self.assertEqual(approvals.sends_today(site, self.root), 2)  # a recreated slug keeps the cap
+        ids = {r["id"] for r in approvals.load(self.root)}
+        self.assertNotIn(held[0]["id"], ids)  # its plans and cards go
+        self.assertNotIn(old["id"], ids)
+        self.assertEqual(approvals.browser_sent(self.root, "acme"), [])  # never shown to the new workspace
+
+    def test_api_returns_sent(self):
+        self.send("acme", "one")
+        with mock.patch.object(server, "ROOT", self.root):
+            out = server.approvals_view("acme")
+        self.assertEqual([r["action"]["arguments"]["text"] for r in out["sent"]], ["one"])
 
 
 if __name__ == "__main__":

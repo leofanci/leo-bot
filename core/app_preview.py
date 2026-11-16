@@ -49,6 +49,9 @@ def _title(slug, toolkit):
 def build(slug, arguments, toolkit=None, account=None):
     """{"title", "fields": [[label, value], ...]} for one held tool call; the
     account it runs as comes first, so two Gmails never get mixed up."""
+    if slug == "BROWSER_SEND" and isinstance(arguments, dict):
+        return {"title": f"Send on {arguments.get('site')}",
+                "fields": [["Page", _fmt(arguments.get("url"))], ["Text", _fmt(arguments.get("text"))]]}
     title, spec = TAILORED.get(slug, (None, []))
     title = title or _title(slug, toolkit)
     head = [["Account", account]] if account else []
