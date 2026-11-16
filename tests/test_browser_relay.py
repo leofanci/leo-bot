@@ -479,7 +479,7 @@ class Gate(unittest.TestCase):
         self.level("write")
         up = FakeUpstream(self.page, browser_key="bot:acme--b1")
         self.handle(call(P + "fill", text="Hi"), up=up)
-        self.assertEqual(browser_relay.typed_state("bot:acme--b1", self.root), {"typed": "Hi", "aside": ""})
+        self.assertEqual(browser_relay.typed_state("bot:acme--b1", self.root), {"typed": "Hi", "aside": "", "by": {"?focus": "Hi"}})
         self.assertTrue((self.root / "run" / "browser_typed.json").is_file())
         fresh = FakeUpstream(self.page, values=["Hi"], browser_key="bot:acme--b1")  # restarted, page restored
         self.assertEqual(text_of(self.handle(call(P + "click"), up=fresh)), browser_relay.NO_PLAN)
@@ -559,7 +559,8 @@ class Gate(unittest.TestCase):
         self.assertEqual(text_of(self.handle(call(P + "click"))), browser_relay.NO_CHECK)
         self.assertEqual(self.up.calls(), [])
         self.handle(call(P + "fill", text="Hi"))
-        self.assertEqual(browser_relay.typed_state(self.up.browser_key, self.root), {"typed": "Hi", "aside": ""})
+        self.assertEqual(browser_relay.typed_state(self.up.browser_key, self.root),
+                         {"typed": "Hi", "aside": "", "by": {"?focus": "Hi"}})
 
     def test_end_send_after_housekeeping_keeps_failed(self):
         status, rec = approvals.claim_send(self.root, ws="acme", bot="b1", url=self.page, text="x", planned=False)
@@ -909,6 +910,132 @@ class Preview(unittest.TestCase):
         text = "line one\n" * 200
         p = app_preview.build("BROWSER_SEND", {"url": u("acme.test/m"), "text": text, "site": "acme.test"}, "browser")
         self.assertEqual(p, {"title": "Send on acme.test", "fields": [["Page", u("acme.test/m")], ["Text", text]]})
+
+class TypedFields(unittest.TestCase):
+    """fill replaces its field's text, the gate's own move to about:blank sets text aside, and
+    text brought back by history is checked against the page's field."""
+    setUp, tearDown, level, handle, plan = Gate.setUp, Gate.tearDown, Gate.level, Gate.handle, Gate.plan
+
+    def other(self, n=1):
+        return u(f"other.test/compose/{n}")
+
+    def typed(self):
+        return browser_relay.typed_state(self.up.browser_key, self.root)
+
+    def test_a_second_fill_replaces_the_first(self):
+        page = self.other()
+        self.plan("Hello", url=page)
+        self.handle(call(P + "open", url=page))
+        self.handle(call(P + "fill", selector="@e1", text="Helo"))
+        self.handle(call(P + "fill", selector="@e1", text="Hello"))
+        self.assertEqual(self.typed()["typed"], "Hello")
+        reply = self.handle(call(P + "click", selector="@e2"))
+        self.assertFalse(reply["result"].get("isError"), reply)
+        self.assertIn(P + "click", self.up.calls())
+
+    def test_fill_with_empty_text_clears_the_field(self):
+        self.level("write")
+        self.handle(call(P + "open", url=self.other()))
+        self.handle(call(P + "fill", selector="@e1", text="Hi"))
+        self.handle(call(P + "fill", selector="@e1", text=""))
+        self.assertEqual(self.typed(), {"typed": "", "aside": "", "by": {}})
+        reply = self.handle(call(P + "click", selector="@e2"))  # nothing typed: a plain click
+        self.assertFalse(reply["result"].get("isError"), reply)
+
+    def test_a_fill_that_failed_keeps_the_old_text(self):
+        self.level("act")
+        self.handle(call(P + "open", url=self.other()))
+        self.handle(call(P + "fill", selector="@e1", text="Hi"))
+        real = self.up.forward
+
+        def broken(frame, sid):
+            if (frame.get("params") or {}).get("name") == P + "fill":
+                self.up.frames.append(frame)
+                return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {
+                    "content": [{"type": "text", "text": "timed out"}], "isError": True}}, "m-1"
+            return real(frame, sid)
+        self.up.forward = broken
+        self.handle(call(P + "fill", selector="@e1", text=""))
+        self.assertEqual(self.typed()["typed"], "Hi")  # the field may still hold it
+
+    def test_no_selector_reaches_another_selectors_text(self):
+        self.level("write")
+        self.handle(call(P + "open", url=self.other()))
+        long_sel = "#" + "x" * 300
+        self.handle(call(P + "type", selector=long_sel, text="Hi"))
+        (key,) = self.typed()["by"]
+        for other in (key, key[2:], "#" + key[2:], browser_relay.UNKNOWN_FIELD, browser_relay.NO_SELECTOR):
+            self.handle(call(P + "fill", selector=other, text=""))
+        self.assertEqual(self.typed()["typed"], "Hi")
+
+    def test_type_adds_and_two_fields_both_count(self):
+        self.level("write")
+        self.handle(call(P + "open", url=self.other()))
+        self.handle(call(P + "type", selector="@e1", text="Hel"))
+        self.handle(call(P + "type", selector="@e1", text="lo"))
+        self.handle(call(P + "fill", selector="@e3", text="there"))
+        self.assertEqual(self.typed()["by"], {"s:@e1": "Hello", "s:@e3": "there"})
+        self.assertEqual(self.typed()["typed"], "Hello there")
+
+    def test_the_gates_move_to_blank_sets_typed_aside(self):
+        self.level("write")
+        self.handle(call(P + "open", url=self.other()))
+        self.handle(call(P + "fill", selector="@e1", text="Hi"))
+        self.up.url = u("demo.test/inbox")  # a late redirect onto a site bound to the other mode
+        reply = self.handle(call(P + "snapshot"))
+        self.assertEqual(text_of(reply), browser_relay.SITE_MODE.format(
+            site="demo.test", mode_label=browser_relay.MODE_LABELS["my_chrome"],
+            other_label=browser_relay.MODE_LABELS["bot"]))
+        self.assertEqual(self.up.url, "about:blank")
+        self.assertEqual(self.typed(), {"typed": "", "aside": "Hi", "by": {}})
+
+    def test_back_checks_the_restored_field_not_every_page_typed(self):
+        one, two = self.other(1), self.other(2)
+        self.level("write")
+        self.handle(call(P + "open", url=one))
+        self.handle(call(P + "fill", selector="@e1", text="first"))
+        self.handle(call(P + "open", url=two))
+        self.handle(call(P + "fill", selector="@e1", text="second"))
+        self.handle(call(P + "back"))
+        self.assertEqual(self.typed()["by"], {browser_relay.UNKNOWN_FIELD: "first second"})
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"))), browser_relay.NO_PLAN)
+        self.assertNotIn(P + "click", self.up.calls())
+        self.plan("first", url=one)
+        reply = self.handle(call(P + "click", selector="@e2"))  # the field holds "first": planned
+        self.assertFalse(reply["result"].get("isError"), reply)
+        self.assertIn(P + "click", self.up.calls())
+
+    def test_restored_text_with_no_field_in_sight_is_refused(self):
+        self.up.typing = False  # the text goes where the field read cannot see
+        self.level("act")
+        self.handle(call(P + "open", url=self.other(1)))
+        self.handle(call(P + "type", selector="@e1", text="unseen"))
+        self.handle(call(P + "open", url=self.other(2)))
+        self.handle(call(P + "back"))
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"))), browser_relay.HIDDEN_TYPED)
+        self.assertNotIn(P + "click", self.up.calls())
+
+    def test_typing_after_a_restore_must_be_in_the_field(self):
+        self.level("act")
+        self.handle(call(P + "open", url=self.other(1)))
+        self.handle(call(P + "fill", selector="@e1", text="kept"))
+        self.handle(call(P + "open", url=self.other(2)))
+        self.handle(call(P + "back"))
+        self.up.typing = False
+        self.handle(call(P + "type", selector="#hidden", text="extra"))  # not in the field it reads
+        self.assertEqual(text_of(self.handle(call(P + "click", selector="@e2"))), browser_relay.TYPED_MISMATCH)
+
+    def test_a_send_reads_the_page_address_once_before_it(self):
+        page = self.other()
+        self.plan("Hello", url=page)
+        self.handle(call(P + "open", url=page))
+        self.handle(call(P + "fill", selector="@e1", text="Hello"))
+        seen = []
+        real = self.up.current_url
+        self.up.current_url = lambda: seen.append(len(self.up.frames)) or real()
+        self.handle(call(P + "click", selector="@e2"))
+        clicked = next(i for i, f in enumerate(self.up.frames) if f["params"]["name"] == P + "click")
+        self.assertEqual(len([i for i in seen if i <= clicked]), 1)
 
 
 if __name__ == "__main__":

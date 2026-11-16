@@ -1,7 +1,9 @@
 """Browser settings store: per-bot level and mode, sites with caps."""
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from core import browser
 
@@ -144,6 +146,34 @@ class Settings(unittest.TestCase):
         self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "off")
         self.assertEqual(browser.bot_setting("acme", "b1", self.root)["level"], "read")
         self.assertEqual(browser.bot_setting("hq", "b1", self.root)["level"], "read")
+
+class LoadCache(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_each_caller_gets_its_own_copy(self):
+        browser.set_bot("demo", "b1", "read", "bot", self.root)
+        browser.load(self.root)["bots"]["demo"]["b1"]["level"] = "act"
+        self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "read")
+
+    def test_a_write_from_outside_is_read(self):
+        browser.set_bot("demo", "b1", "read", "bot", self.root)
+        self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "read")
+        path = self.root / "team" / "browser.json"
+        path.write_text(json.dumps({"bots": {"demo": {"b1": {"level": "write", "mode": "bot"}}}}))
+        self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "write")
+        path.unlink()
+        self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "off")
+
+    def test_an_unchanged_file_is_parsed_once(self):
+        browser.set_bot("demo", "b1", "read", "bot", self.root)
+        browser.load(self.root)
+        with mock.patch("json.loads", side_effect=AssertionError("parsed again")):
+            self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "read")
 
 
 if __name__ == "__main__":

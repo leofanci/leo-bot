@@ -1362,26 +1362,35 @@ BROWSER_TOKENS = apps_relay.Tokens()
 _API_BROWSER_SESSIONS = {}  # browser turn token -> MCP session id (api engine only)
 
 
-def _apps_rpc(token, method, params):
-    """The apps relay for the api engine: same gate as a bot's MCP call."""
-    ctx = apps_relay.TOKENS.lookup(token)
+def _relay_rpc(tokens, sessions, handle, upstream_of, ended, token, method, params):
+    """One MCP call through a relay for the api engine: same gate as a bot's MCP call. The
+    session is initialized once per token, even when it names no session id; `upstream_of(ctx)`
+    is asked once for the handshake and once for the call."""
+    ctx = tokens.lookup(token)
     if ctx is None:
-        raise ValueError("this turn's apps access has ended")
-    upstream = apps_relay.ComposioUpstream(ctx["person"], ctx["ws"], ROOT)
-    sid = _API_APP_SESSIONS.get(token)
-    if token not in _API_APP_SESSIONS:  # initialized once per token, even when it names no session
-        _, sid = apps_relay.handle(
+        raise ValueError(ended)
+    sid = sessions.get(token)
+    if token not in sessions:
+        upstream = upstream_of(ctx)
+        _, sid = handle(
             {"jsonrpc": "2.0", "id": 0, "method": "initialize",
              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                         "clientInfo": {"name": "leobot", "version": "1"}}}, ctx, None, upstream, ROOT)
-        apps_relay.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, ctx, sid, upstream, ROOT)
+        handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, ctx, sid, upstream, ROOT)
         # A turn whose thread died before its finally never pops its row: drop rows of dead tokens.
-        for old in [t for t in _API_APP_SESSIONS if apps_relay.TOKENS.lookup(t) is None]:
-            _API_APP_SESSIONS.pop(old, None)
-        _API_APP_SESSIONS[token] = sid
-    reply, sid = apps_relay.handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                                   ctx, sid, upstream, ROOT)
+        for old in [t for t in sessions if tokens.lookup(t) is None]:
+            sessions.pop(old, None)
+        sessions[token] = sid  # may be None: the upstream keeps no session id
+    reply, sid = handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                        ctx, sid, upstream_of(ctx), ROOT)
     return reply or {}
+
+
+def _apps_rpc(token, method, params):
+    """The apps relay for the api engine."""
+    return _relay_rpc(apps_relay.TOKENS, _API_APP_SESSIONS, apps_relay.handle,
+                      lambda ctx: apps_relay.ComposioUpstream(ctx["person"], ctx["ws"], ROOT),
+                      "this turn's apps access has ended", token, method, params)
 
 
 def _apps_list(token):
@@ -1630,25 +1639,9 @@ def _bots_known_in(ws):
 
 
 def _browser_rpc(token, method, params):
-    """The browser relay for the api engine: same gate as a bot's MCP call."""
-    ctx = BROWSER_TOKENS.lookup(token)
-    if ctx is None:
-        raise ValueError("this turn's browser access has ended")
-    sid = _API_BROWSER_SESSIONS.get(token)
-    if token not in _API_BROWSER_SESSIONS:  # initialized once per token, even when it names no session
-        _, sid = browser_relay.handle(
-            {"jsonrpc": "2.0", "id": 0, "method": "initialize",
-             "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                        "clientInfo": {"name": "leobot", "version": "1"}}}, ctx, None, _browser_upstream(ctx), ROOT)
-        browser_relay.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}, ctx, sid,
-                             _browser_upstream(ctx), ROOT)
-        # A turn whose thread died before its finally never pops its row: drop rows of dead tokens.
-        for old in [t for t in _API_BROWSER_SESSIONS if BROWSER_TOKENS.lookup(t) is None]:
-            _API_BROWSER_SESSIONS.pop(old, None)
-        _API_BROWSER_SESSIONS[token] = sid  # may be None: the upstream keeps no session id
-    reply, sid = browser_relay.handle({"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                                      ctx, sid, _browser_upstream(ctx), ROOT)
-    return reply or {}
+    """The browser relay for the api engine; the upstream is asked again per frame (mode switch)."""
+    return _relay_rpc(BROWSER_TOKENS, _API_BROWSER_SESSIONS, browser_relay.handle, _browser_upstream,
+                      "this turn's browser access has ended", token, method, params)
 
 
 def _browser_list(token):

@@ -72,7 +72,7 @@ from urllib.parse import urlparse
 
 from core import aes_gcm, bots, browser, browser_engine, runners
 from dashboard import browser_proxy, browser_relay, deployment
-from dashboard.browser_relay import MAX_SESSION, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
+from dashboard.browser_relay import MAX_SESSION, PROTOCOL, parse_session, session_name, session_part  # noqa: F401 - names live with the keys
 from dashboard.engines.base import drain, stop_child
 
 NAMESPACE = "leobot"
@@ -87,7 +87,6 @@ DAEMON_WAIT = 5  # seconds a signalled session daemon or its Chrome gets to exit
 SETTLE_POLL = 5  # seconds between background checks of a deleted workspace's daemons
 TIDY_SECONDS = 900  # how long a delete's background tidy keeps retrying a daemon that lives on
 SOCKET_MAX, SOCKET_FIXED = 103, 37
-PROTOCOL = "2024-11-05"
 KEY_NAME = "browser-engine-key"
 CONFIG_NAME = "agent-browser.json"
 CWD_NAME = "engine-cwd"
@@ -574,15 +573,9 @@ class BrowserUpstream(browser_relay.Upstream):
         if isinstance(method, str) and method.startswith("notifications/"):
             return None, mcp_session_id  # the handshake is this upstream's own; ids are rewritten
         rid = frame.get("id")
-        if method == "initialize":
-            params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
-            version = params.get("protocolVersion")
-            return {"jsonrpc": "2.0", "id": rid, "result": {
-                "protocolVersion": version if isinstance(version, str) and version else PROTOCOL,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "agent-browser", "version": browser_engine.VERSION}}}, mcp_session_id
-        if method == "ping":
-            return {"jsonrpc": "2.0", "id": rid, "result": {}}, mcp_session_id
+        local = browser_relay.local_reply(frame)
+        if local is not None:
+            return local, mcp_session_id
         with self._lock:
             self.last_used = time.time()
             try:
@@ -625,10 +618,15 @@ class BrowserUpstream(browser_relay.Upstream):
                 self.last_used = time.time()
 
     def current_url(self):
-        """The active tab's URL from the engine's get_url, or None (no child, error, odd reply)."""
+        """The active tab's URL from the engine's get_url, or None (closed, error, odd reply).
+        With no child running it starts one, as a call would: the engine's daemon (or the pinned
+        tab in My Chrome) keeps the page across children, so a dropped child is not a lost page."""
         with self._lock:
-            child = self._child
-            if self.closed or child is None or child.proc.poll() is not None:
+            if self.closed:
+                return None
+            try:
+                child = self._start(self._chrome() if self.mode == "my_chrome" else None)
+            except _Failed:
                 return None
             try:
                 reply = child.request("tools/call", {"name": "agent_browser_get_url", "arguments": {}}, CALL_SECONDS)

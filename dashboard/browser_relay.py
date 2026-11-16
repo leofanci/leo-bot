@@ -25,9 +25,11 @@ disk (<root>/run/browser_typed.json) so a restart cannot clear it. Calls on one 
 run one at a time (Upstream.lock_key: the owner Chrome is one lock for every my_chrome bot). Opening a page or a new tab
 sets the typed text aside, except an open of the same page with a #fragment (the same
 document, its fields keep their text); history, reload and tab moves bring it back, because
-the browser restores what was in those fields. A refused send keeps it too: the text is still
-in the field, so a second click is still a send. On a listed site, and on any site while
-text is set aside, every commit first reads the page's text field values (the relay's own
+the browser restores what was in those fields, though not which field holds which. Typed
+text is kept per field: fill replaces its field's text, type adds to it. A refused send
+keeps it too: the text is still in the field, so a second click is still a send. On a
+listed site, on any site while text is set aside, and after history brought text back,
+every commit first reads the page's text field values (the relay's own
 fixed eval, FIELDS_SCRIPT): one filled field is the send text whatever was typed, more than
 one is refused. Every call but navigation first checks the page the engine is on, so a late
 redirect onto a site bound to the other mode is never read or typed on. Residual risk: a send that
@@ -44,7 +46,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from core import approvals, bots, browser
+from core import approvals, bots, browser, browser_engine
 from dashboard import shell_rules
 from core.browser_engine import COMMIT_TOOLS, NAV_TOOLS, READ_TOOLS, TYPE_TOOLS
 
@@ -63,6 +65,7 @@ OPEN = "agent_browser_open"
 NEW_TAB = "agent_browser_tab_new"
 READ = "agent_browser_read"
 PRESS = "agent_browser_press"
+FILL = "agent_browser_fill"  # clears its field, then types (docs/browser.md, core tools)
 CLICK = "agent_browser_click"
 SNAPSHOT = "agent_browser_snapshot"
 LINK_ROLE = "link"  # the role a snapshot's data.refs gives a link (probed on 0.41.0)
@@ -241,6 +244,25 @@ def typed_key_for(mode, ws, bot, session=None):
     return f"my_chrome:{session or session_name(ws, bot, mode)}"
 
 
+PROTOCOL = "2024-11-05"  # the MCP version spoken to the engine child
+
+
+def local_reply(frame):
+    """The reply an upstream gives itself, without its engine: initialize and ping. None for
+    any other method (notifications are the caller's to drop)."""
+    rid, method = frame.get("id"), frame.get("method")
+    if method == "initialize":
+        params = frame.get("params") if isinstance(frame.get("params"), dict) else {}
+        version = params.get("protocolVersion")
+        return {"jsonrpc": "2.0", "id": rid, "result": {
+            "protocolVersion": version if isinstance(version, str) and version else PROTOCOL,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "agent-browser", "version": browser_engine.VERSION}}}
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": rid, "result": {}}
+    return None
+
+
 class Upstream:
     """The browser behind the gate. `mode` is "bot" or "my_chrome". `lock_key` (alias
     `browser_key`) is browser_key_for(mode, ws, bot); `typed_key` is typed_key_for(...)."""
@@ -299,7 +321,7 @@ def _typed_path(root):
 
 
 def _typed_all(root):
-    """{browser key: {"typed", "aside"}}; None when the file exists but cannot be read."""
+    """{browser key: {"typed", "aside", "by"}}; None when the file exists but cannot be read."""
     try:
         data = json.loads(_typed_path(root).read_text())
     except FileNotFoundError:
@@ -309,22 +331,60 @@ def _typed_all(root):
     return data if isinstance(data, dict) else None
 
 
+UNKNOWN_FIELD = ""  # "by" key of text whose field is not known (brought back by history or a tab move)
+NO_SELECTOR = "?focus"  # "by" key of a type or fill call that names no selector
+MAX_SELECTOR_KEY = 200
+
+
+def _field_key(selector):
+    """The "by" key of one type or fill target: "s:" + the selector, a long one "h:" + its
+    sha256. The prefixes keep every key a bot can name apart from the others, so no selector
+    it picks can reach text typed through another."""
+    if not isinstance(selector, str) or not selector:
+        return NO_SELECTOR
+    if len(selector) > MAX_SELECTOR_KEY:
+        return "h:" + hashlib.sha256(selector.encode("utf-8", "surrogatepass")).hexdigest()
+    return "s:" + selector
+
+
+def _typed_of(by):
+    """All typed text of a tab: each field's text, in the order it was first typed into."""
+    out = ""
+    for text in by.values():
+        out = _join(out, text)
+    return out
+
+
 def typed_state(key, root=bots.ROOT):
-    """{"typed", "aside"} of one browser, kept on disk so a restart does not clear it, or
-    None when the file is corrupt (the gate then refuses sends: it cannot tell)."""
+    """{"typed", "aside", "by"} of one browser, kept on disk so a restart does not clear it, or
+    None when the file is corrupt (the gate then refuses sends: it cannot tell). "by" is
+    {field: text} of this page: fill replaces its field's text, type adds to it, and text
+    whose field is unknown sits under UNKNOWN_FIELD. "typed" is all of it joined."""
     data = _typed_all(root)
     if data is None:
         return None
     row = data.get(key) if isinstance(data.get(key), dict) else {}
-    return {k: row[k] if isinstance(row.get(k), str) else "" for k in ("typed", "aside")}
+    out = {k: row[k] if isinstance(row.get(k), str) else "" for k in ("typed", "aside")}
+    by = row.get("by")
+    if isinstance(by, dict):
+        out["by"] = {k: v for k, v in by.items() if isinstance(k, str) and isinstance(v, str) and v}
+    else:  # a row written before "by": its text's field is unknown
+        out["by"] = {UNKNOWN_FIELD: out["typed"]} if out["typed"] else {}
+    out["typed"] = _typed_of(out["by"])
+    return out
 
 
 def _save_typed(key, tt, root):
     """Write one browser's typed text; a corrupt file is replaced by a clean one."""
+    by = tt.get("by")
+    if by is None:  # a caller that knows only the text: its field is unknown
+        by = {UNKNOWN_FIELD: tt["typed"]} if tt.get("typed") else {}
+    by = {k: v for k, v in by.items() if v}
+    typed = _typed_of(by)
     with _LOCK:
         data = _typed_all(root) or {}
-        if tt["typed"] or tt["aside"]:
-            data[key] = {"typed": tt["typed"], "aside": tt["aside"]}
+        if typed or tt["aside"]:
+            data[key] = {"typed": typed, "aside": tt["aside"], "by": by}
         else:
             data.pop(key, None)
         _typed_path(root).parent.mkdir(parents=True, exist_ok=True)
@@ -344,13 +404,26 @@ def forget_typed(sessions, root=bots.ROOT):
         bots._atomic_write(_typed_path(root), json.dumps(data, indent=2) + "\n")
 
 
+def _put_aside(tt):
+    """A new page: what was typed is set aside (it may still sit in a field after the move)."""
+    tt["aside"], tt["typed"], tt["by"] = _join(tt["aside"], tt["typed"]), "", {}
+
+
+def _bring_back(tt):
+    """History, reload or a tab move: the browser restores those fields, so everything set aside
+    or typed is typed again, in fields this gate cannot name."""
+    text = _join(tt["aside"], tt["typed"])
+    tt["typed"], tt["aside"], tt["by"] = text, "", ({UNKNOWN_FIELD: text} if text else {})
+
+
 def set_aside(key, root=bots.ROOT):
-    """A new tab the gate did not see (the upstream's tab_gone recovery): the typed text is set
-    aside as for agent_browser_open. Called inside that browser's call, so it takes no browser lock."""
+    """A new page the gate did not open itself (the upstream's tab_gone recovery, or the gate's
+    own move to about:blank): the typed text is set aside as for agent_browser_open. Called
+    inside that browser's call, so it takes no browser lock."""
     tt = typed_state(key, root)
     if tt is None or not tt["typed"]:
         return
-    tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
+    _put_aside(tt)
     _save_typed(key, tt, root)
 
 
@@ -472,24 +545,28 @@ def _forward(upstream, name, arguments, rid, sid, ctx):
                              "params": {"name": name, "arguments": arguments}}, sid)
 
 
-def _page_refusal(upstream, mode, root):
-    url = _current(upstream)
+def _page_refusal(upstream, mode, root, url=None):
+    """A refusal line for the page the engine is on (`url` when already read), or None."""
+    url = _current(upstream) if url is None else url
     if url is None:
         return UNKNOWN_PAGE
     return _mode_refusal(browser.site_of(url, root), mode, root)
 
 
-def _after_nav(upstream, st, mode, rid, sid, ctx, root):
-    """Check the page the engine really landed on. On a site bound to the other mode, or
-    when the engine cannot tell the page, the reply is withheld and the tab is sent to
-    about:blank; until a later navigation lands on an allowed page, only navigation passes."""
-    refusal = _page_refusal(upstream, mode, root)
+def _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey, url=None):
+    """Check the page the engine really landed on (`url` when just read). On a site bound to
+    the other mode, or when the engine cannot tell the page, the reply is withheld and the tab
+    is sent to about:blank, with the typed text set aside as for an open; until a later
+    navigation lands on an allowed page, only navigation passes."""
+    refusal = _page_refusal(upstream, mode, root, url)
     st["blocked"] = refusal
     if refusal:
         try:
             _forward(upstream, OPEN, {"url": "about:blank"}, rid, sid, ctx)
         except Exception:
             pass
+        st["refs"] = {}
+        set_aside(bkey, root)  # the tab may have moved: what was typed is on the page it left
         if not _page_refusal(upstream, mode, root):
             st["blocked"] = None
     return refusal
@@ -542,6 +619,7 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
         return _text(rid, no_plan), sid
     # From here the click is sent: whatever comes back, the typed text may have gone out.
     tt["typed"] = tt["aside"] = ""
+    tt["by"] = {}
     _save_typed(bkey, tt, root)
     try:
         reply, sid = _forward(upstream, name, arguments, rid, sid, ctx)
@@ -611,7 +689,7 @@ def _gate(frame, ctx, sid, upstream, root):
             if here is None or here != st.get("refs_url"):  # moved by itself, or unknown: refs point anywhere
                 st["refs"] = {}
             bad = UNKNOWN_PAGE if here is None else _mode_refusal(browser.site_of(here, root), mode, root)
-            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if bad else None
+            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey, here) if bad else None
             if refusal:
                 return _text(rid, refusal), sid
         if level == "read" and name == CLICK:
@@ -622,19 +700,21 @@ def _gate(frame, ctx, sid, upstream, root):
         tt = typed_state(bkey, root)
         unknown_typed = tt is None
         if unknown_typed:  # a corrupt record: typing still works and writes a clean one
-            tt = {"typed": "", "aside": ""}
+            tt = {"typed": "", "aside": "", "by": {}}
         if sends:
             if unknown_typed:
                 return _text(rid, NO_CHECK), sid
-            url = _current(upstream)
+            url = here if here is not None else _current(upstream)  # here: nothing has run since
             if url is None:
                 return _text(rid, NO_PAGE if tt["typed"] else UNKNOWN_PAGE), sid
             typed = " ".join(tt["typed"].split())  # kept raw, compared normalized
+            restored = tt["by"].get(UNKNOWN_FIELD)
             from_field = False
-            if browser.site_of(url, root) or tt["aside"]:
+            if browser.site_of(url, root) or tt["aside"] or restored:
                 # On a listed site the page's own fields decide: text can sit there without a
                 # type call (prefilled, restored, typed onto), so it is what would go out. On any
                 # site while text is set aside too: a page can keep it in a field after a move.
+                # And after history or a tab move: the restored text's field is unknown.
                 fields, sid = _read_fields(upstream, rid, sid, ctx)
                 if fields is None:
                     return _text(rid, NO_CHECK), sid
@@ -644,7 +724,12 @@ def _gate(frame, ctx, sid, upstream, root):
                     return _text(rid, TOO_LONG), sid
                 if typed and not fields:  # typed into something the read cannot see
                     return _text(rid, HIDDEN_TYPED), sid
-                if typed and fields[0] != typed:
+                if restored and fields:
+                    # Restored text may be another page's: the field holds what goes out, and
+                    # each field this page was typed into since must be in it.
+                    if any(" ".join(v.split()) not in fields[0] for k, v in tt["by"].items() if k != UNKNOWN_FIELD):
+                        return _text(rid, TYPED_MISMATCH), sid
+                elif typed and fields[0] != typed:
                     return _text(rid, TYPED_MISMATCH), sid
                 if fields:
                     from_field, typed = not typed, fields[0]
@@ -654,13 +739,21 @@ def _gate(frame, ctx, sid, upstream, root):
                 reply, sid = _send(rid, name, args, sid, ctx, upstream, bkey, tt, typed, url, setting, mode, root,
                                    no_plan=FIELD_NO_PLAN if from_field else NO_PLAN)
                 st["refs"] = {}
-                refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root) if _ok(reply) else None
+                refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey) if _ok(reply) else None
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
-        if name in TYPE_TOOLS:  # counted before it runs: a failed fill still leaves the field touched
-            if len(tt["typed"]) + len(args["text"]) > MAX_TEXT:  # more than any send could check
+        field = _field_key(args.get("selector")) if name in TYPE_TOOLS else None
+        if name in TYPE_TOOLS:  # counted before it runs: a failed call still leaves the field touched
+            # Added, raw and unseparated, so two parts of one word stay one word. A fill clears
+            # its field first (engine facts), but only a fill that worked replaces the text below:
+            # one that failed may have left the old text in place. Text under UNKNOWN_FIELD stays.
+            by = dict(tt["by"])
+            by[field] = by.get(field, "") + args["text"]
+            if not by[field]:
+                del by[field]
+            if len(_typed_of(by)) > MAX_TEXT:  # more than any send could check
                 return _text(rid, TOO_LONG), sid
-            tt["typed"] += args["text"]  # raw and unseparated: two parts of one word stay one word
+            tt["by"], tt["typed"] = by, _typed_of(by)
             _save_typed(bkey, tt, root)
         same_doc = name == OPEN and _same_document(args.get("url"), _current(upstream) if "url" in args else None)
         reply, sid = _forward(upstream, name, args, rid, sid, ctx)
@@ -671,14 +764,21 @@ def _gate(frame, ctx, sid, upstream, root):
         fresh = typed_state(bkey, root)  # the upstream may have set it aside (set_aside)
         if fresh is not None:
             tt, before = fresh, dict(fresh)
+        if name == FILL and _ok(reply) and field in tt["by"]:
+            by = dict(tt["by"])
+            if args["text"]:
+                by[field] = args["text"]
+            else:
+                del by[field]
+            tt["by"], tt["typed"] = by, _typed_of(by)
         if name in (OPEN, NEW_TAB) and not same_doc:
-            tt["aside"], tt["typed"] = _join(tt["aside"], tt["typed"]), ""
+            _put_aside(tt)
         elif name in RESTORES:
-            tt["typed"], tt["aside"] = _join(tt["aside"], tt["typed"]), ""
-        if tt != before and name not in TYPE_TOOLS:
+            _bring_back(tt)
+        if tt != before:
             _save_typed(bkey, tt, root)
         if name in NAV_TOOLS or name in COMMIT_TOOLS or "url" in args:
-            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root)
+            refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey)
             if refusal:
                 return _text(rid, refusal), sid
         return reply, sid

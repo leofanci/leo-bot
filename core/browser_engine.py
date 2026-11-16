@@ -12,6 +12,7 @@ tool in none of the four sets is refused by the relay: eval, close, profile list
 every file, download, upload, cookie or storage tool.
 """
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -51,10 +52,39 @@ def _usable(p):
     return p.is_file() and os.access(p, os.X_OK)
 
 
+VERSION_SECONDS = 10
+_VERSIONS = {}  # (path, mtime_ns, size) -> the version that binary reports, or None
+
+
+def version_of(p):
+    """The x.y.z an engine binary reports for --version, or None (no answer, other output).
+    Asked once per binary file: a new file at the same path is asked again."""
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    key = (str(p), st.st_mtime_ns, st.st_size)
+    if key not in _VERSIONS:
+        try:
+            r = subprocess.run([str(p), "--version"], capture_output=True, text=True, timeout=VERSION_SECONDS)
+            m = re.search(r"\b(\d+\.\d+\.\d+)\b", r.stdout or "") if r.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            m = None
+        _VERSIONS[key] = m.group(1) if m else None
+    return _VERSIONS[key]
+
+
+def _on_path():
+    found = shutil.which(BINARY_NAME)
+    return Path(found) if found else None
+
+
 def resolve(env=os.environ):
     """The engine binary to run, or None. Env override, then the pinned data-dir copy, then PATH.
 
-    A set but unusable LEOBOT_AGENT_BROWSER returns None and does not fall through."""
+    A set but unusable LEOBOT_AGENT_BROWSER returns None and does not fall through. A binary on
+    PATH is used only when it reports VERSION: the relay and login transfer rely on facts
+    probed on that version (tool names, eval reply shape, state file layout)."""
     given = env.get(ENV_VAR)
     if given:
         p = Path(given).expanduser()
@@ -62,16 +92,20 @@ def resolve(env=os.environ):
     pinned = _pinned_binary()
     if _usable(pinned):
         return pinned
-    found = shutil.which(BINARY_NAME)
-    return Path(found) if found else None
+    found = _on_path()
+    return found if found and version_of(found) == VERSION else None
 
 
 def status():
     binary = resolve()
     if binary:
         return {"state": "ready", "detail": str(binary)}
-    return {"state": "missing",
-            "detail": _INSTALL_HINT.format(dir=_tool_dir(), v=VERSION)}
+    hint = _INSTALL_HINT.format(dir=_tool_dir(), v=VERSION)
+    found = None if os.environ.get(ENV_VAR) else _on_path()
+    if found:
+        other = version_of(found) or "unknown"
+        hint = f"{found} is version {other}, and Leo Bot needs {VERSION}. " + hint
+    return {"state": "missing", "detail": hint}
 
 
 def install():

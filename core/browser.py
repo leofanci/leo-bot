@@ -20,7 +20,9 @@ evil-linkedin.com does not. Stored sites replace the defaults once saved.
 The lock guards threads in this process only, same as core/integrations.py.
 A file of the wrong shape reads as defaults and is overwritten by the next write.
 """
+import copy
 import json
+import os
 import re
 import secrets
 import threading
@@ -48,12 +50,37 @@ def _path(root):
     return Path(root) / "team" / "browser.json"
 
 
-def load(root=bots.ROOT):
+_LOADED = {}  # str(path) -> (stat key, parsed browser.json)
+
+
+def _stamp(path):
+    """What changes when browser.json is replaced or rewritten (GENERATION: a write in this
+    process, in case a reused inode keeps the other four), or None when it cannot be read."""
     try:
-        data = json.loads(_path(root).read_text())
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns, GENERATION
+
+
+def load(root=bots.ROOT):
+    """team/browser.json as a dict ({} when missing or unreadable). One gated browser call asks
+    for it many times, so it is parsed again only when its stat changed; the stat is taken
+    before the read, so a write between them is read again next time. Each caller gets its
+    own copy."""
+    path = _path(root)
+    stamp = _stamp(path)
+    hit = _LOADED.get(str(path))
+    if stamp is not None and hit is not None and hit[0] == stamp:
+        return copy.deepcopy(hit[1])
+    try:
+        data = json.loads(path.read_text())
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    data = data if isinstance(data, dict) else {}
+    if stamp is not None:
+        _LOADED[str(path)] = (stamp, data)
+    return copy.deepcopy(data)
 
 
 def _save(root, data):
