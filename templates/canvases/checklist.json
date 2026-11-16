@@ -1,0 +1,29 @@
+{
+  "title": "Checklist",
+  "blocks": [
+    {
+      "id": "bk1",
+      "type": "text",
+      "md": "Tick items off as they are done."
+    },
+    {
+      "id": "bk2",
+      "type": "list",
+      "title": "Checklist",
+      "columns": [
+        {
+          "name": "Name",
+          "type": "text"
+        },
+        {
+          "name": "Done",
+          "type": "checkbox"
+        },
+        {
+          "name": "Notes",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

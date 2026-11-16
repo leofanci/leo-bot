@@ -1,0 +1,33 @@
+{
+  "title": "Meeting notes",
+  "blocks": [
+    {
+      "id": "bk1",
+      "type": "text",
+      "md": "## Agenda\n\n## Notes\n\n## Decisions"
+    },
+    {
+      "id": "bk2",
+      "type": "list",
+      "title": "Action items",
+      "columns": [
+        {
+          "name": "Name",
+          "type": "text"
+        },
+        {
+          "name": "Owner",
+          "type": "text"
+        },
+        {
+          "name": "Due",
+          "type": "date"
+        },
+        {
+          "name": "Notes",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

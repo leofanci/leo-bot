@@ -30,6 +30,7 @@ Segment prefixes
     pr project · sec section/tab · pf profile · ch channel · po post
     sl slot field · br brief · fd field (under br/pf/ch) · vc voice · pd product
     ex experiment · mm memo · ft feature · ss subsection · vw view
+    cv canvas · bk canvas block · ls list · rw list row
 
 Filesystem slugs (acme, draft-003) stay valid @-mentions when unambiguous.
 Composed IDs are always unambiguous. Build via IdRegistry.build(tree, posts).
@@ -517,6 +518,23 @@ class IdRegistry:
                                  ref={"product": pslug2, "section": "product"})
                         reg._bind(lk_prod(pslug2), cid)
 
+                # Canvases and lists: the number is the file's own (cv3.json is cv3), never renumbered.
+                from core import canvas_store as _cs
+                for _pfx, _kind, _child, _ckind in (("cv", "canvas", "bk", "block"),
+                                                    ("ls", "list", "rw", "row")):
+                    for _fid in _cs.list_ids(root, pslug, _pfx):
+                        try:
+                            _doc = _cs.read(root, pslug, _fid)
+                        except LookupError:
+                            continue
+                        _cid = f"{pr_id}.{_fid}"
+                        reg._add(_cid, _doc.get("title") or _fid, kind=_kind, parent=pr_id,
+                                 ref={"project": pslug, _kind: _fid})
+                        for _it in (_doc.get("blocks") if _pfx == "cv" else _doc.get("rows")) or []:
+                            _iid = str((_it or {}).get("id") or "")
+                            if _cs.valid(_ckind, _iid):
+                                reg._add(f"{_cid}.{_iid}", _iid, kind=_ckind, parent=_cid,
+                                         ref={"project": pslug, _kind: _fid, _ckind: _iid})
                 # GTM phases (time-boxed bets) → strategies (channel-motions) nested under them.
                 from core import gtm as _gtm  # local import — gtm has no ids dependency
                 phase_cids: dict[str, str] = {}

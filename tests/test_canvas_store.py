@@ -1,0 +1,124 @@
+import json
+import os
+import re
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+from core import bots, canvas_store as cs
+
+
+def _doc(i, **kw):
+    return {"id": i, "title": "T", "blocks": [], **kw}
+
+
+class TestCanvasStore(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make(self, ws, i):
+        with cs.locked(self.root, ws, i):
+            cs.write(self.root, ws, _doc(i))
+
+    def test_paths_per_workspace(self):
+        self.assertEqual(cs.base(self.root, "demo"), self.root / "projects" / "demo")
+        self.assertEqual(cs.base(self.root, bots.HQ), self.root / "team")
+
+    def test_ids_refuse_traversal(self):
+        self.assertTrue(cs.valid("canvas", "cv1"))
+        for bad in ("cv1/../x", "../cv1", "cv", "cv1234567", "CV1"):
+            self.assertFalse(cs.valid("canvas", bad), bad)
+        self.assertTrue(cs.valid("list", "ls12"))
+        self.assertTrue(cs.valid("template", "tp3"))
+        self.assertTrue(cs.valid("block", "bk1"))
+        self.assertTrue(cs.valid("row", "rw9"))
+        self.assertTrue(cs.valid("item", "i4"))
+        self.assertTrue(cs.valid("change", "ch0123456789ab"))
+        self.assertFalse(cs.valid("change", "ch0123"))
+        self.assertFalse(cs.valid("nope", "cv1"))
+        with self.assertRaises(ValueError):
+            cs.read(self.root, "demo", "../x")
+        with self.assertRaises(LookupError):
+            cs.read(self.root, "demo", "cv9")
+
+    def test_next_id_counts_trash(self):
+        self.assertEqual(cs.next_id(self.root, "demo", "cv"), "cv1")
+        self._make("demo", "cv1")
+        self._make("demo", "cv2")
+        cs.to_trash(self.root, "demo", "cv2")
+        self.assertEqual(cs.next_id(self.root, "demo", "cv"), "cv3")
+        self.assertEqual(cs.list_ids(self.root, "demo", "cv"), ["cv1"])
+        self.assertEqual(cs.next_child_id([{"id": "bk2"}, {"id": "bk7"}], "bk"), "bk8")
+        self.assertEqual(cs.next_child_id([], "rw"), "rw1")
+
+    def test_write_bumps_version_atomic(self):
+        d = _doc("cv1", version=0)
+        with cs.locked(self.root, "demo", "cv1"):
+            self.assertEqual(cs.write(self.root, "demo", d)["version"], 1)
+            self.assertEqual(cs.write(self.root, "demo", d)["version"], 2)
+        self.assertEqual(cs.read(self.root, "demo", "cv1")["version"], 2)
+        left = [p for p in (self.root / "projects" / "demo").rglob("*.tmp")]
+        self.assertEqual(left, [])
+
+    def test_history_append_and_rotate(self):
+        self._make("demo", "cv1")
+        cid = cs.history_append(self.root, "demo", "cv1", {"by": "x", "text": "a"})
+        self.assertRegex(cid, r"^ch[0-9a-f]{12}$")
+        h = cs.history(self.root, "demo", "cv1")
+        self.assertEqual(h[0]["id"], cid)
+        self.assertIn("at", h[0])
+        blob = "z" * 100_000
+        last = None
+        for _ in range(25):
+            last = cs.history_append(self.root, "demo", "cv1", {"blob": blob})
+        hdir = cs.base(self.root, "demo") / "canvases" / "history"
+        self.assertTrue((hdir / "cv1.1.jsonl").exists())
+        self.assertEqual(cs.history(self.root, "demo", "cv1")[-1]["id"], last)
+
+    def test_purge_trash_after_30_days(self):
+        self._make("demo", "cv1")
+        self._make("demo", "cv2")
+        cs.history_append(self.root, "demo", "cv1", {"a": 1})
+        cs.to_trash(self.root, "demo", "cv1")
+        cs.to_trash(self.root, "demo", "cv2")
+        trash = cs.base(self.root, "demo") / "canvases" / ".trash"
+        now = time.time()
+        os.utime(trash / "cv1.json", (now - 31 * 86400,) * 2)
+        os.utime(trash / "cv2.json", (now - 29 * 86400,) * 2)
+        self.assertEqual(cs.purge_trash(self.root, "demo", now=now), ["cv1"])
+        self.assertFalse((trash / "cv1.json").exists())
+        self.assertFalse(list(trash.glob("cv1*")))
+        self.assertTrue((trash / "cv2.json").exists())
+        cs.from_trash(self.root, "demo", "cv2")
+        self.assertEqual(cs.read(self.root, "demo", "cv2")["id"], "cv2")
+
+    def test_pins_round_trip_and_drop_room(self):
+        self.assertEqual(cs.pins(self.root, "demo"), {})
+        cs.set_pins(self.root, "demo", {"room1": ["cv1"], "room2": ["ls1"]})
+        self.assertEqual(cs.pins(self.root, "demo")["room1"], ["cv1"])
+        cs.drop_room_pins(self.root, "demo", "room1")
+        self.assertEqual(cs.pins(self.root, "demo"), {"room2": ["ls1"]})
+
+    def test_shipped_templates_load(self):
+        ts = cs.templates(self.root, "demo")
+        self.assertEqual({t["id"] for t in ts},
+                         {"tracker", "pipeline", "meeting-notes", "checklist"})
+        for t in ts:
+            self.assertTrue(t["blocks"])
+            for b in t["blocks"]:
+                if b["type"] == "list":
+                    self.assertTrue(b["columns"])
+                    self.assertNotIn("rows", b)
+        with cs.locked(self.root, "demo", "tp1"):
+            cs.write(self.root, "demo", _doc("tp1"))
+        self.assertIn("tp1", {t["id"] for t in cs.templates(self.root, "demo")})
+        self.assertEqual(cs.next_id(self.root, "demo", "tp"), "tp2")
+
+
+if __name__ == "__main__":
+    unittest.main()
