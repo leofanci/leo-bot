@@ -18,6 +18,17 @@ and no way to hand work to a process outside it (launchd, Apple events, open, os
 crontab). Codex has its own sandbox for this (dashboard/engines/codex.py). A Mac without
 sandbox-exec, or another system, keeps wall 2 alone. Before outside content, Full access means
 the bot runs commands as the owner does.
+
+A third wall while the run has a browser (its level above off, taint.Turn.browsing): the
+browser relay is the only way a bot reaches a browser, so every command runs sandboxed from the
+first one, outside content or not, and the sandbox also denies the browser's back doors
+(`browser_walls`): the Chrome debug port (each DevToolsActivePort port, and 9222), the engine's
+folder ~/.agent-browser (its session sockets and saved logins: no read, write or connect) and
+Leo Bot's <data>/run (the engine key, the typed text). Before outside content those ports are
+denied one by one; after it every localhost port is, since sandbox-exec cannot deny one port
+on top of an allowed localhost (probed on macOS 27: the deny then covers every port). With no
+sandbox, a browser level that can send (write, act) refuses the command (and server.py refuses
+the turn up front); at Reads only the command runs as before.
 """
 import hashlib
 import os
@@ -25,7 +36,9 @@ import posixpath
 import re
 import shlex
 import shutil
+import sys
 import tempfile
+from pathlib import Path
 
 # Words that run the next word as the command.
 _WRAPPERS = {"sudo", "nohup", "env", "command", "exec", "time", "nice", "ionice", "caffeinate", "doas"}
@@ -42,6 +55,10 @@ _PUBLISH = {"npm", "pnpm", "yarn", "twine", "cargo", "gem", "poetry", "flit", "d
 
 NEVER = "This command could wreck the machine, so Leo Bot never runs it."
 UNREADABLE = "Leo Bot could not read this command (unbalanced quotes): write it plainly."
+NO_SANDBOX = ("This bot's browser can send, and this machine has no sandbox to keep shell commands away from "
+              "the browser, so shell commands are off while it browses. Ask the owner to set the browser to "
+              "Reads only or Off, or the shell level lower.")
+CHROME_DEBUG_PORT = 9222  # Chrome's usual --remote-debugging-port
 SENDS_OFF = ("This conversation holds outside content or app data, so commands that send things off "
              "this machine (curl, wget, ssh, scp, rsync, git push, a publish, gh, mail) are off. Do the "
              "local work; tell the owner what to push or send.")
@@ -148,8 +165,48 @@ def _sb_str(path):
     return '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sandbox_profile(writable=()):
-    """The sandbox-exec profile for a command run after outside content (see the module notes)."""
+def chrome_debug_ports(home=None, platform=sys.platform):
+    """Every port a Chrome DevToolsActivePort names in the standard user data dirs (the ones Leo
+    Bot attaches to, dashboard/browser_upstream.CHROME_DIRS), plus 9222. A stale file counts too."""
+    from dashboard.browser_upstream import CHROME_DIRS
+    home = Path.home() if home is None else Path(home)
+    key = "darwin" if platform == "darwin" else "linux" if platform.startswith("linux") else None
+    ports = {CHROME_DEBUG_PORT}
+    for rel in CHROME_DIRS.get(key, ()):
+        try:
+            first = (home / rel / "DevToolsActivePort").read_text().splitlines()[0].strip()
+        except (OSError, UnicodeDecodeError, ValueError, IndexError):
+            continue
+        if first.isascii() and first.isdecimal() and 0 < int(first) < 65536:
+            ports.add(int(first))
+    return sorted(ports)
+
+
+def browser_walls(root, required=False, home=None, platform=sys.platform):
+    """What a run with a browser keeps its shell from (module notes): {"ports", "paths",
+    "required"}. `required`: the browser can send, so a command with no sandbox is refused."""
+    home = Path.home() if home is None else Path(home)
+    paths = sorted({os.path.realpath(str(home / ".agent-browser")), os.path.realpath(str(Path(root) / "run"))})
+    return {"ports": chrome_debug_ports(home, platform), "paths": paths, "required": bool(required)}
+
+
+def _browser_denies(browser):
+    lines = []
+    for p in browser.get("paths") or ():
+        lines.append(f"(deny file-read* file-write* (subpath {_sb_str(p)}))")
+        lines.append(f"(deny network-outbound (remote unix-socket (subpath {_sb_str(p)})))")
+    return lines
+
+
+def sandbox_profile(writable=(), browser=None, outside=True):
+    """The sandbox-exec profile for a command run after outside content (see the module notes).
+    `browser` (browser_walls): also keep the command from the browser; with `outside` False the
+    profile is that wall alone (no other limit before outside content)."""
+    handoff = ["(deny appleevent-send)",
+               "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")"]
+    if browser is not None and not outside:
+        ports = [f'(deny network-outbound (remote ip "*:{int(port)}"))' for port in browser.get("ports") or ()]
+        return "".join(["(version 1)", "(allow default)"] + ports + handoff + _browser_denies(browser))
     temps = {os.path.realpath(p) for p in (tempfile.gettempdir(), "/tmp", "/private/tmp", "/private/var/folders")
              if p and os.path.isdir(p)}
     dirs = sorted({os.path.realpath(str(d)) for d in writable if d} | temps)
@@ -157,16 +214,25 @@ def sandbox_profile(writable=()):
         "(version 1)",
         "(allow default)",
         "(deny network-outbound (remote ip))",
-        '(allow network-outbound (remote ip "localhost:*"))',
+    ]
+    if browser is None:  # with a browser no localhost port either: one port cannot be denied here
+        lines.append('(allow network-outbound (remote ip "localhost:*"))')
+    lines += [
         '(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))',
-        "(deny appleevent-send)",
-        "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")",
+        *handoff,
         "(deny file-write*)",
         "(allow file-write* " + " ".join(f"(subpath {_sb_str(d)})" for d in dirs)
         + ' (literal "/dev/null") (literal "/dev/tty") (literal "/dev/dtracehelper") (subpath "/dev/fd"))',
         '(deny file-write* (regex #"/\\.git/(hooks|config$)"))',
     ]
+    if browser is not None:
+        lines += _browser_denies(browser)
     return "".join(lines)
+
+
+def can_sandbox():
+    """This system can run a command inside sandbox-exec."""
+    return bool(os.path.exists(SANDBOX_EXEC) and shutil.which(SANDBOX_EXEC))
 
 
 def _profile_file(profile, profile_dir):
@@ -185,13 +251,13 @@ def _profile_file(profile, profile_dir):
         return None
 
 
-def sandboxed(command, writable=(), shell="/bin/bash", profile_dir=None):
+def sandboxed(command, writable=(), shell="/bin/bash", profile_dir=None, browser=None, outside=True):
     """`command` wrapped to run inside the sandbox, or None when this system has none.
     `profile_dir`: write the profile there and pass its path (a short command) instead of
-    the whole profile inline."""
-    if not (os.path.exists(SANDBOX_EXEC) and shutil.which(SANDBOX_EXEC)):
+    the whole profile inline. `browser`, `outside`: see sandbox_profile."""
+    if not can_sandbox():
         return None
-    profile = sandbox_profile(writable)
+    profile = sandbox_profile(writable, browser=browser, outside=outside)
     path = _profile_file(profile, profile_dir) if profile_dir else None
     spec = f"-f {shlex.quote(path)}" if path else f"-p {shlex.quote(profile)}"
     return f"{SANDBOX_EXEC} {spec} {shell} -c {shlex.quote(command)}"
@@ -213,13 +279,19 @@ def _osctl_only(command):
             and words[1:3] == ["-m", "dashboard.osctl"])
 
 
-def plan(command, outside=False, writable=(), profile_dir=None):
+def plan(command, outside=False, writable=(), profile_dir=None, browser=None):
     """(allow, reason, run): `run` is the command to run instead (sandboxed after outside
-    content), or None to run it as written."""
+    content, or from the first command while the run has a browser: `browser`, browser_walls),
+    or None to run it as written."""
     allow, reason = decide(command, outside)
-    if not allow or not outside or _osctl_only(command):
+    if not allow or _osctl_only(command):
         return allow, reason, None
-    return True, "", sandboxed(command, writable, profile_dir=profile_dir)
+    if browser is None:
+        return (True, "", sandboxed(command, writable, profile_dir=profile_dir)) if outside else (True, "", None)
+    run = sandboxed(command, writable, profile_dir=profile_dir, browser=browser, outside=outside)
+    if run is None and browser.get("required"):
+        return False, NO_SANDBOX, None
+    return True, "", run
 
 
 def decide(command, outside=False):

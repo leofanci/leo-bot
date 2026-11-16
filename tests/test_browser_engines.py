@@ -434,6 +434,26 @@ class Turn(Root):
         self.assertNotIn("browser_token", kw)
         self.assertNotIn("## Browser", kw["prompt"])
 
+    def test_shell_beside_a_sending_browser_needs_the_sandbox(self):
+        with mock.patch.object(server.engine_config, "access", return_value="full"), \
+                mock.patch.object(server.shell_rules, "can_sandbox", return_value=False):
+            browser.set_bot("hq", "cos", "write", "bot", self.root)
+            self.assertEqual(self.run_turn(), [])  # refused before any model run
+            self.assertIn("Settings, Browser", self.out)
+            self.assertIn("Read + write", self.out)
+            self.assertIn("Full access", self.out)
+            browser.set_bot("hq", "cos", "read", "bot", self.root)  # Reads only: the pair is allowed
+            self.assertEqual(len(self.run_turn()), 1)
+
+    def test_browser_turn_walls_its_shell(self):
+        browser.set_bot("hq", "cos", "act", "bot", self.root)
+        with mock.patch.object(server.engine_config, "access", return_value="full"), \
+                mock.patch.object(server.shell_rules, "can_sandbox", return_value=True), \
+                mock.patch.object(server.taint.Turn, "browsing", autospec=True) as browsing:
+            kw = self.run_turn()[0]
+        self.assertEqual(len(kw["browser_token"]), 64)
+        browsing.assert_called_once_with(mock.ANY, self.root, sends=True)
+
     def test_note_names_level_mode_and_report_jobs(self):
         note = server._browser_note({"level": "act", "mode": "my_chrome"}, "report")
         self.assertIn("Acts on its own", note.split("Your level:")[1])
@@ -441,6 +461,7 @@ class Turn(Root):
         self.assertIn("only reports", note)
         self.assertIn("daily limit", note)
         self.assertNotIn("only reports", server._browser_note({"level": "read", "mode": "bot"}))
+        self.assertIn("click a link by its @ref", server._browser_note({"level": "read", "mode": "bot"}))
 
 
 if __name__ == "__main__":

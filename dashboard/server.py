@@ -58,6 +58,7 @@ import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard import taint  # noqa: E402
+from dashboard import shell_rules  # noqa: E402
 from dashboard import browser_relay, browser_upstream  # noqa: E402  (one gate module: its locks are global)
 from core import provenance  # noqa: E402  (one registry: the API engine imports it by this name)
 from dashboard.engines import api as engine_api, config as engine_config, prices, registry as engine_registry  # noqa: E402
@@ -1760,6 +1761,10 @@ def _job_notepad(job):
     return text
 
 
+BROWSER_SHELL_OFF = ("This did not run: {bot}'s browser is set to {browser} (Settings, Browser) and its shell "
+                     "to {shell} (Team), and on {engine} Leo Bot cannot keep that shell away from the browser, "
+                     "so a command could send past your approvals. Set the browser to Reads only or Off, or "
+                     "the shell to a level without commands, then ask again.")
 JOB_UNMETERED = ("This job did not run: its engine ({label}) does not report cost. "
                  "Pick another engine for @{bot} in Settings, Engines.")
 JOB_MATE_UNMETERED = ("@{bot}'s engine ({label}) does not report cost, so a scheduled job "
@@ -3545,6 +3550,14 @@ class Handler(BaseHTTPRequestHandler):
             shell_level = (level if not locked and engine.kind != "runner" and DEPLOYMENT != "server"
                            and "shell" in supports
                            and (level == "full" or (level == "approve" and "review" in supports)) else None)
+            # The relay is the only way a bot reaches the browser: a shell beside a browser that can
+            # send runs in Leo Bot's sandbox, away from it (shell_rules.py). Where that sandbox
+            # cannot wrap the shell (an engine with its own, or no sandbox here) the pair is refused.
+            if (browse and shell_level and browse_setting["level"] in ("write", "act")
+                    and (getattr(engine, "own_sandbox", False) or not shell_rules.can_sandbox())):
+                return BROWSER_SHELL_OFF.format(
+                    bot=bot_id, browser=_BROWSER_LEVELS[browse_setting["level"]].split(" (")[0],
+                    shell=SHELL_LEVELS.get(shell_level, SHELL_LEVELS["full"])[0], engine=engine.label)
             folder_rows, read_dirs, edit_dirs = _turn_folders(
                 ws, room, bot_id, locked=locked, may_edit=may_edit,
                 drop_edit=False, engine=engine, shell=bool(shell_level))
@@ -3933,6 +3946,8 @@ class Handler(BaseHTTPRequestHandler):
                            "taint": turn}), ROOT)
                 if tok:
                     kw.update({"browser_token": tok, "browser_port": self.server.server_address[1]})
+                    # Its shell commands run walled off from the browser from now on (shell_rules.py).
+                    turn.browsing(ROOT, sends=browser.bot_setting(ws, st_.bot_id, ROOT)["level"] in ("write", "act"))
             if st_.locked or st_.engine.full_disk:  # a full-disk engine's own private turn: osctl unshared
                 kw.update({"os_token": os_relay.TOKENS.mint({"ws": ws, "readonly": bool(getattr(sess, "readonly", False)),
                                                         "apps_used": st_.apps_used,

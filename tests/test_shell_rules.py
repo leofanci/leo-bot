@@ -255,5 +255,123 @@ class Sandbox(unittest.TestCase):
         self.assertFalse(taint.GATES.shell("nope", "ls")[0])
 
 
+
+class BrowserWall(unittest.TestCase):
+    """A run with a browser: its shell never reaches the browser past the relay."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = os.path.realpath(self.tmp.name)
+        self.home, self.root = os.path.join(base, "h"), os.path.join(base, "d")
+        os.makedirs(os.path.join(self.home, ".agent-browser"))
+        os.makedirs(os.path.join(self.root, "run"))
+        chrome = os.path.join(self.home, "Library", "Application Support", "Google", "Chrome")
+        os.makedirs(chrome)
+        with open(os.path.join(chrome, "DevToolsActivePort"), "w") as f:
+            f.write("45678\n/devtools/browser/abc\n")
+
+    def walls(self, required=True):
+        return shell_rules.browser_walls(self.root, required=required, home=self.home, platform="darwin")
+
+    def test_walls_name_the_ports_and_folders(self):
+        w = self.walls()
+        self.assertEqual(w["ports"], [9222, 45678])
+        self.assertEqual(w["paths"], sorted([os.path.join(self.home, ".agent-browser"), os.path.join(self.root, "run")]))
+        self.assertTrue(w["required"])
+        self.assertEqual(shell_rules.browser_walls(self.root, home=self.home, platform="linux")["ports"], [9222])
+
+    def test_profile_before_outside_content_is_the_browser_wall_alone(self):
+        prof = shell_rules.sandbox_profile(["/work/acme"], browser=self.walls(), outside=False)
+        for part in ('(remote ip "*:9222")', '(remote ip "*:45678")', "(deny appleevent-send)",
+                     f'(deny file-read* file-write* (subpath "{self.root}/run"))',
+                     f'(remote unix-socket (subpath "{self.home}/.agent-browser"))'):
+            self.assertIn(part, prof)
+        self.assertNotIn("(deny network-outbound (remote ip))", prof)  # the internet stays, as before
+        self.assertNotIn("(deny file-write*)", prof)
+
+    def test_profile_after_outside_content_denies_every_localhost_port(self):
+        prof = shell_rules.sandbox_profile(["/work/acme"], browser=self.walls(), outside=True)
+        self.assertIn("(deny network-outbound (remote ip))", prof)
+        self.assertNotIn('"localhost:*"', prof)
+        self.assertIn(f'(deny file-read* file-write* (subpath "{self.home}/.agent-browser"))', prof)
+        self.assertIn('"localhost:*"', shell_rules.sandbox_profile(["/work/acme"]))  # no browser: as before
+
+    def test_plan_sandboxes_from_the_first_command(self):
+        allow, _, run = shell_rules.plan("npm test", outside=False, writable=["/w"], browser=self.walls())
+        self.assertTrue(allow)
+        if shell_rules.can_sandbox():
+            self.assertTrue(run.startswith(shell_rules.SANDBOX_EXEC))
+        self.assertEqual(shell_rules.plan("rm -rf /", browser=self.walls()), (False, shell_rules.NEVER, None))
+        self.assertIsNone(shell_rules.plan("python3 -m dashboard.osctl tree", browser=self.walls())[2])
+
+    def test_no_sandbox_refuses_when_the_browser_can_send(self):
+        with unittest.mock.patch.object(shell_rules, "SANDBOX_EXEC", "/nonexistent/sandbox-exec"):
+            self.assertEqual(shell_rules.plan("ls", browser=self.walls(required=True)),
+                             (False, shell_rules.NO_SANDBOX, None))
+            self.assertEqual(shell_rules.plan("ls", browser=self.walls(required=False)), (True, "", None))
+            self.assertEqual(shell_rules.plan("ls", outside=True, browser=self.walls(required=True)),
+                             (False, shell_rules.NO_SANDBOX, None))
+        self.assertNotIn("\u2014", shell_rules.NO_SANDBOX)
+
+    def test_turn_with_a_browser_walls_every_command(self):
+        from dashboard import taint
+        t = taint.Turn()
+        self.assertIsNone(t.shell("npm test", ("/w",))[2])  # no browser: as written before outside content
+        t.browsing(self.root, sends=False)
+        with unittest.mock.patch.object(shell_rules, "browser_walls", wraps=shell_rules.browser_walls) as walls:
+            run = t.shell("npm test", ("/w",))[2]
+        self.assertEqual(walls.call_args.kwargs.get("required"), False)
+        if shell_rules.can_sandbox():
+            self.assertTrue(run.startswith(shell_rules.SANDBOX_EXEC))
+        t.browsing(self.root, sends=True)
+        t.browsing(self.root, sends=False)  # only ever gains
+        self.assertTrue(t.browser_sends)
+
+    @unittest.skipUnless(os.path.exists(shell_rules.SANDBOX_EXEC), "macOS sandbox only")
+    def test_live_sandbox_keeps_the_browser_out(self):
+        import socket
+        import subprocess
+        import sys
+        import tempfile
+
+        def listen():
+            s = socket.socket()
+            s.bind(("127.0.0.1", 0))
+            s.listen(5)
+            self.addCleanup(s.close)
+            return s.getsockname()[1]
+        debug, other = listen(), listen()
+        chrome = os.path.join(self.home, "Library", "Application Support", "Google", "Chrome", "DevToolsActivePort")
+        with open(chrome, "w") as f:
+            f.write(f"{debug}\n/devtools/browser/abc\n")
+        with open(os.path.join(self.root, "run", "browser-engine-key"), "w") as f:
+            f.write("k" * 64)
+        sock_dir = tempfile.mkdtemp(dir="/tmp")  # a short path: a Unix socket name is at most 104 bytes
+        self.addCleanup(__import__("shutil").rmtree, sock_dir, True)
+        sock_path = os.path.join(sock_dir, "s.sock")
+        u = socket.socket(socket.AF_UNIX)
+        u.bind(sock_path)
+        u.listen(5)
+        self.addCleanup(u.close)
+        walls = self.walls()
+        walls["paths"] = walls["paths"] + [os.path.realpath(sock_dir)]  # stands in for ~/.agent-browser
+
+        def runs(code, outside):
+            cmd = shell_rules.sandboxed(f"{sys.executable} -c {__import__('shlex').quote(code)}", [self.tmp.name],
+                                        browser=walls, outside=outside)
+            return subprocess.run(cmd, shell=True, capture_output=True).returncode == 0
+        tcp = "import socket; socket.create_connection(('127.0.0.1', {}), 3).close()"
+        unix = f"import socket; s = socket.socket(socket.AF_UNIX); s.connect({sock_path!r})"
+        key = f"open({os.path.join(self.root, 'run', 'browser-engine-key')!r}).read()"
+        self.assertFalse(runs(tcp.format(debug), outside=False))
+        self.assertTrue(runs(tcp.format(other), outside=False))  # other local work still runs
+        self.assertFalse(runs(unix, outside=False))
+        self.assertFalse(runs(key, outside=False))
+        self.assertFalse(runs(tcp.format(other), outside=True))  # after outside content: no localhost at all
+        self.assertFalse(runs(key, outside=True))
+
+
 if __name__ == "__main__":
     unittest.main()
