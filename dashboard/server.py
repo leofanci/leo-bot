@@ -2878,6 +2878,9 @@ class Handler(BaseHTTPRequestHandler):
             if not allow:
                 self.log_message("gate deny tool=%s", tool[:40])
             return self._send(200, {"allow": allow, "reason": reason})
+        if tool == "Bash-ran":  # Claude Code ran a Bash command (PostToolUse): did its review shell ask first?
+            taint.GATES.ran(auth[7:], body.get("id") if isinstance(body.get("id"), str) else None)
+            return self._send(200, {"allow": True, "reason": ""})
         if tool == "Bash-shell":  # the review shell asks for its profile, or redeems an osctl ticket
             ticket = body.get("ticket")
             if ticket is not None:
@@ -2889,8 +2892,9 @@ class Handler(BaseHTTPRequestHandler):
         if tool == "Bash":  # a shell command: it runs sandboxed (shell_rules.plan), on review via its shell
             # The sandbox profile goes in Leo Bot's data folder, which a sandboxed command cannot write.
             cwd = body.get("cwd") if isinstance(body.get("cwd"), str) and body["cwd"].startswith("/") else None
+            call_id = body.get("id") if isinstance(body.get("id"), str) else None
             allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"),
-                                                   cwd=cwd)
+                                                   cwd=cwd, call_id=call_id)
         else:
             allow, reason = turn.decide(tool, command)
         if not allow:

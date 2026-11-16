@@ -376,8 +376,11 @@ def gate_settings(shell=False, review=False):
     # Approve for me (auto mode): file tools ask too, so a write outside the edit folders is refused
     # as on every other level instead of going to Claude Code's reviewer.
     matcher = "WebSearch|WebFetch" + ("|Bash" if shell else "") + ("|Edit|Write|MultiEdit|NotebookEdit" if review else "")
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": matcher,
-                                                 "hooks": [{"type": "command", "command": HOOK_COMMAND}]}]}})
+    hook = [{"type": "command", "command": HOOK_COMMAND}]
+    hooks = {"PreToolUse": [{"matcher": matcher, "hooks": hook}]}
+    if shell and review:  # each Bash run is reported, so the gate knows the review shell ran it (taint.Gates.ran)
+        hooks.update({name: [{"matcher": "Bash", "hooks": hook}] for name in ("PostToolUse", "PostToolUseFailure")})
+    return json.dumps({"hooks": hooks})
 
 
 def _mcp_server(port, path, env):
@@ -585,8 +588,11 @@ class ClaudeCodeEngine(Engine):
         # reviewer still judges it (shell_rules.review_shell). No sandbox here: the gate's command check.
         review = (getattr(policy, "level", "") == "approve" and bool(self.shell_dir(policy, bool(gate_vars(tokens))))
                   and shell_rules.can_sandbox())
+        # SHELL too: Claude Code looks at CLAUDE_CODE_SHELL, then SHELL; if an update stops reading
+        # both, the gate notices (taint.Gates.ran) and refuses the shell.
+        wrapper = shell_rules.review_shell() if review else None
         return {**{k: v for k, v in os.environ.items() if k not in drop},
-                **({"CLAUDE_CODE_SHELL": shell_rules.review_shell()} if review else {}),
+                **({"CLAUDE_CODE_SHELL": wrapper, "SHELL": wrapper} if review else {}),
                 "PYTHONPATH": os.pathsep.join(x for x in (str(paths.CODE), os.environ.get("PYTHONPATH")) if x),
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(policy.workspace or "hq"),

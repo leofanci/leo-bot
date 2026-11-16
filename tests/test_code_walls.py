@@ -522,6 +522,7 @@ class CodeWalls(unittest.TestCase):
                 pass
         srv = http.server.HTTPServer(("127.0.0.1", 0), H)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         return f"http://127.0.0.1:{srv.server_address[1]}/api/internal/gate", got
 
@@ -557,7 +558,7 @@ class CodeWalls(unittest.TestCase):
     @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
     def test_review_shell_runs_inside_the_gate_profile(self):
         self.fake_code()
-        pdir = Path(os.path.realpath(self.tmp.name)) / "profiles"
+        pdir = Path(paths.SANDBOX_DIR) / "profiles-test"  # the review shell takes a profile from there only
         tok = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),), review=True)
         self.addCleanup(taint.GATES.revoke, tok)
         url, got = self._stub_gate(lambda body: dict(zip(("allow", "reason", "profile"),
@@ -574,7 +575,7 @@ class CodeWalls(unittest.TestCase):
         url, got = self._stub_gate(lambda body: {"allow": True, "command": f"touch {shlex.quote(str(mark))}"}
                                    if body.get("ticket") == "a" * 32 else {"allow": False})
         proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url},
-                             "source x; eval ': leobot-osctl-ticket " + "a" * 32 + "'")
+                             "source x && eval ': leobot-osctl-ticket " + "a" * 32 + "' < /dev/null")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(mark.exists())
         proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url},
@@ -640,6 +641,239 @@ class CodeWalls(unittest.TestCase):
         self.assertEqual(run({"allow": True, "review": True}), "")
         full = json.loads(run({"allow": True, "command": "sandbox-exec -f p /bin/bash -c ls"}))
         self.assertEqual(full["hookSpecificOutput"]["permissionDecision"], "allow")
+
+    # --- round 4: the review shell fails closed if Claude Code stops using it ---------------------
+
+    def _review_token(self):
+        tok = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),), review=True)
+        self.addCleanup(taint.GATES.revoke, tok)
+        return tok
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_gate_denies_once_a_command_ran_outside_its_shell(self):
+        """A Claude Code that ignores CLAUDE_CODE_SHELL and SHELL: the first command ran with no
+        Bash-shell call, so the second (and every later one, osctl too) is denied."""
+        tok = self._review_token()
+        self.assertEqual(taint.GATES.shell(tok, "echo one", call_id="a"), (True, "", None))
+        taint.GATES.ran(tok, "a")  # PostToolUse: it ran, and its shell never asked the gate
+        for cmd in ("echo two", "ls", "python3 -m dashboard.osctl tree"):
+            allow, reason, run = taint.GATES.shell(tok, cmd, call_id="b")
+            self.assertEqual((allow, run), (False, None), cmd)
+            self.assertEqual(reason, taint.SHELL_UNCONFIRMED)
+        self.assertIn("Approve for me shell is off until Leo Bot is updated", taint.SHELL_UNCONFIRMED)
+        self.assertFalse(taint.GATES.shell_profile(tok)[0])  # a late shell call does not reopen it
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_gate_keeps_going_while_its_shell_runs_each_command(self):
+        tok = self._review_token()
+        # one command at a time
+        self.assertTrue(taint.GATES.shell(tok, "echo one", call_id="a")[0])
+        self.assertTrue(taint.GATES.shell_profile(tok)[0])
+        taint.GATES.ran(tok, "a")
+        self.assertTrue(taint.GATES.shell(tok, "echo two", call_id="b")[0])
+        self.assertTrue(taint.GATES.shell_profile(tok)[0])
+        taint.GATES.ran(tok, "b")
+        # two calls in one response: both checks come before either shell runs
+        self.assertTrue(taint.GATES.shell(tok, "echo three", call_id="c")[0])
+        self.assertTrue(taint.GATES.shell(tok, "echo four", call_id="d")[0])
+        self.assertTrue(taint.GATES.shell_profile(tok)[0])
+        self.assertTrue(taint.GATES.shell_profile(tok)[0])
+        taint.GATES.ran(tok, "c")
+        taint.GATES.ran(tok, "d")
+        # the reviewer refuses one: no shell call and no PostToolUse, the next still runs
+        self.assertTrue(taint.GATES.shell(tok, "rm -rf build", call_id="e")[0])
+        self.assertTrue(taint.GATES.shell(tok, "echo five", call_id="f")[0])
+        self.assertTrue(taint.GATES.shell_profile(tok)[0])
+        taint.GATES.ran(tok, "f")
+        # osctl: the ticket redeem is the shell call
+        run = taint.GATES.shell(tok, "python3 -m dashboard.osctl tree", call_id="g")[2]
+        self.assertIsNotNone(taint.GATES.redeem(tok, run.split()[-1]))
+        taint.GATES.ran(tok, "g")
+        self.assertTrue(taint.GATES.shell(tok, "echo six", call_id="h")[0])
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_gate_judges_a_late_or_unnamed_report_too(self):
+        tok = self._review_token()
+        self.assertTrue(taint.GATES.shell(tok, "sleep 5 &", call_id="a")[0])
+        taint.GATES.ran(tok, None)  # no id: the latest allowed check is the one it ran
+        self.assertFalse(taint.GATES.shell(tok, "echo two", call_id="b")[0])
+        full = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),))  # Full access: rewritten, never watched
+        self.addCleanup(taint.GATES.revoke, full)
+        self.assertTrue(taint.GATES.shell(full, "echo one", call_id="a")[0])
+        taint.GATES.ran(full, "a")
+        self.assertTrue(taint.GATES.shell(full, "echo two", call_id="b")[0])
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_gate_fails_closed_through_the_server(self):
+        """The stub flow over the real gate endpoint, as the hook and the review shell call it."""
+        import http.server
+        import json
+        import threading
+        import urllib.request
+        from dashboard import server
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"http://127.0.0.1:{srv.server_address[1]}/api/internal/gate"
+        tok = self._review_token()
+
+        def ask(body):
+            req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                         headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+        ok = ask({"tool": "Bash", "command": "echo one", "id": "a"})
+        self.assertEqual((ok["allow"], ok.get("review")), (True, True))
+        self.assertTrue(ask({"tool": "Bash-ran", "id": "a"})["allow"])  # the PostToolUse report
+        no = ask({"tool": "Bash", "command": "echo two", "id": "b"})
+        self.assertFalse(no["allow"])
+        self.assertEqual(no["reason"], taint.SHELL_UNCONFIRMED)
+
+    def test_hook_sends_the_call_id_and_reports_a_run(self):
+        import io
+        import json
+        from dashboard import turn_hook
+        sent = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=None):
+            sent.append(json.loads(req.data))
+            return Resp(json.dumps({"allow": True, "review": True}).encode())
+
+        def run(event):
+            out = io.StringIO()
+            env = {turn_hook.TOKEN_ENV: "t", turn_hook.URL_ENV: "http://127.0.0.1:1/api/internal/gate"}
+            with mock.patch.dict(os.environ, env), mock.patch.object(turn_hook.sys, "stdin", io.StringIO(json.dumps(event))), \
+                    mock.patch.object(turn_hook.urllib.request, "urlopen", fake_urlopen), \
+                    mock.patch.object(turn_hook.sys, "stdout", out):
+                turn_hook.main()
+            return out.getvalue()
+        base = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "tool_use_id": "toolu_1"}
+        self.assertEqual(run({**base, "hook_event_name": "PreToolUse"}), "")
+        self.assertEqual(sent[-1]["id"], "toolu_1")
+        self.assertEqual(sent[-1]["tool"], "Bash")
+        for name in ("PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(run({**base, "hook_event_name": name}), "")  # never a decision after the run
+            self.assertEqual(sent[-1], {"tool": "Bash-ran", "id": "toolu_1"})
+        with mock.patch.object(turn_hook.urllib.request, "urlopen", side_effect=OSError("down")):
+            out = io.StringIO()
+            with mock.patch.object(turn_hook.sys, "stdin", io.StringIO(json.dumps({**base, "hook_event_name": "PostToolUse"}))), \
+                    mock.patch.dict(os.environ, {turn_hook.TOKEN_ENV: "t", turn_hook.URL_ENV: "http://127.0.0.1:1/x"}), \
+                    mock.patch.object(turn_hook.sys, "stdout", out):
+                turn_hook.main()
+            self.assertEqual(out.getvalue(), "")
+
+    def test_review_settings_report_each_bash_run(self):
+        import json
+        from dashboard.engines.claude_code import HOOK_COMMAND, gate_settings
+        hooks = json.loads(gate_settings(True, True))["hooks"]
+        for name in ("PostToolUse", "PostToolUseFailure"):
+            self.assertEqual(hooks[name], [{"matcher": "Bash", "hooks": [{"type": "command", "command": HOOK_COMMAND}]}])
+        for args in ((True, False), (False, False)):
+            self.assertEqual(set(json.loads(gate_settings(*args))["hooks"]), {"PreToolUse"})
+
+    def test_turn_env_sets_shell_to_the_review_shell_too(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        tokens = TurnTokens(gate_token="t", gate_port=8765)
+        mk = lambda level: TurnPolicy(shell=True, level=level, read_dirs=(str(self.edit),),  # noqa: E731
+                                      edit_dirs=(str(self.edit),))
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/zsh"}):
+            env = ClaudeCodeEngine().turn_env(mk("approve"), tokens)
+            if shell_rules.can_sandbox():
+                self.assertEqual(env["SHELL"], shell_rules.review_shell())
+            self.assertEqual(ClaudeCodeEngine().turn_env(mk("full"), tokens)["SHELL"], "/bin/zsh")
+
+    def test_review_shell_takes_only_the_exact_ticket_command(self):
+        mark = self.edit / "osctl-ran"
+        nonce = "a" * 32
+        url, got = self._stub_gate(lambda body: {"allow": True, "command": f"touch {shlex.quote(str(mark))}"}
+                                   if body.get("ticket") == nonce else {"allow": False, "reason": "no"})
+        env = {"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url}
+        # what Claude Code 2.1.325 runs for `: leobot-osctl-ticket <nonce>` (verified live)
+        exact = ("source /x/snapshot-zsh-1.sh 2>/dev/null || true && \\builtin setopt NO_EXTENDED_GLOB 2>/dev/null"
+                 f" || true && eval ': leobot-osctl-ticket {nonce}' < /dev/null && pwd -P >| /tmp/claude-ab12-cwd")
+        for script in (f"source x && eval 'echo leobot-osctl-ticket {nonce}' < /dev/null && pwd -P >| /tmp/c",
+                       f"source x && eval 'grep leobot-osctl-ticket {nonce} f' < /dev/null && pwd -P >| /tmp/c",
+                       f"source x && eval ': leobot-osctl-ticket {nonce}; touch y' < /dev/null && pwd -P >| /tmp/c",
+                       f"echo : leobot-osctl-ticket {nonce}"):
+            got.clear()
+            self._wrapper(env, script)
+            self.assertNotIn("ticket", got[0], script)
+            self.assertFalse(mark.exists(), script)
+        got.clear()
+        proc = self._wrapper(env, exact)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(got[0].get("ticket"), nonce)
+        self.assertTrue(mark.exists())
+
+    def test_review_shell_takes_a_profile_only_from_the_sandbox_folder(self):
+        elsewhere = self.edit / "open.sb"
+        elsewhere.write_text("(version 1)(allow default)\n")
+        mark = self.edit / "ran"
+        url, _ = self._stub_gate(lambda body: {"allow": True, "profile": str(elsewhere)})
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url}, f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        self.assertFalse(mark.exists())
+        link = Path(paths.SANDBOX_DIR) / "link-out.sb"
+        link.unlink(missing_ok=True)
+        link.symlink_to(elsewhere)  # inside by name, outside for real
+        self.addCleanup(link.unlink, missing_ok=True)
+        url, _ = self._stub_gate(lambda body: {"allow": True, "profile": str(link)})
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url}, f"touch {shlex.quote(str(mark))}")
+        self.assertEqual(proc.returncode, 126)
+        self.assertFalse(mark.exists())
+
+    def test_tickets_are_pruned_capped_and_dropped_on_revoke(self):
+        tok = self._review_token()
+        if not shell_rules.can_sandbox():
+            self.skipTest("sandbox-exec")
+        osctl = "python3 -m dashboard.osctl tree"
+        first = taint.GATES.shell(tok, osctl)[2].split()[-1]
+        with mock.patch.object(taint.time, "time", return_value=taint.time.time() + taint.Gates.TICKET_AGE + 1):
+            taint.GATES.shell(tok, osctl)  # issuing a ticket purges expired ones
+            self.assertNotIn(first, taint.GATES._tickets)
+        for _ in range(taint.Gates.TICKETS_PER_TOKEN + 10):
+            taint.GATES.shell(tok, osctl)
+        mine = [k for k, v in taint.GATES._tickets.items() if v[0] == tok]
+        self.assertEqual(len(mine), taint.Gates.TICKETS_PER_TOKEN)
+        taint.GATES.revoke(tok)
+        self.assertFalse([k for k, v in taint.GATES._tickets.items() if v[0] == tok])
+
+    def test_agent_and_package_configs_are_walled(self):
+        home = Path.home()
+        walls = shell_rules.code_walls()
+        names = (".claude/settings.json", ".claude/settings.local.json", ".ssh/config", ".ssh/rc", ".npmrc", ".pypirc")
+        for name in names:
+            self.assertIn(name, shell_rules.STARTUP_FILES)
+            self.assertIn(os.path.realpath(str(home / name)), walls["literals"])
+        edit = str(self.edit)
+        for cmd in ("echo x >> ~/.npmrc", "cp a ~/.claude/settings.json", "rm ~/.ssh/rc", "mv x ~/.pypirc"):
+            self.assertTrue(shell_rules.writes_code(cmd, edit), cmd)
+        self.assertFalse(shell_rules.writes_code("cat ~/.ssh/config", edit))
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_agent_and_package_configs_cannot_be_written(self):
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".ssh").mkdir()
+        code = shell_rules.code_walls(home=home)
+        q = shlex.quote
+        for outside in (False, True):
+            profile = shell_rules.sandbox_profile((str(self.edit), str(home)), outside=outside, code=code)
+            for name in (".claude/settings.json", ".claude/settings.local.json", ".ssh/config", ".ssh/rc",
+                         ".npmrc", ".pypirc"):
+                self.assertNotEqual(self._sandbox(profile, f"echo x >> {q(str(home / name))}").returncode, 0,
+                                    (outside, name))
+                self.assertFalse((home / name).exists(), (outside, name))
+            proc = self._sandbox(profile, f"touch {q(str(home / '.claude' / 'other.json'))}")
+            self.assertEqual(proc.returncode, 0, proc.stderr)  # the folder itself stays usable
 
 
 if __name__ == "__main__":

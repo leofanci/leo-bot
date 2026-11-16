@@ -229,10 +229,13 @@ def _ancestors(path, home):
     return out
 
 
-# Files the owner's shell or git reads at its next start: a write there would run a program later,
-# as the owner, outside every sandbox. Each file is denied as itself (literal), each folder whole.
+# Files the owner's shell, git, Claude Code, ssh or a package tool reads at its next start: a write
+# there would run a program later, as the owner, outside every sandbox (a Claude Code hook, an ssh
+# ProxyCommand or rc, a package index or script setting). Each file is denied as itself (literal),
+# with each link it goes through; each folder whole. Not every such file: README "What stays open".
 STARTUP_FILES = (".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile",
-                 ".gitconfig")
+                 ".gitconfig", ".claude/settings.json", ".claude/settings.local.json", ".ssh/config", ".ssh/rc",
+                 ".npmrc", ".pypirc")
 STARTUP_DIRS = ("Library/LaunchAgents", ".config/git", ".config/fish")
 _WALLS_CACHE = {}
 
@@ -452,13 +455,16 @@ def osctl_command(command):
 # Approve for me on Claude Code (the review level): Claude Code's own reviewer must judge each
 # command, and a hook that rewrites a command skips it (verified live with 2.1.325: "allow" skips
 # the reviewer, "ask" is refused with no prompt to answer). So on that level the hook stays silent
-# and the sandbox comes from the shell Claude Code runs every command in: CLAUDE_CODE_SHELL names
-# this wrapper (named zsh, as Claude Code takes only a bash or zsh), in Leo Bot's sandbox folder,
+# and the sandbox comes from the shell Claude Code runs every command in: CLAUDE_CODE_SHELL and SHELL
+# name this wrapper (named zsh, as Claude Code takes only a bash or zsh), in Leo Bot's sandbox folder,
 # which no bot command writes (code_walls). Each run it asks the gate for this turn's profile
 # (the code wall before outside content; offline and write-limited after; the browser walls while
-# browsing) and runs /bin/zsh inside it. Leo Bot's own osctl comes as a one-time ticket the gate
-# issued for that exact command; the wrapper redeems it and runs only that command, as Full access
-# runs it. No gate, a refusal or a bad answer: nothing runs (exit 126).
+# browsing), takes it only from that sandbox folder, and runs /bin/zsh inside it. Leo Bot's own
+# osctl comes as a one-time ticket the gate issued for that exact command; the wrapper redeems it
+# only when the command is exactly `: leobot-osctl-ticket <nonce>`, and runs only the stored
+# command, as Full access runs it. No gate, a refusal or a bad answer: nothing runs (exit 126).
+# If Claude Code stops running commands in it, the gate sees a command ran with no call from this
+# wrapper and refuses every later one (taint.Gates.ran).
 REVIEW_SHELL_TICKET = "leobot-osctl-ticket"
 _REVIEW_SHELL_CODE = r"""
 import json, os, re, sys, urllib.request
@@ -469,7 +475,12 @@ def die(why):
 token, url = os.environ.get("LEOBOT_GATE_TOKEN"), os.environ.get("LEOBOT_GATE_URL") or ""
 if not token or not url.startswith("http://127.0.0.1:"):
     die("this shell has no gate.")
-ticket = re.search(r"TICKET ([0-9a-f]{32})", " ".join(args))
+# A ticket only when the command Claude Code runs is exactly `: TICKET <nonce>`: its -c script
+# ends `eval ': TICKET <nonce>' < /dev/null`, then its `pwd -P` (verified live with 2.1.325). A
+# quote inside a command comes in that script as '"'"', so no command of the bot's own ends so.
+script = args[-1] if len(args) >= 2 and "-c" in args[:-1] else ""
+ticket = re.fullmatch(r"(?s)(?:.* && )?eval ': TICKET ([0-9a-f]{32})' < /dev/null(?: && pwd -P >\| [^\s'\"]+)?",
+                      script)
 body = {"tool": "Bash-shell", **({"ticket": ticket.group(1)} if ticket else {})}
 try:
     req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
@@ -488,6 +499,9 @@ if ticket:
 profile = answer.get("profile")
 if not isinstance(profile, str) or not profile.startswith("/") or not os.path.isfile(profile):
     die("no sandbox profile.")
+profile = os.path.realpath(profile)
+if not profile.startswith(SANDBOX + "/"):
+    die("no sandbox profile.")  # only a profile the gate wrote, in Leo Bot's sandbox folder
 os.execv("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", profile, "/bin/zsh", *args])
 """.replace("TICKET", REVIEW_SHELL_TICKET)
 
@@ -501,7 +515,8 @@ def review_shell():
     os.chmod(folder, 0o700)
     os.chmod(folder.parent, 0o700)
     path = folder / "zsh"
-    text = f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(_REVIEW_SHELL_CODE)} \"$@\"\n"
+    code = f"SANDBOX = {os.path.realpath(str(paths.SANDBOX_DIR))!r}\n" + _REVIEW_SHELL_CODE
+    text = f"#!/bin/sh\nexec {shlex.quote(sys.executable)} -I -c {shlex.quote(code)} \"$@\"\n"
     try:
         same = path.read_text(encoding="utf-8") == text and os.access(path, os.X_OK)
     except OSError:

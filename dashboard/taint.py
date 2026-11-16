@@ -35,6 +35,8 @@ WEB_OFF = ("Web search and pages are off in this conversation: it holds data fro
            "can start a new thread.")
 WRITE_OFF = "You change files only in your edit folders ({folders}). Say what you would change elsewhere."
 FILE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+SHELL_UNCONFIRMED = ("Leo Bot could not confirm this command runs in its sandbox: Claude Code may have changed; "
+                     "Approve for me shell is off until Leo Bot is updated.")
 SAVE_WAITS = ("This run read outside content (mail, pages, app data), so it saves nothing by itself: "
               "say what and where, and end with one APPROVAL: line.")
 
@@ -97,8 +99,8 @@ class Turn:
 
     def decide(self, tool, command=None):
         """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an
-        Auto job) or "Bash" (a Full access shell command, dashboard/shell_rules.py). Anything
-        else is not this gate's business."""
+        Auto job) or "Bash" (a shell command on Full access or Approve for me,
+        dashboard/shell_rules.py). Anything else is not this gate's business."""
         if tool == "Bash":
             from dashboard import shell_rules
             with self._lock:
@@ -116,10 +118,16 @@ class Gates:
     """Gate tokens: one per run, bound to its request's Turn."""
 
     TICKET_AGE = 120  # seconds an osctl ticket of the review shell stays redeemable
+    TICKETS_PER_TOKEN = 32  # live tickets one run may hold: the oldest goes first
 
     def __init__(self):
         self._live = {}
         self._tickets = {}
+        # Per review token: is the review shell really the shell Claude Code runs commands in?
+        # {"seq": event counter, "allowed": {call id: seq of its allow}, "last": seq of the latest
+        # allow, "shell": seq of the latest Bash-shell call, "ran": [seq of each allow reported run],
+        # "broken": a command ran with no Bash-shell call after its allow}. See `ran`.
+        self._watch = {}
         self._lock = threading.Lock()
 
     def mint(self, turn, writable=(), wrap=True, review=False):
@@ -144,6 +152,7 @@ class Gates:
             for live, entry in list(self._live.items()):
                 if now - entry[1] > MAX_AGE:
                     del self._live[live]
+                    self._watch.pop(live, None)
                 elif hmac.compare_digest(live.encode(), token.encode()):
                     return entry
         return None
@@ -169,13 +178,16 @@ class Gates:
         entry = self._find(token)
         return entry[0] if entry else None
 
-    def shell(self, token, command, profile_dir=None, cwd=None):
+    def shell(self, token, command, profile_dir=None, cwd=None, call_id=None):
         """(allow, reason, run) for a shell command on the run holding `token` (Turn.shell).
-        `cwd`: the folder the engine says the command runs in (it may keep an earlier `cd`)."""
+        `cwd`: the folder the engine says the command runs in (it may keep an earlier `cd`).
+        `call_id`: Claude Code's tool_use_id for it, matched by `ran`."""
         entry = self._find(token)
         if entry is None:
             return False, "no gate for this run", None
         turn, _, writable, wrap, review = entry
+        if review and wrap and self._unconfirmed(token):
+            return False, SHELL_UNCONFIRMED, None
         allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None, cwd=cwd)
         if not (allow and wrap and review and run):
             return allow, reason, (run if wrap else None)
@@ -183,19 +195,91 @@ class Gates:
         if shell_rules.osctl_command(command) == run:  # Leo Bot's own osctl: a ticket the review shell redeems
             nonce = secrets.token_hex(16)
             with self._lock:
+                self._prune_tickets(token)
                 self._tickets[nonce] = (token, run, time.time())
+                self._allowed(token, call_id)
             return True, "", f": {shell_rules.REVIEW_SHELL_TICKET} {nonce}"
+        with self._lock:
+            self._allowed(token, call_id)
         return True, "", None  # Claude Code's reviewer judges it; the review shell sandboxes it
+
+    # The review shell is only a sandbox while Claude Code runs every command in it: it takes
+    # CLAUDE_CODE_SHELL and SHELL today (2.1.325), and an update could stop reading them. So the
+    # gate checks it: each allowed command must be followed by a Bash-shell call (the review shell
+    # asking for its profile or redeeming a ticket) before Claude Code reports that command ran
+    # (its PostToolUse or PostToolUseFailure hook, `ran`). Once one ran without, this and every
+    # later command on the token is refused (fail closed). Checking at the report, not at the next
+    # command, keeps two commands of one response (both checked before either runs) and a command
+    # the reviewer refused (it never runs, nothing is reported) from tripping it.
+
+    def _watched(self, token):
+        return self._watch.setdefault(token, {"seq": 0, "allowed": {}, "last": None, "shell": -1, "ran": [],
+                                              "broken": False})
+
+    def _allowed(self, token, call_id):
+        w = self._watched(token)
+        w["seq"] += 1
+        w["last"] = w["seq"]
+        if isinstance(call_id, str) and call_id:
+            w["allowed"][call_id] = w["seq"]
+            if len(w["allowed"]) > 256:  # a long turn: the oldest ids have long been judged
+                w["allowed"].pop(next(iter(w["allowed"])))
+
+    def _shell_seen(self, token):
+        with self._lock:
+            w = self._watched(token)
+            w["seq"] += 1
+            w["shell"] = w["seq"]
+
+    def _unconfirmed(self, token):
+        with self._lock:
+            w = self._watch.get(token)
+            if w is None:
+                return False
+            if any(seq > w["shell"] for seq in w["ran"]):
+                w["broken"] = True
+            w["ran"] = []
+            return w["broken"]
+
+    def ran(self, token, call_id):
+        """Claude Code reports a Bash command ran (or failed after it started). `call_id`: its
+        tool_use_id; unknown or missing, the latest allowed command is the one it ran. A command
+        started in the background reports at once, maybe before its shell asked, so the verdict
+        waits for the next command or Bash-shell call."""
+        entry = self._find(token)
+        if entry is None or not entry[4]:
+            return
+        with self._lock:
+            w = self._watch.get(token)
+            if w is None:
+                return
+            seq = w["allowed"].pop(call_id, None) if isinstance(call_id, str) else None
+            seq = w["last"] if seq is None else seq
+            if seq is not None:
+                w["ran"].append(seq)
+
+    def _prune_tickets(self, token=None):
+        """Drop expired tickets, and the oldest of `token` past TICKETS_PER_TOKEN - 1 (lock held)."""
+        now = time.time()
+        for k, (_, _, at) in list(self._tickets.items()):
+            if now - at > self.TICKET_AGE:
+                del self._tickets[k]
+        if token is not None:
+            mine = sorted((at, k) for k, (t, _, at) in self._tickets.items() if t == token)
+            for _, k in mine[:max(0, len(mine) - self.TICKETS_PER_TOKEN + 1)]:
+                del self._tickets[k]
 
     def redeem(self, token, nonce):
         """The osctl command a review-shell ticket stands for, once, for the token it was issued to."""
-        if not isinstance(nonce, str) or self._find(token) is None:
+        found = self._find(token)
+        if found is None:
+            return None
+        if found[4]:
+            self._shell_seen(token)
+        if not isinstance(nonce, str) or self._unconfirmed(token):
             return None
         with self._lock:
-            now = time.time()
-            for k, (_, _, at) in list(self._tickets.items()):
-                if now - at > self.TICKET_AGE:
-                    del self._tickets[k]
+            self._prune_tickets()
             entry = self._tickets.get(nonce)
             if entry is None or not hmac.compare_digest(entry[0].encode(), str(token).encode()):
                 return None  # another run's ticket stays for its own run
@@ -208,12 +292,18 @@ class Gates:
         entry = self._find(token)
         if entry is None or not entry[4]:
             return False, "no review shell for this run", None
+        self._shell_seen(token)
+        if self._unconfirmed(token):
+            return False, SHELL_UNCONFIRMED, None
         path = entry[0].shell_profile(entry[2], profile_dir=profile_dir or str(paths.SANDBOX_DIR))
         return (True, "", path) if path else (False, "this machine has no sandbox", None)
 
     def revoke(self, token):
         with self._lock:
             self._live.pop(token, None)
+            self._watch.pop(token, None)
+            for k in [k for k, v in self._tickets.items() if v[0] == token]:
+                del self._tickets[k]
 
 
 GATES = Gates()
