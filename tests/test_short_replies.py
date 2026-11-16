@@ -77,10 +77,11 @@ class NoFrozenRail(unittest.TestCase):
 
 
 class SettingsScreen(unittest.TestCase):
-    def test_bots_tab_has_the_toggle(self):
+    def test_general_tab_has_the_toggle(self):
         js = (paths.CODE / "dashboard" / "app.js").read_text()
-        self.assertIn("data-short-replies", js)
-        self.assertIn('jpost("/api/settings/chat", { short_replies: shortBox.checked })', js)
+        general = js.split("async function renderGeneral(){", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn('id="gen-short"', general)
+        self.assertIn("save({ short_replies: e.target.checked }", general)
 
 
 if __name__ == "__main__":

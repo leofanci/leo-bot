@@ -10,6 +10,8 @@ switches its own bots on/off and keeps its own memory. User data, gitignored:
   projects/<slug>/team/<bot>.md     that workspace's private memory: the owner's private threads only
   projects/<slug>/team/shared/<bot>.md  its team memory: threads invited people can see
                                     (bots never mix workspaces, and the two never mix)
+  team/bot_instructions.json        the owner's standing instructions per bot: "*/bot" for every
+                                    workspace, "slug/bot" for one (owner-only: bots never write it)
 
 Every skill always has exactly one owner: a switched-off bot's skills roll up
 to its nearest active manager. `cos` is the root and is always on.
@@ -248,6 +250,67 @@ def team(root=ROOT, ws=HQ, project=None):
     t.ws = ws or HQ
     t.recommended = default_active(project)
     return t
+
+
+# ---- the owner's standing instructions per bot ---------------------------- #
+INSTRUCTIONS_MAX = 2000
+EVERY = "*"  # "*/cmo": the CMO's instructions in every workspace
+
+
+def _instructions_file(root):
+    return Path(root) / "team" / "bot_instructions.json"
+
+
+def load_instructions(root=ROOT):
+    """{"*/bot" | "slug/bot": text}, rows of the wrong shape dropped."""
+    try:
+        data = json.loads(_instructions_file(root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v.strip()}
+
+
+def instructions(ws, bot_id, root=ROOT):
+    """(every workspace, this workspace): the owner's two texts for a bot, "" when unset."""
+    data = load_instructions(root)
+    here = data.get(f"{ws or HQ}/{bot_id}", "") if ws != EVERY else ""
+    return data.get(f"{EVERY}/{bot_id}", ""), here
+
+
+def set_instructions(scope, text, root=ROOT):
+    """Save one scope's text ("" clears it). `scope` = "*/bot" or "slug/bot"; the caller checks
+    the workspace exists."""
+    ws, sep, bot_id = str(scope or "").partition("/")
+    if not sep or bot_id not in load_defs() or not (ws == EVERY or _SLUG_RE.fullmatch(ws)):
+        raise ValueError("unknown workspace or bot")
+    text = str(text or "").replace("\r\n", "\n").strip()
+    if len(text) > INSTRUCTIONS_MAX:
+        raise ValueError(f"instructions: at most {INSTRUCTIONS_MAX} characters")
+    data = load_instructions(root)
+    if text:
+        data[scope] = text
+    else:
+        data.pop(scope, None)
+    _write_private(_instructions_file(root), data)
+    return text
+
+
+def forget_instructions(ws, root=ROOT):
+    """A deleted workspace: its bots' instructions go too."""
+    data = load_instructions(root)
+    kept = {k: v for k, v in data.items() if not k.startswith(f"{ws}/")}
+    if kept != data:
+        _write_private(_instructions_file(root), kept)
+
+
+def _write_private(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")  # mkstemp is 0600
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
 
 
 # Memory lives in core/memory.py; these names stay importable from here.

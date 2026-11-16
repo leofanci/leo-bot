@@ -1,12 +1,13 @@
 """spend.py: daily spending caps over the per-thread spend ledger.
 
 Each saved thread keeps `spend` rows {"ts", "by", "cost", "ws"} (chat_store.record_turn).
-A cap is dollars per rolling 24 hours, read from the environment on every check:
+A cap is dollars per rolling 24 hours, read on every check from the environment, else from
+Settings, General (core/general.py), else the default:
 - LEOBOT_PERSON_DAILY_CAP: each invited person's turns. Default 5; a value that is not a
   number keeps the default, 0 or less turns it off.
 - LEOBOT_WORKSPACE_DAILY_CAP: every turn in one workspace. Off unless set.
 - LEOBOT_OWNER_DAILY_CAP: the owner's own turns. Off unless set.
-For the last two, unset, empty, 0, negative or not a number means no cap.
+For the last two, unset, empty, 0, negative or not a number means no cap. A saved 0 is no cap.
 A scheduled job may have its own cap (core/jobs.py), passed as `job=(job_id, dollars)` (None: no cap):
 it counts the spend rows that job wrote.
 """
@@ -17,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 
-from core import bots
+from core import bots, general
 from dashboard import chat_store
 
 WINDOW = 86_400
@@ -36,7 +37,8 @@ def cap_value(kind):
     default = DEFAULT.get(kind, 0.0)
     raw = os.environ.get(ENV[kind])
     if raw is None or not raw.strip():
-        return default
+        saved = general.cap(kind)
+        return default if saved is None else saved
     try:
         value = float(raw or 0)
     except ValueError:
@@ -119,8 +121,10 @@ def refusal(ws, by, now=None, pending=0.0, records=None, job=None):
         at = time.localtime((oldest if oldest is not None else now) + WINDOW)
         frees = ("from " if at[:3] == time.localtime(now)[:3] else "tomorrow at ") + time.strftime("%H:%M", at)
         who = "this workspace reached its" if kind == "workspace" else "you reached your"
+        raise_it = (f"Raise {ENV[kind]}" if (os.environ.get(ENV[kind]) or "").strip()
+                    else "Raise it in Settings, General,")
         return (f"Paused: {who} daily cap ({_money(cap)} per 24 hours). Room frees up {frees}. "
-                f"Raise {ENV[kind]} to go on now.")
+                f"{raise_it} to go on now.")
     return None
 
 
