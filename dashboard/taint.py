@@ -152,13 +152,14 @@ class Gates:
         entry = self._find(token)
         return entry[0] if entry else None
 
-    def shell(self, token, command, profile_dir=None):
-        """(allow, reason, run) for a shell command on the run holding `token` (Turn.shell)."""
+    def shell(self, token, command, profile_dir=None, cwd=None):
+        """(allow, reason, run) for a shell command on the run holding `token` (Turn.shell).
+        `cwd`: the folder the engine says the command runs in (it may keep an earlier `cd`)."""
         entry = self._find(token)
         if entry is None:
             return False, "no gate for this run", None
         turn, _, writable, wrap = entry
-        allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None)
+        allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None, cwd=cwd)
         return allow, reason, (run if wrap else None)
 
     def revoke(self, token):

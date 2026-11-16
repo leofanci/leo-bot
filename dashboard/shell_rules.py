@@ -54,6 +54,7 @@ put on sys.path explicitly, from the repo folder. A bot that writes dashboard/os
 edit folder never gets that file run outside the sandbox. (-P needs Python 3.11; Leo Bot
 supports 3.10.)
 """
+import fnmatch
 import hashlib
 import os
 import posixpath
@@ -228,15 +229,51 @@ def _ancestors(path, home):
     return out
 
 
+# Files the owner's shell runs at its next start: a write there would run later, as the owner,
+# outside every sandbox. Each is denied as itself (literal), with ~/Library/LaunchAgents as a folder.
+STARTUP_FILES = (".zshrc", ".zshenv", ".zprofile", ".zlogin", ".bashrc", ".bash_profile", ".bash_login", ".profile")
+_WALLS_CACHE = {}
+
+
+def _unfollowed(path):
+    """`path` with its folders made real but its last part kept: the name of a link itself."""
+    path = os.path.abspath(str(path))
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+
+def _link_chain(path):
+    """`path` and every link hop down to the real file, each as `_unfollowed` names it."""
+    out, cur = [], _unfollowed(path)
+    for _ in range(40):  # a link loop ends here
+        out.append(cur)
+        if not os.path.islink(cur):
+            break
+        try:
+            cur = _unfollowed(os.path.join(os.path.dirname(cur), os.readlink(cur)))
+        except OSError:
+            break
+    return out
+
+
 def code_walls(home=None):
     """What no bot command may write, on every level (module notes): {"write_paths" (Leo Bot's
-    code, the Python that runs osctl, the turns' working folder: sorted real paths), "ancestors"
-    (each folder above them, denied as itself: no rename), "home"}."""
+    code, the Python that runs osctl, the turns' working folder, ~/Library/LaunchAgents: sorted
+    real paths, no write under them), "literals" (sys.executable and each link hop to the real
+    binary, the shell startup files: no write on each as itself; the folder that holds them stays
+    usable, a Homebrew bin folder for one), "ancestors" (each folder above all of them, denied as
+    itself: no rename), "home"}. Built once per process for each (REPO, TURN_CWD, home, Python)."""
     from core import paths
     home = Path.home() if home is None else Path(home)
-    writes = sorted({os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD))})
-    ancestors = sorted({a for p in writes for a in _ancestors(p, home)})
-    return {"write_paths": writes, "ancestors": ancestors, "home": os.path.realpath(str(home))}
+    key = (str(REPO), str(paths.TURN_CWD), str(home), sys.executable, _python_dirs)
+    cached = _WALLS_CACHE.get(key)
+    if cached is None:
+        writes = sorted({os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD)),
+                         os.path.realpath(str(home / "Library" / "LaunchAgents"))})
+        literals = sorted({*_link_chain(sys.executable), *(p for n in STARTUP_FILES for p in _link_chain(home / n))})
+        ancestors = sorted({a for p in writes + literals for a in _ancestors(p, home)})
+        cached = _WALLS_CACHE[key] = {"write_paths": writes, "literals": literals, "ancestors": ancestors,
+                                      "home": os.path.realpath(str(home))}
+    return {k: (list(v) if isinstance(v, list) else v) for k, v in cached.items()}
 
 
 def _fold(path):
@@ -245,10 +282,23 @@ def _fold(path):
 
 
 def in_code(path, walls=None):
-    """`path` (followed to its real path) is under a code wall "write_paths" (code_walls)."""
+    """`path` is under a code wall "write_paths" (followed to its real path), or names one of its
+    "literals" (the name itself or where it leads) (code_walls)."""
+    walls = walls or code_walls()
     real = _fold(os.path.realpath(str(path)))
+    literals = {_fold(p) for p in walls.get("literals") or ()}
+    if real in literals or _fold(_unfollowed(path)) in literals:
+        return True
     return any(real == w or real.startswith(w + "/")
-               for w in (_fold(p).rstrip("/") for p in (walls or code_walls())["write_paths"]))
+               for w in (_fold(p).rstrip("/") for p in walls["write_paths"]))
+
+
+def holds_code(folder, walls=None):
+    """`folder` is, holds or sits inside a code wall: never an edit folder or a writable root."""
+    walls = walls or code_walls()
+    real = _fold(os.path.realpath(str(folder))).rstrip("/") or "/"
+    inner = [_fold(p) for p in [*walls["write_paths"], *(walls.get("literals") or ())]]
+    return in_code(folder, walls) or any(p == real or p.startswith(real.rstrip("/") + "/") for p in inner)
 
 
 def browser_walls(root, required=False, home=None, profile_dir=None):
@@ -265,8 +315,8 @@ def browser_walls(root, required=False, home=None, profile_dir=None):
     writes = sorted({team, *code["write_paths"]} | ({pdir} if pdir else set()))
     walled = [team, run, agent, data] + ([pdir] if pdir else [])
     ancestors = sorted({a for p in walled for a in _ancestors(p, home)} | set(code["ancestors"]))
-    return {"paths": sorted({agent, run}), "write_paths": writes, "ancestors": ancestors,
-            "home": real(home), "required": bool(required)}
+    return {"paths": sorted({agent, run}), "write_paths": writes, "literals": code["literals"],
+            "ancestors": ancestors, "home": real(home), "required": bool(required)}
 
 
 def _browser_denies(browser):
@@ -281,7 +331,8 @@ def _write_denies(walls):
     """No write under each of `walls` "write_paths", and no write on each "ancestors" folder
     itself (no rename): the one deny builder of the code wall and the browser wall."""
     return ([f"(deny file-write* (subpath {_sb_str(p)}))" for p in walls.get("write_paths") or ()]
-            + [f"(deny file-write* (literal {_sb_str(p)}))" for p in walls.get("ancestors") or ()])
+            + [f"(deny file-write* (literal {_sb_str(p)}))"
+               for p in [*(walls.get("literals") or ()), *(walls.get("ancestors") or ())]])
 
 
 def _own_denies(profile_dir, home=None):
@@ -410,7 +461,10 @@ def plan(command, outside=False, writable=(), profile_dir=None, browser=None, cw
     run = sandboxed(command, writable, profile_dir=profile_dir, browser=browser, outside=outside)
     if run is None and browser is not None and browser.get("required"):
         return False, NO_SANDBOX, None
-    if run is None and writes_code(command, cwd or (str(writable[0]) if writable else None)):
+    # The engine's own folder for the command (cwd) and the first edit folder: an engine shell
+    # can keep a `cd` from an earlier command, so both are checked.
+    where = {c for c in (cwd, str(writable[0]) if writable else None) if c} or {None}
+    if run is None and any(writes_code(command, c) for c in where):
         return False, CODE_OFF, None
     return True, "", run
 
@@ -467,9 +521,9 @@ def _words_and_redirects(args):
     return words, targets
 
 
-def _resolve(word, cwd):
-    """`word` as a real path (~ and $HOME expanded, relative to `cwd`), or None when it cannot
-    be known: another variable, or a relative word with no folder."""
+def _expand(word, cwd):
+    """`word` as an absolute path (~ and $HOME expanded, relative to `cwd`), links not followed,
+    or None when it cannot be known: another variable, or a relative word with no folder."""
     home = os.path.expanduser("~")
     if word == "~" or word.startswith("~/"):
         word = home + word[1:]
@@ -481,14 +535,61 @@ def _resolve(word, cwd):
         if not cwd:
             return None
         word = os.path.join(cwd, word)
-    return os.path.realpath(word)
+    return os.path.normpath(word)
 
 
-def writes_code(command, cwd=None):
+def _resolve(word, cwd):
+    """`word` as a real path (`_expand`, links followed), or None when it cannot be known."""
+    path = _expand(word, cwd)
+    return None if path is None else os.path.realpath(path)
+
+
+_GLOB = re.compile(r"[*?\[]")
+_SHELLS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
+_OUTPUT_OPT = re.compile(r"^(?:--output(?:-file)?|--out|-o)(?:=|$)|^-o(?=.)")
+
+
+def _glob_walled(word, cwd, walls):
+    """A glob word (* ? [) that could name a code wall: it matches a walled path, one of its
+    literals or a folder above them, or its fixed part already lies inside a wall."""
+    path = _expand(word, cwd)
+    if path is None:
+        return False
+    i = _GLOB.search(path).start()
+    head = path[:i].rsplit("/", 1)[0]
+    pattern = _fold((os.path.realpath(head) if head else "").rstrip("/") + path[len(head):])
+    if head and in_code(head, walls):
+        return True
+    for target in [*walls["write_paths"], *(walls.get("literals") or ()), *walls["ancestors"]]:
+        cur = _fold(target)
+        while cur and cur != "/":
+            if fnmatch.fnmatchcase(cur, pattern):
+                return True
+            cur = os.path.dirname(cur)
+    return False
+
+
+def _script_of(prog, args):
+    """The command string a shell (`bash -c "..."`, `sh -lc`, `eval ...`) runs, or None."""
+    if prog == "eval":
+        return " ".join(args)
+    if prog in _SHELLS:
+        for i, a in enumerate(args):
+            if a.startswith("-") and not a.startswith("--") and "c" in a[1:]:
+                return args[i + 1] if i + 1 < len(args) else ""
+    return None
+
+
+def writes_code(command, cwd=None, _depth=0):
     """The command, as written, names a write under the code wall (code_walls): a word or a
-    redirect target of a program that can write lands under a walled path or on a folder above
-    one. A redirect there always counts. A command that cannot be read counts too. This reads
-    the command only (module notes): it is the check for a system with no sandbox."""
+    redirect target of a program that can write lands under a walled path, on one of its literals
+    or on a folder above them. A redirect there always counts, so does an output option
+    (`-o`, `--output=`) of a read-only program. A shell's `-c` string and `eval` are read again,
+    a glob counts when it could match a wall, and a path attached to an option (`-oPATH`) is read
+    from its first / or ~. A command that cannot be read counts too. This reads the command only,
+    and one command at a time (module notes): it is the check for a system with no sandbox."""
+    if _depth > 8:
+        return True
     try:
         segments = _segments(command)
     except ValueError:
@@ -497,11 +598,29 @@ def writes_code(command, cwd=None):
     ancestors = {_fold(p) for p in walls["ancestors"]}
 
     def walled(word):
-        real = _resolve(word, cwd)
-        return real is not None and (_fold(real) in ancestors or in_code(real, walls))
+        if _GLOB.search(word):
+            return _glob_walled(word, cwd, walls)
+        path = _expand(word, cwd)
+        if path is None:
+            return False
+        return (_fold(os.path.realpath(path)) in ancestors or _fold(_unfollowed(path)) in ancestors
+                or in_code(path, walls))
+
+    def candidates(w):
+        out = [w]
+        if "=" in w:
+            out.append(w.split("=", 1)[1])
+        if w.startswith("-"):
+            cut = [i for i in (w.find("/"), w.find("~")) if i > 0]
+            if cut:
+                out.append(w[min(cut):])
+        return out
 
     for seg in segments:
         prog, args = _program(seg)
+        script = _script_of(prog, args)
+        if script is not None and writes_code(script, cwd, _depth + 1):
+            return True
         words, targets = _words_and_redirects(args)
         if any(walled(t) for t in targets):
             return True
@@ -509,9 +628,16 @@ def writes_code(command, cwd=None):
             dest = next((w for w in words if not w.startswith("-")), "~")
             cwd = _resolve(dest, cwd) or cwd
         if _read_only(prog, args):
+            for i, w in enumerate(words):
+                if _OUTPUT_OPT.match(w):
+                    value = re.sub(r"^(?:--output(?:-file)?|--out|-o)=?", "", w)
+                    if value and walled(value):
+                        return True
+                    if not value and i + 1 < len(words) and walled(words[i + 1]):
+                        return True
             continue
         for w in words:
-            if any(walled(c) for c in ([w] + ([w.split("=", 1)[1]] if "=" in w else []))):
+            if any(walled(c) for c in candidates(w)):
                 return True
     return False
 

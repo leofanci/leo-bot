@@ -546,7 +546,9 @@ class ClaudeCodeEngine(Engine):
         denied += [f"{t}(/{f})" for f in policy.deny_files for t in ("Read", *EDIT_TOOLS)]
         # Leo Bot's own code, the Python that runs osctl and the turns' folder: never written, on
         # every turn, even by an edit folder that holds them (shell_rules.code_walls).
-        denied += [f"{t}(/{p}/**)" for p in shell_rules.code_walls()["write_paths"] for t in EDIT_TOOLS]
+        code = shell_rules.code_walls()
+        denied += [f"{t}(/{p}/**)" for p in code["write_paths"] for t in EDIT_TOOLS]
+        denied += [f"{t}(/{p})" for p in code["literals"] for t in EDIT_TOOLS]
         cmd = [self.claude_bin, "-p",
                "--output-format", "stream-json",
                "--include-partial-messages",

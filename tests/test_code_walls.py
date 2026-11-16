@@ -223,6 +223,9 @@ class CodeWalls(unittest.TestCase):
             self.assertIn(f"Write(/{repo}/**)", denied)
             for d in shell_rules._python_dirs():
                 self.assertIn(f"Write(/{d}/**)", denied)
+            for lit in shell_rules.code_walls()["literals"]:
+                self.assertIn(f"Edit(/{lit})", denied)
+            self.assertIn(f"Write(/{os.path.realpath(str(Path.home() / '.zshrc'))})", denied)
             log = f"Read(/{paths.CODE.resolve() / 'dashboard' / 'server.log'})"
             self.assertIn(log, denied)
 
@@ -284,6 +287,160 @@ class CodeWalls(unittest.TestCase):
         self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(paths.CODE))
         env = ClaudeCodeEngine().turn_env(TurnPolicy(), TurnTokens(), repo_dir="/elsewhere")
         self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(paths.CODE))
+
+    # --- review round 1 -------------------------------------------------------------------------
+
+    def _sandbox(self, profile, command):
+        return subprocess.run([shell_rules.SANDBOX_EXEC, "-p", profile, "/bin/bash", "-c", command],
+                              cwd=str(self.edit), capture_output=True, text=True, timeout=30)
+
+    def _python_link(self):
+        """bin/python3 -> ../hop/python3 -> cellar/python3.12: the executable as a link chain."""
+        base = Path(os.path.realpath(self.tmp.name))
+        cellar, hop, bindir = base / "cellar", base / "hop", base / "bin"
+        for d in (cellar, hop, bindir):
+            d.mkdir()
+        real = cellar / "python3.12"
+        real.write_text("#!/bin/sh\n")
+        (hop / "python3").symlink_to(real)
+        (bindir / "python3").symlink_to("../hop/python3")
+        return bindir / "python3", hop / "python3", real
+
+    def test_python_executable_links_are_walled(self):
+        link, hop, real = self._python_link()
+        with mock.patch.object(shell_rules.sys, "executable", str(link)):
+            walls = shell_rules.code_walls()
+        for p in (link, hop, real):
+            self.assertIn(str(p), walls["literals"])
+        self.assertIn(str(link.parent), walls["ancestors"])
+        self.assertNotIn(str(link.parent), walls["write_paths"])  # the bin folder itself stays usable
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_python_executable_link_cannot_be_swapped(self):
+        self.fake_code()
+        link, hop, real = self._python_link()
+        evil = self.edit / "evil"
+        evil.write_text("#!/bin/sh\n")
+        q = shlex.quote
+        with mock.patch.object(shell_rules.sys, "executable", str(link)):
+            for outside in (False, True):
+                for cmd in (f"ln -sf {q(str(evil))} {q(str(link))}", f"rm -f {q(str(link))}",
+                            f"mv {q(str(link))} {q(str(link))}.x", f"rm -f {q(str(hop))}",
+                            f"mv {q(str(link.parent))} {q(str(link.parent))}-moved"):
+                    proc = self.run_planned(cmd, outside=outside)
+                    self.assertNotEqual(proc.returncode, 0, cmd)
+                    self.assertEqual(os.readlink(link), "../hop/python3", cmd)
+                    self.assertEqual(os.readlink(hop), str(real), cmd)
+            proc = self.run_planned(f"touch {q(str(link.parent / 'other-tool'))}")
+            self.assertEqual(proc.returncode, 0, proc.stderr)  # brief and brew still write the bin folder
+
+    def test_startup_files_and_launch_agents_are_walled(self):
+        home = Path.home()
+        walls = shell_rules.code_walls()
+        for name in shell_rules.STARTUP_FILES:
+            self.assertIn(os.path.realpath(str(home / name)), walls["literals"])
+        self.assertIn(os.path.realpath(str(home / "Library" / "LaunchAgents")), walls["write_paths"])
+        edit = str(self.edit)
+        for cmd in ("echo x >> ~/.zshrc", "cp a ~/Library/LaunchAgents/x.plist", "touch $HOME/.bash_profile",
+                    "rm ~/.profile", "mv ~/Library/LaunchAgents /tmp/x"):
+            self.assertTrue(shell_rules.writes_code(cmd, edit), cmd)
+        self.assertFalse(shell_rules.writes_code("cat ~/.zshrc", edit))
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_startup_files_and_launch_agents_cannot_be_written(self):
+        home = Path(os.path.realpath(self.tmp.name)) / "home"
+        (home / "Library" / "LaunchAgents").mkdir(parents=True)
+        (home / ".zshrc").write_text("keep\n")
+        code = shell_rules.code_walls(home=home)
+        q = shlex.quote
+        for outside in (False, True):
+            profile = shell_rules.sandbox_profile((str(self.edit), str(home)), outside=outside, code=code)
+            for cmd in (f"echo x >> {q(str(home / '.zshrc'))}", f"touch {q(str(home / '.bashrc'))}",
+                        f"touch {q(str(home / 'Library/LaunchAgents/x.plist'))}",
+                        f"mv {q(str(home / 'Library/LaunchAgents'))} {q(str(home / 'la'))}"):
+                self.assertNotEqual(self._sandbox(profile, cmd).returncode, 0, cmd)
+            self.assertEqual(self._sandbox(profile, f"touch {q(str(home / 'notes.txt'))}").returncode, 0)
+        self.assertEqual((home / ".zshrc").read_text(), "keep\n")
+        self.assertFalse((home / ".bashrc").exists())
+        self.assertEqual(os.listdir(home / "Library" / "LaunchAgents"), [])
+
+    def test_writes_code_sees_through_shells_globs_and_options(self):
+        repo = os.path.realpath(str(shell_rules.REPO))
+        parent, name = os.path.split(repo)
+        edit = str(self.edit)
+        q = shlex.quote
+        for cmd in (f"bash -c {q('rm ' + repo + '/x')}", f"sh -c {q('rm ' + repo + '/x')}",
+                    f"zsh -lc {q('touch ' + repo + '/x')}", f"eval {q('rm -rf ' + repo + '/core')}",
+                    f"bash -c {q('bash -c ' + q('rm ' + repo + '/x'))}",
+                    f"rm -rf {parent}/{name[:3]}*", f"rm -rf {parent}/{name[:-2]}?{name[-1]}",
+                    f"rm -rf {parent}/[a-z]*", f"gcc -o{repo}/x a.c", f"git diff --output={repo}/x",
+                    f"git log -o {repo}/x", f"sort -o{repo}/x a"):
+            self.assertTrue(shell_rules.writes_code(cmd, edit), cmd)
+        for cmd in (f"ls {repo}/*", f"cat {parent}/{name[:3]}*/README.md", f"rm -rf {edit}/*",
+                    f"bash -c {q('ls ' + repo)}", "gcc -o build/x a.c", f"grep -r x {repo}"):
+            self.assertFalse(shell_rules.writes_code(cmd, edit), cmd)
+
+    def test_gate_checks_the_engine_cwd(self):
+        tok = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),))
+        self.addCleanup(taint.GATES.revoke, tok)
+        with mock.patch.object(shell_rules, "can_sandbox", return_value=False):
+            self.assertEqual(taint.GATES.shell(tok, "rm -rf core", cwd=str(shell_rules.REPO))[:2],
+                             (False, shell_rules.CODE_OFF))
+            self.assertTrue(taint.GATES.shell(tok, "rm -rf build", cwd=str(self.edit))[0])
+
+    def test_hook_sends_the_engine_cwd(self):
+        import io
+        import json
+        from dashboard import turn_hook
+        sent = []
+
+        class Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def urlopen(req, timeout=None):
+            sent.append(json.loads(req.data))
+            return Resp(b'{"allow": true}')
+        event = {"tool_name": "Bash", "cwd": "/work/acme", "tool_input": {"command": "ls"}}
+        env = {turn_hook.TOKEN_ENV: "t", turn_hook.URL_ENV: "http://127.0.0.1:1/api/internal/gate"}
+        with mock.patch.dict(os.environ, env), mock.patch.object(turn_hook.sys, "stdin", io.StringIO(json.dumps(event))), \
+                mock.patch.object(turn_hook.urllib.request, "urlopen", urlopen):
+            turn_hook.main()
+        self.assertEqual(sent[0]["cwd"], "/work/acme")
+
+    def test_codex_drops_an_edit_folder_holding_code(self):
+        from dashboard.engines.codex import CodexEngine
+        outer = Path(os.path.realpath(self.tmp.name)) / "outer"
+        (outer / "py").mkdir(parents=True)
+        with mock.patch.object(shell_rules, "_python_dirs", return_value=[str(outer / "py")]):
+            policy = TurnPolicy(shell=True, level="full", read_dirs=(str(outer), str(self.edit)),
+                                edit_dirs=(str(outer), str(self.edit)))
+            self.assertEqual(CodexEngine.shell_dirs(policy, TurnTokens(gate_token="t", gate_port=8765)),
+                             (str(self.edit),))
+
+    def test_folders_refuse_python_dirs_and_their_parents(self):
+        from core import folders
+        outer = Path(os.path.realpath(self.tmp.name)) / "outer"
+        (outer / "py" / "site").mkdir(parents=True)
+        with mock.patch.object(shell_rules, "_python_dirs", return_value=[str(outer / "py")]):
+            for bad in (outer, outer / "py", outer / "py" / "site"):
+                with self.assertRaises(folders.FolderError, msg=str(bad)):
+                    folders.normalize_path(str(bad), root=paths.DATA)
+            self.assertEqual(folders.normalize_path(str(self.edit), root=paths.DATA), str(self.edit))
+
+    def test_code_walls_are_cached_per_process(self):
+        calls = []
+        with mock.patch.object(shell_rules, "_python_dirs", side_effect=lambda: calls.append(1) or [str(self.pydir)]):
+            first = shell_rules.code_walls()
+            shell_rules.in_code("/x")
+            shell_rules.in_code("/y")
+            self.assertEqual(shell_rules.code_walls(), first)
+            self.assertEqual(len(calls), 1)
+            with mock.patch.object(shell_rules, "REPO", self.repo):
+                self.assertIn(str(self.repo), shell_rules.code_walls()["write_paths"])
 
 
 if __name__ == "__main__":

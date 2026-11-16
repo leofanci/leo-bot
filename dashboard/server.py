@@ -2880,7 +2880,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"allow": allow, "reason": reason})
         if tool == "Bash":  # a shell command: after outside content it runs sandboxed (shell_rules.plan)
             # The sandbox profile goes in Leo Bot's data folder, which a sandboxed command cannot write.
-            allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"))
+            cwd = body.get("cwd") if isinstance(body.get("cwd"), str) and body["cwd"].startswith("/") else None
+            allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"),
+                                                   cwd=cwd)
         else:
             allow, reason = turn.decide(tool, command)
         if not allow:
