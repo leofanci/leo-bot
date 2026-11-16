@@ -742,8 +742,8 @@ def _apply(cli, code: Path, target, channel, yes) -> int:
                         why=f"Leo Bot {want} did not answer with its version within {HEALTH_TIMEOUT} s",
                         **ctx)
     _log(f"Leo Bot is updated to {want}. Backup from before the update: {pre}")
-    try:
-        save_settings({"failed_commit": None})
+    try:  # on main, `latest` names a commit: the one now running, so an older check is not offered
+        save_settings({"failed_commit": None, **({"latest": commit, "latest_commit": None} if tag is None else {})})
     except OSError:
         pass
     return 0
