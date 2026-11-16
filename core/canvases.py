@@ -137,6 +137,10 @@ class Stale(Refused):
     pass
 
 
+class Invalid(Refused):
+    """The request itself is malformed (a bad id, value, JSON or limit): fix the input."""
+
+
 class NotFound(Refused):
     """Missing, or not visible to this actor: one answer for both (no existence leak)."""
 
@@ -157,14 +161,14 @@ def _int(v, what: str) -> int:
             raise ValueError
         return int(v)
     except (TypeError, ValueError):
-        raise Refused(f"{what}: a whole number") from None
+        raise Invalid(f"{what}: a whole number") from None
 
 
 def _title(v, what: str = "title") -> str:
     if not isinstance(v, str) or not v.strip():
-        raise Refused(f"{what}: required")
+        raise Invalid(f"{what}: required")
     if len(v) > TITLE_MAX:
-        raise Refused(f"{what}: max {TITLE_MAX} characters")
+        raise Invalid(f"{what}: max {TITLE_MAX} characters")
     return v.strip()
 
 
@@ -352,7 +356,7 @@ def _dispatch(root, ws, actor, cmd, params, team, approved, source):
     _check_person(root, ws, actor)
     fn = _COMMANDS.get(cmd)
     if fn is None:
-        raise Refused(f"unknown canvas command: {cmd!r}")
+        raise Invalid(f"unknown canvas command: {cmd!r}")
     if actor.kind == "bot" and actor.shared and cmd in _SHARED_BLOCKED:
         raise Refused(f"{cmd} is not available in a shared thread")
     for k in _JSON_KEYS:
@@ -361,17 +365,17 @@ def _dispatch(root, ws, actor, cmd, params, team, approved, source):
         v = params.get(k)
         if isinstance(v, str):
             if len(v) > JSON_MAX:
-                raise Refused(f"--{k}-json: too large")
+                raise Invalid(f"--{k}-json: too large")
             try:
                 params[k] = json.loads(v)
             except ValueError:
-                raise Refused(f"--{k}-json: not valid JSON") from None
+                raise Invalid(f"--{k}-json: not valid JSON") from None
     if "force_unembed" in params:
         v = params["force_unembed"]
         params["force_unembed"] = v is True or (isinstance(v, str) and v.lower() in ("true", "1", "yes"))
     api = source == "api"
     if api and cmd in _VERSIONED and params.get("version") is None:
-        raise Refused("missing version: get it again and resend with its version")
+        raise Invalid("missing version: get it again and resend with its version")
     run = _Run(root, ws, actor, params, team, approved, cmd, api)
     return fn(run)
 
@@ -447,7 +451,7 @@ class _Run:
     def ident(self, kind: str, key: str = "id") -> str:
         v = self.p.get(key)
         if not cs.valid(kind, v):
-            raise Refused(f"--{key}: not a {kind} id")
+            raise Invalid(f"--{key}: not a {kind} id")
         return v
 
     def read(self, fid: str) -> dict:
@@ -530,26 +534,26 @@ class _Run:
     # -- validation -------------------------------------------------------- #
     def columns(self, cols, old=None) -> list[dict]:
         if not isinstance(cols, list) or not cols:
-            raise Refused("columns: a non-empty JSON list")
+            raise Invalid("columns: a non-empty JSON list")
         if len(cols) > COLUMNS_MAX:
-            raise Refused(f"too many columns: max {COLUMNS_MAX}")
+            raise Invalid(f"too many columns: max {COLUMNS_MAX}")
         out, keys = [], set()
         for c in cols:
             if not isinstance(c, dict):
-                raise Refused("columns: each one a JSON object")
+                raise Invalid("columns: each one a JSON object")
             label = c.get("label") or c.get("name") or c.get("key")
             label = _title(label, "column label")
             key = c.get("key") or _key_of(label)
             if not isinstance(key, str) or not _KEY_RE.match(key) or key in keys:
-                raise Refused(f"column key {key!r}: lowercase letters, digits, _; unique")
+                raise Invalid(f"column key {key!r}: lowercase letters, digits, _; unique")
             ctype = c.get("type") or "text"
             if ctype not in COLUMN_TYPES:
-                raise Refused(f"column type {ctype!r}: one of {', '.join(COLUMN_TYPES)}")
+                raise Invalid(f"column type {ctype!r}: one of {', '.join(COLUMN_TYPES)}")
             col = {"key": key, "label": label, "type": ctype}
             if ctype == "select":
                 opts = c.get("options") or []
                 if not isinstance(opts, list) or not all(isinstance(o, str) for o in opts):
-                    raise Refused("select options: a list of strings")
+                    raise Invalid("select options: a list of strings")
                 col["options"] = [_title(o, "option") for o in opts]
             keys.add(key)
             out.append(col)
@@ -561,15 +565,15 @@ class _Run:
 
     def cells(self, cells, columns) -> dict:
         if not isinstance(cells, dict):
-            raise Refused("cells: a JSON object")
+            raise Invalid("cells: a JSON object")
         cols = {c["key"]: c for c in columns}
         for k, v in cells.items():
             col = cols.get(k)
             if col is None:
-                raise Refused(f"unknown column: {k!r} (columns: {', '.join(cols)})")
+                raise Invalid(f"unknown column: {k!r} (columns: {', '.join(cols)})")
             err = _cell_error(col, v)
             if err:
-                raise Refused(f"cell {k}: {err}")
+                raise Invalid(f"cell {k}: {err}")
         return dict(cells)
 
     def block_fields(self, t: str, spec: dict, new: bool) -> dict:
@@ -579,42 +583,42 @@ class _Run:
         if t == "text" and ("md" in spec or new):
             md = spec.get("md", "")
             if not isinstance(md, str):
-                raise Refused("md: a string")
+                raise Invalid("md: a string")
             if len(md) > MD_MAX:
-                raise Refused(f"text block: max {MD_MAX} characters")
+                raise Invalid(f"text block: max {MD_MAX} characters")
             out["md"] = md
         elif t == "list" and "view" in spec:
             view = spec["view"] or {}
             if not isinstance(view, dict) or not isinstance(view.get("filter", {}), dict) \
                     or not isinstance(view.get("sort", ""), (str, type(None))):
-                raise Refused("view: {\"filter\": {...}, \"sort\": \"key\"}")
+                raise Invalid("view: {\"filter\": {...}, \"sort\": \"key\"}")
             out["view"] = {k: view[k] for k in ("filter", "sort") if view.get(k) is not None}
             if len(json.dumps(out["view"], ensure_ascii=False)) > VIEW_MAX:
-                raise Refused(f"view: max {VIEW_MAX} characters")
+                raise Invalid(f"view: max {VIEW_MAX} characters")
         elif t == "files" and ("paths" in spec or new):
             paths = spec.get("paths") or []
             pre = "" if self.ws == bots.HQ else f"projects/{self.ws}/"
             if not isinstance(paths, list) or len(paths) > BLOCKS_MAX or not all(
                     isinstance(x, str) and 0 < len(x) <= 1000 and x.startswith(pre)
                     and not x.startswith("/") and ".." not in x.split("/") for x in paths):
-                raise Refused(f"paths: files inside {pre or 'this workspace'}")
+                raise Invalid(f"paths: files inside {pre or 'this workspace'}")
             out["paths"] = paths
         elif t == "view" and ("route" in spec or new):
             route = spec.get("route")
             if not isinstance(route, str) or not route.startswith("#/") or len(route) > 500:
-                raise Refused("route: a dashboard route like #/project/<slug>/gtm")
+                raise Invalid("route: a dashboard route like #/project/<slug>/gtm")
             out["route"] = route
         elif t == "browser" and ("bot" in spec or new):
             if not isinstance(spec.get("bot"), str) or not _BOT_RE.match(spec["bot"]):
-                raise Refused("browser block: bot id")
+                raise Invalid("browser block: bot id")
             out["bot"] = spec["bot"]
         return out
 
     def check_item(self, text) -> str:
         if not isinstance(text, str):
-            raise Refused("checklist item text: a string")
+            raise Invalid("checklist item text: a string")
         if len(text) > CELL_MAX:
-            raise Refused(f"checklist item: max {CELL_MAX} characters")
+            raise Invalid(f"checklist item: max {CELL_MAX} characters")
         return text
 
     def new_block(self, spec, blocks: list, pending: list) -> dict:
@@ -622,19 +626,19 @@ class _Run:
         own columns is queued in `pending` as (block, list doc): `make_lists` creates
         those lists once every block of the call has validated."""
         if not isinstance(spec, dict):
-            raise Refused("block: a JSON object")
+            raise Invalid("block: a JSON object")
         t = spec.get("type")
         if t not in BLOCK_TYPES:
-            raise Refused(f"block type {t!r}: one of {', '.join(BLOCK_TYPES)}")
+            raise Invalid(f"block type {t!r}: one of {', '.join(BLOCK_TYPES)}")
         b = {"id": cs.next_child_id(blocks, "bk"), "type": t, **self.stamp(spec.get("outside"))}
         b.update(self.block_fields(t, spec, new=True))
         if t == "checklist":
             b["items"] = []
             specs = spec.get("items") or []
             if not isinstance(specs, list):
-                raise Refused("items: a JSON list")
+                raise Invalid("items: a JSON list")
             if len(specs) > ITEMS_MAX:
-                raise Refused(f"too many checklist items: max {ITEMS_MAX}")
+                raise Invalid(f"too many checklist items: max {ITEMS_MAX}")
             for it in specs:
                 it = it if isinstance(it, dict) else {"text": it}
                 b["items"].append({"id": cs.next_child_id(b["items"], "i"),
@@ -644,7 +648,7 @@ class _Run:
             lid = spec.get("list")
             if lid is not None:
                 if not cs.valid("list", lid):
-                    raise Refused("list block: not a list id")
+                    raise Invalid("list block: not a list id")
                 ldoc = self.read(lid)
                 if not _private(self.actor) and ldoc.get("created_by") != self.tag \
                         and lid not in self.visible_lists(False):
@@ -658,7 +662,7 @@ class _Run:
                 b["list"] = None
                 pending.append((b, doc))
             else:
-                raise Refused("list block: give list or columns")
+                raise Invalid("list block: give list or columns")
         return b
 
     def make_lists(self, pending: list) -> None:
@@ -834,17 +838,17 @@ def _get_list(r: _Run) -> dict:
     rows = list(doc.get("rows") or [])
     flt = r.p.get("filter") or {}
     if not isinstance(flt, dict):
-        raise Refused("filter: a JSON object")
+        raise Invalid("filter: a JSON object")
     for k, want in flt.items():
         if k not in keys:
-            raise Refused(f"unknown column: {k!r}")
+            raise Invalid(f"unknown column: {k!r}")
         wants = want if isinstance(want, list) else [want]
         rows = [x for x in rows if (x.get("cells") or {}).get(k) in wants]
     sort = r.p.get("sort")
     if sort:
         key = str(sort).lstrip("-")
         if key not in keys:
-            raise Refused(f"unknown column: {key!r}")
+            raise Invalid(f"unknown column: {key!r}")
         rows.sort(key=lambda x: _sort_key((x.get("cells") or {}).get(key)),
                   reverse=str(sort).startswith("-"))
     total = len(rows)
@@ -899,7 +903,7 @@ def _list_history(r: _Run) -> dict:
         if r.actor.kind != "owner":
             r.lst(fid, write=False)
     else:
-        raise Refused("--id: not a canvas or list id")
+        raise Invalid("--id: not a canvas or list id")
     entries = cs.history(r.root, r.ws, fid)
     if r.actor.kind != "owner":
         entries = [{k: v for k, v in e.items() if k not in ("before", "after")} for e in entries]
@@ -912,7 +916,7 @@ def _create_canvas(r: _Run) -> dict:
     specs = r.p.get("blocks") or []
     specs = [specs] if isinstance(specs, dict) else specs
     if not isinstance(specs, list):
-        raise Refused("blocks: a JSON list")
+        raise Invalid("blocks: a JSON list")
     title = r.p.get("title")
     tid = r.p.get("template")
     title_outside = False
@@ -925,7 +929,7 @@ def _create_canvas(r: _Run) -> dict:
             title, title_outside = tpl.get("title"), bool(tpl.get("outside"))
     title = _title(title)
     if len(specs) > BLOCKS_MAX:
-        raise Refused(f"too many blocks: max {BLOCKS_MAX} per canvas")
+        raise Invalid(f"too many blocks: max {BLOCKS_MAX} per canvas")
     if r.actor.kind == "bot" and r.actor.shared:
         r.p["pin"] = r.actor.room  # a shared thread's canvas lives in its own room
     if r.actor.kind == "person" and not r.p.get("pin"):
@@ -962,13 +966,13 @@ def _update_canvas(r: _Run) -> dict:
         if r.actor.kind != "owner":
             raise Refused("only the owner changes --coworkers")
         if r.p["coworkers"] not in ("edit", "view"):
-            raise Refused("--coworkers: edit or view")
+            raise Invalid("--coworkers: edit or view")
     title = _title(r.p["title"]) if r.p.get("title") is not None else None
 
     keys = (("title", "outside") if title is not None else ()) + (
         ("coworkers",) if r.p.get("coworkers") is not None else ())
     if not keys:
-        raise Refused("nothing to change: give --title or --coworkers")
+        raise Invalid("nothing to change: give --title or --coworkers")
 
     def fn(doc):
         r.fresh_meta(doc)
@@ -990,7 +994,7 @@ def _add_block(r: _Run) -> dict:
     spec = r.p.get("blocks")
     if isinstance(spec, list):
         if len(spec) != 1:
-            raise Refused("add-block: one block")
+            raise Invalid("add-block: one block")
         spec = spec[0]
 
     def fn(doc):
@@ -1040,24 +1044,24 @@ def _update_block(r: _Run) -> dict:
 def _checklist_ops(r: _Run, b: dict, ops, single_iv: bool) -> None:
     """Item ops; each may carry its own `item_version` (a lone op takes --item-version)."""
     if not isinstance(ops, list):
-        raise Refused("items: a JSON list")
+        raise Invalid("items: a JSON list")
     items = b.setdefault("items", [])
     for op in ops:
         if not isinstance(op, dict):
-            raise Refused("items: each one a JSON object")
+            raise Invalid("items: each one a JSON object")
         if op.get("id") is None:
             if len(items) >= ITEMS_MAX:
-                raise Refused(f"too many checklist items: max {ITEMS_MAX}")
+                raise Invalid(f"too many checklist items: max {ITEMS_MAX}")
             items.append({"id": cs.next_child_id(items, "i"),
                           "text": r.check_item(op.get("text", "")),
                           "done": bool(op.get("done")), **r.stamp()})
             continue
         if not cs.valid("item", op["id"]):
-            raise Refused("item: not an item id")
+            raise Invalid("item: not an item id")
         i, it = r.find(items, op["id"], "item")
         if single_iv:
             if len(ops) > 1 and r.p.get("item_version") is not None and "item_version" not in op:
-                raise Refused("--item-version names one item: with several items, put "
+                raise Invalid("--item-version names one item: with several items, put "
                               "item_version on each one")
             iv = op.get("item_version", r.p.get("item_version") if len(ops) == 1 else None)
             r.fresh(it, iv=iv)
@@ -1195,7 +1199,7 @@ def _update_list(r: _Run) -> dict:
     cols_in = r.p.get("columns")
     keys = (("title",) if title is not None else ()) + (("columns",) if cols_in is not None else ())
     if not keys:
-        raise Refused("nothing to change: give --title or --columns")
+        raise Invalid("nothing to change: give --title or --columns")
     keys += ("outside",)
 
     def fn(doc):
@@ -1257,9 +1261,9 @@ def _add_row(r: _Run) -> dict:
 def _add_rows_cmd(r: _Run) -> dict:
     rows = r.p.get("rows")
     if not isinstance(rows, list) or not rows:
-        raise Refused("rows: a non-empty JSON list")
+        raise Invalid("rows: a non-empty JSON list")
     if len(rows) > BATCH_MAX:
-        raise Refused(f"too many rows in one call: max {BATCH_MAX}")
+        raise Invalid(f"too many rows in one call: max {BATCH_MAX}")
     return _add_rows(r, [x.get("cells", x) if isinstance(x, dict) else x for x in rows])
 
 
@@ -1342,13 +1346,13 @@ def _delete_list(r: _Run) -> dict:
                    if b.get("type") == "list" and b.get("list") == lid]
             if bks:
                 embeds.append((cid, cdoc, bks))
-        if embeds and not r.p.get("force_unembed"):
-            raise Refused(f"{lid} is embedded in {len(embeds)} canvas(es): pass --force-unembed "
-                          "to remove those embeds too")
-        if not _private(r.actor):
+        if not _private(r.actor):  # first: the count below then names only canvases it sees
             vis = set(visible_canvas_ids(r.root, r.ws, r.actor, r._team_obj))
             if any(cid not in vis or cdoc.get("coworkers") == "view" for cid, cdoc, _ in embeds):
                 raise Refused(f"{lid} is embedded where only the owner can remove it")
+        if embeds and not r.p.get("force_unembed"):
+            raise Refused(f"{lid} is embedded in {len(embeds)} canvas(es): pass --force-unembed "
+                          "to remove those embeds too")
         # every check before any change: then unembed, then trash
         r.guard(doc, f"delete {lid}")
         for _, _, bks in embeds:
@@ -1384,7 +1388,7 @@ def _items_of(doc: dict):
 def _fid_of(r: _Run) -> str:
     fid = r.p.get("id")
     if not (cs.valid("canvas", fid) or cs.valid("list", fid)):
-        raise Refused("--id: not a canvas or list id")
+        raise Invalid("--id: not a canvas or list id")
     return fid
 
 

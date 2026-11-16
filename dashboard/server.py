@@ -3349,8 +3349,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "forbidden"})
         if path == "/api/rooms/delete":
             name = str(body.get("name") or "")
+            # Pins go first: a failed delete loses them, never hands them to a later room of that name.
+            canvas_store.drop_room_pins(ROOT, ws, f"{ws}/t-{name}")
             rooms.delete_topic(ws, name, ROOT)
-            canvas_store.drop_room_pins(ROOT, ws, f"{ws}/t-{name}")  # a new room of that name starts empty
             _retire_threads(lambda rec: rec.get("room") == f"{ws}/t-{name}")  # never follow the name
             return self._send(200, {"ok": True})
         members = body.get("members") or []
@@ -3392,14 +3393,17 @@ class Handler(BaseHTTPRequestHandler):
         return ws, bots.team(ROOT, ws, record)
 
     def _canvas_call(self, viewer, ws, team, cmd, params):
-        """(code, body) of one rules-engine call: Refused 403, Stale 409, not found 404."""
+        """(code, body) of one rules-engine call: Invalid 400, Refused 403, NotFound 404, Stale 409;
+        anything else (a KeyError included) is a bug: 500."""
         try:
             return 200, canvases.dispatch(ROOT, ws, _canvas_api_actor(viewer), cmd, params,
                                           team=team, source="api")
-        except (canvases.NotFound, LookupError) as e:
+        except canvases.NotFound as e:
             return 404, ({"error": str(e) or "not found"} if viewer.get("kind") == "owner" else CANVAS_404)
         except canvases.Stale as e:
             return 409, {"error": str(e)}
+        except canvases.Invalid as e:
+            return 400, {"error": str(e)}
         except canvases.Refused as e:
             return 403, {"error": str(e)}
         except Exception:  # noqa: BLE001 - one bad call never takes the request thread down

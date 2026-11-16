@@ -1,5 +1,6 @@
 """Dashboard canvas API: owner sees all, a coworker only canvases pinned in rooms they see."""
 import unittest
+from unittest import mock
 
 import dashboard.server as server
 from core import canvas_store as cs, rooms
@@ -178,6 +179,50 @@ class CanvasApi(Base):
         code, _, _ = request("POST", "/api/canvases", raw=b"{nope", owner=True)
         self.assertEqual(code, 400)
 
+    def test_core_validation_errors_are_400(self):
+        code, data = self.run_cmd("owner", "create-canvas", {})
+        self.assertEqual(code, 400, data)
+        cid = self.make("Open", pin="acme/general")
+        code, data = self.run_cmd("owner", "update-block", {"id": cid, "block": "x", "version": 1,
+                                                            "blocks": {"md": "y"}})
+        self.assertEqual(code, 400, data)
+        code, data = self.run_cmd("person", "add-block", {"id": cid, "blocks": {"type": "text", "md": "x"}})
+        self.assertEqual(code, 400, data)  # missing version
+        code, data = self.run_cmd("owner", "create-list", {"title": "L", "columns": "{nope"})
+        self.assertEqual(code, 400, data)
+
+    def test_a_bug_in_core_is_500_not_404(self):
+        cid = self.make("Open")
+        with mock.patch.object(server.canvases, "dispatch", side_effect=KeyError("key")):
+            code, data = self.owner("GET", f"/api/canvases/{cid}?ws=acme")
+        self.assertEqual((code, data), (500, {"error": "internal error"}))
+
+    def test_delete_list_never_counts_canvases_a_person_cannot_see(self):
+        rooms.save_topic("acme", "secret", ["cos"], "cos", self.root, private=True, people=["p-other"])
+        cols = [{"key": "name", "label": "Name"}]
+        cid = self.make("Leads", pin="acme/general", blocks=[{"type": "list", "title": "L", "columns": cols}])
+        lid = self.owner("GET", f"/api/canvases/{cid}?ws=acme")[1]["blocks"][0]["list"]
+        self.make("Hidden", pin="acme/t-secret", blocks=[{"type": "list", "list": lid}])
+        v = self.person("GET", f"/api/lists/{lid}?ws=acme")[1]["version"]
+        code, data = self.run_cmd("person", "delete-list", {"id": lid, "version": v})
+        self.assertEqual(code, 403, data)
+        self.assertNotIn("2 canvas", data["error"])
+        self.assertNotIn("canvas(es)", data["error"])
+
+    def test_person_write_needs_same_origin(self):
+        cid = self.make("Open", pin="acme/general")
+        before = cs.read(self.root, "acme", cid)
+        code, _, _ = request("POST", "/api/canvases", {"ws": "acme", "cmd": "create-canvas",
+                                                       "params": {"title": "X", "pin": "acme/general"}},
+                             member=self.tok, host=PUBLIC, origin="https://evil.example")
+        self.assertEqual(code, 403)
+        code, _, _ = request("POST", "/api/canvases", {"ws": "acme", "cmd": "add-block", "params": {
+            "id": cid, "version": before["version"], "blocks": {"type": "text", "md": "x"}}},
+                             member=self.tok, host=PUBLIC, origin="https://evil.example")
+        self.assertEqual(code, 403)
+        self.assertEqual(cs.list_ids(self.root, "acme", "cv"), [cid])
+        self.assertEqual(cs.read(self.root, "acme", cid), before)
+
     def test_owner_write_needs_same_origin(self):
         code, _, _ = request("POST", "/api/canvases", {"ws": "acme", "cmd": "create-canvas",
                                                        "params": {"title": "X"}},
@@ -230,6 +275,14 @@ class CanvasApi(Base):
         self.assertEqual(code, 200)
         pins = cs.pins(self.root, "acme")
         self.assertEqual((pins.get("acme/t-won"), pins.get("acme/t-deals")), ([b], None))
+
+
+    def test_room_delete_drops_pins_even_if_the_delete_fails(self):
+        rooms.save_topic("acme", "launch", ["cos"], "cos", self.root)
+        self.make("A", pin="acme/t-launch")
+        with mock.patch.object(server.rooms, "delete_topic", side_effect=RuntimeError("disk")):
+            self.owner("POST", "/api/rooms/delete", {"ws": "acme", "name": "launch"})
+        self.assertNotIn("acme/t-launch", cs.pins(self.root, "acme"))
 
 
 class BotPathUntouched(unittest.TestCase):

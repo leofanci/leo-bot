@@ -108,6 +108,13 @@ class Access(Base):
             self.assertFalse(out["ok"])
 
 
+    def test_invalid_input_stays_a_200_refusal(self):
+        tok, _ = self.mint()
+        self.assertEqual(self.call(tok, "create-canvas"), (200, {"ok": False, "error": "title: required"}))
+        self.assertEqual(self.call(tok, "get-canvas", id="x"),
+                         (200, {"ok": False, "error": "--id: not a canvas id"}))
+
+
 class Actor(Base):
     def test_actor_comes_from_token_not_body(self):
         tok, _ = self.mint()
