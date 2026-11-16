@@ -30,7 +30,6 @@ LEDGER = Path("team") / "outside_content.json"
 _LOCK = threading.Lock()
 _SKIP_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".lock", ".tmp")
 PREVIEW_CHARS = 20000
-CANVAS_DIRS = ("canvases", "lists")  # labeled per item instead (core/canvases.py)
 
 
 def _work_roots(root, ws):
@@ -40,11 +39,26 @@ def _work_roots(root, ws):
     return [root / "projects" / ws]
 
 
+# The core/canvas_store.py layout under canvases/ and lists/ (lock and temp files are skipped above).
+_CANVAS_LAYOUT = {
+    "canvases": re.compile(r"^(?:cv\d{1,6}\.json|pins\.json|holds\.json|\.trash/cv\d{1,6}\.json"
+                           r"|templates/(?:\.trash/)?tp\d{1,6}\.json|history/(?:cv|tp)\d{1,6}(?:\.1)?\.jsonl)$"),
+    "lists": re.compile(r"^(?:ls\d{1,6}\.json|\.trash/ls\d{1,6}\.json|history/ls\d{1,6}(?:\.1)?\.jsonl)$"),
+}
+
+
 def _labeled_per_item(rel):
-    """A canvas or list file (or one of their side files): left out of the ledger."""
+    """A canvas or list file, or one of their side files, in the canvas store's own layout: left
+    out of the ledger. Any other file in those folders is listed as usual."""
     parts = rel.split("/")
-    return ((parts[0] == "projects" and len(parts) > 3 and parts[2] in CANVAS_DIRS)
-            or (parts[0] == "team" and len(parts) > 2 and parts[1] in CANVAS_DIRS))
+    if parts[0] == "projects" and len(parts) > 3:
+        folder, rest = parts[2], parts[3:]
+    elif parts[0] == "team" and len(parts) > 2:
+        folder, rest = parts[1], parts[2:]
+    else:
+        return False
+    rx = _CANVAS_LAYOUT.get(folder)
+    return bool(rx and rx.match("/".join(rest)))
 
 
 def scan(root, ws):

@@ -52,7 +52,8 @@ content labels that only the server's get-canvas/get-list hand over (core/canvas
 command reads or writes <data>/projects/<ws>/canvases, .../lists, <data>/team/canvases or
 <data>/team/lists. With no sandbox, a command whose words name one of those, the data folder or a
 folder between them (`reads_canvases`), or a recursive read of a folder above the data folder, is
-refused with CANVAS_OFF. Like the code check, that reads the command only.
+refused with CANVAS_OFF. Codex runs commands in its own sandbox, so the gate runs that same check
+on its commands (taint.Gates.shell). Like the code check, that reads the command only.
 
 The one command that runs outside the sandbox, a plain `python3 -m dashboard.osctl ...`, is
 rewritten to run Leo Bot's own osctl only: this server's own Python (sys.executable) in
@@ -837,6 +838,9 @@ def _canvas_place(path, data):
     return None
 
 
+_PATH_PIECE = re.compile(r"(?:~|\$HOME|/)[^\s'\"`;|&<>()]*")
+
+
 def _braces(word, limit=64):
     """A word's bash brace expansions ({a,b}), at most `limit`."""
     m = re.search(r"\{([^{}]*,[^{}]*)\}", word)
@@ -852,10 +856,12 @@ def _braces(word, limit=64):
 
 def reads_canvases(command, cwd=None, data_root=None, _depth=0):
     """The command, as written, names a canvas or list path (canvas_read_denies), in any program's
-    words or redirects, a glob or a brace expansion; or names the data folder or a folder between it
-    and a canvas folder (ls, cd and the like may); or runs a recursive read of a folder above the
-    data folder. A command that cannot be read counts too. The check for a system with no sandbox:
-    it reads the command only (module notes)."""
+    words or redirects, a glob, a brace expansion, a VAR=value or inline code (`python3 -c '...'`);
+    or names the data folder or a folder between it and a canvas folder (ls, cd and the like may);
+    or runs a recursive read of a folder above the data folder, the folder it runs in counting
+    too; or runs inside a canvas folder. A command that cannot be read counts too. The check for a
+    system with no sandbox, and for engines with their own sandbox: it reads the command only, so a
+    path the command builds at run time is not seen (module notes)."""
     if _depth > 8:
         return True
     try:
@@ -884,16 +890,20 @@ def reads_canvases(command, cwd=None, data_root=None, _depth=0):
                 out.append(w[min(cut):])
         return out
 
-    # Brace words are cut apart by _segments: read them from the raw text too.
+    # Brace words are cut apart by _segments, and a path can sit inside inline code or a VAR=value
+    # prefix: every path-like piece of the raw words counts too.
     try:
         lex = shlex.shlex(command, posix=True, punctuation_chars=";&|<>()")
         lex.whitespace_split, lex.commenters = True, ""
-        raw = [t for t in lex if "{" in t]
+        raw = list(lex)
     except ValueError:
         return True
-    if any("in" in places(w, cwd) for w in raw):
+    pieces = [t for t in raw if "{" in t] + [m.group(0) for t in raw for m in _PATH_PIECE.finditer(t)]
+    if any("in" in places(w, cwd) for w in pieces):
         return True
     for seg in segments:
+        if cwd and _canvas_place(os.path.realpath(cwd), data) == "in":
+            return True
         prog, args = _program(seg)
         script = _script_of(prog, args)
         if script is not None and reads_canvases(script, cwd, data, _depth + 1):
@@ -907,6 +917,8 @@ def reads_canvases(command, cwd=None, data_root=None, _depth=0):
         recursive = prog in _RECURSIVE_READERS or (prog in _RECURSIVE_WITH_FLAG and _recursive(args))
         if recursive and "above" in found:
             return True
+        if recursive and cwd and _canvas_place(os.path.realpath(cwd), data) in ("in", "holds", "above"):
+            return True  # `rg x`, `grep -r x`, `find -name`: the folder it runs in
         if prog in ("cd", "pushd"):
             dest = next((w for w in words if not w.startswith("-")), "~")
             cwd = _resolve(dest, cwd) or cwd

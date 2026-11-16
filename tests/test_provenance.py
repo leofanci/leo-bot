@@ -92,6 +92,17 @@ class Labels(unittest.TestCase):
         self.write("team/lists/ls1.json", "{}")
         self.assertEqual(sorted(provenance.scan(self.root, "hq")), ["projects/demo/docs/x.md"])
 
+    def test_only_the_canvas_layout_is_left_out(self):
+        for rel in ("canvases/pins.json", "canvases/templates/tp1.json", "canvases/templates/.trash/tp2.json",
+                    "canvases/history/tp1.jsonl", "canvases/.trash/cv3.json", "canvases/history/cv1.1.jsonl",
+                    "lists/history/ls1.jsonl", "lists/.trash/ls2.json"):
+            self.write(f"projects/demo/{rel}", "{}")
+        for rel in ("canvases/notes.md", "lists/x.json", "canvases/history/x.md", "canvases/sub/cv1.json"):
+            self.write(f"projects/demo/{rel}", "x")
+        self.assertEqual(sorted(provenance.scan(self.root, "demo")),
+                         ["projects/demo/canvases/history/x.md", "projects/demo/canvases/notes.md",
+                          "projects/demo/canvases/sub/cv1.json", "projects/demo/lists/x.json"])
+
 
 if __name__ == "__main__":
     unittest.main()

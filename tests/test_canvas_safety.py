@@ -151,6 +151,25 @@ class NoSandbox(unittest.TestCase):
         allow, _, _ = self.plan("cat canvases/cv1.json", cwd=os.path.join(self.data, "projects", "demo"))
         self.assertFalse(allow)
 
+    def test_recursive_reads_of_the_folder_it_runs_in(self):
+        ws = os.path.join(self.data, "projects", "demo")
+        for cmd, cwd in ((f"cd {ws} && rg title", None), (f"cd {ws} && grep -r title", None),
+                         ("rg title", ws), ("find -name '*.json' -exec cat {} +", ws),
+                         ("cat cv1.json", os.path.join(ws, "canvases")), ("rg title", os.path.dirname(self.data))):
+            allow, reason, _ = self.plan(cmd, cwd=cwd)
+            self.assertFalse(allow, (cmd, cwd))
+            self.assertEqual(reason, shell_rules.CANVAS_OFF)
+        self.assertTrue(self.plan("rg title", cwd=self.work)[0])
+
+    def test_paths_inside_inline_code_and_assignments(self):
+        cv = os.path.join(self.data, "projects", "demo", "canvases")
+        for cmd in (f"python3 -c 'print(open(\"{cv}/cv1.json\").read())'", f"D={cv}; cat $D/cv1.json",
+                    f"D={cv} sh -c 'cat $D/cv1.json'"):
+            allow, reason, _ = self.plan(cmd)
+            self.assertFalse(allow, cmd)
+            self.assertEqual(reason, shell_rules.CANVAS_OFF)
+        self.assertTrue(self.plan(f"python3 -c 'print(open(\"{self.data}/projects/demo/docs/x.md\").read())'")[0])
+
     def test_allowed(self):
         d = self.data
         for cmd in (f"cat {d}/projects/demo/docs/x.md", f"ls {d}/projects/demo", "echo canvases/cv1.json",
@@ -163,12 +182,38 @@ class NoSandbox(unittest.TestCase):
         self.assertFalse(shell_rules.reads_canvases(f"cat {self.data}/projects/demo/docs/x.md", None, self.data))
 
 
+class OwnSandboxEngines(unittest.TestCase):
+    """Codex runs commands in its own sandbox (gate token wrap=False): the text check still holds,
+    even where sandbox-exec exists and the wrapped command is dropped."""
+
+    def test_codex_shell_refuses_canvas_reads(self):
+        from core import paths
+        from dashboard import taint
+        t = taint.Turn(outside=True)
+        own = taint.GATES.mint(t, writable=("/w",), wrap=False)
+        self.addCleanup(taint.GATES.revoke, own)
+        with mock.patch.object(shell_rules, "can_sandbox", return_value=True):
+            allow, reason, run = taint.GATES.shell(own, f"cat {paths.DATA}/projects/demo/canvases/cv1.json")
+            self.assertEqual((allow, reason, run), (False, shell_rules.CANVAS_OFF, None))
+            self.assertTrue(taint.GATES.shell(own, f"cat {paths.DATA}/projects/demo/docs/x.md")[0])
+
+
 class ClaudeCodeDenies(unittest.TestCase):
     def argv(self, policy):
         from dashboard import chat_session
         sess = chat_session.ChatSession(repo_dir=".", rail="R")
         cmd = claude_code.ClaudeCodeEngine().build_cmd(sess, policy, None)
         return cmd[cmd.index("--disallowedTools") + 1:cmd.index("--strict-mcp-config")]
+
+    def test_a_data_folder_whose_real_path_holds_glob_chars_is_refused(self):
+        from dashboard.engines.base import EngineRefused
+        with tempfile.TemporaryDirectory() as tmp:
+            real = os.path.join(tmp, "data[1]")
+            os.makedirs(real)
+            link = os.path.join(tmp, "plain")
+            os.symlink(real, link)
+            with mock.patch.object(claude_code.paths, "DATA", Path(link)), self.assertRaises(EngineRefused):
+                self.argv(TurnPolicy())
 
     def test_read_denies_on_every_turn_and_search_with_folders(self):
         from core import paths

@@ -189,6 +189,14 @@ class Gates:
         if review and wrap and self._unconfirmed(token):
             return False, SHELL_UNCONFIRMED, None
         allow, reason, run = turn.shell(command, writable, profile_dir=profile_dir if wrap else None, cwd=cwd)
+        if allow and not wrap:
+            # An engine with its own sandbox (Codex) drops `run`, so Leo Bot's canvas deny never
+            # applies: the text check stands in. A path the command builds at run time is not seen
+            # (an accepted limit: such a run is outside content, offline, private threads only).
+            from dashboard import shell_rules
+            where = {c for c in (cwd, str(writable[0]) if writable else None) if c} or {None}
+            if any(shell_rules.reads_canvases(command, c) for c in where):
+                return False, shell_rules.CANVAS_OFF, None
         if not (allow and wrap and review and run):
             return allow, reason, (run if wrap else None)
         from dashboard import shell_rules

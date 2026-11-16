@@ -514,7 +514,8 @@ class ClaudeCodeEngine(Engine):
         # deny rules, so it never reaches one (core.folders refuses to link it, too).
         read_dirs = tuple(d for d in policy.read_dirs if not folders.has_glob_chars(d))
         edit_dirs = tuple(d for d in policy.edit_dirs if d in read_dirs and _hooks_expressible(d))
-        walls = [*policy.deny_dirs, *policy.deny_files, str(paths.DATA)]  # DATA: canvas_read_rules
+        walls = [*policy.deny_dirs, *policy.deny_files,  # DATA, both spellings: canvas_read_rules
+                 str(paths.DATA), str(Path(paths.DATA).resolve())]
         if any(folders.has_glob_chars(w) for w in walls):  # a deny rule could not match it: never run
             raise EngineRefused("Leo Bot's data folder path holds * ? [ or ] characters, so bots "
                                 "could read past their walls. Move the folder to a plain path.")
