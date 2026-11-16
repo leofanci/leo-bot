@@ -45,7 +45,9 @@ Storage stays owner-only in the data root's `team/` (denied to bots and to `osct
 - A deleted workspace drops its keys from both files (also when a new workspace reuses the slug).
 - `leobot.json` (General): `about_me` (1500 chars, private turns only), `reply_language` (empty
   matches the message; goes in the chat rail), `timezone` (IANA name, empty is the machine's; set as
-  `TZ` in the server process at start and on save, so jobs and children follow), `caps` (`owner`, `workspace`, `person`
+  `TZ` in the server process at start and on save, so jobs and children follow; while none was
+  ever saved and the owner's browser reports a different zone than the machine's, the browser's is
+  saved once), `caps` (`owner`, `workspace`, `person`
   dollars per 24 hours). An environment variable still wins over a saved cap.
 
 Screens:
