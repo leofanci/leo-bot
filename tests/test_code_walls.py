@@ -1,0 +1,290 @@
+"""No bot writes Leo Bot's own code (dashboard/shell_rules.py code_walls), on every level and engine.
+
+Every allowed shell command but the plain osctl form runs sandboxed, before outside content too,
+with writes denied to the code folder, the Python that runs osctl, the turns' working folder and
+the rename of every folder above them. With no sandbox, a command whose parsed target writes there
+is refused. The engines' own file tools are walled off the same folders.
+"""
+import os
+import shlex
+import subprocess
+import tempfile
+import unittest
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+from core import paths
+from dashboard import chat_session, shell_rules, taint
+from dashboard.engines.base import TurnPolicy, TurnTokens
+
+
+def _profile_of(run):
+    """The sandbox profile text a planned command runs under (inline or from its file)."""
+    words = shlex.split(run)
+    if "-p" in words:
+        return words[words.index("-p") + 1]
+    return Path(words[words.index("-f") + 1]).read_text(encoding="utf-8")
+
+
+def _bash(run, cwd):
+    return subprocess.run(["/bin/bash", "-c", run], cwd=cwd, capture_output=True, text=True, timeout=30)
+
+
+class CodeWalls(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(os.path.realpath(self.tmp.name))
+        self.parent = base / "code-parent"
+        self.repo = self.parent / "leo-bot"
+        (self.repo / "core").mkdir(parents=True)
+        (self.repo / "existing.py").write_text("keep\n")
+        self.edit = base / "edit"
+        self.edit.mkdir()
+        self.pydir = base / "python"
+        self.pydir.mkdir()
+
+    def fake_code(self):
+        """The code walls point at temp copies: the real checkout is never a target."""
+        repo = mock.patch.object(shell_rules, "REPO", self.repo)
+        py = mock.patch.object(shell_rules, "_python_dirs", return_value=[str(self.pydir)])
+        repo.start(), py.start()
+        self.addCleanup(repo.stop)
+        self.addCleanup(py.stop)
+
+    def run_planned(self, command, outside=False):
+        allow, reason, run = shell_rules.plan(command, outside=outside, writable=(str(self.edit),))
+        self.assertTrue(allow, reason)
+        self.assertIsNotNone(run)
+        return _bash(run, str(self.edit))
+
+    # --- the walls themselves ------------------------------------------------------------------
+
+    def test_code_walls_shape(self):
+        walls = shell_rules.code_walls()
+        self.assertIn(os.path.realpath(str(shell_rules.REPO)), walls["write_paths"])
+        for d in shell_rules._python_dirs():
+            self.assertIn(d, walls["write_paths"])
+        self.assertIn(os.path.realpath(str(paths.turn_cwd())), walls["write_paths"])
+        self.assertEqual(walls["write_paths"], sorted(walls["write_paths"]))
+        self.assertIn(os.path.dirname(os.path.realpath(str(shell_rules.REPO))), walls["ancestors"])
+        self.assertEqual(walls["home"], os.path.realpath(str(Path.home())))
+
+    def test_turn_cwd_is_private_and_not_code(self):
+        cwd = paths.turn_cwd()
+        self.assertTrue(cwd.is_dir())
+        self.assertEqual(cwd, paths.DATA / "run" / "turns")
+        self.assertEqual(os.stat(cwd).st_mode & 0o777, 0o700)
+        self.assertNotIn(paths.CODE.resolve(), [cwd.resolve(), *cwd.resolve().parents])
+
+    # --- sandboxed at every level ---------------------------------------------------------------
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_full_access_before_outside_runs_sandboxed_with_code_denies(self):
+        allow, _, run = shell_rules.plan("touch x", outside=False, writable=(str(self.edit),))
+        self.assertTrue(allow)
+        self.assertIsNotNone(run)
+        profile = _profile_of(run)
+        self.assertIn(os.path.realpath(str(shell_rules.REPO)), profile)
+        self.assertNotIn("(deny network-outbound (remote ip))", profile)  # the internet stays
+        self.assertNotIn("(deny file-write*)(allow file-write*", profile)  # writes as today
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_profile_file_holds_code_denies(self):
+        pdir = Path(self.tmp.name) / "profiles"
+        _, _, run = shell_rules.plan("touch x", writable=(str(self.edit),), profile_dir=str(pdir))
+        self.assertIn(" -f ", run)
+        self.assertIn(os.path.realpath(str(shell_rules.REPO)), _profile_of(run))
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_cannot_create_change_or_rename_in_code_folder(self):
+        self.fake_code()
+        r, parent = shlex.quote(str(self.repo)), shlex.quote(str(self.parent))
+        for outside in (False, True):
+            for cmd in (f"touch {r}/new.txt", f"echo x >> {r}/existing.py", f"rm -f {r}/existing.py",
+                        f"mv {r} {r}-moved", f"mv {parent} {parent}-moved", f"mkdir {r}/core/sub"):
+                proc = self.run_planned(cmd, outside=outside)
+                self.assertNotEqual(proc.returncode, 0, cmd)
+                self.assertFalse((self.repo / "new.txt").exists(), cmd)
+                self.assertEqual((self.repo / "existing.py").read_text(), "keep\n", cmd)
+                self.assertTrue(self.repo.is_dir(), cmd)
+                self.assertTrue(self.parent.is_dir(), cmd)
+                self.assertFalse((self.repo / "core" / "sub").exists(), cmd)
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_cannot_write_osctl_python(self):
+        self.fake_code()
+        target = self.pydir / "site.py"
+        for outside in (False, True):
+            proc = self.run_planned(f"touch {shlex.quote(str(target))}", outside=outside)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(target.exists())
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_cannot_write_turns_folder(self):
+        target = paths.turn_cwd() / "dashboard"
+        proc = self.run_planned(f"mkdir {shlex.quote(str(target))}")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse(target.exists())
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_edit_folder_still_writable(self):
+        self.fake_code()
+        for outside in (False, True):
+            name = f"ok-{outside}.txt"
+            proc = self.run_planned(f"touch {shlex.quote(str(self.edit / name))} && echo hi > rel-{outside}.txt",
+                                    outside=outside)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue((self.edit / name).exists())
+            self.assertTrue((self.edit / f"rel-{outside}.txt").exists())
+
+    def test_network_rules_unchanged_before_outside(self):
+        code = shell_rules.code_walls()
+        profile = shell_rules.sandbox_profile((), outside=False, code=code)
+        self.assertNotIn("(deny network-outbound (remote ip))", profile)
+        self.assertNotIn("(deny file-write*)(allow", profile)
+        self.assertIn(f"(deny file-write* (subpath {shell_rules._sb_str(code['write_paths'][0])}))", profile)
+        after = shell_rules.sandbox_profile((), outside=True, code=code)
+        self.assertIn("(deny network-outbound (remote ip))", after)
+        self.assertIn(f"(deny file-write* (subpath {shell_rules._sb_str(code['write_paths'][0])}))", after)
+
+    def test_browser_walls_carry_the_code_walls(self):
+        walls = shell_rules.browser_walls(paths.DATA)
+        code = shell_rules.code_walls()
+        for p in code["write_paths"]:
+            self.assertIn(p, walls["write_paths"])
+        for a in code["ancestors"]:
+            self.assertIn(a, walls["ancestors"])
+
+    # --- no sandbox: the command check ----------------------------------------------------------
+
+    def test_no_sandbox_refuses_write_into_code(self):
+        repo = shell_rules.REPO
+        with mock.patch.object(shell_rules, "can_sandbox", return_value=False):
+            allow, reason, run = shell_rules.plan(f"rm -rf {repo}/core", outside=False)
+            self.assertFalse(allow)
+            self.assertEqual(reason, shell_rules.CODE_OFF)
+            self.assertIsNone(run)
+            self.assertTrue(shell_rules.plan(f"cat {repo}/README.md")[0])
+            self.assertFalse(shell_rules.plan(f"echo x > {repo}/a")[0])
+            self.assertFalse(shell_rules.plan(f"cat {repo}/README.md > {repo}/b")[0])
+            ok = shell_rules.plan("touch notes.txt", writable=(str(self.edit),))
+            self.assertEqual(ok, (True, "", None))
+
+    def test_writes_code(self):
+        repo = os.path.realpath(str(shell_rules.REPO))
+        parent = os.path.dirname(repo)
+        edit = str(self.edit)
+        writes = [f"touch {repo}/x", f"echo x >{repo}/x", f"echo x 2>> {repo}/log", f"cp a {repo}/b",
+                  f"sed -i '' s/a/b/ {repo}/core/paths.py", f"mv {repo} /tmp/x", f"mv {parent} /tmp/x",
+                  f"dd if=a of={repo}/x", f"git -C {repo} commit -m x", f"cd {repo} && touch x",
+                  f"find {repo} -delete", f"ls && rm -rf {repo}/core", "touch core/x",
+                  f"python3 -c 1 > {repo}/x", f"tee {repo}/x"]
+        for cmd in writes:
+            cwd = repo if cmd == "touch core/x" else edit
+            self.assertTrue(shell_rules.writes_code(cmd, cwd), cmd)
+        reads = [f"cat {repo}/README.md", f"ls {repo}", f"grep -r x {repo}", f"git -C {repo} status",
+                 f"git -C {repo} log", f"diff {repo}/a {repo}/b", f"head {repo}/x | wc -l", "touch notes.txt",
+                 f"rm -rf {edit}/build", f"cat {repo}/x > {edit}/copy", f"find {repo} -name '*.py'"]
+        for cmd in reads:
+            self.assertFalse(shell_rules.writes_code(cmd, edit), cmd)
+        home_repo = "~/" + os.path.relpath(repo, os.path.expanduser("~")) if repo.startswith(
+            os.path.expanduser("~") + "/") else None
+        if home_repo:
+            self.assertTrue(shell_rules.writes_code(f"touch {home_repo}/x", edit))
+            self.assertTrue(shell_rules.writes_code(f"touch $HOME/{home_repo[2:]}/x", edit))
+
+    def test_osctl_form_still_rewritten(self):
+        run = shell_rules.plan("python3 -m dashboard.osctl tree")[2]
+        self.assertIn("-I -c", run)
+        self.assertNotIn(shell_rules.SANDBOX_EXEC, run)
+
+    # --- engine and gate file tools -------------------------------------------------------------
+
+    def test_gate_may_write_refuses_code_even_in_edit_folder(self):
+        tok = taint.GATES.mint(taint.Turn(), writable=(str(shell_rules.REPO),))
+        self.addCleanup(taint.GATES.revoke, tok)
+        self.assertFalse(taint.GATES.may_write(tok, str(shell_rules.REPO / "core" / "x.py"))[0])
+        self.assertFalse(taint.GATES.may_write(tok, str(paths.turn_cwd() / "x.py"))[0])
+        tok2 = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),))
+        self.addCleanup(taint.GATES.revoke, tok2)
+        self.assertTrue(taint.GATES.may_write(tok2, str(self.edit / "x.py"))[0])
+
+    def test_claude_code_denies_edit_write_in_code(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        repo = os.path.realpath(str(shell_rules.REPO))
+        for policy in (TurnPolicy(), TurnPolicy(read_dirs=(str(self.edit),), edit_dirs=(str(self.edit),))):
+            argv = ClaudeCodeEngine().build_cmd(chat_session.ChatSession(repo_dir=str(paths.turn_cwd()), rail="R"),
+                                                policy, None)
+            denied = argv[argv.index("--disallowedTools") + 1:]
+            self.assertIn(f"Edit(/{repo}/**)", denied)
+            self.assertIn(f"Write(/{repo}/**)", denied)
+            for d in shell_rules._python_dirs():
+                self.assertIn(f"Write(/{d}/**)", denied)
+            log = f"Read(/{paths.CODE.resolve() / 'dashboard' / 'server.log'})"
+            self.assertIn(log, denied)
+
+    def test_codex_writable_roots_never_hold_code(self):
+        from dashboard.engines.codex import CodexEngine
+        repo = str(shell_rules.REPO)
+        policy = TurnPolicy(shell=True, level="full", read_dirs=(repo, str(self.edit)),
+                            edit_dirs=(repo, str(self.edit), str(shell_rules.REPO / "core")))
+        tokens = TurnTokens(gate_token="t", gate_port=8765)
+        self.assertEqual(CodexEngine.shell_dirs(policy, tokens), (str(self.edit),))
+        sess = SimpleNamespace(rail="r", model=None, repo_dir=str(paths.turn_cwd()), _started=False, shared=False,
+                               session_id=str(uuid.uuid4()), engine_state={})
+        argv = CodexEngine().build_cmd(sess, policy, None, tokens)
+        roots = next(a for a in argv if a.startswith("sandbox_workspace_write.writable_roots="))
+        self.assertIn(str(self.edit), roots)
+        self.assertNotIn(repo, roots)
+        only_code = TurnPolicy(shell=True, level="full", read_dirs=(repo,), edit_dirs=(repo,))
+        self.assertEqual(CodexEngine.shell_dirs(only_code, tokens), ())
+
+    def test_api_engine_write_tool_refuses_code(self):
+        from dashboard.engines import api_tools
+        self.fake_code()
+        policy = TurnPolicy(read_dirs=(str(self.repo),), edit_dirs=(str(self.repo),))
+        box = api_tools.ToolBox(policy, paths.DATA, TurnTokens(), "api", {})
+        text, err = box.run("write_file", {"path": str(self.repo / "core" / "x.py"), "content": "x"})
+        self.assertTrue(err, text)
+        self.assertFalse((self.repo / "core" / "x.py").exists())
+        text, err = box.run("edit_file", {"path": str(self.repo / "existing.py"), "old_text": "keep", "new_text": "x"})
+        self.assertTrue(err, text)
+        self.assertEqual((self.repo / "existing.py").read_text(), "keep\n")
+
+    def test_api_engine_shell_passes_its_folder(self):
+        from dashboard.engines import api_tools
+        self.fake_code()
+        turn = taint.Turn()
+        tok = taint.GATES.mint(turn)
+        self.addCleanup(taint.GATES.revoke, tok)
+        policy = TurnPolicy(shell=True, level="full", read_dirs=(str(self.edit),), edit_dirs=(str(self.edit),))
+        box = api_tools.ToolBox(policy, paths.DATA, TurnTokens(gate_token=tok, gate_port=8765), "api", {})
+        with mock.patch.object(shell_rules, "can_sandbox", return_value=False):
+            text, err = box.run("run_command", {"command": f"touch {shlex.quote(str(self.repo))}/x"})
+        self.assertTrue(err)
+        self.assertEqual(text, shell_rules.CODE_OFF)
+        self.assertFalse((self.repo / "x").exists())
+
+    # --- the chat session's working folder ------------------------------------------------------
+
+    def test_chat_session_cwd_is_not_code(self):
+        import dashboard.server as server
+        sess = server.new_chat_session()
+        self.assertEqual(Path(sess.repo_dir), paths.turn_cwd())
+        self.assertNotEqual(Path(sess.repo_dir).resolve(), paths.CODE.resolve())
+        back = server._reopen({"id": str(uuid.uuid4())}, None, None)
+        self.assertEqual(Path(back.repo_dir), paths.turn_cwd())
+
+    def test_non_shell_turn_env_finds_osctl(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        env = ClaudeCodeEngine().turn_env(TurnPolicy(), TurnTokens())
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(paths.CODE))
+        env = ClaudeCodeEngine().turn_env(TurnPolicy(), TurnTokens(), repo_dir="/elsewhere")
+        self.assertEqual(env["PYTHONPATH"].split(os.pathsep)[0], str(paths.CODE))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -155,7 +155,18 @@ bot's Edit folders and temp folders (never a git hook), and no handing work to a
 Codex runs in its own sandbox with no internet on either level, since Leo Bot cannot watch
 its own tools mid-run. A job's notepad written after outside content counts as outside
 content on its later runs. Before any outside content, a Full access bot runs commands as
-you do.
+you do, with one exception.
+
+No bot ever changes Leo Bot's own code, on any level and any engine, before or after outside
+content. Every shell command runs in macOS's sandbox from the first one, with writes denied to
+Leo Bot's code folder, the Python that runs Leo Bot (so a global or `--user` pip install fails;
+a virtualenv in an Edit folder works), the folder bot turns start in, and the rename of any
+folder above them. Before outside content that is the only limit: the internet and every other
+folder stay as they are. File tools (Claude Code's Edit and Write, Codex's writable folders,
+the API key engine's file tools) are walled off the same folders, even when an Edit folder
+holds them. On a Mac without the sandbox, or another system, Leo Bot can only read the command
+itself: a command that names a write there (`rm`, `mv`, `cp`, a `>` redirect into the code
+folder) is refused, but a script the bot writes and runs could still change the code there.
 
 ### Reactions
 

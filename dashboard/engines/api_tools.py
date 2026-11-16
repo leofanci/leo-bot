@@ -31,7 +31,7 @@ import urllib.request
 from pathlib import Path
 
 from core import folders
-from dashboard import taint
+from dashboard import shell_rules, taint
 from dashboard.engines.claude_code import SECRET_FILE_GLOBS
 
 MAX_OUT_CHARS = 120_000
@@ -253,6 +253,8 @@ def _edit_target(raw, root, policy):
     holder = max((b for b in reads if b in target.parents), key=lambda b: len(b.parts))
     if holder not in edits:
         raise ToolError("that folder is read-only this turn")
+    if shell_rules.in_code(target):  # Leo Bot's own code, even inside an edit folder
+        raise ToolError(shell_rules.CODE_OFF)
     hooks = [Path(h) for h in folders.hook_dirs(base)]
     if (not folders.may_write(target, base) or is_private_path(target, root, policy)
             or any(h == target or h in target.parents for h in hooks)):
@@ -529,7 +531,7 @@ def run_command(command, folder, policy, turn, review=None, box=None):
     cwd = dirs[0] if not folder else next((d for d in dirs if str(Path(d)) == str(Path(str(folder)))), None)
     if cwd is None:
         raise ToolError("folder must be one of your edit folders: " + ", ".join(dirs))
-    allow, reason, run = turn.shell(command, dirs)
+    allow, reason, run = turn.shell(command, dirs, cwd=cwd)
     if not allow:
         return reason, True
     if review is not None:

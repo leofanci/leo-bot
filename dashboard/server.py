@@ -136,7 +136,7 @@ def rail() -> str:
 
 
 def new_chat_session():
-    return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=rail())
+    return chat_session.ChatSession(repo_dir=str(paths.turn_cwd()), rail=rail())  # never the code folder
 
 # The session token is handed out only to whoever proves they already know it:
 # the macOS app reads it from this owner-only file, a terminal user gets it in
@@ -2013,7 +2013,7 @@ def _reopen(rec, scope, linked):
         return new_chat_session()
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(paths.CODE), rail(), rec)
+    return chat_session.ChatSession.restore(str(paths.turn_cwd()), rail(), rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):

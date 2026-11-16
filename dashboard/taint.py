@@ -75,14 +75,16 @@ class Turn:
             self.outside = True
             return True
 
-    def shell(self, command, writable=(), profile_dir=None):
-        """(allow, reason, run) for one shell command (dashboard/shell_rules.plan): after outside
-        content an allowed command runs sandboxed, as `run`."""
+    def shell(self, command, writable=(), profile_dir=None, cwd=None):
+        """(allow, reason, run) for one shell command (dashboard/shell_rules.plan): an allowed
+        command runs sandboxed, as `run` (the code wall on every level; after outside content
+        also offline and write-limited). `cwd`: where it runs (default the first edit folder)."""
         from dashboard import shell_rules
         with self._lock:
             outside, root, sends = self.outside, self.browser_root, self.browser_sends
         walls = shell_rules.browser_walls(root, required=sends) if root else None
-        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir, browser=walls)
+        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir, browser=walls,
+                                cwd=cwd)
 
     def decide(self, tool, command=None):
         """(allow, reason) for one tool about to run: a web tool, "osctl-write" (a save in an
@@ -131,13 +133,17 @@ class Gates:
 
     def may_write(self, token, path):
         """(allow, reason) for a file tool writing `path` on the run holding `token`: only inside
-        its edit folders. Claude Code's auto mode (Approve for me) would otherwise leave a write
-        anywhere to its reviewer."""
+        its edit folders, and never in Leo Bot's own code (shell_rules.code_walls), even when an
+        edit folder holds it. Claude Code's auto mode (Approve for me) would otherwise leave a
+        write anywhere to its reviewer."""
+        from dashboard import shell_rules
         entry = self._find(token)
         dirs = [os.path.realpath(d) for d in (entry[2] if entry else ())]
         if not isinstance(path, str) or not path.startswith("/") or not dirs:
             return False, WRITE_OFF.format(folders="none")
         real = os.path.realpath(path)
+        if shell_rules.in_code(real):
+            return False, shell_rules.CODE_OFF
         if any(real == d or real.startswith(d.rstrip("/") + "/") for d in dirs):
             return True, ""
         return False, WRITE_OFF.format(folders=", ".join(dirs))

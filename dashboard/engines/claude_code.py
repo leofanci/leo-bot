@@ -30,6 +30,7 @@ import uuid
 from pathlib import Path
 
 from core import folders, paths
+from dashboard import shell_rules
 from dashboard.engines import prices
 from dashboard.engines.base import (TURN_ENV, Engine, EngineRefused, SessionLost, drain, gate_vars, stop_child,
                                     turn_vars)
@@ -168,9 +169,10 @@ SECRET_FILE_GLOBS = folders.SECRET_FILE_GLOBS
 HOME_PRIVATE = (".codex", ".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config")
 
 
-def private_read_rules(repo_dir):
+def private_read_rules(repo_dir=None):
     """Read denies for every turn: Claude's config keeps each bot session's
-    transcript (all workspaces), and server.log lists their ids."""
+    transcript (all workspaces), and server.log lists their ids. The old in-checkout log is in
+    Leo Bot's code folder (paths.CODE), whatever folder the turn works in; `repo_dir` is unused."""
     home = Path.home()
     private = [home / ".claude", *(home / n for n in HOME_PRIVATE)]
     cfg = os.environ.get("CLAUDE_CONFIG_DIR")
@@ -183,7 +185,7 @@ def private_read_rules(repo_dir):
     return [*(f"Read(/{d}/**)" for d in private),
             *(f"Read(/{s}/**)" for d in home_dirs for s in spellings(d)),
             *(f"Read(/{s})" for f in home_files for s in spellings(f)),
-            f"Read(/{Path(repo_dir).resolve() / 'dashboard' / 'server.log'})"]
+            f"Read(/{paths.CODE.resolve() / 'dashboard' / 'server.log'})"]
 # Tools loaded EVERY turn. Skills are NOT loaded via the Skill tool — that costs
 # ~4k tok of discovery (35 descriptions, incl. useless built-ins) just to let the
 # model pick one. Instead the server routes to the ONE relevant skill and injects
@@ -542,6 +544,9 @@ class ClaudeCodeEngine(Engine):
                 denied += [f"{t}(/{d}/**)" for t in EDIT_TOOLS]
         denied += [f"{t}(/{d}/**)" for d in policy.deny_dirs for t in ("Read", *EDIT_TOOLS)]
         denied += [f"{t}(/{f})" for f in policy.deny_files for t in ("Read", *EDIT_TOOLS)]
+        # Leo Bot's own code, the Python that runs osctl and the turns' folder: never written, on
+        # every turn, even by an edit folder that holds them (shell_rules.code_walls).
+        denied += [f"{t}(/{p}/**)" for p in shell_rules.code_walls()["write_paths"] for t in EDIT_TOOLS]
         cmd = [self.claude_bin, "-p",
                "--output-format", "stream-json",
                "--include-partial-messages",
@@ -569,12 +574,13 @@ class ClaudeCodeEngine(Engine):
         return cmd
 
     def turn_env(self, policy, tokens, repo_dir=None):
-        """`repo_dir`: a turn working in another folder still runs `python3 -m dashboard.osctl`."""
+        """Every turn works outside Leo Bot's code (paths.turn_cwd, or a shell turn's edit folder),
+        so PYTHONPATH leads with paths.CODE: `python3 -m dashboard.osctl` still finds Leo Bot's own.
+        `repo_dir` is unused (kept for callers)."""
         drop = (APPS_TOKEN_ENV, APPS_USED_ENV, OS_TOKEN_ENV, ENGINE_ENV, RUNNER_TOKEN_ENV, BROWSER_TOKEN_ENV,
                 *TURN_ENV)
         return {**{k: v for k, v in os.environ.items() if k not in drop},
-                **({"PYTHONPATH": os.pathsep.join(x for x in (str(repo_dir), os.environ.get("PYTHONPATH")) if x)}
-                   if repo_dir else {}),
+                "PYTHONPATH": os.pathsep.join(x for x in (str(paths.CODE), os.environ.get("PYTHONPATH")) if x),
                 "LEOBOT_WORKSPACE": policy.workspace or "hq",
                 "CLAUDE_CODE_TMPDIR": bot_tmpdir(policy.workspace or "hq"),
                 ENGINE_ENV: self.id,
@@ -602,7 +608,7 @@ class ClaudeCodeEngine(Engine):
                 # A shell level works in its edit folder. Claude Code keys a session to its folder:
                 # a thread that moves in or out of one continues with its recap (SessionLost).
                 cwd=self.shell_dir(policy, gated) or session.repo_dir,
-                env=self.turn_env(policy, tokens, repo_dir=session.repo_dir if self.shell_dir(policy, gated) else None),
+                env=self.turn_env(policy, tokens),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1)
         except FileNotFoundError:

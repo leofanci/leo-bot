@@ -25,6 +25,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from dashboard import shell_rules
 from dashboard.engines import prices
 from dashboard.engines.base import TURN_ENV, Engine, SessionLost, drain, gate_vars, stop_child, turn_vars
 from dashboard.engines.claude_code import (
@@ -97,10 +98,12 @@ class CodexEngine(Engine):
     @staticmethod
     def shell_dirs(policy, tokens):
         """The edit folders a shell-level turn works in, or () when it runs read-only: no shell
-        level, no edit folder, or no gate for the hook to ask."""
+        level, no edit folder, or no gate for the hook to ask. An edit folder that is, or sits
+        inside, Leo Bot's own code (shell_rules.code_walls) is never a writable root."""
         if not (getattr(policy, "shell", False) and policy.edit_dirs and not policy.shared and gate_vars(tokens)):
             return ()
-        return tuple(policy.edit_dirs)
+        walls = shell_rules.code_walls()
+        return tuple(d for d in policy.edit_dirs if not shell_rules.in_code(d, walls))
 
     def build_cmd(self, session, policy, model, tokens):
         state = session.engine_state.get(self.id) or {}

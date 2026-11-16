@@ -609,7 +609,12 @@ class Gate(Base):
     def test_a_shell_command_after_outside_content_comes_back_sandboxed(self):
         code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
                                    origin=False, headers={"Authorization": f"Bearer {self.token}"})
-        self.assertEqual((code, data["allow"], data.get("command")), (200, True, None))  # clean: as written
+        self.assertEqual((code, data["allow"]), (200, True))
+        from dashboard import shell_rules
+        if shell_rules.can_sandbox():  # clean: sandboxed for the code wall alone (tests/test_code_walls.py)
+            self.assertTrue(data["command"].startswith(shell_rules.SANDBOX_EXEC))
+        else:
+            self.assertIsNone(data.get("command"))
         self.turn.saw_outside()
         code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
                                    origin=False, headers={"Authorization": f"Bearer {self.token}"})

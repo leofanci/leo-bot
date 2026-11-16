@@ -17,7 +17,18 @@ DNS, writes only in the bot's edit folders and the temp folders (never a .git ho
 and no way to hand work to a process outside it (launchd, Apple events, open, osascript,
 crontab). Codex has its own sandbox for this (dashboard/engines/codex.py). A Mac without
 sandbox-exec, or another system, keeps wall 2 alone. Before outside content, Full access means
-the bot runs commands as the owner does.
+the bot runs commands as the owner does, but for Leo Bot's own code (the code wall, below).
+
+The code wall, on every level, before and after outside content (`code_walls`): no bot command
+changes Leo Bot's own code (REPO), the Python that runs osctl (`_python_dirs`) or the turns'
+working folder (core.paths.TURN_CWD, where `python3 -m dashboard.osctl` starts), nor renames a
+folder above them. So every allowed command but the plain osctl form runs sandboxed from the
+first one: before outside content with the internet, writes and localhost as before, plus the
+code denies and the hand-off denies (a hand-off would run the command outside the sandbox);
+after outside content the write limit above plus the code denies. With no sandbox, a command
+whose parsed target writes there (`writes_code`: a word or redirect target of a program that
+can write) is refused with CODE_OFF. That check reads the command only: a program the bot
+writes could still change the code, a limit the docs state.
 
 A third wall while the run has a browser (its level above off, taint.Turn.browsing): the
 browser relay is the only way a bot reaches a browser, so every command runs sandboxed from the
@@ -75,6 +86,7 @@ BROWSER_SHELL_OFF = ("This did not run: {bot}'s browser is set to {browser} (Set
 NO_SANDBOX = ("This bot's browser can send, and this machine has no sandbox to keep shell commands away from "
               "the browser, so shell commands are off while it browses. Ask the owner to set the browser to "
               "Reads only or Off, or the shell level lower.")
+CODE_OFF = "Leo Bot's own code and the Python that runs it are never changed by a bot. Work in your edit folder."
 SENDS_OFF = ("This conversation holds outside content or app data, so commands that send things off "
              "this machine (curl, wget, ssh, scp, rsync, git push, a publish, gh, mail) are off. Do the "
              "local work; tell the owner what to push or send.")
@@ -216,6 +228,29 @@ def _ancestors(path, home):
     return out
 
 
+def code_walls(home=None):
+    """What no bot command may write, on every level (module notes): {"write_paths" (Leo Bot's
+    code, the Python that runs osctl, the turns' working folder: sorted real paths), "ancestors"
+    (each folder above them, denied as itself: no rename), "home"}."""
+    from core import paths
+    home = Path.home() if home is None else Path(home)
+    writes = sorted({os.path.realpath(str(REPO)), *_python_dirs(), os.path.realpath(str(paths.TURN_CWD))})
+    ancestors = sorted({a for p in writes for a in _ancestors(p, home)})
+    return {"write_paths": writes, "ancestors": ancestors, "home": os.path.realpath(str(home))}
+
+
+def _fold(path):
+    """A path as the disk compares it: macOS disks ignore letter case."""
+    return path.lower() if sys.platform == "darwin" else path
+
+
+def in_code(path, walls=None):
+    """`path` (followed to its real path) is under a code wall "write_paths" (code_walls)."""
+    real = _fold(os.path.realpath(str(path)))
+    return any(real == w or real.startswith(w + "/")
+               for w in (_fold(p).rstrip("/") for p in (walls or code_walls())["write_paths"]))
+
+
 def browser_walls(root, required=False, home=None, profile_dir=None):
     """What a run with a browser keeps its shell from (module notes): {"paths" (no read, write
     or socket), "write_paths" (no write), "ancestors" (no write on the folder itself: no rename),
@@ -226,10 +261,10 @@ def browser_walls(root, required=False, home=None, profile_dir=None):
     real = lambda p: os.path.realpath(str(p))  # noqa: E731 - one short helper
     agent, run, team, data = real(home / ".agent-browser"), real(Path(root) / "run"), real(Path(root) / "team"), real(root)
     pdir = real(profile_dir) if profile_dir else None
-    python = _python_dirs()
-    writes = sorted({team, real(REPO), *python} | ({pdir} if pdir else set()))
-    walled = [team, run, agent, real(REPO), data, *python] + ([pdir] if pdir else [])
-    ancestors = sorted({a for p in walled for a in _ancestors(p, home)})
+    code = code_walls(home)
+    writes = sorted({team, *code["write_paths"]} | ({pdir} if pdir else set()))
+    walled = [team, run, agent, data] + ([pdir] if pdir else [])
+    ancestors = sorted({a for p in walled for a in _ancestors(p, home)} | set(code["ancestors"]))
     return {"paths": sorted({agent, run}), "write_paths": writes, "ancestors": ancestors,
             "home": real(home), "required": bool(required)}
 
@@ -239,11 +274,14 @@ def _browser_denies(browser):
     for p in browser.get("paths") or ():
         lines.append(f"(deny file-read* file-write* (subpath {_sb_str(p)}))")
         lines.append(f"(deny network-outbound (remote unix-socket (subpath {_sb_str(p)})))")
-    for p in browser.get("write_paths") or ():
-        lines.append(f"(deny file-write* (subpath {_sb_str(p)}))")
-    for p in browser.get("ancestors") or ():
-        lines.append(f"(deny file-write* (literal {_sb_str(p)}))")
-    return lines
+    return lines + _write_denies(browser)
+
+
+def _write_denies(walls):
+    """No write under each of `walls` "write_paths", and no write on each "ancestors" folder
+    itself (no rename): the one deny builder of the code wall and the browser wall."""
+    return ([f"(deny file-write* (subpath {_sb_str(p)}))" for p in walls.get("write_paths") or ()]
+            + [f"(deny file-write* (literal {_sb_str(p)}))" for p in walls.get("ancestors") or ()])
 
 
 def _own_denies(profile_dir, home=None):
@@ -267,24 +305,31 @@ def _write_limit(writable):
             '(deny file-write* (regex #"/\\.git/(hooks|config$)"))']
 
 
-def sandbox_profile(writable=(), browser=None, outside=True, profile_dir=None, home=None):
-    """The sandbox-exec profile for a command run after outside content (see the module notes).
-    `browser` (browser_walls): also keep the command from the browser, write-limited from the
-    first command; with `outside` False the internet stays (only localhost is denied).
-    `profile_dir`: where the profile file goes, denied to writes with every folder above it.
-    The denies come last, so an edit folder that holds a walled path never opens it."""
+def sandbox_profile(writable=(), browser=None, outside=True, profile_dir=None, home=None, code=None):
+    """The sandbox-exec profile for a bot command (see the module notes). After outside content:
+    no internet, writes only in `writable` and the temp folders. `browser` (browser_walls): also
+    keep the command from the browser, write-limited from the first command; with `outside`
+    False the internet stays (only localhost is denied). Neither: the command runs as the owner
+    would, but for the code wall. `code` (code_walls, built when not given) is denied on every
+    profile; browser_walls already holds it. `profile_dir`: where the profile file goes, denied
+    to writes with every folder above it. The denies come last, so an edit folder that holds a
+    walled path never opens it."""
     handoff = ["(deny appleevent-send)",
                "(deny process-exec " + " ".join(f"(literal {_sb_str(p)})" for p in _HANDOFF_PROGRAMS) + ")"]
     home = (browser or {}).get("home") if home is None else home
     lines = ["(version 1)", "(allow default)"]
-    if browser is None or outside:
+    if outside:
         lines.append("(deny network-outbound (remote ip))")
         if browser is None:  # with a browser no localhost port either
             lines.append('(allow network-outbound (remote ip "localhost:*"))')
         lines.append('(deny network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))')
-    lines += handoff + _write_limit(writable)
+    lines += handoff
+    if browser is not None or outside:
+        lines += _write_limit(writable)
     if browser is not None:
         lines += _browser_denies(browser)
+    else:
+        lines += _write_denies(code_walls(home) if code is None else code)
     return "".join(lines + _own_denies(profile_dir, home))
 
 
@@ -347,23 +392,128 @@ def osctl_command(command):
     return f"cd {shlex.quote(str(REPO))} && {shlex.quote(sys.executable)} -I -c {shlex.quote(code)}{command[m.end():]}"
 
 
-def plan(command, outside=False, writable=(), profile_dir=None, browser=None):
-    """(allow, reason, run): `run` is the command to run instead (sandboxed after outside
-    content, or from the first command while the run has a browser: `browser`, browser_walls),
-    or None to run it as written."""
+def plan(command, outside=False, writable=(), profile_dir=None, browser=None, cwd=None):
+    """(allow, reason, run): `run` is the command to run instead (sandboxed from the first
+    command for the code wall, write-limited and offline after outside content, kept from the
+    browser while the run has one: `browser`, browser_walls), or None to run it as written: no
+    sandbox here, or an empty command. `cwd`: where it runs (default the first edit folder), for
+    the no-sandbox code check."""
     allow, reason = decide(command, outside)
     if not allow:
         return allow, reason, None
+    if not isinstance(command, str) or not command.strip():
+        return True, "", None
     if _osctl_only(command):
         own = osctl_command(command)
         if own is not None:
             return True, "", own
-    if browser is None:
-        return (True, "", sandboxed(command, writable, profile_dir=profile_dir)) if outside else (True, "", None)
     run = sandboxed(command, writable, profile_dir=profile_dir, browser=browser, outside=outside)
-    if run is None and browser.get("required"):
+    if run is None and browser is not None and browser.get("required"):
         return False, NO_SANDBOX, None
+    if run is None and writes_code(command, cwd or (str(writable[0]) if writable else None)):
+        return False, CODE_OFF, None
     return True, "", run
+
+
+# Programs that only write through a redirect: their own words are never a write target. `git`
+# counts only for a read-only subcommand, `find` only without an action that writes or runs.
+_READ_ONLY = {"cat", "less", "head", "tail", "ls", "grep", "rg", "find", "wc", "stat", "file", "diff", "git",
+              "cd", "pushd", "pwd", "echo", "printf"}
+_GIT_READ = {"status", "log", "diff", "show", "blame"}
+_FIND_WRITES = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+
+
+def _read_only(prog, args):
+    if prog == "git":
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+                i += 2
+                continue
+            if a.startswith("-"):
+                i += 1
+                continue
+            return a in _GIT_READ
+        return False
+    if prog == "find":
+        return not any(a in _FIND_WRITES for a in args)
+    return prog in _READ_ONLY
+
+
+def _words_and_redirects(args):
+    """(words, redirect targets) of one simple command's arguments: `> f`, `>>f`, `2> f`, `&> f`
+    and `x>f` all name f; `2>&1` names none."""
+    words, targets, pending = [], [], False
+    for a in args:
+        if pending:
+            targets.append(a)
+            pending = False
+            continue
+        if ">" not in a:
+            words.append(a.lstrip("<"))
+            continue
+        before, _, after = a.partition(">")
+        before = before.rstrip("0123456789&")
+        if before:
+            words.append(before)
+        after = after.lstrip(">|")
+        if after.startswith("&"):  # a file descriptor copy
+            continue
+        if after:
+            targets.append(after)
+        else:
+            pending = True
+    return words, targets
+
+
+def _resolve(word, cwd):
+    """`word` as a real path (~ and $HOME expanded, relative to `cwd`), or None when it cannot
+    be known: another variable, or a relative word with no folder."""
+    home = os.path.expanduser("~")
+    if word == "~" or word.startswith("~/"):
+        word = home + word[1:]
+    elif word == "$HOME" or word.startswith("$HOME/"):
+        word = home + word[5:]
+    if not word or "$" in word:
+        return None
+    if not word.startswith("/"):
+        if not cwd:
+            return None
+        word = os.path.join(cwd, word)
+    return os.path.realpath(word)
+
+
+def writes_code(command, cwd=None):
+    """The command, as written, names a write under the code wall (code_walls): a word or a
+    redirect target of a program that can write lands under a walled path or on a folder above
+    one. A redirect there always counts. A command that cannot be read counts too. This reads
+    the command only (module notes): it is the check for a system with no sandbox."""
+    try:
+        segments = _segments(command)
+    except ValueError:
+        return True
+    walls = code_walls()
+    ancestors = {_fold(p) for p in walls["ancestors"]}
+
+    def walled(word):
+        real = _resolve(word, cwd)
+        return real is not None and (_fold(real) in ancestors or in_code(real, walls))
+
+    for seg in segments:
+        prog, args = _program(seg)
+        words, targets = _words_and_redirects(args)
+        if any(walled(t) for t in targets):
+            return True
+        if prog in ("cd", "pushd"):
+            dest = next((w for w in words if not w.startswith("-")), "~")
+            cwd = _resolve(dest, cwd) or cwd
+        if _read_only(prog, args):
+            continue
+        for w in words:
+            if any(walled(c) for c in ([w] + ([w.split("=", 1)[1]] if "=" in w else []))):
+                return True
+    return False
 
 
 def decide(command, outside=False):

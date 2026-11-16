@@ -46,6 +46,7 @@ TOKEN_FILE = RUN / "auth-token"
 PID_FILE = RUN / "server.pid"
 SERVER_LOG = LOGS / "server.log"
 UPDATE_LOG = LOGS / "update.log"
+TURN_CWD = DATA / "run" / "turns"  # a bot turn's working folder (turn_cwd), never CODE
 
 
 HOME_SHARED = ("app", "data")  # the only home folder entries a bot turn may read
@@ -84,6 +85,15 @@ def ensure_dirs() -> None:
     for d in (HOME, DATA, RUN, LOGS, BACKUPS):
         d.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(d, 0o700)
+
+
+def turn_cwd() -> Path:
+    """The working folder of a bot turn that has no shell edit folder: a neutral folder in the
+    data's run area, never Leo Bot's own code (CODE). Owner-only, made when first asked for."""
+    d = TURN_CWD
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(d, 0o700)
+    return d
 
 
 def inside(base, name):
