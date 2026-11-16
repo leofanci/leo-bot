@@ -188,6 +188,23 @@ class General(SettingsFile):
             self.assertFalse(general.adopt_browser_timezone("Europe/Paris"))
             self.assertEqual(general.view()["timezone"], "")
 
+    def test_browser_zone_alias_is_the_machine_clock(self):
+        self.assertTrue(general.same_zone("Asia/Calcutta", "Asia/Kolkata"))
+        self.assertTrue(general.same_zone("Europe/Rome", "Europe/Rome"))
+        self.assertFalse(general.same_zone("Europe/Rome", "Europe/London"))
+        self.assertFalse(general.same_zone("Europe/Rome", ""))
+        self.assertFalse(general.same_zone("Europe/Rome", "Mars/Base"))
+        with mock.patch.object(general, "machine_timezone", return_value="Asia/Kolkata"):
+            self.assertFalse(general.adopt_browser_timezone("Asia/Calcutta"))
+        self.assertNotIn("timezone", json.loads(paths.SETTINGS.read_text()) if paths.SETTINGS.exists() else {})
+
+    def test_broken_saved_timezone_counts_as_unset(self):
+        paths.SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+        paths.SETTINGS.write_text(json.dumps({"timezone": 123}))
+        with mock.patch.object(general, "machine_timezone", return_value="UTC"):
+            self.assertTrue(general.adopt_browser_timezone("Asia/Tokyo"))
+        self.assertEqual(general.view()["timezone"], "Asia/Tokyo")
+
     def test_reply_language_goes_in_the_rail(self):
         self.assertNotIn("## Reply language", server.rail())
         general.update({"reply_language": "Italiano"})
