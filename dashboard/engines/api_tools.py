@@ -156,6 +156,8 @@ def is_private_path(path, root, policy):
     if rel.startswith(_PRIVATE_PREFIXES) or rel.endswith(_PRIVATE_SUFFIXES):
         return True
     parts = rel.split("/")
+    if parts[0] == "projects" and len(parts) > 3 and parts[2] in ("canvases", "lists"):
+        return True  # read only through osctl get-canvas/get-list, which keeps their labels
     ws = (policy.workspace or "hq").lower()
     return ws != "hq" and parts[0] == "projects" and len(parts) > 1 and parts[1] != ws
 

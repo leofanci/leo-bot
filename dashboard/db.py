@@ -87,6 +87,12 @@ def experiments():
     )
 
 
+def canvases(ws):
+    """A workspace's canvases (the index of canvases/cvN.json), newest first."""
+    return _rows("SELECT id, ws, title, updated, created_by FROM canvases WHERE ws = ?"
+                 " ORDER BY updated DESC, id", (ws,))
+
+
 def _folders(slug):
     """A project's linked folders (core.folders). The checkout this index belongs to is
     three levels above DB_PATH, so a test index reads its own folders."""

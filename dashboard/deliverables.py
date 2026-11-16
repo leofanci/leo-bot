@@ -12,17 +12,23 @@ underneath as storage; the user never has to think in them:
 Each item: {key, kind, label, link (canvas route), focus (composed id of the
 card to scroll to, or None), updated, profile (for post links), post (the post
 id, for a single brief)}. Content plans and briefs open the Content view, focused
-on the profile's card or the post's row.
+on the profile's card or the post's row. A canvas (canvases/cvN.json) opens at
+#/canvas/<id>; a changed list is the card of the first canvas embedding it, and a
+list no canvas embeds is none. Canvas history, trash, pins and templates are not
+deliverables.
 """
 import json
+import re
 from pathlib import Path
 
 from core.ids import build_id_registry, lk_doc, lk_experiment, lk_memo, lk_post, lk_prof
 from core.project_schemas import MEMO_SECTION
 
-KINDS = ("memo", "experiment", "doc", "roadmap", "plan", "content", "brief", "voice")
+KINDS = ("memo", "experiment", "doc", "roadmap", "plan", "content", "brief", "voice", "canvas")
 _SKIP_TOP = {"team"}                         # bot state/memory: not work product
 _SKIP_FILES = {"subsections.json", "project.md"}
+_CANVAS_FILE = re.compile(r"^(cv\d{1,6})\.json$")
+_LIST_FILE = re.compile(r"^(ls\d{1,6})\.json$")
 
 
 def _project_dir(root, slug):
@@ -65,6 +71,26 @@ def _names(projects, slug):
     """{profile/product slug: display name} for the project."""
     p = next((x for x in projects or [] if x.get("slug") == slug), {})
     return {x["slug"]: x.get("name") or x["slug"] for x in (p.get("profiles") or []) + (p.get("products") or [])}
+
+
+def _canvas_card(base, cid):
+    title = _read_json(base / "canvases" / f"{cid}.json").get("title")
+    return {"key": f"canvas:{cid}", "kind": "canvas", "label": title if isinstance(title, str) and title else cid,
+            "link": f"#/canvas/{cid}", "focus": None}
+
+
+def _embedding_canvas(base, lid):
+    """The first canvas (lowest number) with a block embedding list `lid`, or None."""
+    found = []
+    for f in (base / "canvases").glob("cv*.json"):
+        m = _CANVAS_FILE.match(f.name)
+        if m:
+            found.append((int(m.group(1)[2:]), m.group(1), f))
+    for _, cid, f in sorted(found):
+        blocks = _read_json(f).get("blocks")
+        if any(isinstance(b, dict) and b.get("list") == lid for b in (blocks if isinstance(blocks, list) else ())):
+            return cid
+    return None
 
 
 def describe(root, slug, rel, reg=None, mtime=None, names=None):
@@ -117,6 +143,11 @@ def describe(root, slug, rel, reg=None, mtime=None, names=None):
         elif parts[2] in ("brief-specs", "voices", "profile.md"):
             item = {"key": f"voice:{prof}", "kind": "voice", "label": f"Voice & brief spec: {name(prof)}",
                     "link": f"#/profile/{prof}/setup", "focus": None, "profile": prof}
+    elif len(parts) == 2 and parts[0] == "canvases" and _CANVAS_FILE.match(parts[1]):
+        item = _canvas_card(base, parts[1][:-5])
+    elif len(parts) == 2 and parts[0] == "lists" and _LIST_FILE.match(parts[1]):
+        cid = _embedding_canvas(base, parts[1][:-5])
+        item = _canvas_card(base, cid) if cid else None
     if item:
         item["updated"] = mtime
     return item

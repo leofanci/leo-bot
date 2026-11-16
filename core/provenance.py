@@ -13,6 +13,9 @@ label travels with the data (information-flow control, as in CaMeL and Microsoft
 
 Work files: projects/<slug>/** (docs, memos, posts, briefs, per-project memory) and
 team/memory/** (HQ bot memory). HQ conversations see every workspace, so any listed file counts.
+Canvas and list files (projects/<slug>/canvases/**, lists/**, and team/canvases, team/lists) are
+left out: each block, item and row carries its own label (core/canvases.py), so one coworker note
+never flags the whole workspace.
 """
 import json
 import os
@@ -27,6 +30,7 @@ LEDGER = Path("team") / "outside_content.json"
 _LOCK = threading.Lock()
 _SKIP_SUFFIXES = (".db", ".db-wal", ".db-shm", ".db-journal", ".sqlite", ".lock", ".tmp")
 PREVIEW_CHARS = 20000
+CANVAS_DIRS = ("canvases", "lists")  # labeled per item instead (core/canvases.py)
 
 
 def _work_roots(root, ws):
@@ -34,6 +38,13 @@ def _work_roots(root, ws):
     if ws == bots.HQ:
         return [root / "projects", root / "team" / "memory"]
     return [root / "projects" / ws]
+
+
+def _labeled_per_item(rel):
+    """A canvas or list file (or one of their side files): left out of the ledger."""
+    parts = rel.split("/")
+    return ((parts[0] == "projects" and len(parts) > 3 and parts[2] in CANVAS_DIRS)
+            or (parts[0] == "team" and len(parts) > 2 and parts[1] in CANVAS_DIRS))
 
 
 def scan(root, ws):
@@ -50,7 +61,9 @@ def scan(root, ws):
                 st = f.stat()
             except OSError:
                 continue
-            out[f.relative_to(root).as_posix()] = (st.st_mtime_ns, st.st_size)
+            rel = f.relative_to(root).as_posix()
+            if not _labeled_per_item(rel):
+                out[rel] = (st.st_mtime_ns, st.st_size)
     return out
 
 

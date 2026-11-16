@@ -19,6 +19,8 @@ Reads, under WORKSPACE_ROOT:
     projects/<slug>/products/<slug>/roadmap.md      -> features
     portfolio/activities.md                         -> activities
     portfolio/milestones.json                       -> milestones
+    projects/<slug>/canvases/cv*.json, team/canvases/cv*.json -> canvases
+    projects/<slug>/lists/ls*.json, team/lists/ls*.json       -> canvas_lists
 
 Writes WORKSPACE_ROOT/database/data/os.db. Entities are inserted FIRST so every
 FK resolves; an unresolved slug aborts the whole rebuild (no orphan rows).
@@ -36,7 +38,7 @@ HERE = Path(__file__).resolve().parent
 MIGRATIONS_DIR = HERE / "database" / "migrations"   # schema lives with the code
 DB_RELPATH = Path("database") / "data" / "os.db"    # generated under the workspace root
 
-from core import memory, paths  # noqa: E402
+from core import bots, canvas_store, memory, paths  # noqa: E402
 from core.project_schemas import MEMO_TYPES, normalize_workspace_artifacts  # noqa: E402
 EXPERIMENT_STATUSES = {"planned", "running", "done"}
 EXPERIMENT_DECISIONS = {"persist", "pivot", "kill"}
@@ -441,6 +443,29 @@ def collect_milestones(root: Path, slugs):
     return rows
 
 
+def collect_canvases(root: Path):
+    """(canvases, canvas_lists) rows for every workspace and HQ (core/canvas_store.py layout)."""
+    wss = [p.name for p in sorted((root / "projects").glob("*")) if p.is_dir() and not p.is_symlink()]
+    canvases, lists = [], []
+    for ws in [*wss, bots.HQ]:
+        for prefix, folder, out in (("cv", "canvases", canvases), ("ls", "lists", lists)):
+            for fid in canvas_store.list_ids(root, ws, prefix):
+                path = canvas_store.base(root, ws) / folder / f"{fid}.json"
+                doc = load_json(path) if not path.is_symlink() else None
+                if not isinstance(doc, dict):
+                    continue
+                title = doc.get("title") if isinstance(doc.get("title"), str) else None
+                row = {"id": fid, "ws": ws, "title": title, "updated": mtime_iso(path)}
+                if prefix == "cv":
+                    by = doc.get("created_by")
+                    row["created_by"] = by if isinstance(by, str) else None
+                else:
+                    rows = doc.get("rows")
+                    row["rows"] = len(rows) if isinstance(rows, list) else 0
+                out.append(row)
+    return canvases, lists
+
+
 # --------------------------------------------------------------------------- #
 # slug integrity
 # --------------------------------------------------------------------------- #
@@ -492,6 +517,10 @@ _SQL = {
                     " VALUES (:entity_slug,:title,:date,:date_end,:time,:time_end,:type,:status,:priority)"),
     "milestones": ("INSERT INTO milestones (id,entity_slug,entity_type,type,title,date,date_end,priority,notes)"
                     " VALUES (:id,:entity_slug,:entity_type,:type,:title,:date,:date_end,:priority,:notes)"),
+    "canvases": ("INSERT INTO canvases (id,ws,title,updated,created_by)"
+                  " VALUES (:id,:ws,:title,:updated,:created_by)"),
+    "canvas_lists": ('INSERT INTO canvas_lists (id,ws,title,"rows",updated)'
+                      " VALUES (:id,:ws,:title,:rows,:updated)"),
 }
 
 
@@ -521,6 +550,7 @@ def build(root: Path):
     features = collect_features(root)
     activities = collect_activities(root)
     milestones = collect_milestones(root, slugs)
+    canvases, canvas_lists = collect_canvases(root)
 
     # Resilience: generated content (a plan-*.json) can reference a profile or
     # channel slug that doesn't exist — typically the model naming a platform
@@ -593,12 +623,15 @@ def build(root: Path):
     features = insert(_SQL["features"], features, "feature")
     activities = insert(_SQL["activities"], activities, "activity")
     milestones = insert(_SQL["milestones"], milestones, "milestone")
+    canvases = insert(_SQL["canvases"], canvases, "canvas")
+    canvas_lists = insert(_SQL["canvas_lists"], canvas_lists, "canvas list")
     conn.commit()
 
     counts = {
         "entities": entities, "relationships": relationships, "memos": memos,
         "experiments": experiments, "posts": posts, "post_channels": post_channels,
         "features": features, "activities": activities, "milestones": milestones,
+        "canvases": canvases, "canvas_lists": canvas_lists,
     }
     fk = conn.execute("PRAGMA foreign_key_check;").fetchall()
     timeline_n = conn.execute("SELECT COUNT(*) FROM timeline;").fetchone()[0]

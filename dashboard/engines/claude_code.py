@@ -186,6 +186,22 @@ def private_read_rules(repo_dir=None):
             *(f"Read(/{s}/**)" for d in home_dirs for s in spellings(d)),
             *(f"Read(/{s})" for f in home_files for s in spellings(f)),
             f"Read(/{paths.CODE.resolve() / 'dashboard' / 'server.log'})"]
+
+
+CANVAS_FILE_RULES = ("projects/*/canvases/**", "projects/*/lists/**", "team/canvases/**", "team/lists/**")
+
+
+def canvas_read_rules(search=False):
+    """Read denies (and Grep/Glob ones when `search`: those tools are loaded) for every canvas and
+    list file: a bot reads them only through osctl get-canvas/get-list, which hands over their
+    per-item outside content labels (core/canvases.py). Both spellings of the data folder
+    (macOS /var is /private/var)."""
+    data = paths.DATA
+    tools = ("Read", *APP_TOOLS) if search else ("Read",)
+    return [f"{t}(/{s}/{r})" for s in dict.fromkeys((str(data), str(Path(data).resolve())))
+            for r in CANVAS_FILE_RULES for t in tools]
+
+
 # Tools loaded EVERY turn. Skills are NOT loaded via the Skill tool — that costs
 # ~4k tok of discovery (35 descriptions, incl. useless built-ins) just to let the
 # model pick one. Instead the server routes to the ONE relevant skill and injects
@@ -498,7 +514,7 @@ class ClaudeCodeEngine(Engine):
         # deny rules, so it never reaches one (core.folders refuses to link it, too).
         read_dirs = tuple(d for d in policy.read_dirs if not folders.has_glob_chars(d))
         edit_dirs = tuple(d for d in policy.edit_dirs if d in read_dirs and _hooks_expressible(d))
-        walls = [*policy.deny_dirs, *policy.deny_files]
+        walls = [*policy.deny_dirs, *policy.deny_files, str(paths.DATA)]  # DATA: canvas_read_rules
         if any(folders.has_glob_chars(w) for w in walls):  # a deny rule could not match it: never run
             raise EngineRefused("Leo Bot's data folder path holds * ? [ or ] characters, so bots "
                                 "could read past their walls. Move the folder to a plain path.")
@@ -537,6 +553,7 @@ class ClaudeCodeEngine(Engine):
         # (probed live with the real binary, 2.1.322): one spelling per rule is enough.
         denied = [f"Read(**/{g})" for g in SECRET_FILE_GLOBS]
         denied += private_read_rules(session.repo_dir)
+        denied += canvas_read_rules(search=bool(read_dirs))
         for d in read_dirs:
             denied += [f"Read(/{d}/**/{g})" for g in SECRET_FILE_GLOBS]
         for d in edit_dirs:

@@ -78,6 +78,20 @@ class Labels(unittest.TestCase):
         (self.root / "projects/acme/memos/m1.md").unlink()
         self.assertEqual(provenance.pending(self.root, "acme"), [])
 
+    def test_canvas_and_list_files_are_left_out(self):
+        """Per-item labels replace the ledger for these (core/canvases.py)."""
+        before = provenance.scan(self.root, "demo")
+        self.write("projects/demo/canvases/cv1.json", "{}")
+        self.write("projects/demo/canvases/history/cv1.jsonl", "{}")
+        self.write("projects/demo/lists/ls1.json", "{}")
+        self.write("projects/demo/docs/x.md", "from a mail")
+        after = provenance.scan(self.root, "demo")
+        self.assertEqual(sorted(after), ["projects/demo/docs/x.md"])
+        self.assertEqual(provenance.mark(self.root, before, after), ["projects/demo/docs/x.md"])
+        self.write("team/canvases/cv1.json", "{}")
+        self.write("team/lists/ls1.json", "{}")
+        self.assertEqual(sorted(provenance.scan(self.root, "hq")), ["projects/demo/docs/x.md"])
+
 
 if __name__ == "__main__":
     unittest.main()
