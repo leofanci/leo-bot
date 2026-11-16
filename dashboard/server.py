@@ -52,6 +52,7 @@ from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
 from core import canvases  # noqa: E402
+from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -1402,6 +1403,17 @@ def _canvas_actor(ctx):
                           room=ctx.get("room"), people=tuple(ctx.get("people") or ()), tainted=tainted,
                           mark_outside=mark, gated=bool(ctx.get("gated")), chat=ctx.get("chat"),
                           job_mode=ctx.get("job_mode"))
+
+
+def _canvas_api_actor(viewer):
+    """The rules engine's actor for a dashboard request: the owner cookie, or an invited
+    person's member cookie. Bots never come through here (see _canvas_actor)."""
+    if (viewer or {}).get("kind") == "owner":
+        return canvases.Actor(kind="owner")
+    return canvases.Actor(kind="person", id=viewer["id"])
+
+
+CANVAS_404 = {"error": "not found"}  # missing, not visible, malformed: one answer
 
 
 def _room_people(ws, room):
@@ -3338,6 +3350,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/rooms/delete":
             name = str(body.get("name") or "")
             rooms.delete_topic(ws, name, ROOT)
+            canvas_store.drop_room_pins(ROOT, ws, f"{ws}/t-{name}")  # a new room of that name starts empty
             _retire_threads(lambda rec: rec.get("room") == f"{ws}/t-{name}")  # never follow the name
             return self._send(200, {"ok": True})
         members = body.get("members") or []
@@ -3361,8 +3374,113 @@ class Handler(BaseHTTPRequestHandler):
                     rec["room"] = room_id
                     chat_store.save(rec)
             approvals.move_room(f"{ws}/t-{old}", room_id, ROOT)
+            canvas_store.move_room_pins(ROOT, ws, f"{ws}/t-{old}", room_id)
         listed = rooms.list_rooms(team, ws, ROOT)
         return self._send(200, {"id": room_id, "rooms": [r for r in listed if rooms.can_see(r, viewer)]})
+
+    # -- canvases (owner cookie, or a person scoped by the rooms they see) -- #
+    def _canvas_ws(self, value, viewer):
+        """(ws, team) from our own workspace list, or None: a person only their joined
+        workspaces, never HQ. ValueError when `ws` is missing."""
+        if not isinstance(value, str) or not value:
+            raise ValueError("ws: required")
+        projects = db.tree()
+        ws = _known_ws(value, projects)
+        if not ws or (viewer.get("kind") != "owner" and (ws == bots.HQ or ws not in viewer["ws"])):
+            return None
+        record = next((p for p in projects if p.get("slug") == ws), None) if ws != bots.HQ else None
+        return ws, bots.team(ROOT, ws, record)
+
+    def _canvas_call(self, viewer, ws, team, cmd, params):
+        """(code, body) of one rules-engine call: Refused 403, Stale 409, not found 404."""
+        try:
+            return 200, canvases.dispatch(ROOT, ws, _canvas_api_actor(viewer), cmd, params,
+                                          team=team, source="api")
+        except (canvases.NotFound, LookupError) as e:
+            return 404, ({"error": str(e) or "not found"} if viewer.get("kind") == "owner" else CANVAS_404)
+        except canvases.Stale as e:
+            return 409, {"error": str(e)}
+        except canvases.Refused as e:
+            return 403, {"error": str(e)}
+        except Exception:  # noqa: BLE001 - one bad call never takes the request thread down
+            traceback.print_exc()
+            return 500, {"error": "internal error"}
+
+    def _canvas_get(self, path, viewer):
+        qs = parse_qs(urlparse(self.path).query)
+        q = lambda k: (qs.get(k) or [None])[0]  # noqa: E731
+        try:
+            found = self._canvas_ws(q("ws"), viewer)
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        if not found:
+            return self._send(404, CANVAS_404)
+        ws, team = found
+        if path == "/api/canvases":
+            return self._canvas_index(viewer, ws, team, q("room"))
+        kind, _, rest = path[len("/api/"):].partition("/")
+        fid, _, sub = rest.partition("/")
+        if (kind, sub) not in {("canvases", ""), ("canvases", "history"), ("lists", ""),
+                               ("lists", "rows"), ("lists", "history")}:
+            return self._send(404, {"error": "unknown endpoint"})
+        if not canvas_store.valid("canvas" if kind == "canvases" else "list", fid):
+            return self._send(404, CANVAS_404)
+        params = {"id": fid}
+        try:
+            for k in ("offset", "limit"):
+                if q(k) is not None:
+                    params[k] = int(q(k))
+            if q("filter"):
+                params["filter"] = json.loads(q("filter"))
+                if not isinstance(params["filter"], dict):
+                    raise ValueError
+            if q("sort"):
+                params["sort"] = q("sort")
+        except ValueError:
+            return self._send(400, {"error": "offset, limit: whole numbers; filter: a JSON object"})
+        cmd = "list-history" if sub == "history" else "get-canvas" if kind == "canvases" else "get-list"
+        code, out = self._canvas_call(viewer, ws, team, cmd, params)
+        if code == 200 and sub == "rows":
+            out = {k: out.get(k) for k in ("id", "version", "total", "offset", "limit", "rows")}
+        return self._send(code, out)
+
+    def _canvas_index(self, viewer, ws, team, room):
+        """The canvases this viewer sees in `ws` (or pinned in `room`), and that room's pin order."""
+        params = {}
+        if room:
+            r = rooms.get_room(room, team, ROOT) if rooms.split_id(room)[0] == ws else None
+            if not r or (viewer.get("kind") != "owner" and (r.get("kind") == "dm" or not rooms.can_see(r, viewer))):
+                return self._send(404, CANVAS_404)
+            params["room"] = room
+        code, out = self._canvas_call(viewer, ws, team, "list-canvases", params)
+        if code != 200:
+            return self._send(code, out)
+        rows = []
+        for c in out.get("canvases") or []:
+            row = {**c, "pinned_in": c.get("rooms") or [], "updated": canvas_store.updated(ROOT, ws, c["id"])}
+            row.pop("rooms", None)
+            rows.append(row)
+        seen = {c["id"] for c in rows}
+        pins = [c for c in canvas_store.pins(ROOT, ws).get(room, []) if c in seen] if room else []
+        return self._send(200, {"ws": ws, "canvases": rows, "pins": pins})
+
+    def _canvas_post(self, body, viewer):
+        """One write (or read) command; the actor comes from the cookie, never the body."""
+        if not isinstance(body, dict):
+            return self._send(400, {"error": 'bad request: {"ws", "cmd", "params"}'})
+        cmd, params = body.get("cmd"), body.get("params")
+        if not isinstance(cmd, str) or cmd not in canvases.COMMANDS or not isinstance(params, (dict, type(None))):
+            return self._send(400, {"error": 'bad request: {"ws", "cmd": a canvas command, "params": {...}}'})
+        try:
+            found = self._canvas_ws(body.get("ws"), viewer)
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        if not found:
+            return self._send(404, CANVAS_404)
+        params = dict(params or {})
+        params.pop("project", None)  # the workspace is `ws`, checked above
+        code, out = self._canvas_call(viewer, found[0], found[1], cmd, params)
+        return self._send(code, out)
 
     def _person_get(self, path, person):
         """The only reads an invited person gets, each bound to their workspaces."""
@@ -3404,6 +3522,8 @@ class Handler(BaseHTTPRequestHandler):
                 chats = [_for_person(c) for c in chat_store.list_meta()
                          if rooms.room_of_chat(c, ids, spaces) == room["id"] and rooms.chat_visible(c, room, person)]
                 return self._send(200, {"chats": chats})
+            if path == "/api/canvases" or path.startswith(("/api/canvases/", "/api/lists/")):
+                return self._canvas_get(path, person)
             if path.startswith("/api/chats/"):
                 rec = chat_store.load(path[len("/api/chats/"):])
                 if _person_can_read(rec, person, projects):
@@ -3434,6 +3554,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._people_post(path, body, person)
             if path in ("/api/rooms", "/api/rooms/delete"):
                 return self._rooms_post(path, body, person)
+            if path == "/api/canvases":
+                return self._canvas_post(body, person)
             if path.startswith("/api/chats/") and path.endswith("/react"):
                 chat_id = path[len("/api/chats/"):-len("/react")]
                 if not _person_can_read(chat_store.load(chat_id), person, db.tree()):
@@ -4560,6 +4682,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/me":
                 return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner", "deployment": DEPLOYMENT})
+            if path == "/api/canvases" or path.startswith(("/api/canvases/", "/api/lists/")):
+                return self._canvas_get(path, OWNER)
             if path in ("/api/people", "/api/sharing"):
                 if path == "/api/sharing":
                     return self._send(200, {"public_url": people.public_url(ROOT)})
@@ -4758,6 +4882,10 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
                 return self._people_post(path, body, OWNER)
+            if path == "/api/canvases":
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._canvas_post(body, OWNER)
             if path == "/api/sharing":
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})

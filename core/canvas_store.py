@@ -333,6 +333,26 @@ def drop_room_pins(root: Path, ws: str, room_id: str) -> None:
             set_pins(root, ws, cur)
 
 
+def move_room_pins(root: Path, ws: str, old_id: str, new_id: str) -> None:
+    """A renamed room keeps its pins: a later room under the old name starts empty."""
+    with pins_lock(root, ws):
+        cur = pins(root, ws)
+        moved = cur.pop(old_id, None)
+        if moved is None:
+            return
+        cur[new_id] = cur.get(new_id, []) + [c for c in moved if c not in cur.get(new_id, [])]
+        set_pins(root, ws, cur)
+
+
+def updated(root: Path, ws: str, file_id: str) -> str | None:
+    """When a canvas or list file last changed (UTC ISO), or None."""
+    try:
+        ts = _path(root, ws, file_id).stat().st_mtime
+    except (OSError, ValueError, LookupError):
+        return None
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds")
+
+
 def templates(root: Path, ws: str) -> list[dict]:
     out = []
     for p in sorted(_SHIPPED.glob("*.json")):

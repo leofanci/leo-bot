@@ -637,6 +637,7 @@ const KIND_META = {
   memo: ["doc", "Memos", "Memo"], experiment: ["flask", "Experiments", "Experiment"], doc: ["book", "Docs", "Doc"],
   roadmap: ["map", "Roadmap", "Roadmap"], plan: ["route", "Go-to-market", "Go-to-market plan"],
   content: ["calendar", "Content", "Content plan"], brief: ["compose", "Post briefs", "Post brief"], voice: ["mic", "Voice", "Voice"],
+  canvas: ["layers", "Canvases", "Canvas"],
 };
 const VIEW_LABEL = { content: "Content", files: "Files", team: "Team", approvals: "Approvals", folders: "Linked folders", calendar: "Calendar", needs: "Today", operations: "Operations" };
 const profileName = slug => _TREE.flatMap(p => p.profiles).find(x => x.slug === slug)?.name || slug;

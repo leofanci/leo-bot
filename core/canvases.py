@@ -137,6 +137,10 @@ class Stale(Refused):
     pass
 
 
+class NotFound(Refused):
+    """Missing, or not visible to this actor: one answer for both (no existence leak)."""
+
+
 class NeedsApproval(Refused):
     def __init__(self, msg: str, hold_id: str):
         super().__init__(msg)
@@ -167,10 +171,10 @@ def _title(v, what: str = "title") -> str:
 def _check_ws(root: Path, ws: str, actor: Actor) -> None:
     if ws == bots.HQ:
         if actor.kind != "owner":
-            raise Refused("HQ canvases are the owner's only")
+            raise NotFound("HQ canvases are the owner's only")
         return
     if not isinstance(ws, str) or not _WS_RE.match(ws) or not (Path(root) / "projects" / ws).is_dir():
-        raise Refused(f"unknown workspace: {ws!r}")
+        raise NotFound(f"unknown workspace: {ws!r}")
 
 
 def _check_actor(actor: Actor) -> None:
@@ -186,7 +190,7 @@ def _check_person(root: Path, ws: str, actor: Actor) -> None:
         return
     rec = people.get(root, actor.id)
     if not rec or ws not in (rec.get("ws") or {}):
-        raise Refused(f"unknown workspace: {ws!r}")
+        raise NotFound(f"unknown workspace: {ws!r}")
 
 
 def _team(root: Path, ws: str, team):
@@ -450,12 +454,12 @@ class _Run:
         try:
             return cs.read(self.root, self.ws, fid)
         except LookupError:
-            raise Refused(f"no such canvas or list: {fid}") from None
+            raise NotFound(f"no such canvas or list: {fid}") from None
 
     def canvas(self, cid: str, write: bool) -> dict:
         if not _private(self.actor) and cid not in visible_canvas_ids(
                 self.root, self.ws, self.actor, self._team_obj):
-            raise Refused(f"no such canvas or list: {cid}")
+            raise NotFound(f"no such canvas or list: {cid}")
         doc = self.read(cid)
         if write and not _private(self.actor) and doc.get("coworkers") == "view":
             raise Refused("this canvas is view-only for coworkers")
@@ -477,7 +481,7 @@ class _Run:
         if not _private(self.actor) and lid not in self.visible_lists(write):
             if write and lid in self.visible_lists(False):
                 raise Refused("this list is view-only for coworkers")
-            raise Refused(f"no such canvas or list: {lid}")
+            raise NotFound(f"no such canvas or list: {lid}")
         return self.read(lid)
 
     def mutate(self, fid: str, fn, access) -> dict:
@@ -499,11 +503,11 @@ class _Run:
         ws, local = rooms.split_id(rid)
         room = rooms.get_room(rid, self.team(), self.root) if ws == self.ws else None
         if not room:
-            raise Refused(f"no such room: {rid!r}")
+            raise NotFound(f"no such room: {rid!r}")
         a = self.actor
         if a.kind == "person" and (room.get("kind") == "dm" or not rooms.can_see(
                 room, {"kind": "person", "id": a.id})):
-            raise Refused(f"no such room: {rid!r}")
+            raise NotFound(f"no such room: {rid!r}")
         if a.kind == "bot" and a.shared and rid != a.room:
             raise Refused("a shared thread pins only into its own room")
         return rid
@@ -644,7 +648,7 @@ class _Run:
                 ldoc = self.read(lid)
                 if not _private(self.actor) and ldoc.get("created_by") != self.tag \
                         and lid not in self.visible_lists(False):
-                    raise Refused(f"no such canvas or list: {lid}")
+                    raise NotFound(f"no such canvas or list: {lid}")
                 b["list"] = lid
             elif spec.get("columns"):
                 doc = {"title": _title(spec.get("title") or "List"),
@@ -669,7 +673,7 @@ class _Run:
         for i, it in enumerate(items or []):
             if it.get("id") == iid:
                 return i, it
-        raise Refused(f"no such {what}: {iid}")
+        raise NotFound(f"no such {what}: {iid}")
 
 
 def _cell_error(col: dict, v) -> str | None:
@@ -915,7 +919,7 @@ def _create_canvas(r: _Run) -> dict:
     if tid:
         tpl = next((t for t in _templates(r) if t.get("id") == tid), None)
         if tpl is None:
-            raise Refused(f"no such template: {tid!r}")
+            raise NotFound(f"no such template: {tid!r}")
         specs = list(tpl.get("blocks") or []) + specs
         if not title:
             title, title_outside = tpl.get("title"), bool(tpl.get("outside"))
@@ -1405,7 +1409,7 @@ def _trust(r: _Run) -> dict:
                 it["outside"] = False
                 paths.append(path)
         if scope is not None and not any(p == scope for p, _ in _items_of(doc)):
-            raise Refused(f"no such item: {scope}")
+            raise NotFound(f"no such item: {scope}")
         return [{"op": "trust", "kind": "trust", "target": fid + (f"/{scope}" if scope else ""),
                  "before": {"labels": paths}, "after": None}], {}
     return r.mutate(fid, fn, r.read)
@@ -1414,9 +1418,11 @@ def _trust(r: _Run) -> dict:
 def _undo(r: _Run) -> dict:
     fid = _fid_of(r)
     cid = r.ident("change", "change")
+    if not _private(r.actor):  # a history it cannot see answers like a missing one
+        r.canvas(fid, write=False) if cs.valid("canvas", fid) else r.lst(fid, write=False)
     entry = next((e for e in cs.history(r.root, r.ws, fid) if e.get("id") == cid), None)
     if entry is None:
-        raise Refused(f"no such change: {cid}")
+        raise NotFound(f"no such change: {cid}")
     if r.actor.kind != "owner" and entry.get("by") != r.tag:
         raise Refused("you can undo only your own changes")
     kind = entry.get("kind")
