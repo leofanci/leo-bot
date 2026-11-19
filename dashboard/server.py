@@ -1419,6 +1419,16 @@ def _canvas_token_ctx(*, ws, bot, job, s_, sess, room, shared, turn, gated, send
             "readonly": bool(getattr(s_, "readonly", False)), "sender": sender}
 
 
+def _canvases_seen(ws, room, bot_id, team=None):
+    """The canvas ids a shared thread in `room` may see (its room's pins): its deliverable cards
+    name no other canvas. Fails closed (none)."""
+    try:
+        actor = canvases.Actor(kind="bot", id=bot_id, shared=True, room=(room or {}).get("id"))
+        return set(canvases.visible_canvas_ids(ROOT, ws, actor, team))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def _canvas_job_refusal(ctx, cmd):
     """Why a scheduled job's canvas write must wait, or None. The same rules osctl applies, held
     here so a caller that skips osctl (or its environment) meets them too: only Auto writes, an
@@ -4488,7 +4498,8 @@ class Handler(BaseHTTPRequestHandler):
                     if job:
                         live["status"] = "waiting"
             if files_before is not None:
-                handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
+                handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts(),
+                                              canvases_seen=_canvases_seen(ws, room, bot_id, team) if shared else None)
                 if handed:
                     msgs[last]["deliverables"] = handed
                     emit({"deliverables": handed, "msg": last})

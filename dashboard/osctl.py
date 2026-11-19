@@ -1201,8 +1201,12 @@ CANVAS_FILE_REFUSAL = "canvases and lists are read with get-canvas and get-list"
 
 
 def _refuse_canvas_path(rel):
-    """A canvas or list file read raw would hand a bot labeled text with no label."""
-    if {"canvases", "lists"} & set(rel.lower().split("/")[:-1]):
+    """A canvas or list file read raw would hand a bot labeled text with no label: anything under
+    projects/<ws>/canvases|lists/ or team/canvases|lists/ (the store's own folders only)."""
+    parts = rel.lower().split("/")
+    store = {"canvases", "lists"}
+    if (parts[0] == "projects" and len(parts) > 3 and parts[2] in store) or (
+            parts[0] == "team" and len(parts) > 2 and parts[1] in store):
         raise fileops.ActionError(CANVAS_FILE_REFUSAL)
 
 

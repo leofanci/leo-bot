@@ -78,6 +78,9 @@ COLUMNS_MAX = 50
 ROWS_MAX = 5_000
 BATCH_MAX = 500
 ITEMS_MAX = 500
+OPTIONS_MAX = 100   # select options per column
+OPTION_MAX = 60     # characters per select option
+SELECT_SHOWN_MAX = 40  # a labeled select value an ungated engine still sees
 VIEW_MAX = 2_000
 PAGE_DEFAULT = 100
 PAGE_MAX = 500
@@ -588,6 +591,10 @@ class _Run:
                 opts = c.get("options") or []
                 if not isinstance(opts, list) or not all(isinstance(o, str) for o in opts):
                     raise Invalid("select options: a list of strings")
+                if len(opts) > OPTIONS_MAX:
+                    raise Invalid(f"select options: max {OPTIONS_MAX}")
+                if any(len(o.strip()) > OPTION_MAX for o in opts):
+                    raise Invalid(f"select option: max {OPTION_MAX} characters")
                 col["options"] = [_title(o, "option") for o in opts]
             keys.add(key)
             out.append(col)
@@ -748,8 +755,8 @@ def _cell_safe(col: dict, v, known: set) -> bool:
     t = col.get("type")
     if v is None:
         return True
-    if t == "select":
-        return isinstance(v, str) and v in (col.get("options") or [])
+    if t == "select":  # options are free text too: only a short one is shown
+        return isinstance(v, str) and v in (col.get("options") or []) and len(v) <= SELECT_SHOWN_MAX
     if t == "person":
         return v in known
     return t in _KEEP_COLS and _cell_error(col, v) is None
@@ -800,7 +807,8 @@ def _label_doc(doc: dict, out: dict, gated: bool) -> bool:
     if not gated:
         out["title"] = HIDDEN
         if "columns" in out:
-            out["columns"] = [{**c, "label": HIDDEN} for c in out["columns"]]
+            out["columns"] = [{**c, "label": HIDDEN, **({"options": HIDDEN} if "options" in c else {})}
+                              for c in out["columns"]]
     return True
 
 
@@ -933,6 +941,9 @@ def _list_templates(r: _Run) -> dict:
     return {"templates": out}
 
 
+_HISTORY_SHOWN = frozenset({"op", "kind", "target", "by", "job", "at", "id", "undid", "pos"})
+
+
 def _list_history(r: _Run) -> dict:
     fid = r.p.get("id")
     if cs.valid("canvas", fid):
@@ -944,8 +955,8 @@ def _list_history(r: _Run) -> dict:
     else:
         raise Invalid("--id: not a canvas or list id")
     entries = cs.history(r.root, r.ws, fid)
-    if r.actor.kind != "owner":
-        entries = [{k: v for k, v in e.items() if k not in ("before", "after")} for e in entries]
+    if r.actor.kind != "owner":  # who did what, never the values (cells, text, cleared cells)
+        entries = [{k: v for k, v in e.items() if k in _HISTORY_SHOWN} for e in entries]
     limit = min(_int(r.p.get("limit", PAGE_DEFAULT), "limit"), PAGE_MAX)
     return {"id": fid, "entries": entries[-limit:] if limit > 0 else []}
 

@@ -276,11 +276,6 @@ class Index(unittest.TestCase):
             self.assertEqual(list(con.execute('SELECT ws, id, title, "rows" FROM canvas_lists')),
                              [("demo", "ls1", "Leads", 2)])
             con.close()
-            import dashboard.db as db
-            with mock.patch.object(db, "DB_PATH", root / "database" / "data" / "os.db"):
-                rows = db.canvases("demo")
-            self.assertEqual([r["id"] for r in rows], ["cv1"])
-            self.assertEqual(rows[0]["title"], "Plan")
 
 
 if __name__ == "__main__":

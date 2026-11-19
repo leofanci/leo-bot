@@ -41,7 +41,7 @@ def _work_roots(root, ws):
 
 # The core/canvas_store.py layout under canvases/ and lists/ (lock and temp files are skipped above).
 _CANVAS_LAYOUT = {
-    "canvases": re.compile(r"^(?:cv\d{1,6}\.json|pins\.json|holds\.json|\.trash/cv\d{1,6}\.json"
+    "canvases": re.compile(r"^(?:cv\d{1,6}\.json|pins\.json|\.trash/cv\d{1,6}\.json"
                            r"|templates/(?:\.trash/)?tp\d{1,6}\.json|history/(?:cv|tp)\d{1,6}(?:\.1)?\.jsonl)$"),
     "lists": re.compile(r"^(?:ls\d{1,6}\.json|\.trash/ls\d{1,6}\.json|history/ls\d{1,6}(?:\.1)?\.jsonl)$"),
 }

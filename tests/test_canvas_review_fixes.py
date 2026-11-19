@@ -225,5 +225,49 @@ class TestTrashPins(Base):
         self.assertEqual(list((self.root / "projects").rglob("*78*")), [])
 
 
+class TestMinors(Base):
+    def test_ungated_labeled_list_hides_options_and_long_select_values(self):  # M1
+        long = "x" * 60
+        cols = [{"key": "name", "label": "Name", "type": "text"},
+                {"key": "stage", "label": "Stage", "type": "select", "options": ["new", long]}]
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.d(P1, "create-list", title="Theirs", columns=cols)["id"]
+        self.d(P1, "add-block", id=c, blocks={"type": "list", "list": lid})
+        a = self.d(P1, "add-row", id=lid, cells={"name": "a", "stage": "new"})["row"]
+        b = self.d(P1, "add-row", id=lid, cells={"name": "b", "stage": long})["row"]
+        out = self.d(bot(gated=False), "get-list", id=lid)
+        stage = next(x for x in out["columns"] if x["key"] == "stage")
+        self.assertEqual(stage["options"], cv.HIDDEN)
+        rows = {r["id"]: r["cells"] for r in out["rows"]}
+        self.assertEqual(rows[a]["stage"], "new")
+        self.assertEqual(rows[b]["stage"], cv.HIDDEN)
+        self.assertNotIn(long, str(out))
+        gated = self.d(bot(), "get-list", id=lid)  # a gated engine reads the labeled text
+        self.assertIn(long, str(gated))
+
+    def test_select_options_are_bounded_on_write(self):  # M1
+        with self.assertRaises(Invalid):
+            self.d(OWNER, "create-list", title="L", columns=[
+                {"label": "S", "type": "select", "options": [f"o{i}" for i in range(cv.OPTIONS_MAX + 1)]}])
+        with self.assertRaises(Invalid):
+            self.d(OWNER, "create-list", title="L", columns=[
+                {"label": "S", "type": "select", "options": ["x" * (cv.OPTION_MAX + 1)]}])
+
+    def test_list_history_never_hands_non_owners_cell_values(self):  # M2
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.lst(OWNER, c)
+        self.d(OWNER, "add-row", id=lid, cells={"name": "a", "notes": "secret words"})
+        self.d(OWNER, "update-list", id=lid, columns=[
+            {"key": "name", "label": "Name", "type": "text"},
+            {"key": "notes", "label": "Notes", "type": "number"}])
+        self.assertIn("cleared", cs.history(self.root, "demo", lid)[-1])
+        for actor in (P1, bot()):
+            out = self.d(actor, "list-history", id=lid)
+            self.assertNotIn("secret words", str(out))
+            for e in out["entries"]:
+                self.assertLessEqual(set(e), {"op", "kind", "target", "by", "job", "at", "id", "undid", "pos"})
+        self.assertIn("secret words", str(self.d(OWNER, "list-history", id=lid)))
+
+
 if __name__ == "__main__":
     unittest.main()

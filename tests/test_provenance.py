@@ -104,5 +104,12 @@ class Labels(unittest.TestCase):
                           "projects/demo/canvases/sub/cv1.json", "projects/demo/lists/x.json"])
 
 
+class CanvasLayout(unittest.TestCase):
+    def test_holds_live_in_team_not_beside_canvases(self):  # M6
+        self.assertTrue(provenance._labeled_per_item("projects/demo/canvases/pins.json"))
+        self.assertTrue(provenance._labeled_per_item("projects/demo/canvases/cv1.json"))
+        self.assertFalse(provenance._labeled_per_item("projects/demo/canvases/holds.json"))
+
+
 if __name__ == "__main__":
     unittest.main()

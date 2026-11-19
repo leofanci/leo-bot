@@ -226,6 +226,23 @@ class Walls(Base):
                 self.assertFalse(out["ok"], path)
                 self.assertIn("get-canvas and get-list", out["error"], (path, ws))
 
+    def test_read_file_allows_other_folders_named_lists_or_canvases(self):  # M4
+        f = self.root / "projects" / "demo" / "docs" / "lists" / "plan.md"
+        f.parent.mkdir(parents=True)
+        f.write_text("plan")
+        g = self.root / "projects" / "demo" / "notes" / "canvases" / "idea.md"
+        g.parent.mkdir(parents=True)
+        g.write_text("idea")
+        for path, text in (("projects/demo/docs/lists/plan.md", "plan"),
+                           ("projects/demo/notes/canvases/idea.md", "idea")):
+            out, _ = run(["read-file", "--path", path], env={"LEOBOT_WORKSPACE": "demo"})
+            self.assertTrue(out["ok"], (path, out))
+            self.assertEqual(out["content"], text)
+        for path in ("projects/demo/canvases/history/cv1.jsonl", "projects/demo/lists/.trash/ls1.json",
+                     "PROJECTS/demo/Canvases/cv1.json"):
+            out, _ = run(["read-file", "--path", path], env={"LEOBOT_WORKSPACE": "demo"})
+            self.assertFalse(out["ok"], path)
+
 
 if __name__ == "__main__":
     unittest.main()

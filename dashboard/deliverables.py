@@ -14,7 +14,7 @@ card to scroll to, or None), updated, profile (for post links), post (the post
 id, for a single brief)}. Content plans and briefs open the Content view, focused
 on the profile's card or the post's row. A canvas (canvases/cvN.json) opens at
 #/canvas/<id>; a changed list is the card of the first canvas embedding it, and a
-list no canvas embeds is none. Canvas history, trash, pins and templates are not
+list no canvas embeds is none. A shared thread's cards name only canvases its room shows. Canvas history, trash, pins and templates are not
 deliverables.
 """
 import json
@@ -79,22 +79,26 @@ def _canvas_card(base, cid):
             "link": f"#/canvas/{cid}", "focus": None}
 
 
-def _embedding_canvas(base, lid):
-    """The first canvas (lowest number) with a block embedding list `lid`, or None."""
+def _embedding_canvas(base, lid, seen=None):
+    """The first canvas (lowest number) with a block embedding list `lid`, or None. `seen`: the
+    canvases the reader may see (None: all)."""
     found = []
     for f in (base / "canvases").glob("cv*.json"):
         m = _CANVAS_FILE.match(f.name)
         if m:
             found.append((int(m.group(1)[2:]), m.group(1), f))
     for _, cid, f in sorted(found):
+        if seen is not None and cid not in seen:
+            continue
         blocks = _read_json(f).get("blocks")
         if any(isinstance(b, dict) and b.get("list") == lid for b in (blocks if isinstance(blocks, list) else ())):
             return cid
     return None
 
 
-def describe(root, slug, rel, reg=None, mtime=None, names=None):
-    """One file → its deliverable, or None when it isn't one."""
+def describe(root, slug, rel, reg=None, mtime=None, names=None, canvases_seen=None):
+    """One file → its deliverable, or None when it isn't one. `canvases_seen`: the canvas ids the
+    reader may see (a shared thread: its room's); None for the owner (all)."""
     base = _project_dir(root, slug)
     names = names or {}
     name = lambda s: names.get(s) or _title(s)  # noqa: E731
@@ -144,9 +148,10 @@ def describe(root, slug, rel, reg=None, mtime=None, names=None):
             item = {"key": f"voice:{prof}", "kind": "voice", "label": f"Voice & brief spec: {name(prof)}",
                     "link": f"#/profile/{prof}/setup", "focus": None, "profile": prof}
     elif len(parts) == 2 and parts[0] == "canvases" and _CANVAS_FILE.match(parts[1]):
-        item = _canvas_card(base, parts[1][:-5])
+        cid = parts[1][:-5]
+        item = _canvas_card(base, cid) if canvases_seen is None or cid in canvases_seen else None
     elif len(parts) == 2 and parts[0] == "lists" and _LIST_FILE.match(parts[1]):
-        cid = _embedding_canvas(base, parts[1][:-5])
+        cid = _embedding_canvas(base, parts[1][:-5], canvases_seen)
         item = _canvas_card(base, cid) if cid else None
     if item:
         item["updated"] = mtime
@@ -182,14 +187,14 @@ def _collapse(items, names=None, reg=None):
     return out
 
 
-def changed(root, slug, before, projects, posts):
-    """Deliverables created or modified since `before` (a snapshot)."""
+def changed(root, slug, before, projects, posts, canvases_seen=None):
+    """Deliverables created or modified since `before` (a snapshot). `canvases_seen`: see describe."""
     after = snapshot(root, slug)
     rels = [r for r, t in after.items() if before.get(r) != t]
     if not rels:
         return []
     reg, names = _registry(projects, posts, root), _names(projects, slug)
-    items = [describe(root, slug, r, reg, after[r], names) for r in sorted(rels)]
+    items = [describe(root, slug, r, reg, after[r], names, canvases_seen) for r in sorted(rels)]
     return _collapse([i for i in items if i], names, reg)
 
 

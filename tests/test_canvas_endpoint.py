@@ -492,6 +492,18 @@ class TrashPurge(Base):
         self.assertIn("target=_canvas_trash_loop", inspect.getsource(server.main))
 
 
+class SharedCards(Base):
+    def test_canvases_seen_is_the_rooms_pins(self):  # M3
+        rooms.save_topic("demo", "launch", ["research"], "research", self.root, private=True, people=["p1"])
+        owner = cv.Actor("owner")
+        shown = cv.dispatch(self.root, "demo", owner, "create-canvas", {"title": "A", "pin": "demo/t-launch"})["id"]
+        cv.dispatch(self.root, "demo", owner, "create-canvas", {"title": "B"})
+        room = {"id": "demo/t-launch"}
+        self.assertEqual(server._canvases_seen("demo", room, "research"), {shown})
+        self.assertEqual(server._canvases_seen("demo", None, "research"), set())
+        self.assertEqual(server._canvases_seen("hq", room, "research"), set())
+
+
 def request_owner(path, body):
     h = server.Handler.__new__(server.Handler)
     out = {}
