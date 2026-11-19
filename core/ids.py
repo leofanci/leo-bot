@@ -519,6 +519,8 @@ class IdRegistry:
                         reg._bind(lk_prod(pslug2), cid)
 
                 # Canvases and lists: the number is the file's own (cv3.json is cv3), never renumbered.
+                # Labeled by id only: a title may be a coworker's words or name a page a reader
+                # cannot see, and this catalog reaches every bot unlabeled (get-id-catalog).
                 from core import canvas_store as _cs
                 for _pfx, _kind, _child, _ckind in (("cv", "canvas", "bk", "block"),
                                                     ("ls", "list", "rw", "row")):
@@ -528,7 +530,7 @@ class IdRegistry:
                         except LookupError:
                             continue
                         _cid = f"{pr_id}.{_fid}"
-                        reg._add(_cid, _doc.get("title") or _fid, kind=_kind, parent=pr_id,
+                        reg._add(_cid, _fid, kind=_kind, parent=pr_id,
                                  ref={"project": pslug, _kind: _fid})
                         _seen: set[str] = set()
                         for _it in (_doc.get("blocks") if _pfx == "cv" else _doc.get("rows")) or []:

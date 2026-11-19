@@ -47,6 +47,27 @@ class TestIds(unittest.TestCase):
                 self.assertIn(cid, reg.by_id)
             self.assertIn("pr1.cv1.bk1", reg.by_id)
 
+    def test_canvas_titles_never_in_the_catalog(self):
+        """I5: a canvas or list title (a coworker's words, an unpinned page) is never a label:
+        the catalog reaches shared threads and ungated engines unlabeled."""
+        tree = [{"slug": "demo", "name": "Demo", "profiles": [], "products": []}]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for sub, name, body in (("canvases", "cv3", {"id": "cv3", "title": "Secret canvas title",
+                                                         "blocks": [{"id": "bk1", "title": "Block words"}]}),
+                                    ("lists", "ls2", {"id": "ls2", "title": "Secret list title",
+                                                      "rows": [{"id": "rw1"}]})):
+                d = root / "projects" / "demo" / sub
+                d.mkdir(parents=True)
+                (d / f"{name}.json").write_text(json.dumps(body))
+            entries = build_catalog(tree, root=root, posts=[])
+            text = json.dumps(entries)
+            for words in ("Secret canvas title", "Secret list title", "Block words"):
+                self.assertNotIn(words, text)
+            reg = build_id_registry(tree, [], root=root)
+            self.assertEqual(reg.resolve("pr1.cv3")["label"], "cv3")
+            self.assertEqual(reg.resolve("pr1.ls2")["label"], "ls2")
+
     def test_canvas_duplicate_child_ids_skipped(self):
         tree = [{"slug": "demo", "name": "Demo", "profiles": [], "products": []}]
         with tempfile.TemporaryDirectory() as tmp:

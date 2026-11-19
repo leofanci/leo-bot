@@ -244,6 +244,22 @@ class T(unittest.TestCase):
         self.assertEqual(out["section"]["section"], "pricing")
         self.assertTrue(out["section"]["empty"])
 
+    def test_shared_thread_catalog_leaves_out_canvases(self):
+        """I5: a shared thread sees no canvas or list ids it was not shown in its room."""
+        run(["create-project", "--slug", "acme", "--name", "Acme"])
+        cdir = self.root / "projects" / "acme" / "canvases"
+        cdir.mkdir(parents=True)
+        (cdir / "cv1.json").write_text(json.dumps({"id": "cv1", "title": "Hidden page", "blocks": []}))
+        _, out = run(["get-id-catalog"])
+        self.assertIn("pr1.cv1", {e["id"] for e in out["entries"]})
+        self.assertNotIn("Hidden page", json.dumps(out))
+        with mock.patch.dict("os.environ", {"LEOBOT_WORKSPACE": "acme", "LEOBOT_SHARED": "1"}):
+            _, out = run(["get-id-catalog"])
+            self.assertNotIn("pr1.cv1", {e["id"] for e in out["entries"]})
+            _, out = run(["resolve-id", "--id", "pr1.cv1"])
+            self.assertNotIn("entry", out)
+            self.assertNotIn("Hidden page", json.dumps(out))
+
     def test_section_artifact_creates_sync_ids(self):
         run(["create-project", "--slug", "acme", "--name", "Acme"])
         c, out = run(["create-intake", "--project", "acme"])
