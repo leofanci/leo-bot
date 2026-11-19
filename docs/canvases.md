@@ -24,13 +24,13 @@ Files are truth; the database index is derived. Workspace data lives under:
 - `projects/<ws>/canvases/pins.json`: channel pins, in tab order.
 - `projects/<ws>/canvases/history/` and `projects/<ws>/lists/history/`: append-only change logs, rotating at 2 MB.
 - `projects/<ws>/canvases/templates/`: saved layouts.
-- `projects/<ws>/canvases/.trash/` and `projects/<ws>/lists/.trash/`: deleted objects, retained for 30 days.
+- `projects/<ws>/canvases/.trash/` and `projects/<ws>/lists/.trash/`: deleted objects, retained for 30 days. The server removes older ones, with their history, at start and once a day. A removed canvas, list or template number is never given out again.
 
 HQ uses `team/` instead of `projects/<ws>/`. Each block, checklist item and row records its original `created_by`, last writer `by`, timestamp `at`, item version `v` and outside-content label. Permissions use the creator, never the last writer.
 
 Writes take a per-file lock. Dashboard writes send the document `version` they read and, for item edits, its `item_version`. Concurrent edits to different items can merge; a changed target returns HTTP 409. The UI reloads, says `Changed by someone else: reloaded`, and keeps text and cell drafts for an explicit retry. A draft retains the version editing started from, even if a background reload completes during editing.
 
-History records actor, operation, target and before/after values. A job also records its job id. Use the History drawer's Undo button for an individual change. The owner can undo any change, including a canvas or list deletion. Coworkers and private bots can undo their own changes only. History rotates at 2 MB, retaining one previous file.
+History records actor, operation, target and before/after values. A job also records its job id. Use the History drawer's Undo button for an individual change. The owner can undo any change, including a canvas or list deletion. A deleted canvas leaves every channel it was pinned in; undoing the delete pins it back. Coworkers and private bots can undo their own changes only. History rotates at 2 MB, retaining one previous file.
 
 Canonical references nest under the project: `pr1.cv1`, `pr1.cv1.bk2`, `pr1.ls1`, `pr1.ls1.rw4`. Use `get-id-catalog` and `resolve-id` to look them up.
 

@@ -126,7 +126,6 @@ class TestCanvasStore(unittest.TestCase):
             cs.read(self.root, "demo", "cv1")
         with self.assertRaises(LookupError):
             cs.to_trash(self.root, "demo", "cv9")
-        self.assertFalse((cs.base(self.root, "demo") / "canvases" / "cv9.json.lock").exists())
 
     def test_shipped_templates_load(self):
         ts = cs.templates(self.root, "demo")
@@ -205,14 +204,89 @@ class TestCanvasStore(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cs.write(self.root, "demo", d)
 
-    def test_trash_and_purge_remove_lock_files(self):
+    def test_lock_files_are_never_unlinked(self):
+        """A waiter on an unlinked lock file and a newcomer on its replacement would both enter:
+        lock files stay (empty) through trash, restore and purge."""
+        self._make("demo", "cv1")
+        cdir = self.root / "projects" / "demo" / "canvases"
+        lock = cdir / "cv1.json.lock"
+        ino = lock.stat().st_ino
+        cs.to_trash(self.root, "demo", "cv1")
+        cs.from_trash(self.root, "demo", "cv1")
+        cs.to_trash(self.root, "demo", "cv1")
+        os.utime(cdir / ".trash" / "cv1.json", (0, 0))
+        self.assertEqual(cs.purge_trash(self.root, "demo"), ["cv1"])
+        self.assertEqual(lock.stat().st_ino, ino)
+        self.assertEqual(lock.stat().st_size, 0)
+        self.assertFalse(hasattr(cs, "_drop_lock"))
+
+    def test_no_lock_file_for_a_missing_id(self):
+        with self.assertRaises(LookupError):
+            cs.to_trash(self.root, "demo", "cv9")
+        with self.assertRaises(LookupError):
+            cs.from_trash(self.root, "demo", "cv9")
+        self.assertEqual(list((self.root / "projects").rglob("*.lock")), [])
+
+    def test_purged_ids_are_never_reused(self):
+        self._make("demo", "cv1")
+        made = cs.create(self.root, "demo", "cv", _doc(""))
+        self.assertEqual(made["id"], "cv2")
+        cs.to_trash(self.root, "demo", "cv2")
+        os.utime(cs.base(self.root, "demo") / "canvases" / ".trash" / "cv2.json", (0, 0))
+        cs.purge_trash(self.root, "demo")
+        self.assertEqual(cs.create(self.root, "demo", "cv", _doc(""))["id"], "cv3")
+        lid = cs.create(self.root, "demo", "ls", {"title": "L", "rows": []})["id"]
+        cs.to_trash(self.root, "demo", lid)
+        os.utime(cs.base(self.root, "demo") / "lists" / ".trash" / f"{lid}.json", (0, 0))
+        cs.purge_trash(self.root, "demo")
+        self.assertEqual(cs.create(self.root, "demo", "ls", {"title": "L", "rows": []})["id"], "ls2")
+
+    def test_purge_drops_the_purged_canvas_pins(self):
+        self._make("demo", "cv1")
+        self._make("demo", "cv2")
+        cs.set_pins(self.root, "demo", {"demo/general": ["cv1", "cv2"], "demo/t-x": ["cv1"]})
+        cs.to_trash(self.root, "demo", "cv1")
+        os.utime(cs.base(self.root, "demo") / "canvases" / ".trash" / "cv1.json", (0, 0))
+        cs.purge_trash(self.root, "demo")
+        self.assertEqual(cs.pins(self.root, "demo"), {"demo/general": ["cv2"]})
+
+    def test_from_trash_refuses_a_taken_live_path_and_a_race(self):
         self._make("demo", "cv1")
         cs.to_trash(self.root, "demo", "cv1")
-        cdir = self.root / "projects" / "demo" / "canvases"
-        self.assertFalse((cdir / "cv1.json.lock").exists())
-        os.utime(cdir / ".trash" / "cv1.json", (0, 0))
-        cs.purge_trash(self.root, "demo")
-        self.assertEqual([p.name for p in cdir.rglob("cv1*")], [])
+        self._make("demo", "cv1")  # the live path is taken again
+        with self.assertRaises(FileExistsError):
+            cs.from_trash(self.root, "demo", "cv1")
+        self.assertTrue((cs.base(self.root, "demo") / "canvases" / ".trash" / "cv1.json").exists())
+        # two restores at once: one lands, the other is a plain LookupError
+        self._make("demo", "cv5")
+        cs.to_trash(self.root, "demo", "cv5")
+        errs = []
+
+        def restore():
+            try:
+                cs.from_trash(self.root, "demo", "cv5")
+            except LookupError as e:
+                errs.append(e)
+        with cs.locked(self.root, "demo", "cv5"):
+            ts = [threading.Thread(target=restore) for _ in range(2)]
+            for t in ts:
+                t.start()
+            time.sleep(0.2)
+        for t in ts:
+            t.join(5)
+        self.assertEqual(len(errs), 1)
+        self.assertEqual(cs.read(self.root, "demo", "cv5")["id"], "cv5")
+
+    def test_purge_all_workspaces_and_hq(self):
+        for ws in ("demo", "acme", bots.HQ):
+            (self.root / "projects" / "acme").mkdir(parents=True, exist_ok=True)
+            (self.root / "projects" / "demo").mkdir(parents=True, exist_ok=True)
+            self._make(ws, "cv1")
+            cs.to_trash(self.root, ws, "cv1")
+            os.utime(cs.base(self.root, ws) / "canvases" / ".trash" / "cv1.json", (0, 0))
+        (self.root / "projects" / "Bad Name").mkdir()
+        gone = cs.purge_all(self.root)
+        self.assertEqual(gone, {"acme": ["cv1"], "demo": ["cv1"], bots.HQ: ["cv1"]})
 
     def test_saved_templates_not_shipped(self):
         with cs.locked(self.root, "demo", "tp1"):

@@ -175,5 +175,55 @@ class TestUndoAddRows(Base):
         self.assertEqual(cs.read(self.root, "demo", lid)["rows"], [])
 
 
+class TestTrashPins(Base):
+    """I6, M8: a deleted canvas leaves its rooms (undo puts it back), purged ids never come
+    back, and an embed of a purged list never shows a newer list."""
+
+    def test_delete_unpins_and_undo_repins(self):
+        c = self.canvas(OWNER, pin=ROOM)
+        self.d(OWNER, "pin-canvas", id=c, room="demo/general")
+        ch = self.d(OWNER, "delete-canvas", id=c)["change"]
+        self.assertEqual(cs.pins(self.root, "demo"), {})
+        self.d(OWNER, "undo", id=c, change=ch)
+        self.assertEqual(cs.pins(self.root, "demo"), {ROOM: [c], "demo/general": [c]})
+        self.assertIn(c, cv.visible_canvas_ids(self.root, "demo", P1, self.team))
+
+    def test_purge_then_create_is_a_new_unpinned_canvas(self):
+        import os
+        c = self.canvas(OWNER, pin=ROOM)
+        self.d(OWNER, "delete-canvas", id=c)
+        os.utime(cs.base(self.root, "demo") / "canvases" / ".trash" / f"{c}.json", (0, 0))
+        self.assertEqual(cs.purge_all(self.root), {"demo": [c]})
+        new = self.canvas(OWNER)
+        self.assertNotEqual(new, c)
+        self.assertEqual(cs.pins(self.root, "demo"), {})
+        self.assertEqual(cv.visible_canvas_ids(self.root, "demo", P1, self.team), [])
+
+    def test_embed_of_a_purged_list_stays_deleted(self):
+        import os
+        c = self.canvas(OWNER, pin=ROOM)
+        lid = self.lst(OWNER, c)
+        with cs.locked(self.root, "demo", lid):  # trashed outside the rules (an older trash)
+            cs.to_trash(self.root, "demo", lid, held=True)
+        os.utime(cs.base(self.root, "demo") / "lists" / ".trash" / f"{lid}.json", (0, 0))
+        cs.purge_all(self.root)
+        other = self.d(OWNER, "create-list", title="Private", columns=[{"label": "Secret"}])["id"]
+        self.assertNotEqual(other, lid)
+        out = self.d(P1, "get-canvas", id=c)
+        lb = next(b for b in out["blocks"] if b["type"] == "list")
+        self.assertEqual(lb["summary"], {"deleted": True})
+        self.assertNotIn("Private", str(out))
+
+    def test_missing_ids_take_no_lock_file(self):
+        with self.assertRaises(Refused):
+            self.d(OWNER, "update-row", id="ls77", row="rw1", cells={})
+        with self.assertRaises(Refused):
+            self.d(OWNER, "delete-canvas", id="cv77")
+        with self.assertRaises(Refused):
+            self.d(OWNER, "delete-list", id="ls78")
+        self.assertEqual(list((self.root / "projects").rglob("*77*")), [])
+        self.assertEqual(list((self.root / "projects").rglob("*78*")), [])
+
+
 if __name__ == "__main__":
     unittest.main()

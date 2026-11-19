@@ -469,6 +469,29 @@ class JobRules(Base):
         self.assertEqual(ctx["job_mode_now"](), "approval")
 
 
+class TrashPurge(Base):
+    """I6: the server purges old canvas trash at start and daily, in every workspace and HQ."""
+
+    def test_loop_purges_each_round_and_survives_errors(self):
+        waits = []
+        with mock.patch.object(server.canvas_store, "purge_all", side_effect=[OSError("disk"), {}]) as purge, \
+                mock.patch("traceback.print_exc"):
+            server._canvas_trash_loop(sleep=waits.append, rounds=2)
+        self.assertEqual([c.args for c in purge.call_args_list], [(self.root,), (self.root,)])
+        self.assertEqual(waits, [server.CANVAS_TRASH_EVERY])
+
+    def test_loop_removes_old_trash(self):
+        cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Old"})["id"]
+        cv.dispatch(self.root, "demo", cv.Actor("owner"), "delete-canvas", {"id": cid})
+        os.utime(cs.base(self.root, "demo") / "canvases" / ".trash" / f"{cid}.json", (0, 0))
+        server._canvas_trash_loop(sleep=lambda s: None, rounds=1)
+        self.assertEqual(list((cs.base(self.root, "demo") / "canvases" / ".trash").glob("cv*")), [])
+
+    def test_main_starts_the_loop(self):
+        import inspect
+        self.assertIn("target=_canvas_trash_loop", inspect.getsource(server.main))
+
+
 def request_owner(path, body):
     h = server.Handler.__new__(server.Handler)
     out = {}

@@ -516,8 +516,14 @@ class _Run:
             raise NotFound(f"no such canvas or list: {lid}")
         return self.read(lid)
 
+    def exists(self, fid: str) -> None:
+        """Before any lock: a missing file is NotFound and leaves no lock file behind."""
+        if not cs.exists(self.root, self.ws, fid):
+            raise NotFound(f"no such canvas or list: {fid}")
+
     def mutate(self, fid: str, fn, access) -> dict:
         """Lock, re-read, run fn(doc) -> (entries, extra), write, log history."""
+        self.exists(fid)
         with cs.locked(self.root, self.ws, fid):
             doc = access(fid)
             self.new_v = int(doc.get("version") or 0) + 1
@@ -1145,7 +1151,10 @@ def _delete_block(r: _Run) -> dict:
 
 
 def _delete_canvas(r: _Run) -> dict:
+    """Trash a canvas and take it out of every room (its trash entry keeps the rooms: undo
+    pins it back). A purged canvas is gone from every room, and its id is never reused."""
     cid = r.ident("canvas")
+    r.exists(cid)
     with cs.locked(r.root, r.ws, cid):
         doc = r.canvas(cid, write=True)
         r.fresh_meta(doc)
@@ -1156,8 +1165,14 @@ def _delete_canvas(r: _Run) -> dict:
             cs.to_trash(r.root, r.ws, cid, held=True)
         except LookupError:  # gone meanwhile (a trash race)
             raise NotFound(f"no such canvas or list: {cid}") from None
+        with cs.pins_lock(r.root, r.ws):
+            pins = cs.pins(r.root, r.ws)
+            was = [rid for rid, ids in pins.items() if cid in ids]
+            if was:
+                left = {rid: [c for c in ids if c != cid] for rid, ids in pins.items()}
+                cs.set_pins(r.root, r.ws, {rid: ids for rid, ids in left.items() if ids})
         change = r.log(cid, {"op": "delete-canvas", "kind": "trash", "target": cid,
-                             "before": None, "after": None})
+                             "before": {"pins": was} if was else None, "after": None})
     return {"id": cid, "version": doc.get("version"), "change": change}
 
 
@@ -1369,6 +1384,7 @@ def _reembed(r: _Run, cid: str, removed: list) -> None:
 
 def _delete_list(r: _Run) -> dict:
     lid = r.ident("list")
+    r.exists(lid)
     with cs.locked(r.root, r.ws, lid):
         doc = r.lst(lid, write=True)
         r.fresh_meta(doc)
@@ -1476,10 +1492,18 @@ def _undo(r: _Run) -> dict:
             cs.from_trash(r.root, r.ws, fid)
         except LookupError:
             raise Refused(f"{fid} is not in the trash") from None
+        except FileExistsError:
+            raise Refused(f"{fid} exists again: it cannot be restored over") from None
         except OSError as e:
             raise Refused(f"cannot restore {fid}: {e}") from None
         head["kind"] = "untrash"
-        change = r.log(fid, {**head, "before": None, "after": None})
+        back = []
+        for rid in (entry.get("before") or {}).get("pins") or []:
+            ws_, _ = rooms.split_id(rid)
+            if ws_ == r.ws and rooms.get_room(rid, r.team(), r.root):  # a room deleted since stays gone
+                r.set_pin(fid, rid, True)
+                back.append(rid)
+        change = r.log(fid, {**head, "before": None, "after": {"pins": back} if back else None})
         return {"id": fid, "version": r.read(fid).get("version"), "change": change}
     if kind == "create":
         # undoing a create deletes it, under the same delete rules for this actor
@@ -1578,6 +1602,8 @@ def _undo(r: _Run) -> dict:
         return [{**head, "before": cur, "after": copy.deepcopy(restored)}], {}
     out = r.mutate(fid, fn, access)
     for lid in made_list:  # the undone block had created its list: trash it unless used elsewhere
+        if not cs.exists(r.root, r.ws, lid):
+            continue
         with cs.locked(r.root, r.ws, lid):
             if _embedded_anywhere(r, lid):
                 continue

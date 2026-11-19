@@ -7,6 +7,10 @@ Layout under base(root, ws):
     canvases/.trash/               trashed files, purged after 30 days
     canvases/pins.json             {room id: [file ids]}
     lists/<lsN>.json               list (same history/.trash layout)
+    <dir>/.seq-<prefix>            highest number ever given: an id is never reused, even purged
+    <file>.lock                    an empty lock file per path, never unlinked: a waiter on an
+                                   unlinked lock file and a newcomer on its replacement would
+                                   both enter (they stay through trash, restore and purge)
 
 Every id is checked against a strict regex before any path is built.
 """
@@ -100,10 +104,31 @@ def _nums(d: Path, prefix: str) -> list[int]:
     return out
 
 
+def _seq_path(root: Path, ws: str, prefix: str) -> Path:
+    return _dir(root, ws, prefix) / f".seq-{prefix}"
+
+
+def _seq(root: Path, ws: str, prefix: str) -> int:
+    try:
+        return int(_seq_path(root, ws, prefix).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _bump_seq(root: Path, ws: str, prefix: str, n: int) -> None:
+    """Raise the high-water mark to `n` (never lowers it)."""
+    if n > _seq(root, ws, prefix):
+        _atomic_write(_seq_path(root, ws, prefix), f"{n}\n")
+
+
 def next_id(root: Path, ws: str, prefix: str) -> str:
     d = _dir(root, ws, prefix)
-    nums = _nums(d, prefix) + _nums(_trash_dir(root, ws, prefix), prefix)
+    nums = _nums(d, prefix) + _nums(_trash_dir(root, ws, prefix), prefix) + [_seq(root, ws, prefix)]
     return f"{prefix}{max(nums, default=0) + 1}"
+
+
+def exists(root: Path, ws: str, file_id: str) -> bool:
+    return _path(root, ws, file_id).is_file()
 
 
 def next_child_id(items: list[dict], prefix: str) -> str:
@@ -145,11 +170,6 @@ def _flock(target: Path):
 
 def locked(root: Path, ws: str, file_id: str):
     return _flock(_path(root, ws, file_id))
-
-
-def _drop_lock(target: Path) -> None:
-    with contextlib.suppress(OSError):
-        Path(f"{target}.lock").unlink()
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -216,7 +236,9 @@ def create(root: Path, ws: str, prefix: str, doc: dict) -> dict:
     with _flock(d / f".create-{prefix}"):
         doc["id"] = next_id(root, ws, prefix)
         doc["version"] = 0
-        return write(root, ws, doc)
+        out = write(root, ws, doc)
+        _bump_seq(root, ws, prefix, int(_file_id(doc["id"]).group(2)))
+        return out
 
 
 def _hist_path(root: Path, ws: str, file_id: str, rotated: bool = False) -> Path:
@@ -253,33 +275,38 @@ def history(root: Path, ws: str, file_id: str) -> list[dict]:
 
 
 def to_trash(root: Path, ws: str, file_id: str, *, held: bool = False) -> None:
-    """Move a file to .trash. `held`: the caller already holds `locked()` for it
-    (the lock file is then left in place for the caller to release)."""
+    """Move a file to .trash. `held`: the caller already holds `locked()` for it."""
     p = _path(root, ws, file_id)
+    if not held and not p.is_file():
+        raise LookupError(file_id)  # no lock file for an id that never existed
     td = _trash_dir(root, ws, _file_id(file_id).group(1))
     td.mkdir(parents=True, exist_ok=True)
     dest = td / p.name
-    try:
-        with contextlib.nullcontext() if held else locked(root, ws, file_id):
-            if not p.is_file():
-                raise LookupError(file_id)
-            os.replace(p, dest)
-            os.utime(dest, None)
-    finally:
-        if not held:
-            _drop_lock(p)
+    with contextlib.nullcontext() if held else locked(root, ws, file_id):
+        if not p.is_file():
+            raise LookupError(file_id)
+        os.replace(p, dest)
+        os.utime(dest, None)
 
 
 def from_trash(root: Path, ws: str, file_id: str) -> None:
+    """Restore a trashed file. LookupError: not in the trash (a concurrent restore took it);
+    FileExistsError: the live path is taken."""
     p = _path(root, ws, file_id)
     src = _trash_dir(root, ws, _file_id(file_id).group(1)) / p.name
     if not src.is_file():
-        raise LookupError(file_id)
+        raise LookupError(file_id)  # no lock file for an id that never existed
     with locked(root, ws, file_id):
+        if not src.is_file():
+            raise LookupError(file_id)
+        if p.exists():
+            raise FileExistsError(str(p))
         os.replace(src, p)
 
 
 def purge_trash(root: Path, ws: str, days: int = TRASH_DAYS, now: float | None = None) -> list[str]:
+    """Remove trashed files older than `days` with their history. Their numbers stay taken
+    (`.seq-<prefix>`) and a purged canvas leaves every room it was still pinned in."""
     now = time.time() if now is None else now
     gone: list[str] = []
     for prefix in ("cv", "ls", "tp"):
@@ -287,18 +314,50 @@ def purge_trash(root: Path, ws: str, days: int = TRASH_DAYS, now: float | None =
         if not td.is_dir():
             continue
         for f in sorted(td.glob(f"{prefix}*.json")):
-            if not _FILE_RE.match(f.stem) or now - f.stat().st_mtime < days * 86400:
+            m = _FILE_RE.match(f.stem)
+            if not m or m.group(1) != prefix:
                 continue
             with locked(root, ws, f.stem):
+                try:
+                    if now - f.stat().st_mtime < days * 86400:
+                        continue
+                except OSError:  # restored meanwhile
+                    continue
+                with _flock(_dir(root, ws, prefix) / f".create-{prefix}"):
+                    _bump_seq(root, ws, prefix, int(m.group(2)))
                 f.unlink()
                 hdir = _history_dir(root, ws, prefix)
                 for h in (hdir / f"{f.stem}.jsonl", hdir / f"{f.stem}.1.jsonl"):
                     with contextlib.suppress(OSError):
                         h.unlink()
-                    _drop_lock(h)
-            _drop_lock(_path(root, ws, f.stem))
             gone.append(f.stem)
+    cvs = [g for g in gone if g.startswith("cv")]
+    if cvs:
+        with pins_lock(root, ws):
+            cur = pins(root, ws)
+            left = {rid: [c for c in ids if c not in cvs] for rid, ids in cur.items()}
+            left = {rid: ids for rid, ids in left.items() if ids}
+            if left != cur:
+                set_pins(root, ws, left)
     return gone
+
+
+_WS_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def purge_all(root: Path, days: int = TRASH_DAYS, now: float | None = None) -> dict[str, list[str]]:
+    """purge_trash for every workspace and HQ: {ws: purged ids} (only those with any)."""
+    root = Path(root)
+    spaces = [bots.HQ]
+    pdir = root / "projects"
+    if pdir.is_dir():
+        spaces += sorted(d.name for d in pdir.iterdir() if d.is_dir() and _WS_RE.match(d.name))
+    out = {}
+    for ws in spaces:
+        gone = purge_trash(root, ws, days, now)
+        if gone:
+            out[ws] = gone
+    return out
 
 
 def _pins_path(root: Path, ws: str) -> Path:

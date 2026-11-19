@@ -420,6 +420,23 @@ def _update_check_loop(sleep=time.sleep, rounds=None) -> None:
             print(f"update check failed: {e}", file=sys.stderr)
 
 
+CANVAS_TRASH_EVERY = 24 * 3600
+
+
+def _canvas_trash_loop(sleep=time.sleep, rounds=None) -> None:
+    """Remove canvases, lists and templates trashed over 30 days ago (canvas_store.purge_all),
+    in every workspace and HQ: once at start, then daily. Never raises."""
+    n = 0
+    while rounds is None or n < rounds:
+        try:
+            canvas_store.purge_all(ROOT)
+        except Exception:  # noqa: BLE001 - the next day tries again
+            traceback.print_exc()
+        n += 1
+        if rounds is None or n < rounds:
+            sleep(CANVAS_TRASH_EVERY)
+
+
 def _start_update_checker():
     if not paths.is_installed():
         return None
@@ -5623,6 +5640,7 @@ def main():
         raise
     write_token_file()
     _start_update_checker()
+    threading.Thread(target=_canvas_trash_loop, name="canvas-trash", daemon=True).start()
     # No bot-mode browser child starts until the startup close (below) has finished: held before
     # anything that can reach POOL.get (jobs, the sweeper, requests) runs.
     browser_upstream.POOL.hold_starts()
