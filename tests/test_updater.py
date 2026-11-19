@@ -337,10 +337,12 @@ class ApplyTests(UpdaterBase):
     def test_main_channel_moves_to_origin_main(self):
         commit_version(self.work, "0.3.0", None)
         git(self.work, "push", "-q", self.origin.as_uri(), "main")
+        updater.save_settings({"channel": "main", "latest": self.head()})  # a check from before
         rc, out = self.call(updater.apply, channel="main")
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.head(), git(self.work, "rev-parse", "HEAD"))
         self.assertTrue(self.pre_backups()[0].startswith("pre-main-"))
+        self.assertFalse(updater.cached_available(updater.settings(), "0.3.0", self.head))  # doctor: no stale offer
 
     def untagged_main_at(self, ver):
         """The app on an untagged origin/main commit whose VERSION is `ver` (a main-channel
