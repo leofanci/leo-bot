@@ -36,12 +36,15 @@ redirect onto a site bound to the other mode is never read or typed on. Residual
 needs no typing (a one-click canned reply) is not detected, nor text in cross-origin
 frames or closed shadow roots.
 """
+import base64
 import copy
 import hashlib
 import json
 import math
+import os
 import re
 import threading
+import time
 import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -285,6 +288,95 @@ class Upstream:
 
 
 _BROWSER_LOCKS = {}
+LIVE = {}  # (ws, bot): last successful capture, never an engine or caller file path
+
+
+def live_frame(ws, bot, root=bots.ROOT):
+    """Cached bytes only, scoped to this data root, browser mode and workspace incarnation."""
+    with browser.LOCK:
+        epoch = browser.epochs(root).get(ws)
+        mode = browser.bot_setting(ws, bot, root)["mode"]
+        with _LOCK:
+            frame = LIVE.get((ws, bot))
+            if frame and (frame["root"], frame["epoch"], frame["mode"]) == (str(Path(root).resolve()), epoch, mode):
+                return dict(frame)
+            LIVE.pop((ws, bot), None)
+    return None
+
+
+SCREENSHOT_NAME = re.compile(r"screenshot-\d{1,20}\.(?:png|jpg)")
+
+
+def prune_screenshot(result, home=None):
+    """Remove the file the engine saved for a screenshot whose bytes already came back in the
+    reply. Only a default-named file in the engine's own folder (agent-browser 0.41.0
+    native/screenshot.rs get_screenshot_dir: <home>/.agent-browser/tmp/screenshots), never a
+    path elsewhere or a link. True when a file was removed."""
+    try:
+        content = result.get("content") or []
+        if not any(isinstance(c, dict) and c.get("type") == "image" for c in content):
+            return False
+        data = ((result.get("structuredContent") or {}).get("response") or {}).get("data") or {}
+        path = data.get("path")
+        if not isinstance(path, str) or not path:
+            return False
+        home = os.path.realpath(home or os.environ.get("HOME") or str(Path.home()))
+        folder = os.path.join(home, ".agent-browser", "tmp", "screenshots")
+        p = Path(path)
+        if not SCREENSHOT_NAME.fullmatch(p.name) or os.path.realpath(p.parent) != os.path.realpath(folder):
+            return False
+        if p.is_symlink() or not p.is_file():
+            return False
+        p.unlink()
+        return True
+    except (OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def _capture_live(upstream, rid, sid, ctx, root, mode):
+    """Best effort, inside the bot call's browser lock; never start a poller."""
+    if getattr(upstream, "owner", "owner") != "owner" or (
+            mode == "my_chrome" and ctx.get("runner_owner") not in (None, "owner")):
+        return  # A coworker's own Chrome is theirs: never shown to the owner.
+    names = ("agent_browser_screenshot", "agent_browser_get_url", "agent_browser_get_title")
+    schemas = _state(upstream)["schemas"]
+    if not all(n in schemas for n in names):
+        return  # No screenshot support was advertised by this upstream.
+    epoch = browser.epochs(root).get(ctx["ws"])
+    if epoch is None or getattr(upstream, "epoch", epoch) != epoch:
+        return
+    try:
+        # Only the keys the engine's own schema declares travel, as for every bot call.
+        shot, sid = _forward(upstream, names[0], _clean({"format": "png"}, schemas.get(names[0])), rid, sid, ctx)
+        if not _ok(shot):
+            return
+        if not getattr(upstream, "remote", False):
+            prune_screenshot(shot["result"])  # The bytes came back: no file left behind per capture.
+        image = next(c for c in shot["result"].get("content", [])
+                     if isinstance(c, dict) and c.get("type") == "image" and c.get("mimeType") == "image/png")
+        png = base64.b64decode(image["data"], validate=True)
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            return
+        metadata = []
+        for name in names[1:]:
+            reply, sid = _forward(upstream, name, {}, rid, sid, ctx)
+            if not _ok(reply):
+                return
+            metadata.append(next(c["text"] for c in reply["result"].get("content", [])
+                                 if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str)))
+        url, title = metadata
+        if _url_refusal(url, mode, root):
+            return
+        with browser.LOCK:
+            if browser.epochs(root).get(ctx["ws"]) != epoch or browser.bot_setting(
+                    ctx["ws"], ctx["bot"], root)["mode"] != mode:
+                return
+            with _LOCK:
+                LIVE[(ctx["ws"], ctx["bot"])] = {
+                    "png": png, "url": url, "title": title, "at": time.time(),
+                    "root": str(Path(root).resolve()), "epoch": epoch, "mode": mode}
+    except Exception:
+        pass  # A missing frame never changes the bot's result.
 
 
 def _state(upstream):
@@ -740,6 +832,8 @@ def _gate(frame, ctx, sid, upstream, root):
                                    no_plan=FIELD_NO_PLAN if from_field else NO_PLAN)
                 st["refs"] = {}
                 refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey) if _ok(reply) else None
+                if _ok(reply) and not refusal:
+                    _capture_live(upstream, rid, sid, ctx, root, mode)
                 return (_text(rid, refusal) if refusal else reply), sid
         before = dict(tt)
         field = _field_key(args.get("selector")) if name in TYPE_TOOLS else None
@@ -788,6 +882,8 @@ def _gate(frame, ctx, sid, upstream, root):
             refusal = _after_nav(upstream, st, mode, rid, sid, ctx, root, bkey)
             if refusal:
                 return _text(rid, refusal), sid
+        if _ok(reply) and name in NAV_TOOLS | COMMIT_TOOLS:
+            _capture_live(upstream, rid, sid, ctx, root, mode)
         return reply, sid
 
 

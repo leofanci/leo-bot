@@ -1506,6 +1506,32 @@ def _browser_upstream(ctx):
 
 _BROWSER_INSTALL = {"running": False, "last": None}  # Settings, Browser: one engine install at a time
 _BROWSER_INSTALL_LOCK = threading.Lock()
+_BROWSER_LIVE_REQUESTS = {}
+_BROWSER_LIVE_LOCK = threading.Lock()
+_BROWSER_RUNS = {}  # browser token -> currently executing model run, including scheduled jobs
+_BROWSER_RUNS_LOCK = threading.Lock()
+
+
+def _stop_browser_runs(ws=None, bot=None):
+    """Targeted (the owner's Stop on a browser block): every run of that bot. Untargeted (the
+    owner's chat Stop): the owner's own turns only, never a coworker's or a scheduled job."""
+    with _BROWSER_RUNS_LOCK:
+        runs = [r for r in _BROWSER_RUNS.values()
+                if (ws is None and not r["job"] and r.get("sender") == "owner")
+                or (ws is not None and (r["ws"], r["bot"]) == (ws, bot))]
+        for r in runs:
+            r["live"]["stopped"] = True
+            BROWSER_TOKENS.revoke(r["token"])
+        if ws is not None:
+            BROWSER_TOKENS.revoke_where(ws=ws, bot=bot)
+    for r in runs:
+        r["session"].close()
+    targets = {(r["ws"], r["bot"]) for r in runs}
+    if ws is not None:
+        targets.add((ws, bot))
+    for w, b in targets:
+        # Untargeted: a coworker's own lent Chrome of that bot stays theirs.
+        browser_upstream.POOL.stop_bot(w, b, ROOT, people=None if ws is not None else ("owner",))
 
 
 def _browser_install_run():
@@ -3146,6 +3172,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
+            browser_relay.live_frame(ws, bot_id, ROOT)  # Drop a frame from the previous mode now, even without a viewer.
             return self._send(200, _browser_view(ws))
         if path == "/api/browser/install":
             with _BROWSER_INSTALL_LOCK:
@@ -3176,6 +3203,29 @@ class Handler(BaseHTTPRequestHandler):
             except _AppRefused as e:
                 return self._send(409, {"ok": False, "error": str(e)})
         return self._send(404, {"error": "unknown endpoint"})
+
+    def _browser_live(self):
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            ws, bot = _browser_bot({"ws": (q.get("ws") or [None])[0], "bot": (q.get("bot") or [None])[0]})
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        now = time.monotonic()
+        key = (str(ROOT), ws, bot, bots.CEO)  # Owner cookie is the sole viewer identity in round one.
+        with _BROWSER_LIVE_LOCK:
+            for old, at in list(_BROWSER_LIVE_REQUESTS.items()):
+                if now - at >= 1:
+                    del _BROWSER_LIVE_REQUESTS[old]
+            if key in _BROWSER_LIVE_REQUESTS:
+                return self._send(429, {"error": "try again in one second"})
+            _BROWSER_LIVE_REQUESTS[key] = now
+        frame = browser_relay.live_frame(ws, bot, ROOT) or {}
+        setting = browser.bot_setting(ws, bot, ROOT)
+        live = setting["level"] != "off" and browser_upstream.POOL.is_live(ws, bot, setting["mode"], ROOT)
+        return self._send(200, {"url": frame.get("url", ""), "title": frame.get("title", ""),
+                                "at": frame.get("at"), "live": live,
+                                "image": "data:image/png;base64," + base64.b64encode(frame["png"]).decode()
+                                if frame else None})
 
     def _engines_post(self, path, body):
         """Settings, Engines: owner only (the caller checked)."""
@@ -3546,6 +3596,8 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/api/runners", "/api/runners/revoke"):
                 return self._runners_post(path, body, person["id"])
             if path == "/api/chat-stop":
+                if "ws" in body or "bot" in body:
+                    return self._send(403, {"error": "owner only"})
                 stop_person_chat(person["id"])
                 return self._send(200, {"ok": True})
             if path == "/api/chat-reset":  # new thread: drop their active session only
@@ -4075,8 +4127,19 @@ class Handler(BaseHTTPRequestHandler):
                 if kw.get("os_token"):  # osctl over the relay gets the same token (os_relay.env_for)
                     os_relay.TOKENS.update(kw["os_token"], **canvas_kw)
             try:
+                browser_token = kw.get("browser_token")
+                if browser_token:
+                    with _BROWSER_RUNS_LOCK:
+                        if BROWSER_TOKENS.lookup(browser_token) is None:
+                            live["stopped"] = True
+                            raise _RunFailed
+                        _BROWSER_RUNS[browser_token] = {
+                            "ws": ws, "bot": msg.get("bot"), "session": s_, "live": live,
+                            "job": bool(job), "token": browser_token, "sender": sender}
                 for kind, payload in s_.ask(prompt_, with_web=web_, model=model_, web_domains=web_domains,
                                             **kw, **gate_kw, **canvas_kw):
+                    if live.get("stopped"):
+                        break
                     if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
                         so_far = payload.get("cost")
                         if so_far is None:
@@ -4097,6 +4160,9 @@ class Handler(BaseHTTPRequestHandler):
                     elif kind == "done":
                         fin = payload or {}
             finally:
+                if kw.get("browser_token"):
+                    with _BROWSER_RUNS_LOCK:
+                        _BROWSER_RUNS.pop(kw["browser_token"], None)
                 if gate_kw:
                     taint.GATES.revoke(gate_kw["gate_token"])
                 if canvas_kw:
@@ -4665,6 +4731,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH, CANVAS_PATH):
             return self._send(405, {"error": "method not allowed"})  # no server-sent stream
+        if path == "/api/browser/live" and not self._authorized():
+            return self._send(403, {"error": "owner only"})
         if not self._authorized():
             person = None if self._valid_cookie() else self._person_authorized()
             if person and db.db_exists():
@@ -4743,6 +4811,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ws": ws, "files": files})
             if path == "/api/engines":
                 return self._send(200, _engines_view())
+            if path == "/api/browser/live":
+                return self._browser_live()
             if path == "/api/browser/settings":  # owner only (checked above)
                 ws = (parse_qs(urlparse(self.path).query).get("ws") or [None])[0]
                 try:
@@ -5383,6 +5453,13 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(data)
                 return self._send(200, {"path": fpath})
             if path == "/api/chat-stop":
+                if "ws" in body or "bot" in body:
+                    if not self._authorized(require_origin=True):
+                        return self._send(403, {"error": "forbidden"})
+                    ws, bot = _browser_bot(body)
+                    _stop_browser_runs(ws, bot)
+                    return self._send(200, {"ok": True})
+                _stop_browser_runs()
                 # Abort the in-flight turn (kills the claude subprocess so it
                 # stops consuming tokens) but KEEP the session so the next
                 # message resumes the same context. Unlike chat-reset.

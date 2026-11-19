@@ -91,6 +91,7 @@ class RunnerChromeUpstream(browser_relay.Upstream):
     It sticks to one lending runner; when another one takes over, the typed text is set aside
     (another computer's Chrome has nothing typed)."""
     mode = "my_chrome"
+    remote = True  # Its engine files are on the person's computer, never this one's.
     POLL = 0.5
 
     def __init__(self, ws, bot, root, owner, epoch, shared=False, hub=None):
