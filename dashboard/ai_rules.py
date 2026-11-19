@@ -155,7 +155,7 @@ DELIVERABLES = """## Deliverables → command
 | Content plan | `generate-plan --profile <p> --period "A to B"` (no `--dates` unless asked) |
 | Post brief / rewrite | `update-brief --id <post> --instruction "..."` · `generate-brief` · `revise-post` |
 | Timed activity | `get-busy --from <date>`, then `create-activity ... --time HH:MM` |
-Canvases/lists: `get-canvas`/`get-list` first, then `add-block`, `update-block`, `add-row`, `update-row` or another canvas cmd (`osctl -h`); changes and deletes pass `--version` as read; deletes/rewrites of others' text need APPROVAL.
+Canvases/lists: `get-canvas`/`get-list` first, then `add-block`/`update-block`/`add-row`/`update-row` or another cmd (`osctl -h`); edits pass `--version`; deletes/rewrites of others' text need APPROVAL.
 Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."""
 
 TEAM_TAGGING = """## Skills and saves
