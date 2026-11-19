@@ -3588,7 +3588,10 @@ class Handler(BaseHTTPRequestHandler):
             rows.append(row)
         seen = {c["id"] for c in rows}
         pins = [c for c in canvas_store.pins(ROOT, ws).get(room, []) if c in seen] if room else []
-        return self._send(200, {"ws": ws, "canvases": rows, "pins": pins})
+        extra = {}
+        if viewer.get("kind") == "owner" and not room:  # All canvases: deleted ones to restore
+            extra["trash"] = canvases.trashed_canvases(ROOT, ws)
+        return self._send(200, {"ws": ws, "canvases": rows, "pins": pins, **extra})
 
     def _canvas_post(self, body, viewer):
         """One write (or read) command; the actor comes from the cookie, never the body."""

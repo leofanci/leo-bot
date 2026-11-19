@@ -119,11 +119,12 @@
   const attrs = (h, pairs) => Object.entries(pairs)
     .map(([k, v]) => `data-${k}="${h.esc(v)}"`).join(" ");
 
-  function blockMenu(b, h) {
+  // `name`: the block's heading text, so each menu button says which block it acts on.
+  function blockMenu(b, h, name) {
     if (!h.canEdit) return "";
     const id = h.esc(b.id);
     return `<div class="cn-more cv-bmenu">
-      <button type="button" class="term-btn" data-cv-bmenu aria-haspopup="menu" aria-expanded="false" aria-label="Block actions">${h.icon("more")}</button>
+      <button type="button" class="term-btn" data-cv-bmenu aria-haspopup="menu" aria-expanded="false" aria-label="Actions for ${h.esc(name)}">${h.icon("more")}</button>
       <div class="menu" role="menu">
         <button type="button" role="menuitem" data-cv-move="up" data-bk="${id}">Move up</button>
         <button type="button" role="menuitem" data-cv-move="down" data-bk="${id}">Move down</button>
@@ -142,7 +143,7 @@
     const kindTag = title ? `<small class="cv-kind">${h.esc(kind)}</small>` : "";
     const who = b.by ? `<small class="cv-by">${h.esc(h.who ? h.who(b.by) : b.by)}</small>` : "";
     const tag = b.outside ? outsideTag(h, attrs(h, { bk: b.id })) : "";
-    return `<header class="cv-bhead"><h2 class="cv-btitle">${heading}</h2>${kindTag}${tag}${who}${blockMenu(b, h)}</header>`;
+    return `<header class="cv-bhead"><h2 class="cv-btitle">${heading}</h2>${kindTag}${tag}${who}${blockMenu(b, h, title || kind)}</header>`;
   }
 
   function textBlock(b, state, h) {
@@ -327,17 +328,18 @@
       const selected = bot.id === b.bot ? " selected" : "";
       return `<option value="${h.esc(bot.id)}"${selected}>${h.esc(bot.name)}</option>`;
     }).join("");
+    const name = (bots.find(bot => bot.id === b.bot) || {}).name || b.bot;
     const pick = h.canEdit && bots.length
       ? `<label class="cv-note">Bot <select class="cv-input" data-cv-browserbot="${h.esc(b.id)}">${options}</select></label>`
-      : `<span class="cv-note">Browser of ${h.esc(b.bot)}</span>`;
+      : `<span class="cv-note">Browser of ${h.esc(name)}</span>`;
     return `<div data-cv-browser="${h.esc(b.bot)}">
         <div class="cv-viewbar">${pick}<span class="cv-note" data-cv-browser-status role="status">Loading browser…</span>
-          <button type="button" class="btn sm" data-cv-stopbot="${h.esc(b.bot)}" aria-label="Stop ${h.esc(b.bot)} browsing" disabled>Stop</button></div>
+          <button type="button" class="btn sm" data-cv-stopbot="${h.esc(b.bot)}" aria-label="Stop ${h.esc(name)} browsing" disabled>Stop</button></div>
         <p class="cv-note" data-cv-browser-title hidden></p>
         <a class="cv-browser-url" data-cv-browser-url target="_blank" rel="noopener noreferrer" hidden></a>
-        <div class="cv-browser-frame"><img data-cv-browser-image alt="Latest screenshot from ${h.esc(b.bot)}" hidden>
+        <div class="cv-browser-frame"><img data-cv-browser-image alt="Latest screenshot from ${h.esc(name)}" hidden>
           <p class="cv-note" data-cv-browser-empty>No screenshot yet. It appears after this bot browses.</p></div>
-        <p class="cv-note" data-cv-browser-time>No screenshot captured yet.</p>
+        <p class="cv-note" data-cv-browser-time hidden></p>
         <p class="cv-note" data-cv-browser-error role="status" hidden></p></div>`;
   }
 
@@ -370,6 +372,15 @@
   };
   const historyLabel = e => OP_LABEL[e && e.op] || (e && e.op) || "Change";
 
+  // Where focus goes once a new block of `type` is drawn: its first control. Text opens its
+  // editor elsewhere. Null for an id the server would never give.
+  function addFocus(type, bk) {
+    if (!/^bk\d{1,6}$/.test(String(bk))) return null;
+    return { checklist: `.cv-block[data-bk="${bk}"] [data-cv-additem] input`,
+      files: `.cv-block[data-bk="${bk}"] [data-cv-addpath] input`, list: `[data-cv-addrow="${bk}"]`,
+      view: `[data-cv-route="${bk}"]`, browser: `[data-cv-browserbot="${bk}"]` }[type] || null;
+  }
+
   // True while the viewer is mid-edit: a background reload waits for the edit to end.
   // `typing`: a focused field in the canvas holds unsaved text.
   function busy(state, typing) {
@@ -390,6 +401,6 @@
   // A pinned-tabs list's identity: the tabs redraw only when it changes.
   const pinSig = list => JSON.stringify((list || []).map(c => [c.id, c.title]));
 
-  return { busy, rights, pinSig, COLUMN_TYPES, COLUMN_LABEL, TYPE_LABEL, safeHref, fileRoute, moveParams, parseCell,
+  return { busy, rights, pinSig, addFocus, COLUMN_TYPES, COLUMN_LABEL, TYPE_LABEL, safeHref, fileRoute, moveParams, parseCell,
     cellHtml, blockHtml, browserImage, registerBlock, historyLabel };
 });

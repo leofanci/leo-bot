@@ -51,6 +51,31 @@ class CanvasApi(Base):
         self.assertEqual(data["pins"], [a])
         self.assertEqual([c["id"] for c in data["canvases"]], [a])
 
+    def test_owner_list_shows_deleted_canvases_and_restores_them(self):
+        a = self.make("Alpha", pin="acme/general")
+        self.make("Beta")
+        code, data = self.run_cmd("owner", "delete-canvas", {"id": a, "version": self.version(a)})
+        self.assertEqual(code, 200, data)
+        code, data = self.owner("GET", "/api/canvases?ws=acme")
+        self.assertEqual([c["id"] for c in data["canvases"]], ["cv2"])
+        [gone] = data["trash"]
+        self.assertEqual((gone["id"], gone["title"]), (a, "Alpha"))
+        self.assertTrue(gone["deleted"])
+        code, out = self.run_cmd("owner", "undo", {"id": a, "change": gone["change"]})
+        self.assertEqual(code, 200, out)
+        code, data = self.owner("GET", "/api/canvases?ws=acme")
+        self.assertEqual(data["trash"], [])
+        self.assertEqual({c["id"]: c["pinned_in"] for c in data["canvases"]}[a], ["acme/general"])
+
+    def test_deleted_canvases_are_listed_for_the_owner_only(self):
+        a = self.make("Alpha", pin="acme/general")
+        self.run_cmd("owner", "delete-canvas", {"id": a, "version": self.version(a)})
+        code, data = self.person("GET", "/api/canvases?ws=acme")
+        self.assertEqual(code, 200)
+        self.assertNotIn("trash", data)
+        code, data = self.owner("GET", "/api/canvases?ws=acme&room=acme/general")
+        self.assertNotIn("trash", data)  # a room's tabs never carry the trash
+
     def test_person_sees_only_canvases_pinned_in_rooms_they_see(self):
         rooms.save_topic("acme", "deals", ["cos"], "cos", self.root, private=True, people=[self.pid])
         rooms.save_topic("acme", "secret", ["cos"], "cos", self.root, private=True, people=["p-other"])

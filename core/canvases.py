@@ -230,6 +230,19 @@ def _person_rooms(root: Path, ws: str, actor: Actor, team) -> list[dict]:
             if r.get("kind") != "dm" and rooms.can_see(r, viewer)]
 
 
+
+def trashed_canvases(root, ws) -> list[dict]:
+    """Deleted canvases the owner can restore, newest first: {id, title, deleted, change}.
+    `change` is the history id of the delete; undo of it restores the canvas and its pins."""
+    out = []
+    for e in cs.trashed(Path(root), ws, "cv"):
+        dels = [h for h in cs.history(Path(root), ws, e["id"])
+                if h.get("op") == "delete-canvas" and h.get("kind") == "trash"]
+        if dels:
+            out.append({"id": e["id"], "title": e["doc"].get("title") or e["id"],
+                        "deleted": dels[-1].get("at"), "change": dels[-1].get("id")})
+    return out
+
 def visible_canvas_ids(root, ws, actor, team=None) -> list[str]:
     root = Path(root)
     _check_actor(actor)

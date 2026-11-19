@@ -949,6 +949,7 @@ img.logo-preview[src="/logo.svg"]{border:0;background:transparent}
 .cv-danger{color:var(--ui-color-danger)}
 .cv-outside{background:var(--ui-color-warning-soft);color:var(--ui-color-warning)}
 .cv-note{color:var(--ui-color-text-muted);font-size:var(--ui-type-label)}
+.cv-subhead{margin:var(--ui-space-4) 0 var(--ui-space-1);font:var(--ui-weight-semibold) var(--ui-type-control)/var(--ui-line-control) var(--ui-font-sans);color:var(--ui-color-text)}
 .cv-actions{display:flex;align-items:center;gap:var(--ui-space-2);flex-wrap:wrap;margin-top:var(--ui-space-2)}
 .cv-inline{display:flex;align-items:center;gap:var(--ui-space-2);flex-wrap:wrap;margin-top:var(--ui-space-2)}
 .cv-input{min-height:var(--ui-control-dense);padding:var(--ui-space-1) var(--ui-space-2);border:1px solid var(--ui-color-border);border-radius:var(--ui-radius-control);background:var(--ui-color-surface);font-size:var(--ui-type-control)}

@@ -897,5 +897,71 @@ class TestCanvasViewHelpers(unittest.TestCase):
         self.assertNotIn("<x>", got)
 
 
+
+class TestCanvasLiveCheck(unittest.TestCase):
+    """Defects found driving the real app (keyboard, restore, coworker console, browser block)."""
+
+    def run_js(self, expr):
+        return TestCanvasViewHelpers.run_js(self, expr)
+
+    def test_all_canvases_lists_deleted_ones_with_restore(self):
+        sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
+        body = _body(sec, "async function renderCanvasList(")
+        self.assertIn("d.trash", body)
+        self.assertIn("data-cv-restore", body)
+        self.assertIn('canvasCmd("undo", { id: b.dataset.cvRestore, change: b.dataset.change })', body)
+        self.assertIn("esc(c.title)", body)
+
+    def test_rename_save_returns_focus_to_rename(self):
+        sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
+        i = sec.index('f.matches("[data-cv-renameform]")')
+        branch = sec[i:sec.index("root.onkeydown", i)]
+        self.assertIn('st.focusNext = "[data-cv-rename]"', branch)
+
+    def test_new_block_takes_focus(self):
+        self.assertEqual(self.run_js('CV.addFocus("checklist","bk2")'), '.cv-block[data-bk="bk2"] [data-cv-additem] input')
+        self.assertEqual(self.run_js('CV.addFocus("files","bk5")'), '.cv-block[data-bk="bk5"] [data-cv-addpath] input')
+        self.assertEqual(self.run_js('CV.addFocus("list","bk4")'), '[data-cv-addrow="bk4"]')
+        self.assertEqual(self.run_js('CV.addFocus("view","bk6")'), '[data-cv-route="bk6"]')
+        self.assertEqual(self.run_js('CV.addFocus("browser","bk7")'), '[data-cv-browserbot="bk7"]')
+        self.assertIsNone(self.run_js('CV.addFocus("list","bk4\\"]")'))
+        sec = _canvas_section(APP_JS.read_text(encoding="utf-8"))
+        i = sec.index('if (t.matches("[data-cv-add]")) {')
+        branch = sec[i:sec.index('if (t.matches("[data-cv-rename]"))', i)]
+        self.assertIn("CanvasView.addFocus(d.cvAdd, out.block)", branch)
+
+    def test_block_menu_names_its_block(self):
+        got = self.run_js('CV.blockHtml({id:"bk1",type:"text",md:"x",v:1},{},H)')
+        self.assertIn('aria-label="Actions for Text"', got)
+        got = self.run_js('CV.blockHtml({id:"bk3",type:"list",list:"ls1",v:1},{lists:{bk3:{id:"ls1",title:"<b>Leads</b>",'
+                          'version:1,total:0,columns:[],rows:[]}}},H)')
+        self.assertIn('aria-label="Actions for &lt;b&gt;Leads&lt;/b&gt;"', got)
+
+    def test_browser_block_names_the_bot_once(self):
+        h = 'Object.assign({},H,{bots:[{id:"research",name:"Research Analyst"}]})'
+        got = self.run_js(f'CV.blockHtml({{id:"bk6",type:"browser",bot:"research",v:1}},{{}},{h})')
+        self.assertIn('aria-label="Stop Research Analyst browsing"', got)
+        self.assertIn('alt="Latest screenshot from Research Analyst"', got)
+        self.assertIn("data-cv-browser-time hidden", got)  # the empty note already says it
+        paint = _body(APP_JS.read_text(encoding="utf-8"), "function paintCanvasBrowsers(")
+        self.assertIn("? \"Last screenshot: \" + captured.toLocaleString() : \"\").hidden = !captured", paint)
+
+    def test_coworker_never_asks_for_hq_or_dm_tabs(self):
+        pins = _body(APP_JS.read_text(encoding="utf-8"), "function canvasPins(")
+        self.assertIn('if (isPerson() && (room.startsWith("hq/") || roomById(room)?.kind === "dm")) return [];', pins)
+        self.assertLess(pins.index("isPerson()"), pins.index("api("))
+
+    def test_escape_in_a_menu_returns_focus_and_arrows_move(self):
+        js = APP_JS.read_text(encoding="utf-8")
+        keys = _body(js, "function menuKeys(")
+        self.assertIn("m._btn?.focus()", keys)
+        for k in ('"ArrowDown"', '"ArrowUp"', '"Home"', '"End"'):
+            self.assertIn(k, keys)
+        self.assertIn('document.addEventListener("keydown", menuKeys);', js)
+
+    def test_page_scales_on_phones(self):
+        html = APP_HTML.read_text(encoding="utf-8")
+        self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', html)
+
 if __name__ == "__main__":
     unittest.main()

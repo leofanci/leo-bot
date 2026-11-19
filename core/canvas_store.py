@@ -143,6 +143,20 @@ def list_ids(root: Path, ws: str, prefix: str) -> list[str]:
     return [f"{prefix}{n}" for n in sorted(_nums(_dir(root, ws, prefix), prefix))]
 
 
+
+def trashed(root: Path, ws: str, prefix: str) -> list[dict]:
+    """Files in the trash, newest first: {id, doc, at} (at: when it went there, epoch seconds).
+    An unreadable file is skipped."""
+    td = _trash_dir(root, ws, prefix)
+    out = []
+    for n in _nums(td, prefix):
+        f = td / f"{prefix}{n}.json"
+        try:
+            out.append({"id": f.stem, "doc": json.loads(f.read_text(encoding="utf-8")), "at": f.stat().st_mtime})
+        except (OSError, ValueError):
+            continue
+    return sorted(out, key=lambda e: -e["at"])
+
 def read(root: Path, ws: str, file_id: str) -> dict:
     p = _path(root, ws, file_id)
     try:

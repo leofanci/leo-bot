@@ -549,7 +549,28 @@ function toggleMenu(btn, menu){
   menu.classList.add("open"); menu._btn = btn; btn.setAttribute("aria-expanded", "true");
 }
 document.addEventListener("click", closeMenus);
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeMenus(); });
+// Keyboard in an open menu: Escape closes it and puts focus back on its button; the arrows,
+// Home and End move between its items (role="menu" promises that).
+function menuKeys(e){
+  const m = document.querySelector(".menu.open");
+  if (!m) return;
+  if (e.key === "Escape") {
+    const inside = m.contains(document.activeElement) || m._btn === document.activeElement;
+    closeMenus();
+    if (inside) m._btn?.focus();
+    return;
+  }
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+  if (!m.contains(document.activeElement) && m._btn !== document.activeElement) return;
+  const items = [...m.querySelectorAll("button:not([disabled]), a[href]")].filter(x => x.offsetParent !== null);
+  if (!items.length) return;
+  e.preventDefault();
+  const at = items.indexOf(document.activeElement);
+  const next = e.key === "Home" ? 0 : e.key === "End" ? items.length - 1
+    : e.key === "ArrowDown" ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1);
+  items[next].focus();
+}
+document.addEventListener("keydown", menuKeys);
 
 async function renderRail(){
   const skillsP = _SKILLS.length ? Promise.resolve(_SKILLS) : api("/api/skills-index").catch(() => []);
@@ -962,6 +983,8 @@ function stopCanvasBrowserWatch(){
 // Canvases pinned in `room`, in pin order; null while the first load runs.
 // Loads in the background and redraws the canvas bar when it lands.
 function canvasPins(room){
+  // A coworker has no HQ and no tabs in DM rooms: the server answers 404, so never ask.
+  if (isPerson() && (room.startsWith("hq/") || roomById(room)?.kind === "dm")) return [];
   const key = `${_WS}|${room}`;
   const have = CANVAS_PINS.key === key ? CANVAS_PINS.list : null;
   if (have && Date.now() - CANVAS_PINS.at < 30000) return have;
@@ -1314,9 +1337,9 @@ function paintCanvasBrowsers(root, st){
     if (source && image.getAttribute("src") !== source) image.src = source;
     else if (!source) image.removeAttribute("src");
     box.querySelector("[data-cv-browser-empty]").hidden = !!source;
-    const captured = Number.isFinite(frame?.at) ? new Date(frame.at * 1000) : null;
-    text("[data-cv-browser-time]", captured && Number.isFinite(captured.getTime())
-      ? "Last screenshot: " + captured.toLocaleString() : "No screenshot captured yet.");
+    let captured = Number.isFinite(frame?.at) ? new Date(frame.at * 1000) : null;
+    if (captured && !Number.isFinite(captured.getTime())) captured = null;
+    text("[data-cv-browser-time]", captured ? "Last screenshot: " + captured.toLocaleString() : "").hidden = !captured;
     text("[data-cv-browser-error]", error).hidden = !error;
     const stop = text("[data-cv-stopbot]", stopping ? "Stopping…" : "Stop");
     stop.disabled = stopping || !frame?.live;
@@ -1615,6 +1638,9 @@ function wireCanvas(root, h){
       if (d.cvAdd === "text" && out.block && CANVAS === st && cvBlock(out.block)) {
         st.editing[out.block] = { version: st.doc.version, item_version: cvBlock(out.block).v };
         st.drafts[out.block] = ""; st.focusNext = `[data-cv-md="${CSS.escape(out.block)}"]`; drawCanvas();
+      } else if (out.block && CANVAS === st && cvBlock(out.block)) {
+        const sel = CanvasView.addFocus(d.cvAdd, out.block);   // the new block's first control
+        if (sel) $("#main").querySelector(sel)?.focus();
       }
       return;
     }
@@ -1716,7 +1742,7 @@ function wireCanvas(root, h){
       const title = f.elements.title.value.trim();
       if (!title) return;
       let stale = false;
-      if (await canvasCmd("update-canvas", { id: cv, version: st.renameVersion, title }, () => { stale = true; })) { st.renaming = false; st.renameDraft = null; refreshCanvasPins(); await reloadCanvas(); renderCanvasNav(); }
+      if (await canvasCmd("update-canvas", { id: cv, version: st.renameVersion, title }, () => { stale = true; })) { st.renaming = false; st.renameDraft = null; st.focusNext = "[data-cv-rename]"; refreshCanvasPins(); await reloadCanvas(); renderCanvasNav(); }
       else if (stale && st.renaming && st.doc) st.renameVersion = st.doc.version;
     }
   };
@@ -1790,10 +1816,23 @@ async function renderCanvasList(){
   const body = d.error ? `<div class="empty">Could not load canvases: ${esc(d.error)}</div>`
     : rows ? `<div class="cv-gridwrap"><table class="cv-grid cv-index"><thead><tr><th scope="col">Canvas</th><th scope="col">Pinned in</th><th scope="col">Updated</th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<div class="empty">No canvases yet. Use New canvas, or ask a bot to make one.</div>`;
+  // Deleted canvases (owner only, 30 days): Restore undoes the delete and pins them back.
+  const trash = (d.trash || []).map(c => `<tr><th scope="row">${esc(c.title)}</th><td>${esc(isoAge(c.deleted))}</td>
+      <td><button type="button" class="btn sm" data-cv-restore="${esc(c.id)}" data-change="${esc(c.change)}">Restore</button></td></tr>`).join("");
+  const deleted = trash ? `<h2 class="cv-subhead">Deleted</h2><p class="cv-note">Kept for 30 days, then removed.</p>
+      <div class="cv-gridwrap"><table class="cv-grid cv-index"><thead><tr><th scope="col">Canvas</th><th scope="col">Deleted</th><th scope="col"><span class="cv-sr">Restore</span></th></tr></thead><tbody>${trash}</tbody></table></div>` : "";
   $("#main").innerHTML = `<div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")}</div><h1 class="title">Canvases</h1></div>
       <div class="topbar-end"><button type="button" class="btn primary sm" id="cv-new">${icon("plus")} New canvas</button></div></div>
-    <div class="scroll">${body}</div>`;
+    <div class="scroll">${body}${deleted}</div>`;
   $("#cv-new").onclick = () => createCanvas(null);
+  $("#main").querySelectorAll("[data-cv-restore]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    if (await canvasCmd("undo", { id: b.dataset.cvRestore, change: b.dataset.change })) {
+      toast("Restored"); refreshCanvasPins();
+      return navigate("#/canvas/" + encodeURIComponent(b.dataset.cvRestore));
+    }
+    b.disabled = false;
+  });
 }
 // ── end canvases ─────────────────────────────────────────────────────────────
 
