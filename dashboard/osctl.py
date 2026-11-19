@@ -1291,7 +1291,10 @@ def _add_canvas_parsers(sub):
 
     ID = ("--id", {"required": True})
     ROOM = ("--room", {})
-    VERSION = ("--version", {"type": int, "help": "the version you read: refused if it changed since"})
+    VERSION = ("--version", {"type": int, "help": "the version you read (required to change or delete): "
+                                                  "refused if that item changed since"})
+    ITEM_VERSION = ("--item-version", {"type": int, "dest": "item_version",
+                                       "help": "the item's own v as read: refused if it moved"})
     PROJECT = ("--project", {})
 
     cmd("list-canvases", "Canvases of this workspace and the rooms they are pinned to",
@@ -1344,12 +1347,13 @@ def _add_canvas_parsers(sub):
         items = _json_arg(a.items_json, "--items-json")
         if items is not None:
             params["items"] = items
-        if a.version is not None:
-            params["version"] = a.version
+        for k in ("version", "item_version"):
+            if getattr(a, k, None) is not None:
+                params[k] = getattr(a, k)
         return params
 
     cmd("update-block", "Change one block (a checklist takes item operations in --items-json)",
-        [ID, ("--block", {"required": True}), VERSION] + block_flags, update_block)
+        [ID, ("--block", {"required": True}), VERSION, ITEM_VERSION] + block_flags, update_block)
 
     def move_block(a):
         if bool(a.after) == bool(a.first):
@@ -1364,8 +1368,8 @@ def _add_canvas_parsers(sub):
     cmd("move-block", "Move a block after another, or first",
         [ID, ("--block", {"required": True}), ("--after", {}),
          ("--first", {"action": "store_true"}), VERSION], move_block)
-    cmd("delete-block", "Delete one block", [ID, ("--block", {"required": True}), VERSION],
-        plain("id", "block", "version"))
+    cmd("delete-block", "Delete one block", [ID, ("--block", {"required": True}), VERSION, ITEM_VERSION],
+        plain("id", "block", "version", "item_version"))
     cmd("delete-canvas", "Delete a canvas", [ID, VERSION], plain("id", "version"))
     cmd("pin-canvas", "Show a canvas in a room", [ID, ("--room", {"required": True})], plain("id", "room"))
     cmd("unpin-canvas", "Take a canvas out of a room", [ID, ("--room", {"required": True})], plain("id", "room"))
@@ -1386,10 +1390,11 @@ def _add_canvas_parsers(sub):
     cmd("add-rows", "Add several rows in one call (max 500)",
         [ID, ("--rows-json", {"required": True, "dest": "rows_json"})], plain("id", "rows_json"))
     cmd("update-row", "Change cells of one row",
-        [ID, ("--row", {"required": True}), ("--cells-json", {"required": True, "dest": "cells_json"}), VERSION],
-        plain("id", "row", "cells_json", "version"))
-    cmd("delete-row", "Delete one row", [ID, ("--row", {"required": True}), VERSION],
-        plain("id", "row", "version"))
+        [ID, ("--row", {"required": True}), ("--cells-json", {"required": True, "dest": "cells_json"}), VERSION,
+         ITEM_VERSION],
+        plain("id", "row", "cells_json", "version", "item_version"))
+    cmd("delete-row", "Delete one row", [ID, ("--row", {"required": True}), VERSION, ITEM_VERSION],
+        plain("id", "row", "version", "item_version"))
     cmd("delete-list", "Delete a list (--force-unembed also removes it from canvases that show it)",
         [ID, ("--force-unembed", {"action": "store_true", "dest": "force_unembed"}), VERSION],
         plain("id", "force_unembed", "version"))

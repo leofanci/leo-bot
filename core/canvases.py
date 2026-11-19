@@ -44,7 +44,8 @@ another room only if they created it, and never pins or unpins a view-only canva
 Persons and shared-thread bots see shipped templates and their own saved ones. Shared-thread bots see canvases pinned in their own room;
 `coworkers: view` is read-only for them too, and they may rewrite or delete only items
 that they or a person in their thread created. A list an actor created may be embedded
-by that actor even before it is visible.
+by that actor even before it is visible; a list visible only through view-only canvases is never
+embedded by them (the embed would make it writable).
 
 Undo: the owner undoes anything; others only their own changes (shared threads never).
 Undo of a create deletes it under the actor's delete rules. Undo is refused when the
@@ -341,6 +342,8 @@ _SHARED_BLOCKED = {"delete-canvas", "delete-list", "update-canvas", "undo", "tru
 _VERSIONED = {"update-canvas", "add-block", "update-block", "move-block", "delete-block",
               "delete-canvas", "update-list", "add-row", "add-rows", "update-row",
               "delete-row", "delete-list"}
+# A bot's rewrite or delete names the version it read (osctl --version): adds merge freely.
+_BOT_VERSIONED = _VERSIONED - {"add-block", "add-row", "add-rows"}
 
 
 def dispatch(root, ws, actor, cmd: str, params: dict, team=None, source: str = "osctl") -> dict:
@@ -379,6 +382,8 @@ def _dispatch(root, ws, actor, cmd, params, team, approved, source):
     api = source == "api"
     if api and cmd in _VERSIONED and params.get("version") is None:
         raise Invalid("missing version: get it again and resend with its version")
+    if actor.kind == "bot" and not approved and cmd in _BOT_VERSIONED and params.get("version") is None:
+        raise Invalid(f"{cmd}: missing --version: get the canvas or list first and pass the version you read")
     run = _Run(root, ws, actor, params, team, approved, cmd, api)
     return fn(run)
 
@@ -425,18 +430,27 @@ class _Run:
         item["by"], item["at"], item["v"] = self.tag, _now(), self.new_v
         item["outside"] = self.relabel(item.get("outside"), full)
 
+    def read_version(self) -> int | None:
+        """The doc version the writer read (`version`), or None. An approved hold runs as
+        the owner judged it, with no version check (plan ruling)."""
+        if self.approved or self.p.get("version") is None:
+            return None
+        return _int(self.p.get("version"), "version")
+
     def fresh(self, item: dict, iv="param") -> None:
         v = int(item.get("v") or 0)
         if iv == "param":
             iv = self.p.get("item_version")
-        if iv is not None and v != _int(iv, "item_version"):
+        if iv is not None and not self.approved and v != _int(iv, "item_version"):
             raise Stale(STALE_MSG)
-        if self.api and v > _int(self.p.get("version"), "version"):
+        seen = self.read_version()
+        if seen is not None and v > seen:
             raise Stale(STALE_MSG)
 
     def fresh_meta(self, doc: dict) -> None:
         # undo is keyed by its change id, not by a version read
-        if self.api and self.cmd != "undo" and int(doc.get("meta_v") or 0) > _int(self.p.get("version"), "version"):
+        seen = self.read_version()
+        if self.cmd != "undo" and seen is not None and int(doc.get("meta_v") or 0) > seen:
             raise Stale(STALE_MSG)
 
     def guard(self, item: dict, what: str) -> None:
@@ -653,9 +667,14 @@ class _Run:
                 if not cs.valid("list", lid):
                     raise Invalid("list block: not a list id")
                 ldoc = self.read(lid)
-                if not _private(self.actor) and ldoc.get("created_by") != self.tag \
-                        and lid not in self.visible_lists(False):
-                    raise NotFound(f"no such canvas or list: {lid}")
+                if not _private(self.actor) and lid not in self.visible_lists(True):
+                    # An embed would make the list writable through this canvas: a list shown
+                    # only on view-only canvases stays read-only. Its maker may embed it before
+                    # any canvas shows it.
+                    if lid in self.visible_lists(False):
+                        raise Refused("this list is view-only for coworkers")
+                    if ldoc.get("created_by") != self.tag:
+                        raise NotFound(f"no such canvas or list: {lid}")
                 b["list"] = lid
             elif spec.get("columns"):
                 doc = {"title": _title(spec.get("title") or "List"),
@@ -1256,7 +1275,7 @@ def _add_rows(r: _Run, batch: list) -> dict:
                      "pos": len(rows) - 1, "before": None, "after": copy.deepcopy(new[0])}], \
                 {"row": new[0]["id"]}
         return [{"op": "add-rows", "kind": "rows", "target": lid, "before": None,
-                 "after": {"rows": [x["id"] for x in new]}}], {"rows": [x["id"] for x in new]}
+                 "after": {"rows": [x["id"] for x in new], "v": r.new_v}}], {"rows": [x["id"] for x in new]}
     return r.mutate(lid, fn, lambda f: r.lst(f, write=True))
 
 
@@ -1464,7 +1483,7 @@ def _undo(r: _Run) -> dict:
         change = r.log(fid, {**head, "before": {"room": rid, "pinned": was},
                              "after": {"room": rid, "pinned": on}})
         return {"id": fid, "version": r.read(fid).get("version"), "change": change}
-    if kind not in ("item", "meta", "rows", "trust"):  # untrash, unrows, untrust: final
+    if kind not in ("item", "meta", "rows", "unrows", "trust"):  # untrash, untrust: final
         raise Refused("this change cannot be undone")
     access = r.read if r.actor.kind == "owner" else (
         (lambda f: r.canvas(f, write=True)) if cs.valid("canvas", fid)
@@ -1503,10 +1522,9 @@ def _undo(r: _Run) -> dict:
             doc["meta_v"] = r.new_v
             return [{**head, "before": cur, "after": copy.deepcopy(entry.get("before"))}], {}
         if kind == "rows":
-            gone = set((entry.get("after") or {}).get("rows") or [])
-            doc["rows"] = [x for x in doc.get("rows") or [] if x["id"] not in gone]
-            head["kind"] = "unrows"
-            return [{**head, "before": None, "after": None}], {}
+            return _undo_rows(r, doc, entry, head)
+        if kind == "unrows":
+            return _redo_rows(r, doc, entry, head)
         if kind == "trust":
             labels = set((entry.get("before") or {}).get("labels") or [])
             for path, it in _items_of(doc):
@@ -1559,6 +1577,55 @@ def _undo(r: _Run) -> dict:
             r.log(lid, {"op": "delete-list", "kind": "trash", "target": lid,
                         "before": None, "after": None})
     return out
+
+
+def _undo_rows(r: _Run, doc: dict, entry: dict, head: dict):
+    """Undo a batch add: removes its rows, refused when any of them changed since (a later
+    edit is never lost). Rows deleted since are skipped. The removed rows are kept in the
+    entry's `before`, so the undo is itself undoable."""
+    after = entry.get("after") or {}
+    ids = [x for x in after.get("rows") or [] if isinstance(x, str)]
+    v, by = after.get("v"), after.get("made_by") or entry.get("by")
+    rows = doc.get("rows") or []
+    removed = []
+    for i, row in enumerate(rows):
+        if row.get("id") not in ids:
+            continue
+        # an entry from before rows carried `v`: the rows must still be as their maker left them
+        same = row.get("v") == v if v is not None else row.get("by") == by
+        if not same or row.get("created_by") != by:
+            raise Refused(f"{row.get('id')} changed after that change: undo the later changes first")
+        removed.append({"pos": i, "row": copy.deepcopy(row)})
+    gone = {x["row"]["id"] for x in removed}
+    doc["rows"] = [x for x in rows if x.get("id") not in gone]
+    head["kind"] = "unrows"
+    return [{**head, "before": {"rows": removed}, "after": None}], {}
+
+
+def _redo_rows(r: _Run, doc: dict, entry: dict, head: dict):
+    """Undo an undone batch add: puts its rows back where they were, refused when a row id
+    is taken meanwhile. The result is a plain batch add again (undoable as one)."""
+    saved = [x for x in (entry.get("before") or {}).get("rows") or []
+             if isinstance(x, dict) and isinstance(x.get("row"), dict)]
+    rows = doc.setdefault("rows", [])
+    taken = {x.get("id") for x in rows}
+    if any(x["row"].get("id") in taken for x in saved):
+        raise Refused("a row id is taken since that change: undo the later changes first")
+    if len(rows) + len(saved) > ROWS_MAX:
+        raise Refused(f"too many rows: max {ROWS_MAX} per list")
+    back = []
+    for x in saved:
+        row = copy.deepcopy(x["row"])
+        row["v"] = r.new_v
+        row["outside"] = r.undo_label(row.get("outside"), None)
+        pos = x.get("pos")
+        pos = len(rows) if not isinstance(pos, int) else min(max(pos, 0), len(rows))
+        rows.insert(pos, row)
+        back.append(row["id"])
+    head["kind"] = "rows"
+    # the rows keep their maker: undo of this checks them against that maker
+    by = saved[0]["row"].get("created_by") if saved else None
+    return [{**head, "before": None, "after": {"rows": back, "v": r.new_v, "made_by": by}}], {}
 
 
 def _embedded_anywhere(r: _Run, lid: str) -> bool:

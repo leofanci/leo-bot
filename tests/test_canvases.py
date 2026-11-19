@@ -43,6 +43,13 @@ class Base(unittest.TestCase):
         self.shared = bot("writer", shared=True, room=ROOM, people=("p1",), chat="c2")
 
     def d(self, actor, cmd, ws="demo", source="osctl", **params):
+        """A bot's rewrite or delete carries the version it read: unless a test passes its own
+        (None to send none), it read the file just now."""
+        if actor.kind == "bot" and cmd in cv._BOT_VERSIONED and "version" not in params:
+            try:
+                params["version"] = cs.read(self.root, ws, params.get("id"))["version"]
+            except (LookupError, ValueError):
+                pass
         return cv.dispatch(self.root, ws, actor, cmd, params, self.team, source=source)
 
     def canvas(self, actor=OWNER, pin=None, **kw):
@@ -278,7 +285,7 @@ class TestVersions(Base):
         self.assertEqual(self.row(lid, r2)["cells"]["notes"], "other")
         with self.assertRaises(Refused):  # API write without version
             self.d(OWNER, "update-row", id=lid, row=r2, cells={"notes": "x"}, source="api")
-        # osctl: no version needed; item_version checked when given
+        # osctl: a bot sends the version it read (d fills it) and item_version when given
         iv = self.row(lid, r1)["v"]
         self.d(bot(), "update-row", id=lid, row=r1, cells={"notes": "third"}, item_version=iv)
         with self.assertRaises(Stale):

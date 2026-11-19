@@ -129,7 +129,7 @@ class Actor(Base):
     def test_refusals_and_approvals(self):
         cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
         tok, _ = self.mint()
-        code, out = self.call(tok, "delete-canvas", id=cid)
+        code, out = self.call(tok, "delete-canvas", id=cid, version=1)
         self.assertEqual(code, 200)
         self.assertEqual((out["ok"], out.get("needs_approval")), (False, True))
         self.assertIn("APPROVAL", out["error"])
@@ -311,7 +311,8 @@ class Turn(Base):
     def hold(self):
         cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Plan"})["id"]
         with self.assertRaises(cv.NeedsApproval):
-            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas", {"id": cid})
+            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas",
+                        {"id": cid, "version": 1})
         self.assertEqual(len(cv.pending_holds(self.root, CHAT)), 1)
         return cid
 
@@ -340,7 +341,8 @@ class Turn(Base):
         cid = self.hold()  # will run: delete-canvas cid
         gone = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas", {"title": "Old"})["id"]
         with self.assertRaises(cv.NeedsApproval):
-            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas", {"id": gone})
+            cv.dispatch(self.root, "demo", cv.Actor("bot", "research", chat=CHAT), "delete-canvas",
+                        {"id": gone, "version": 1})
         cv.dispatch(self.root, "demo", cv.Actor("owner"), "delete-canvas", {"id": gone})  # its hold will fail
         seen = self.run_turn({"chat_id": CHAT, "approval": "approved"})
         prompt = seen[0]["_prompt"]

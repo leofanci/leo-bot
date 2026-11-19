@@ -53,7 +53,7 @@ WRITES_TABLE = """| What | Command |
 | Scheduled job (yours to set up when the work needs a later or repeated run; no APPROVAL: line for it) | `propose-job --bot <bot-id> --skill <skill> --name "..." --message "..." --schedule "every 30m" or "daily 09:00" or "mon,thu 09:00" or "once 2026-12-01 09:00" [--cap <usd per day; 0 or none: no cap>] [--mode approval|auto|report] [--project <slug>] [--check-app <app> --check-action <READ_SLUG> [--check-args JSON]]` (saved when your reply ends, in the owner's private thread only; the owner sees it with Undo and Pause. With a check, code runs that app read first and the job's model run happens only when its answer changed: watch an inbox every 5m at no cost) · in a job's run: `job-note --text "..."` replaces that job's notepad (every run sees it: progress, who answered, what is next) · change one: `propose-job --job <id> [--schedule ...] [--cap ...] [--mode ...] [--message ...] [--skill ...] [--name ...]` · delete one: `propose-job --job <id> --delete` · `list-jobs` |
 | Calendar activity (one calendar across workspaces) | `create-activity --entity <slug> --title "..." --date YYYY-MM-DD [--time HH:MM --time-end HH:MM]` (timed ones may not overlap: `get-busy --from <date>` first) |
 | Content calendar | `generate-plan --profile <slug> --period "YYYY-MM-DD to YYYY-MM-DD"` (unscheduled by default — add `--dates` ONLY if the user explicitly asks posts to be dated/scheduled now) |
-| Canvas / list | `get-canvas --id <cv>` · `add-block --id <cv> --type text --md "..."` · `get-list --id <ls>` · `add-row --id <ls> --cells-json '{...}'` · `update-row --id <ls> --row <rw> --cells-json '{...}'` (other commands: `docs/canvases.md`; deletes and rewrites of others' text need APPROVAL) |
+| Canvas / list | `get-canvas --id <cv>` · `add-block --id <cv> --type text --md "..."` · `get-list --id <ls>` · `add-row --id <ls> --cells-json '{...}'` · `update-row --id <ls> --row <rw> --cells-json '{...}' --version <n>` (changes and deletes pass the `version` you read; other commands: `docs/canvases.md`; deletes and rewrites of others' text need APPROVAL) |
 
 Banned: direct file writes, `set-brief`, `patch-brief`, editing `briefs/*.json`, `brief-specs/*.md`, or `voices/*.md` by hand."""
 
@@ -155,7 +155,7 @@ DELIVERABLES = """## Deliverables → command
 | Content plan | `generate-plan --profile <p> --period "A to B"` (no `--dates` unless asked) |
 | Post brief / rewrite | `update-brief --id <post> --instruction "..."` · `generate-brief` · `revise-post` |
 | Timed activity | `get-busy --from <date>`, then `create-activity ... --time HH:MM` |
-Canvases/lists: `get-canvas`/`get-list` first, then `add-block`, `update-block`, `add-row`, `update-row` or another canvas cmd (`osctl -h`); deletes/rewrites of others' text need APPROVAL.
+Canvases/lists: `get-canvas`/`get-list` first, then `add-block`, `update-block`, `add-row`, `update-row` or another canvas cmd (`osctl -h`); changes and deletes pass `--version` as read; deletes/rewrites of others' text need APPROVAL.
 Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."""
 
 TEAM_TAGGING = """## Skills and saves

@@ -43,25 +43,25 @@ Bots read and write through `python3 -m dashboard.osctl`, never by editing data 
 | `list-canvases --project <slug> [--room <room>]` | Visible canvases and pins |
 | `get-canvas --id <cv>` | Blocks and embedded list summaries |
 | `create-canvas --project <slug> --title "..." [--template <template>] [--pin <room>]` | Blank page or template |
-| `update-canvas --id <cv> [--title "..."] [--coworkers edit\|view]` | Canvas metadata; coworkers setting is owner-only |
+| `update-canvas --id <cv> --version <n> [--title "..."] [--coworkers edit\|view]` | Canvas metadata; coworkers setting is owner-only |
 | `add-block --id <cv> --type text --md "..."` | Add a block; other types use their own data flags |
-| `update-block --id <cv> --block <bk> --md "..."` | Replace text; other types use their own data flags |
-| `move-block --id <cv> --block <bk> --after <bk>` | Reorder; use `--first` to move to the start |
-| `delete-block --id <cv> --block <bk>` | Remove a block |
-| `delete-canvas --id <cv>` | Move a canvas to trash |
+| `update-block --id <cv> --block <bk> --version <n> --md "..."` | Replace text; other types use their own data flags |
+| `move-block --id <cv> --block <bk> --version <n> --after <bk>` | Reorder; use `--first` to move to the start |
+| `delete-block --id <cv> --block <bk> --version <n>` | Remove a block |
+| `delete-canvas --id <cv> --version <n>` | Move a canvas to trash |
 | `pin-canvas --id <cv> --room <room>` / `unpin-canvas --id <cv> --room <room>` | Change channel tabs |
 | `create-list --project <slug> --title "..." --columns-json '[...]'` | Create a separate list |
 | `get-list --id <ls> [--filter-json '{...}'] [--sort <key>] [--limit <n>] [--offset <n>]` | Filtered, sorted, paged rows; prefix sort key with `-` for descending |
-| `update-list --id <ls> [--title "..."] [--columns-json '[...]']` | Rename or change columns |
+| `update-list --id <ls> --version <n> [--title "..."] [--columns-json '[...]']` | Rename or change columns |
 | `add-row --id <ls> --cells-json '{...}'` | Add one row |
 | `add-rows --id <ls> --rows-json '[{...}]'` | Add a batch, up to 500 rows |
-| `update-row --id <ls> --row <rw> --cells-json '{...}'` | Edit supplied cells |
-| `delete-row --id <ls> --row <rw>` | Remove one row |
-| `delete-list --id <ls> [--force-unembed]` | Trash a list; optionally remove its embeds |
+| `update-row --id <ls> --row <rw> --version <n> --cells-json '{...}'` | Edit supplied cells |
+| `delete-row --id <ls> --row <rw> --version <n>` | Remove one row |
+| `delete-list --id <ls> --version <n> [--force-unembed]` | Trash a list; optionally remove its embeds |
 | `save-template --from <cv> --name "..."` / `list-templates --project <slug>` | Save or list reusable layouts |
 | `undo --id <cv-or-ls> --change <change>` | Undo a change by its history id |
 
-Use a command's `--help` for its full flags. Text bodies accept `--md -` to read stdin. JSON arguments must be valid JSON and at most 1 MB. Limits include 200 blocks per canvas, 50 columns, 5,000 rows per list, 100,000 characters per text block and 10,000 characters per cell.
+Every change or delete of an existing canvas, block, list or row passes `--version`: the `version` that `get-canvas` or `get-list` returned. The server refuses it with `changed since you read it: get it again` when that block, row or the canvas or list settings changed since, and refuses it outright when `--version` is missing. Adds need no version. `--item-version` also pins one block, row or checklist item to the `v` you read. Use a command's `--help` for its full flags. Text bodies accept `--md -` to read stdin. JSON arguments must be valid JSON and at most 1 MB. Limits include 200 blocks per canvas, 50 columns, 5,000 rows per list, 100,000 characters per text block and 10,000 characters per cell.
 
 ## Who may do what
 
