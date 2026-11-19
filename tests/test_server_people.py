@@ -163,6 +163,31 @@ class InviteAndJoin(Base):
         code, page, _ = request("GET", f"/join/{invite_code}", host=PUBLIC)
         self.assertEqual(code, 410)  # used
 
+    def security_headers(self, path, host=PUBLIC):
+        """The headers a real response carries (request() above drops end_headers)."""
+        h = server.Handler.__new__(server.Handler)
+        sent = []
+        h.wfile = io.BytesIO()
+        h.send_response = lambda *a: None
+        h.send_header = lambda k, v: sent.append((k, v))
+        h.request_version = "HTTP/0.9"  # the base end_headers then writes nothing itself
+        h.log_message = lambda *a: None
+        msg = Message()
+        msg["Host"] = host
+        h.headers, h.rfile, h.path = msg, io.BytesIO(b""), path
+        h.client_address = ("127.0.0.1", 50000)
+        h.server = SimpleNamespace(server_address=("127.0.0.1", PORT))
+        h.do_GET()
+        return [v for k, v in sent if k == "Referrer-Policy"]
+
+    def test_join_form_post_carries_its_origin(self):
+        # With no-referrer a browser sends "Origin: null" on the form post, which the origin
+        # check refuses: the join page keeps the origin for same-origin requests only.
+        _, code = people.create_invite(self.root, ws="acme", role="member", by="ceo")
+        self.assertEqual(self.security_headers(f"/join/{code}"), ["same-origin"])
+        self.assertEqual(self.security_headers("/join/unknown-code"), ["same-origin"])
+        self.assertEqual(self.security_headers("/api/me"), ["no-referrer"])  # everything else
+
     def test_join_needs_same_origin(self):
         _, code = people.create_invite(self.root, ws="acme", role="member", by="ceo")
         status, _, _ = request("POST", f"/join/{code}", raw=b"name=Pat", host=PUBLIC, origin="",

@@ -2772,6 +2772,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "LeoBot/1.0"
     # A client that opens a socket and sends nothing must not hold a thread forever.
     timeout = 60
+    # The join page sets "same-origin": with no-referrer a browser sends "Origin: null" on its
+    # form post, and _join_post refuses any origin but this server's own.
+    referrer_policy = "no-referrer"
 
     def end_headers(self):
         self.send_header("Content-Security-Policy", (
@@ -2780,7 +2783,7 @@ class Handler(BaseHTTPRequestHandler):
             "ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'"
         ))
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", self.referrer_policy)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -3366,6 +3369,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(doc)
 
     def _join_page(self, code):
+        self.referrer_policy = "same-origin"
         inv = people.invite_for(ROOT, code)
         if not inv:
             return self._page(410, "Invite expired", "<h1>This invite link no longer works</h1>"
