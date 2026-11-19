@@ -381,6 +381,94 @@ class Turn(Base):
         self.assertEqual(cv.pending_holds(self.root, CHAT), [])
 
 
+class JobRules(Base):
+    """I4: an Auto job's waits and the no-save-after-outside-content rule hold at the endpoint
+    itself (a shell that skips osctl, or unsets LEOBOT_JOB, still reaches only this)."""
+
+    def setUp(self):
+        super().setUp()
+        self.cid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-canvas",
+                               {"title": "Plan", "pin": "demo/general",
+                                "blocks": [{"type": "text", "md": "a"}, {"type": "text", "md": "b"}]})["id"]
+        self.lid = cv.dispatch(self.root, "demo", cv.Actor("owner"), "create-list",
+                               {"title": "Leads", "columns": [{"label": "Name"}]})["id"]
+
+    def job(self, mode="auto", **over):
+        return self.mint(job="j1", job_mode=mode, chat=CHAT, **over)
+
+    def test_auto_job_waits_on_the_waits_set(self):
+        tok, _ = self.job()
+        v = cs.read(self.root, "demo", self.cid)["version"]
+        for cmd, params in (("unpin-canvas", {"id": self.cid, "room": "demo/general"}),
+                            ("move-block", {"id": self.cid, "block": "bk2", "version": v}),
+                            ("update-canvas", {"id": self.cid, "title": "x", "version": v}),
+                            ("save-template", {"from": self.cid, "name": "x"}),
+                            ("update-list", {"id": self.lid, "title": "x", "version": 1}),
+                            ("undo", {"id": self.cid, "change": "ch" + "0" * 12}),
+                            ("delete-block", {"id": self.cid, "block": "bk2", "version": v})):
+            code, out = self.call(tok, cmd, **params)
+            self.assertEqual((code, out["ok"]), (200, False), cmd)
+            self.assertIn("APPROVAL:", out["error"], cmd)
+        self.assertEqual(cs.read(self.root, "demo", self.cid)["version"], v)
+        self.assertEqual(cs.pins(self.root, "demo"), {"demo/general": [self.cid]})
+        self.assertEqual(cs.list_ids(self.root, "demo", "tp"), [])
+        # what an Auto job does by itself still runs
+        self.assertTrue(self.call(tok, "add-row", id=self.lid, cells={"name": "x"})[1]["ok"])
+        self.assertTrue(self.call(tok, "get-canvas", id=self.cid)[1]["ok"])
+
+    def test_auto_job_saves_nothing_after_outside_content(self):
+        tok, turn = self.job()
+        turn.saw_outside()
+        code, out = self.call(tok, "add-row", id=self.lid, cells={"name": "x"})
+        self.assertEqual((code, out["ok"]), (200, False))
+        self.assertEqual(out["error"], taint.SAVE_WAITS)
+        self.assertEqual(cs.read(self.root, "demo", self.lid)["rows"], [])
+        self.assertTrue(self.call(tok, "get-list", id=self.lid)[1]["ok"])  # reads stay open
+
+    def test_approval_and_report_jobs_only_read(self):
+        for mode in ("approval", "report", None):
+            tok, _ = self.job(mode)  # readonly not set on the token: the mode alone decides
+            code, out = self.call(tok, "add-row", id=self.lid, cells={"name": "x"})
+            self.assertEqual((code, out["ok"]), (200, False), mode)
+            self.assertTrue(self.call(tok, "list-canvases")[1]["ok"], mode)
+        self.assertEqual(cs.read(self.root, "demo", self.lid)["rows"], [])
+
+    def test_job_mode_is_read_live(self):
+        state = {"mode": "auto"}
+        tok, _ = self.job(job_mode_now=lambda: state["mode"])
+        self.assertTrue(self.call(tok, "add-row", id=self.lid, cells={"name": "a"})[1]["ok"])
+        state["mode"] = "approval"  # the run was switched to approval mid-run
+        self.assertFalse(self.call(tok, "add-row", id=self.lid, cells={"name": "b"})[1]["ok"])
+        self.assertEqual(len(cs.read(self.root, "demo", self.lid)["rows"]), 1)
+
+    def test_auto_job_past_its_skill_saves_nothing(self):
+        with mock.patch.object(server.jobs, "get", return_value={"id": "j1", "skill": "own"}), \
+                mock.patch.object(server.skill_loads, "loaded", return_value=["other"]):
+            tok, _ = self.job()
+            out = self.call(tok, "add-row", id=self.lid, cells={"name": "x"})[1]
+        self.assertFalse(out["ok"])
+        self.assertEqual(cs.read(self.root, "demo", self.lid)["rows"], [])
+
+    def test_private_thread_is_not_a_job(self):
+        tok, turn = self.mint()
+        turn.saw_outside()  # a private thread labels its writes instead
+        self.assertTrue(self.call(tok, "add-row", id=self.lid, cells={"name": "x"})[1]["ok"])
+
+    def test_waits_set_is_shared_with_osctl(self):
+        from dashboard import osctl
+        self.assertIs(osctl._CANVAS_AUTO_WAITS, cv.AUTO_WAITS)
+        self.assertEqual(server.CANVAS_READS, cv.READS)
+
+    def test_run_mints_a_live_job_mode(self):
+        class S:
+            job_mode = "auto"
+        ctx = server._canvas_token_ctx(ws="demo", bot="b", job={"id": "j1"}, s_=S(), sess=S(), room=None,
+                                       shared=False, turn=taint.Turn(), gated=True, sender=None)
+        self.assertEqual(ctx["job_mode_now"](), "auto")
+        S.job_mode = "approval"
+        self.assertEqual(ctx["job_mode_now"](), "approval")
+
+
 def request_owner(path, body):
     h = server.Handler.__new__(server.Handler)
     out = {}

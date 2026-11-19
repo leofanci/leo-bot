@@ -1389,7 +1389,40 @@ CANVAS_PATH = "/api/internal/canvas"
 CANVAS_TOKENS = apps_relay.Tokens()
 CANVAS_NO_ACCESS = "no canvas access for this run"
 # What a read-only run (a consulted teammate, an Approval or Report job) may still call.
-CANVAS_READS = frozenset({"list-canvases", "get-canvas", "get-list", "list-templates", "list-history"})
+CANVAS_READS = canvases.READS
+
+
+def _canvas_token_ctx(*, ws, bot, job, s_, sess, room, shared, turn, gated, sender):
+    """A run's canvas token context. `job_mode_now` reads the run's job mode live: a run
+    switched to approval mid-run is read-only at the endpoint from then on."""
+    return {"ws": ws, "actor": "bot", "bot": bot, "job": job["id"] if job else None,
+            "job_mode": getattr(s_, "job_mode", None), "job_mode_now": lambda: getattr(s_, "job_mode", None),
+            "chat": getattr(sess, "session_id", None), "room": (room or {}).get("id"), "shared": bool(shared),
+            "people": _room_people(ws, room) if shared else (), "turn": turn, "gated": gated,
+            "readonly": bool(getattr(s_, "readonly", False)), "sender": sender}
+
+
+def _canvas_job_refusal(ctx, cmd):
+    """Why a scheduled job's canvas write must wait, or None. The same rules osctl applies, held
+    here so a caller that skips osctl (or its environment) meets them too: only Auto writes, an
+    Auto job's waits end with an APPROVAL line, and after outside content (or a skill other than
+    its job's own) it saves nothing by itself."""
+    if not ctx.get("job") or cmd in CANVAS_READS:
+        return None
+    now = ctx.get("job_mode_now")
+    mode = now() if callable(now) else ctx.get("job_mode")
+    if mode != "auto":
+        return canvases.JOB_READONLY_MSG if mode != "report" else (
+            "this scheduled job only reports: nothing is saved. Put what you found in your summary.")
+    if cmd in canvases.AUTO_WAITS:
+        return canvases.AUTO_WAITS_MSG.format(cmd=cmd)
+    turn = ctx.get("turn")
+    if turn is None or turn.outside:
+        return taint.SAVE_WAITS
+    own = (jobs.get(ROOT, ctx["job"]) or {}).get("skill")
+    if any(s != own for s in skill_loads.loaded(ROOT, ctx.get("chat") or "")):
+        return canvases.JOB_READONLY_MSG
+    return None
 
 
 def _canvas_actor(ctx):
@@ -2971,6 +3004,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"ok": False, "error": 'bad request: {"cmd": str, "params": {...}}'})
         if ctx.get("readonly") and cmd not in CANVAS_READS:
             return self._send(200, {"ok": False, "error": f"{cmd}: this run is read-only, canvases can only be read"})
+        waits = _canvas_job_refusal(ctx, cmd)
+        if waits:
+            return self._send(200, {"ok": False, "error": waits})
         try:
             out = canvases.dispatch(ROOT, ctx.get("ws"), _canvas_actor(ctx), cmd, dict(params or {}))
         except canvases.NeedsApproval as e:
@@ -4122,13 +4158,9 @@ class Handler(BaseHTTPRequestHandler):
             # This run's canvas token: the endpoint takes the actor from it alone (revoked below).
             canvas_kw = {}
             if isinstance(port, int):
-                canvas_kw = {"canvas_token": CANVAS_TOKENS.mint({
-                    "ws": ws, "actor": "bot", "bot": msg.get("bot"), "job": job["id"] if job else None,
-                    "job_mode": getattr(s_, "job_mode", None), "chat": getattr(sess, "session_id", None),
-                    "room": (room or {}).get("id"), "shared": bool(shared),
-                    "people": _room_people(ws, room) if shared else (), "turn": turn, "gated": gated,
-                    "readonly": bool(getattr(s_, "readonly", False)), "sender": sender}),
-                    "canvas_port": port}
+                canvas_kw = {"canvas_token": CANVAS_TOKENS.mint(_canvas_token_ctx(
+                    ws=ws, bot=msg.get("bot"), job=job, s_=s_, sess=sess, room=room, shared=shared,
+                    turn=turn, gated=gated, sender=sender)), "canvas_port": port}
                 if kw.get("os_token"):  # osctl over the relay gets the same token (os_relay.env_for)
                     os_relay.TOKENS.update(kw["os_token"], **canvas_kw)
             try:

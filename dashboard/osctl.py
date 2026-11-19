@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root
 from dashboard import chat_session, db, fileops, job_cards, tokensave_bridge  # noqa: E402
-from core import bots, folders, jobs, memory, paths, skill_loads  # noqa: E402
+from core import bots, canvases, folders, jobs, memory, paths, skill_loads  # noqa: E402
 from core.ids import (  # noqa: E402
     bare_slug,
     build_catalog,
@@ -47,8 +47,8 @@ _CANVAS_CMDS = frozenset({
     "move-block", "delete-block", "delete-canvas", "pin-canvas", "unpin-canvas", "create-list",
     "get-list", "update-list", "add-row", "add-rows", "update-row", "delete-row", "delete-list",
     "save-template", "list-templates", "undo"})
-_CANVAS_AUTO_WAITS = frozenset({"delete-block", "delete-canvas", "delete-row", "delete-list", "move-block",
-                                "update-list", "update-canvas", "unpin-canvas", "save-template", "undo"})
+# The server's canvas endpoint enforces the same set (core/canvases.py), whatever osctl decides.
+_CANVAS_AUTO_WAITS = canvases.AUTO_WAITS
 _CANVAS_SHARED_BLOCKED = frozenset({"delete-canvas", "delete-list", "update-canvas", "undo"})
 # A consulted teammate (LEOBOT_READONLY) may only look things up; the lead saves.
 _READ_ONLY_CMDS = {"tree", "get-project", "get-posts", "read-file", "get-id-catalog",
