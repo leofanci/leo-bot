@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -354,7 +355,11 @@ def purge_all(root: Path, days: int = TRASH_DAYS, now: float | None = None) -> d
         spaces += sorted(d.name for d in pdir.iterdir() if d.is_dir() and _WS_RE.match(d.name))
     out = {}
     for ws in spaces:
-        gone = purge_trash(root, ws, days, now)
+        try:
+            gone = purge_trash(root, ws, days, now)
+        except (OSError, ValueError) as e:  # One bad workspace never skips the others.
+            print(f"canvas trash purge failed for {ws}: {e}", file=sys.stderr)
+            continue
         if gone:
             out[ws] = gone
     return out

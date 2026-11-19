@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import os
 import re
@@ -301,6 +303,24 @@ class TestCanvasStore(unittest.TestCase):
         (self.root / "projects" / "Bad Name").mkdir()
         gone = cs.purge_all(self.root)
         self.assertEqual(gone, {"acme": ["cv1"], "demo": ["cv1"], bots.HQ: ["cv1"]})
+
+    def test_purge_all_one_bad_workspace_does_not_stop_the_rest(self):
+        for ws in ("acme", "demo"):
+            (self.root / "projects" / ws).mkdir(parents=True, exist_ok=True)
+            self._make(ws, "cv1")
+            cs.to_trash(self.root, ws, "cv1")
+            os.utime(cs.base(self.root, ws) / "canvases" / ".trash" / "cv1.json", (0, 0))
+        real = cs.purge_trash
+
+        def purge(root, ws, *a):
+            if ws == "acme":
+                raise OSError("disk")
+            return real(root, ws, *a)
+        with mock.patch.object(cs, "purge_trash", side_effect=purge), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            gone = cs.purge_all(self.root)
+        self.assertEqual(gone, {"demo": ["cv1"]})
+        self.assertIn("acme", err.getvalue())
 
     def test_saved_templates_not_shipped(self):
         with cs.locked(self.root, "demo", "tp1"):
