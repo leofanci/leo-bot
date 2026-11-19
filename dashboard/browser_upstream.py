@@ -759,11 +759,12 @@ class Pool:
             old.close()
         return up
 
-    def stop_bot(self, ws, bot, root, people=None):
+    def stop_bot(self, ws, bot, root, people=None, local=True):
         """Stop this bot's existing child, not another bot or an owner's login window. `people`:
-        only the lent Chrome of these people (None: everyone's)."""
+        only the lent Chrome of these people (None: everyone's). `local=False` keeps the bot's
+        own child here: another sender's run still uses it."""
         with self._lock:
-            up = self._items.get((ws, bot))
+            up = self._items.get((ws, bot)) if local else None
             if up is not None and str(up.root) == str(root):
                 del self._items[(ws, bot)]
             else:

@@ -445,6 +445,31 @@ class UntargetedStop(api.Base):
         self.assertTrue(self.pool.is_live("acme", "profile-b", "bot", self.root))
 
 
+class UntargetedStopSameBot(api.Base):
+    def test_owner_stop_keeps_the_bot_browser_a_coworker_run_still_uses(self):
+        browser.epoch("acme", self.root)
+        browser.set_bot("acme", "profile-a", "act", "bot", self.root)
+        shared = self.pool.get("acme", "profile-a", "bot", self.root)
+        shared.forward(call(P + "open", url=PAGE), None)
+        runs, sessions, tokens = {}, {}, {}
+        for sender in ("owner", "pm-1"):
+            token = api.server.BROWSER_TOKENS.mint({"ws": "acme", "bot": "profile-a", "runner_owner": sender})
+            sessions[sender], tokens[sender] = mock.Mock(), token
+            runs[token] = {"ws": "acme", "bot": "profile-a", "session": sessions[sender], "live": {},
+                           "job": False, "token": token, "sender": sender}
+        with mock.patch.dict(api.server._BROWSER_RUNS, runs, clear=True), \
+                mock.patch.object(api.server, "_CHAT", None):
+            self.assertEqual(api.request("POST", "/api/chat-stop", {}), (200, {"ok": True}))
+            coworker_run = api.server._BROWSER_RUNS[tokens["pm-1"]]
+        sessions["owner"].close.assert_called_once()
+        sessions["pm-1"].close.assert_not_called()
+        self.assertFalse(coworker_run["live"].get("stopped"))
+        self.assertIsNone(api.server.BROWSER_TOKENS.lookup(tokens["owner"]))
+        self.assertIsNotNone(api.server.BROWSER_TOKENS.lookup(tokens["pm-1"]))
+        self.assertFalse(shared.closed)
+        self.assertTrue(self.pool.is_live("acme", "profile-a", "bot", self.root))
+
+
 class StopRun(api.Base):
     def test_stop_ends_actual_registered_bot_run_and_revokes_token(self):
         self.exercise_stop({"ws": "acme", "bot": "profile-a"})

@@ -11,6 +11,12 @@ class TestAiRules(unittest.TestCase):
             self.assertIn(command, CHAT_RAIL)
         self.assertIn("others' text", CHAT_RAIL)
 
+    def test_canvas_rail_line_is_not_an_exhaustive_list(self):
+        from dashboard.ai_rules import CHAT_RAIL
+        line = next(l for l in CHAT_RAIL.splitlines() if l.startswith("Canvases/lists:"))
+        self.assertIn("get-list", line)
+        self.assertIn("osctl -h", line)   # points at the rest: block edits, columns, undo
+
     def test_read_file_line_names_concrete_files(self):
         from dashboard.ai_rules import CHAT_RAIL
         line = next(l for l in CHAT_RAIL.splitlines() if "read-file --path" in l)

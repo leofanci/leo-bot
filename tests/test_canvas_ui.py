@@ -189,10 +189,6 @@ class TestCanvasWrites(unittest.TestCase):
         self.assertIn("runPendingReload(st);", draw)
         start = _body(sec, "function startCellEdit(")
         self.assertIn("void cvSaveCell(otd, open);", start)
-        # an editor whose value does not parse stays open instead of losing its typing
-        self.assertLess(start.index("if (bad) { toast(bad); open.focus(); return; }"),
-                        start.index("void cvSaveCell(otd, open);"))
-        self.assertLess(start.index("if (bad)"), start.index("CANVAS.editCell = {"))
         cap = _body(sec, "function captureCanvasInputs(")
         for field in ("e.draft = ed.value", "st.renameDraft = rn.value", "st.colForm.draft =",
                       "st.itemDrafts[", "st.pathDrafts[", "st.drafts["):
@@ -600,6 +596,52 @@ assert.equal(calls.length, 1);
 cleanup();
 assert.equal(cleared, true);
 """)
+
+
+class TestCanvasCellSwitch(unittest.TestCase):
+    run_loads = TestCanvasReloads.run_loads
+
+    def test_invalid_cell_keeps_its_editor_and_valid_one_saves(self):
+        for value, valid in (("abc", False), ("3", True)):
+            with self.subTest(value=value):
+                self.run_loads("""
+context.state = st;
+vm.runInContext('CANVAS = state', context);
+context.CanvasView = require(process.argv[1]);
+context.CSS = {escape: x => x};
+const list = {id: 'ls1', version: 4, columns: [{key: 'n', label: 'Count', type: 'number'}],
+  rows: [{id: 'rw1', v: 1, cells: {}}, {id: 'rw2', v: 2, cells: {}}]};
+st.lists = {bk1: list};   // the real cvBk, cvList and cvRow read these
+const td = rw => ({dataset: {cvCell: 'n'}, closest: sel => sel === '[data-rw]' ? {dataset: {rw}}
+  : sel === '.cv-block' ? {dataset: {bk: 'bk1'}} : null});
+const tdA = td('rw1'), tdB = td('rw2');
+let focused = 0;
+const input = {value: VALUE, _done: false, focus: () => { focused += 1; }, closest: () => tdA};
+context.$ = () => ({querySelector: () => input});
+const saves = [], toasts = [];
+let draws = 0;
+context.cvSaveCell = (cell, el) => { saves.push([cell, el]); };
+context.toast = m => toasts.push(m);
+context.drawCanvas = () => { draws += 1; };
+const editA = {bk: 'bk1', rw: 'rw1', key: 'n', version: 4, item_version: 1};
+st.editCell = editA;
+context.startCellEdit(tdB);
+if (VALID) {
+  assert.deepEqual(saves, [[tdA, input]]);
+  assert.equal(input._done, true);
+  assert.equal(st.editCell.rw, 'rw2');
+  assert.equal(st.editCell.key, 'n');
+  assert.equal(draws, 1);
+  assert.deepEqual(toasts, []);
+} else {
+  assert.equal(st.editCell, editA);
+  assert.deepEqual(saves, []);
+  assert.equal(draws, 0);
+  assert.deepEqual(toasts, ['Enter a number']);
+  assert.equal(focused, 1);
+  assert.equal(input._done, false);
+}
+""".replace("VALUE", json.dumps(value)).replace("VALID", "true" if valid else "false"))
 
 
 class TestCanvasBrowserStop(unittest.TestCase):

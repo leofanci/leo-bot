@@ -112,7 +112,7 @@ Starters + normalize use project lists, else defaults."""
 
 SCHEMAS = """## Schemas
 `GET /api/schemas` + `core/project_schemas.py` + `core/subsections.py`. Every osctl write normalizes on save.
-Per-project subsection lists drive intake.md, technical.md, and product roadmap headings. Features → Next until shipped.
+Features → Next until shipped.
 memos: `create-memo --type <t>`; full fields for problem-validation + assessment; else summary + recommendation; default `proposed`.
 experiments: assumption, success_criteria, kill_criteria."""
 
@@ -155,7 +155,7 @@ DELIVERABLES = """## Deliverables → command
 | Content plan | `generate-plan --profile <p> --period "A to B"` (no `--dates` unless asked) |
 | Post brief / rewrite | `update-brief --id <post> --instruction "..."` · `generate-brief` · `revise-post` |
 | Timed activity | `get-busy --from <date>`, then `create-activity ... --time HH:MM` |
-Canvases/lists: `get-canvas`, `add-block`, `add-row`, `update-row`; deletes/rewrites of others' text need APPROVAL.
+Canvases/lists: `get-canvas`/`get-list` first, then `add-block`, `update-block`, `add-row`, `update-row` or another canvas cmd (`osctl -h`); deletes/rewrites of others' text need APPROVAL.
 Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."""
 
 TEAM_TAGGING = """## Skills and saves

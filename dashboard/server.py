@@ -1524,6 +1524,10 @@ def _stop_browser_runs(ws=None, bot=None):
             BROWSER_TOKENS.revoke(r["token"])
         if ws is not None:
             BROWSER_TOKENS.revoke_where(ws=ws, bot=bot)
+        # Untargeted: a bot's own child is shared by every sender of that bot, so it stays while
+        # another run of it (a coworker's turn or a job) is still going.
+        busy = set() if ws is not None else {
+            (r["ws"], r["bot"]) for r in _BROWSER_RUNS.values() if not any(r is x for x in runs)}
     for r in runs:
         r["session"].close()
     targets = {(r["ws"], r["bot"]) for r in runs}
@@ -1531,7 +1535,8 @@ def _stop_browser_runs(ws=None, bot=None):
         targets.add((ws, bot))
     for w, b in targets:
         # Untargeted: a coworker's own lent Chrome of that bot stays theirs.
-        browser_upstream.POOL.stop_bot(w, b, ROOT, people=None if ws is not None else ("owner",))
+        browser_upstream.POOL.stop_bot(w, b, ROOT, people=None if ws is not None else ("owner",),
+                                       local=(w, b) not in busy)
 
 
 def _browser_install_run():

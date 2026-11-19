@@ -534,6 +534,22 @@ class CloseOnDelete(Base):
         self.assertEqual(len([j for j in owner.jobs if j["op"] == "close"]), 1)
         self.assertEqual([j for j in coworker.jobs if j["op"] == "close"], [])
 
+    def test_bot_stop_without_local_keeps_the_shared_child(self):
+        pool = bu.Pool()
+        child = mock.Mock(root=self.root)
+        pool._items[("demo", "profile-a")] = child
+        mine = browser_lent.RunnerChromeUpstream("demo", "profile-a", self.root, "owner", EPOCH, hub=self.hub)
+        pool._lent[("demo", "profile-a", "owner")] = mine
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}):
+            pool.stop_bot("demo", "profile-a", self.root, people=("owner",), local=False)
+        self.assertIs(pool._items[("demo", "profile-a")], child)
+        child.kill.assert_not_called()
+        self.assertTrue(mine.closed)
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}):
+            pool.stop_bot("demo", "profile-a", self.root)
+        self.assertNotIn(("demo", "profile-a"), pool._items)
+        child.kill.assert_called_once()
+
     def test_delete_on_a_local_install_notifies_no_runner(self):
         r = self.runner("rn-o", "owner", answer=lambda job: None)
         with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}), \
