@@ -157,38 +157,39 @@ its own tools mid-run. A job's notepad written after outside content counts as o
 content on its later runs. Before any outside content, a Full access bot runs commands as
 you do, with one exception.
 
-No bot writes these, on any level and any engine, before or after outside content: Leo Bot's
-code folder; the Python that runs Leo Bot (its folders, the `python3` link and each link to the
-real binary, so a global or `--user` pip install fails while a virtualenv in an Edit folder
-works); the folder bot turns start in; the shell startup files `~/.zshrc`, `~/.zshenv`,
-`~/.zprofile`, `~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.profile`;
-git's `~/.gitconfig` and `~/.config/git`; fish's `~/.config/fish`; `~/Library/LaunchAgents`;
-Claude Code's `~/.claude/settings.json` and `~/.claude/settings.local.json`; ssh's `~/.ssh/config`
-and `~/.ssh/rc`; `~/.npmrc` and `~/.pypirc`; and no folder above any of them is renamed. These are
-the files known to make a program run later as you; the list is not every such file. Every shell command runs in macOS's sandbox from the
-first one to hold this. On Approve for me with Claude Code, its reviewer still judges each command
-as you wrote it, and the command then runs in a Leo Bot shell that puts it in the same sandbox;
-Leo Bot's own `osctl` runs as on Full access. Leo Bot checks that each command really ran in its
-shell: if Claude Code ever runs one without it (an update that no longer reads `CLAUDE_CODE_SHELL`
-or `SHELL`), every later command of that turn is refused and the shell on Approve for me stays off
-until Leo Bot is updated. Before outside content that is the only limit: the internet and every
-other folder stay as they are. File tools (Claude Code's Edit and Write, Codex's writable
-folders, the API key engine's file tools) are walled off the same places, and none of them can
-be linked as a folder, nor a folder holding them. Leo Bot's own updater runs git with no global
-or system config, no hooks and no fsmonitor, so no git config can make it run a program.
+No bot writes these, on any level and any engine, before or after outside content: Leo Bot's code
+folder; the Python that runs Leo Bot (its folders, the `python3` link and each link to the real
+binary, so a global or `--user` pip install fails while a virtualenv in an Edit folder works); the
+folder bot turns start in; the shell startup files `~/.zshrc`, `~/.zshenv`, `~/.zprofile`,
+`~/.zlogin`, `~/.bashrc`, `~/.bash_profile`, `~/.bash_login` and `~/.profile`; git's `~/.gitconfig`
+and `~/.config/git`; fish's `~/.config/fish`; `~/Library/LaunchAgents`; Claude Code's
+`~/.claude/settings.json` and `~/.claude/settings.local.json`; ssh's `~/.ssh/config` and
+`~/.ssh/rc`; `~/.npmrc` and `~/.pypirc`; and no folder above any of them is renamed. These are the
+files known to make a program run later as you; the list is not every such file. Every shell command
+runs in macOS's sandbox from the first one to hold this. On Approve for me with Claude Code, its
+reviewer still judges each command as you wrote it, and the command then runs in a Leo Bot shell
+that puts it in the same sandbox; Leo Bot's own `osctl` runs as on Full access. Leo Bot checks that
+each command really ran in its shell: if Claude Code ever runs one without it (an update that no
+longer reads `CLAUDE_CODE_SHELL` or `SHELL`), every later command of that turn is refused and the
+shell on Approve for me stays off until Leo Bot is updated. The command that reveals the change has
+already run outside the sandbox; only the ones after it are refused. Before outside content that is
+the only limit: the internet and every other folder stay as they are. File tools (Claude Code's Edit
+and Write, Codex's writable folders, the API key engine's file tools) are walled off the same
+places, and none of them can be linked as a folder, nor a folder holding them. Leo Bot's own updater
+runs git with no global or system config, no hooks and no fsmonitor, so no git config can make it
+run a program.
 
-What stays open: before outside content a Full access bot otherwise runs as you, so it can
-still put a program in a folder on your PATH, such as `~/.local/bin`, that you or Leo Bot's
-service later run, or copy a program such as `launchctl` or `osascript` into its Edit folder
-and run that copy to hand work to a process outside the sandbox. On Approve for me before
-outside content the same paths are open to the sandbox, and only Claude Code's reviewer stands
-in their way. A command started in the background before outside content keeps the sandbox it
-started with: it is not moved to the stricter one once the turn reads outside content. On a Mac without the
-sandbox, or another system, Leo Bot can only read the command itself: a command that names a
-write there (`rm`, `mv`, `cp`, a `>` redirect, `git config --global`, also inside `bash -c` or
-`eval`, or a glob that could match one) is refused, but a script the bot writes and runs could
-still write there, and the check reads one command at a time: a `cd` from an earlier command is
-known only when the engine reports its folder.
+What stays open: before outside content a Full access bot otherwise runs as you, so it can still put
+a program in a folder on your PATH, such as `~/.local/bin`, that you or Leo Bot's service later run,
+or copy a program such as `launchctl` or `osascript` into its Edit folder and run that copy to hand
+work to a process outside the sandbox. On Approve for me before outside content the same paths are
+open to the sandbox, and only Claude Code's reviewer stands in their way. A command started in the
+background before outside content keeps the sandbox it started with: it is not moved to the stricter
+one once the turn reads outside content. On a Mac without the sandbox, or another system, Leo Bot
+can only read the command itself: a command that names a write there (`rm`, `mv`, `cp`, a `>`
+redirect, `git config --global`, also inside `bash -c` or `eval`, or a glob that could match one) is
+refused, but a script the bot writes and runs could still write there, and the check reads one
+command at a time: a `cd` from an earlier command is known only when the engine reports its folder.
 
 ### Reactions
 

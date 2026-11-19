@@ -15,6 +15,20 @@ def _doc(i, **kw):
     return {"id": i, "title": "T", "blocks": [], **kw}
 
 
+def _add_rows_worker(root, lid, n, tag):
+    """One process: n add-row dispatches through the rules engine (its own locks, its own cache)."""
+    from core import canvases
+    for k in range(n):
+        canvases.dispatch(root, "demo", canvases.Actor("owner"), "add-row",
+                          {"id": lid, "cells": {"name": f"{tag}-{k}"}})
+
+
+def _create_worker(root, n):
+    from core import canvases
+    for k in range(n):
+        canvases.dispatch(root, "demo", canvases.Actor("owner"), "create-canvas", {"title": f"C{k}"})
+
+
 class TestCanvasStore(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -294,6 +308,42 @@ class TestCanvasStore(unittest.TestCase):
         by = {t["id"]: t for t in cs.templates(self.root, "demo")}
         self.assertFalse(by["tp1"]["shipped"])
         self.assertTrue(by["tracker"]["shipped"])
+
+
+class TestCrossProcess(unittest.TestCase):
+    """Writers in separate processes (a bot's osctl and the server, two runs): flock serializes
+    them; no lost update, no duplicate id, one history line per change."""
+
+    def test_processes_never_lose_or_duplicate_a_write(self):
+        import multiprocessing
+        from core import canvases
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "projects" / "demo").mkdir(parents=True)
+        lid = canvases.dispatch(root, "demo", canvases.Actor("owner"), "create-list",
+                                {"title": "L", "columns": [{"label": "Name"}]})["id"]
+        ctx = multiprocessing.get_context("spawn")
+        procs = [ctx.Process(target=_add_rows_worker, args=(str(root), lid, 50, f"w{i}")) for i in range(3)]
+        procs.append(ctx.Process(target=_create_worker, args=(str(root), 20)))
+        for pr in procs:
+            pr.start()
+        for pr in procs:
+            pr.join(120)
+            self.assertEqual(pr.exitcode, 0)
+        doc = cs.read(root, "demo", lid)
+        rows = doc["rows"]
+        self.assertEqual(len(rows), 150)
+        self.assertEqual(len({r["id"] for r in rows}), 150)
+        self.assertEqual(doc["version"], 151)  # created at 1, one bump per write
+        self.assertEqual(sorted(r["v"] for r in rows), list(range(2, 152)))  # each write saw the last
+        hist = cs.history(root, "demo", lid)
+        self.assertEqual(len(hist), 151)
+        self.assertEqual(len({h["id"] for h in hist}), 151)
+        self.assertEqual(sorted(cs.list_ids(root, "demo", "cv"), key=lambda x: int(x[2:])),
+                         [f"cv{i}" for i in range(1, 21)])
+        for cid in cs.list_ids(root, "demo", "cv"):
+            self.assertEqual(len(cs.history(root, "demo", cid)), 1)
 
 
 if __name__ == "__main__":

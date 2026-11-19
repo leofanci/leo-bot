@@ -541,18 +541,26 @@ except Exception:
     die("Leo Bot could not check it.")
 if not isinstance(answer, dict) or answer.get("allow") is not True:
     die(str((answer or {}).get("reason") or "the gate refused it.") if isinstance(answer, dict) else "bad answer.")
+# A command's own $SHELL names the owner's shell, never this wrapper: `$SHELL -c` inside it would
+# re-enter here (a nested sandbox-exec and another gate call). CLAUDE_CODE_SHELL goes too.
+env = dict(os.environ)
+real = env.pop("LEOBOT_REAL_SHELL", "") or ""
+env.pop("CLAUDE_CODE_SHELL", None)
+if not real.startswith("/") or os.path.realpath(real).startswith(SANDBOX + "/"):
+    real = "/bin/zsh"
+env["SHELL"] = real
 if ticket:
     run = answer.get("command")
     if not isinstance(run, str) or not run:
         die("bad answer.")
-    os.execv("/bin/sh", ["/bin/sh", "-c", run])
+    os.execve("/bin/sh", ["/bin/sh", "-c", run], env)
 profile = answer.get("profile")
 if not isinstance(profile, str) or not profile.startswith("/") or not os.path.isfile(profile):
     die("no sandbox profile.")
 profile = os.path.realpath(profile)
 if not profile.startswith(SANDBOX + "/"):
     die("no sandbox profile.")  # only a profile the gate wrote, in Leo Bot's sandbox folder
-os.execv("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", profile, "/bin/zsh", *args])
+os.execve("/usr/bin/sandbox-exec", ["/usr/bin/sandbox-exec", "-f", profile, "/bin/zsh", *args], env)
 """.replace("TICKET", REVIEW_SHELL_TICKET)
 
 

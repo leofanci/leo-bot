@@ -582,6 +582,52 @@ class CodeWalls(unittest.TestCase):
                              ": leobot-osctl-ticket " + "b" * 32)
         self.assertEqual(proc.returncode, 126)  # a ticket the gate did not issue runs nothing
 
+    def test_review_shell_hands_commands_the_real_shell(self):
+        """$SHELL inside a command names the owner's shell, not this wrapper (no nested sandbox,
+        no extra gate call), and CLAUDE_CODE_SHELL is gone."""
+        out = self.edit / "env-ticket"
+        url, _ = self._stub_gate(lambda body: {"allow": True, "command": f"env > {shlex.quote(str(out))}"})
+        wrapper = shell_rules.review_shell()
+        for real, want in (("/bin/bash", "/bin/bash"), ("", "/bin/zsh"), ("relative/sh", "/bin/zsh"),
+                           (wrapper, "/bin/zsh")):
+            proc = self._wrapper({"LEOBOT_GATE_TOKEN": "t", "LEOBOT_GATE_URL": url, "SHELL": wrapper,
+                                  "CLAUDE_CODE_SHELL": wrapper, "LEOBOT_REAL_SHELL": real},
+                                 "eval ': leobot-osctl-ticket " + "c" * 32 + "' < /dev/null")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            env = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
+            self.assertEqual(env.get("SHELL"), want, real)
+            self.assertNotIn("CLAUDE_CODE_SHELL", env)
+            self.assertNotIn("LEOBOT_REAL_SHELL", env)
+
+    @unittest.skipUnless(shell_rules.can_sandbox(), "sandbox-exec")
+    def test_review_shell_sandboxed_command_gets_the_real_shell(self):
+        self.fake_code()
+        pdir = Path(paths.SANDBOX_DIR) / "profiles-test"
+        tok = taint.GATES.mint(taint.Turn(), writable=(str(self.edit),), review=True)
+        self.addCleanup(taint.GATES.revoke, tok)
+        url, _ = self._stub_gate(lambda body: dict(zip(("allow", "reason", "profile"),
+                                                       taint.GATES.shell_profile(tok, profile_dir=str(pdir)))))
+        out = self.edit / "shell-name"
+        wrapper = shell_rules.review_shell()
+        proc = self._wrapper({"LEOBOT_GATE_TOKEN": tok, "LEOBOT_GATE_URL": url, "SHELL": wrapper,
+                              "CLAUDE_CODE_SHELL": wrapper, "LEOBOT_REAL_SHELL": "/bin/bash"},
+                             f'echo "$SHELL ${{CLAUDE_CODE_SHELL:-none}}" > {shlex.quote(str(out))}')
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(out.read_text().strip(), "/bin/bash none")
+
+    def test_turn_env_passes_the_owners_shell_to_the_review_shell(self):
+        from dashboard.engines.claude_code import ClaudeCodeEngine
+        tokens = TurnTokens(gate_token="t", gate_port=8765)
+        mk = lambda level: TurnPolicy(shell=True, level=level, read_dirs=(str(self.edit),),  # noqa: E731
+                                      edit_dirs=(str(self.edit),))
+        with mock.patch.dict(os.environ, {"SHELL": "/bin/bash", "LEOBOT_REAL_SHELL": "/tmp/stale"}):
+            full = ClaudeCodeEngine().turn_env(mk("full"), tokens)
+            self.assertNotIn("LEOBOT_REAL_SHELL", full)
+            if shell_rules.can_sandbox():
+                env = ClaudeCodeEngine().turn_env(mk("approve"), tokens)
+                self.assertEqual(env["LEOBOT_REAL_SHELL"], "/bin/bash")
+                self.assertEqual(env["SHELL"], shell_rules.review_shell())
+
     def test_gate_review_tokens(self):
         turn = taint.Turn()
         tok = taint.GATES.mint(turn, writable=(str(self.edit),), review=True)
