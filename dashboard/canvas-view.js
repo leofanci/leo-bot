@@ -2,7 +2,7 @@
 // canvas page needs (safe links, file routes, block moves, cell values).
 // No DOM and no fetch: app.js wires events and passes `h`, its helpers:
 //   h.esc     the app's escape helper (every user, bot or outside string)
-//   h.md      the app's markdown renderer (formatBlocks, escapes first)
+//   h.md      the app's document markdown renderer (formatMdDoc, escapes first; "" for blank text)
 //   h.icon    icon(name) from the app's sprite
 //   h.owner   the viewer is the owner (Trust buttons)
 //   h.canEdit the viewer may change this canvas
@@ -152,7 +152,7 @@
       const draft = (state.drafts || {})[b.id] ?? b.md ?? "";
       const preview = (state.preview || {})[b.id];
       const conflict = (state.conflict || {})[b.id]
-        ? `<div class="cv-conflict" role="alert"><p><b>Someone else changed this block while you edited.</b>
+        ? `<div class="cv-conflict"${(state.announce || {})[b.id] ? ' role="alert"' : ""}><p><b>Someone else changed this block while you edited.</b>
             Their version is below and your draft is kept. Save replaces their version; Keep theirs drops your draft.</p>
             <div class="cv-md">${h.md(b.md) || "<p class=\"cv-note\">Their version is empty.</p>"}</div></div>` : "";
       const pane = preview
@@ -165,7 +165,7 @@
         <div class="cv-actions"><button type="button" class="btn primary sm" data-cv-savemd="${id}">${conflict ? "Replace their version" : "Save"}</button>
           <button type="button" class="btn ghost sm" data-cv-cancelmd="${id}">${conflict ? "Keep theirs" : "Cancel"}</button></div>`;
     }
-    const body = b.md ? h.md(b.md) : `<p class="cv-note">Empty.</p>`;
+    const body = h.md(b.md) || `<p class="cv-note">Empty.</p>`;
     const edit = h.canEdit ? `<div class="cv-actions"><button type="button" class="btn sm" data-cv-editmd="${id}">Edit</button></div>` : "";
     return `<div class="cv-md">${body}</div>${edit}`;
   }
@@ -183,7 +183,7 @@
     }).join("");
     const list = items ? `<ul class="cv-checks">${items}</ul>` : `<p class="cv-note">No items yet.</p>`;
     const add = h.canEdit ? `<form class="cv-inline" data-cv-additem="${id}">
-        <input class="cv-input" name="text" aria-label="New item" placeholder="Add an item" maxlength="10000" autocomplete="off">
+        <input class="cv-input" name="text" aria-label="New item" placeholder="Add an item" maxlength="10000" autocomplete="off" value="${h.esc((state.itemDrafts || {})[b.id] || "")}">
         <button class="btn sm" type="submit">Add</button></form>` : "";
     return list + add;
   }
@@ -196,7 +196,7 @@
     const cur = edit && edit.draft != null ? edit.draft : v;
     const now = cellHtml(col, v, h) || "(empty)";
     const note = edit && edit.conflict
-      ? `<small class="cv-note" role="alert">Changed meanwhile to: ${now}. Enter saves yours, Escape keeps theirs.</small>` : "";
+      ? `<small class="cv-note"${edit.announce ? ' role="alert"' : ""}>Changed meanwhile to: ${now}. Enter saves yours, Escape keeps theirs.</small>` : "";
     if (t === "select") {
       const opts = [`<option value="">(empty)</option>`].concat((col.options || []).map(o =>
         `<option value="${h.esc(o)}"${o === cur ? " selected" : ""}>${h.esc(o)}</option>`)).join("");
@@ -210,9 +210,11 @@
 
   function columnForm(bk, ls, form, cols, h) {
     const col = form.key ? cols.find(c => c.key === form.key) : null;
-    const type = (col && col.type) || "text";
-    const label = col ? h.esc(col.label) : "";
-    const options = col && col.options ? h.esc(col.options.join(", ")) : "";
+    // What the viewer typed survives a redraw (form.draft), else the column as stored.
+    const draft = form.draft || {};
+    const type = draft.type || (col && col.type) || "text";
+    const label = h.esc(draft.label ?? (col ? col.label : ""));
+    const options = h.esc(draft.options ?? (col && col.options ? col.options.join(", ") : ""));
     const types = COLUMN_TYPES.map(t => `<option value="${t}"${t === type ? " selected" : ""}>${COLUMN_LABEL[t]}</option>`).join("");
     const keyAttr = col ? ` data-key="${h.esc(col.key)}"` : "";
     const heading = col ? "Edit column" : "New column";
@@ -292,7 +294,7 @@
     const list = items ? `<ul class="cv-files">${items}</ul>` : `<p class="cv-note">No files yet.</p>`;
     const pre = h.ws && h.ws !== "hq" ? "projects/" + h.ws + "/" : "";
     const add = h.canEdit ? `<form class="cv-inline" data-cv-addpath="${id}">
-        <input class="cv-input" name="path" aria-label="File path" placeholder="${h.esc(pre)}docs/notes.md" autocomplete="off" maxlength="1000">
+        <input class="cv-input" name="path" aria-label="File path" placeholder="${h.esc(pre)}docs/notes.md" autocomplete="off" maxlength="1000" value="${h.esc((state.pathDrafts || {})[b.id] || "")}">
         <button class="btn sm" type="submit">Add file</button></form>` : "";
     return list + add;
   }
@@ -315,11 +317,35 @@
       <div class="cv-view" data-cv-view="${id}" inert>${inner}</div>`;
   }
 
-  const BLOCKS = { text: textBlock, checklist: checklistBlock, list: listBlock, files: filesBlock, view: viewBlock };
+  const browserImage = value => typeof value === "string" && /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/.test(value);
 
-  // A block type without a renderer here yet (the browser block) shows what it is.
+  function browserBlock(b, state, h) {
+    if (!h.owner) return `<p class="cv-note">Browser view: owner only.</p>`;
+    const bots = h.bots || [];
+    const choices = bots.some(bot => bot.id === b.bot) ? bots : [{ id: b.bot, name: b.bot }, ...bots];
+    const options = choices.map(bot => {
+      const selected = bot.id === b.bot ? " selected" : "";
+      return `<option value="${h.esc(bot.id)}"${selected}>${h.esc(bot.name)}</option>`;
+    }).join("");
+    const pick = h.canEdit && bots.length
+      ? `<label class="cv-note">Bot <select class="cv-input" data-cv-browserbot="${h.esc(b.id)}">${options}</select></label>`
+      : `<span class="cv-note">Browser of ${h.esc(b.bot)}</span>`;
+    return `<div data-cv-browser="${h.esc(b.bot)}">
+        <div class="cv-viewbar">${pick}<span class="cv-note" data-cv-browser-status role="status">Loading browser…</span>
+          <button type="button" class="btn sm" data-cv-stopbot="${h.esc(b.bot)}" aria-label="Stop ${h.esc(b.bot)} browsing" disabled>Stop</button></div>
+        <p class="cv-note" data-cv-browser-title hidden></p>
+        <a class="cv-browser-url" data-cv-browser-url target="_blank" rel="noopener noreferrer" hidden></a>
+        <div class="cv-browser-frame"><img data-cv-browser-image alt="Latest screenshot from ${h.esc(b.bot)}" hidden>
+          <p class="cv-note" data-cv-browser-empty>No screenshot yet. It appears after this bot browses.</p></div>
+        <p class="cv-note" data-cv-browser-time>No screenshot captured yet.</p>
+        <p class="cv-note" data-cv-browser-error role="status" hidden></p></div>`;
+  }
+
+  const BLOCKS = { text: textBlock, checklist: checklistBlock, list: listBlock, files: filesBlock,
+    view: viewBlock, browser: browserBlock };
+
+  // Unknown types keep a placeholder until a renderer is registered.
   function otherBlock(b, state, h) {
-    if (b.type === "browser") return `<p class="cv-note">Browser of ${h.esc(b.bot)}. The live view is not available in this version.</p>`;
     return `<p class="cv-note">This block type has no view here.</p>`;
   }
 
@@ -344,6 +370,26 @@
   };
   const historyLabel = e => OP_LABEL[e && e.op] || (e && e.op) || "Change";
 
-  return { COLUMN_TYPES, COLUMN_LABEL, TYPE_LABEL, safeHref, fileRoute, moveParams, parseCell,
-    cellHtml, blockHtml, registerBlock, historyLabel };
+  // True while the viewer is mid-edit: a background reload waits for the edit to end.
+  // `typing`: a focused field in the canvas holds unsaved text.
+  function busy(state, typing) {
+    const s = state || {};
+    return !!(typing || s.editCell || s.colForm || s.renaming || Object.values(s.editing || {}).some(Boolean));
+  }
+
+  // What the viewer may do to the canvas as a whole; the same rules as core/canvases.py
+  // (_delete_canvas, _pin_check). A person: deletes any canvas the owner did not create;
+  // pins into another room only a canvas they created, never in a DM room.
+  function rights({ person, me, doc, pinned, roomKind, canEdit }) {
+    if (!canEdit) return { mayDelete: false, mayPin: false };
+    if (!person) return { mayDelete: true, mayPin: true };
+    return { mayDelete: doc.created_by !== "owner",
+      mayPin: roomKind !== "dm" && (!!pinned || doc.created_by === me) };
+  }
+
+  // A pinned-tabs list's identity: the tabs redraw only when it changes.
+  const pinSig = list => JSON.stringify((list || []).map(c => [c.id, c.title]));
+
+  return { busy, rights, pinSig, COLUMN_TYPES, COLUMN_LABEL, TYPE_LABEL, safeHref, fileRoute, moveParams, parseCell,
+    cellHtml, blockHtml, browserImage, registerBlock, historyLabel };
 });
