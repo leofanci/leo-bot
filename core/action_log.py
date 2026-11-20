@@ -7,7 +7,8 @@ setting turns the log off: the content of conversations can be deleted, what bot
 
 Each line carries `prev` (the hash of the line before it, across months) and `h` (sha256 of
 prev + this line's fields), so removing or editing a line breaks the chain: `verify` finds it
-(`leobot actions --verify`). This shows tampering after the fact; it cannot stop someone who
+(`leobot actions --verify`), except lines cut off the very end: nothing after them points back.
+This shows tampering after the fact; it cannot stop someone who
 holds the owner's account from rewriting the whole folder. Bots never reach team/ (osctl's
 read-file refuses it, and edit folders never hold Leo Bot's data folder).
 
