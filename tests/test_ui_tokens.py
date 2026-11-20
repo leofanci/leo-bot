@@ -150,7 +150,7 @@ class UiTokens(unittest.TestCase):
         assert ".chip,.kchip{min-height:var(--ui-control-dense)" in app_css
         assert ".chip,.kchip{min-width:var(--ui-control-touch);min-height:var(--ui-control-touch)}" in app_css
 
-    def test_kernel_logo_is_wired_into_dashboard_shell(self):
+    def test_logo_is_wired_into_dashboard_shell(self):
         logo = DASHBOARD / "logo.svg"
         html = (DASHBOARD / "app.html").read_text(encoding="utf-8")
         app_js = (DASHBOARD / "app.js").read_text(encoding="utf-8")
@@ -163,10 +163,10 @@ class UiTokens(unittest.TestCase):
         assert '"/logo.svg"' in server
         assert '"image/svg+xml"' in server
 
-    def test_kernel_logo_follows_graphite_indigo_palette(self):
-        logo = (DASHBOARD / "logo.svg").read_text(encoding="utf-8").upper()
-        assert "#4F46E5" in logo or "#4338CA" in logo   # indigo accent
-        assert "#D86A47" not in logo and "#A53A24" not in logo  # old rust
+    def test_logo_is_the_embedded_app_icon(self):
+        logo = (DASHBOARD / "logo.svg").read_text(encoding="utf-8")
+        assert "data:image/png;base64," in logo  # the landing-page icon, embedded
+        assert "kernel-bg" not in logo  # old kernel mark gone
 
     def test_graphite_palette_light(self):
         t = _tokens()
