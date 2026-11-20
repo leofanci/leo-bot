@@ -28,6 +28,11 @@ def _path(chat_id):
     return CHATS_DIR / f"{chat_id}.json"
 
 
+def locked():
+    """The lock to hold around one load-change-save of a chat (a context manager)."""
+    return _LOCK
+
+
 def title_from(text):
     t = re.sub(r"(?:^|\s)/[\w.-]+", " ", text or "")  # drop /skill tags, keep @mentions
     t = " ".join(t.split())

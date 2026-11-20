@@ -1163,6 +1163,19 @@ def _skills_index():
     return out
 
 
+def _someone_elses_notes(rec):
+    """An invited person's notes-to-self thread: only its starter reads it, the owner included."""
+    return bool(rec) and str(rec.get("room") or "").endswith("/dm-self") and bool(rec.get("by"))
+
+
+def _avatar_ids_for(person):
+    """Whose pictures an invited person may see: the owner, and people sharing a workspace."""
+    seen = {bots.CEO, person["id"]}
+    for ws in person.get("ws") or ():
+        seen.update(p["id"] for p in people.people_in(ROOT, ws))
+    return seen
+
+
 def _retire_threads(match):
     """Unshare saved threads: the owner keeps them, people never see them again."""
     for rec in chat_store.records():
@@ -3589,7 +3602,8 @@ class Handler(BaseHTTPRequestHandler):
         params = {}
         if room:
             r = rooms.get_room(room, team, ROOT) if rooms.split_id(room)[0] == ws else None
-            if not r or (viewer.get("kind") != "owner" and (r.get("kind") == "dm" or not rooms.can_see(r, viewer))):
+            if not r or r.get("kind") == "self" or (viewer.get("kind") != "owner" and (
+                    r.get("kind") == "dm" or not rooms.can_see(r, viewer))):
                 return self._send(404, CANVAS_404)
             params["room"] = room
         code, out = self._canvas_call(viewer, ws, team, "list-canvases", params)
@@ -3636,9 +3650,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/me":
                 return self._send(200, {k: person[k] for k in ("kind", "id", "name", "ws")})
             if path == "/api/avatars":
-                return self._send(200, {"avatars": avatars.all_views(ROOT)})
+                seen = _avatar_ids_for(person)
+                return self._send(200, {"avatars": {k: v for k, v in avatars.all_views(ROOT).items() if k in seen}})
             if path.startswith("/api/avatar/"):
-                return self._send_avatar(path[len("/api/avatar/"):])
+                who = path[len("/api/avatar/"):]
+                if who not in _avatar_ids_for(person):  # nobody outside their workspaces
+                    return self._send(404, {"error": "no picture"})
+                return self._send_avatar(who)
             if path == "/api/self-chat":
                 ws = mine(q("ws"))
                 if not ws:
@@ -3873,8 +3891,11 @@ class Handler(BaseHTTPRequestHandler):
         project_scope = (project_slug,) if project_record else None
         linked = set(folders.all_paths(ws, ROOT))
         chat_id = body.get("chat_id") or None
-        if chat_id and _chat_workspace(chat_store.load(chat_id)) not in (None, ws):
+        prior = chat_store.load(chat_id) if chat_id else None
+        if chat_id and _chat_workspace(prior) not in (None, ws):
             chat_id = None  # a thread never leaves its workspace: start a fresh one here
+        if prior and str(prior.get("room") or "").endswith("/dm-self"):
+            chat_id = None  # notes to self never get a bot turn: start a fresh thread instead
         person = viewer if viewer.get("kind") == "person" else None
         # A scheduled job: its own fresh thread every run, writes by its mode; `live` tells run_job
         # how it went. The owner's open thread (_CHAT) is never touched.
@@ -4917,7 +4938,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("unknown workspace")
                 return self._self_chat_get(ws, bots.CEO)
             if path == "/api/chats":
-                chats = chat_store.list_meta()
+                chats = [c for c in chat_store.list_meta() if not _someone_elses_notes(c)]
                 room = (parse_qs(urlparse(self.path).query).get("room") or [None])[0]
                 if room:
                     projects = db.tree()
@@ -4931,7 +4952,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"chats": chats})
             if path.startswith("/api/chats/"):
                 rec = chat_store.load(path[len("/api/chats/"):])
-                if rec is None:
+                if rec is None or _someone_elses_notes(rec):
                     return self._send(404, {"error": "chat not found"})
                 return self._send(200, rec)
             if path == "/api/timeline":
@@ -5298,6 +5319,11 @@ class Handler(BaseHTTPRequestHandler):
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
                 for pid in people.forget_workspace(ROOT, out["slug"]):
                     runners.revoke_owner(ROOT, pid)
+                    avatars.remove(pid, ROOT)  # gone from their last workspace: their picture too
+                # Notes to self (owner's and everyone's) go: their ids repeat for a reused slug.
+                for rec in list(chat_store.records()):
+                    if rec.get("room") == self_chat.room_id(out["slug"]) and isinstance(rec.get("id"), str):
+                        chat_store.delete(rec["id"])
                 # Turns still running for the deleted workspace lose their tokens and sessions now.
                 os_relay.TOKENS.revoke_where(ws=out["slug"])
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
@@ -5634,9 +5660,14 @@ class Handler(BaseHTTPRequestHandler):
                     _CHAT_SCOPE = None
                 return self._send(200, {"ok": True})
             if path.startswith("/api/chats/") and path.endswith("/react"):
-                return self._react_post(path[len("/api/chats/"):-len("/react")], body, by=bots.CEO)
+                chat_id = path[len("/api/chats/"):-len("/react")]
+                if _someone_elses_notes(chat_store.load(chat_id)):
+                    return self._send(404, {"error": "chat not found"})
+                return self._react_post(chat_id, body, by=bots.CEO)
             if path.startswith("/api/chats/") and path.endswith("/delete"):
                 chat_id = path[len("/api/chats/"):-len("/delete")]
+                if _someone_elses_notes(chat_store.load(chat_id)):
+                    return self._send(404, {"error": "chat not found"})
                 if _CHAT is not None and getattr(_CHAT, "session_id", None) == chat_id:
                     _CHAT.close()
                     _CHAT = None

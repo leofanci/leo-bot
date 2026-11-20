@@ -10,6 +10,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 from core import paths, ws_logos
@@ -21,6 +22,7 @@ HUES = ("ocean", "clay", "plum", "ochre", "slate", "rose")
 ICONS = ("smile", "zap", "flag", "globe", "compass", "chart", "flask", "map",
          "route", "mic", "book", "layers")
 _ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+_LOCK = threading.Lock()  # one change at a time: presets.json and the one-image-per-person rule
 
 
 def _dir(root=None):
@@ -90,11 +92,12 @@ def save_image(who, data, root=None):
     ext = ws_logos.sniff(bytes(data))
     if not ext:
         raise ValueError("picture must be a PNG, JPEG or WebP image")
-    _drop_image(who, root)
-    _write(_path(who, ext, root), bytes(data))
-    rows = _presets(root)
-    if rows.pop(who, None) is not None:
-        _save_presets(rows, root)
+    with _LOCK:
+        _drop_image(who, root)
+        _write(_path(who, ext, root), bytes(data))
+        rows = _presets(root)
+        if rows.pop(who, None) is not None:
+            _save_presets(rows, root)
     return view(who, root)
 
 
@@ -102,19 +105,21 @@ def save_preset(who, icon, hue, root=None):
     who = _id(who)
     if icon not in ICONS or hue not in HUES:
         raise ValueError("unknown preset")
-    _drop_image(who, root)
-    rows = _presets(root)
-    rows[who] = {"icon": icon, "hue": hue}
-    _save_presets(rows, root)
+    with _LOCK:
+        _drop_image(who, root)
+        rows = _presets(root)
+        rows[who] = {"icon": icon, "hue": hue}
+        _save_presets(rows, root)
     return view(who, root)
 
 
 def remove(who, root=None):
     who = _id(who)
-    _drop_image(who, root)
-    rows = _presets(root)
-    if rows.pop(who, None) is not None:
-        _save_presets(rows, root)
+    with _LOCK:
+        _drop_image(who, root)
+        rows = _presets(root)
+        if rows.pop(who, None) is not None:
+            _save_presets(rows, root)
     return None
 
 

@@ -435,7 +435,7 @@ async function adoptBrowserZone(){
     if (r.adopted) toast(`Timezone set to ${r.timezone} from your browser. Change it in Settings, General.`);
   } catch {}
 }
-async function boot(){ await loadMe(); loadAvatars(); loadUpdate(); adoptBrowserZone(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+async function boot(){ await loadMe(); loadUpdate(); adoptBrowserZone(); await Promise.all([ensureSchemas(), loadAvatars()]); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -734,7 +734,7 @@ function renderCanvasNav(){
     CANVAS.roomPending = room;
     requestCanvasReload();
   }
-  const canNew = !!room && !(isPerson() && roomById(room)?.kind === "dm");
+  const canNew = !!room && !noCanvasRoom(room);
   const tabs = pins && pins.length ? `<div class="cn-tabs" role="navigation" aria-label="Canvases in this channel">
       ${pins.map(c => `<button type="button" class="cn-tab" data-cn-tab="${esc(c.id)}"${c.id === openCv ? ' aria-current="page"' : ""}>${icon("layers")}<span>${esc(c.title)}</span></button>`).join("")}
     </div>` : "";
@@ -1008,11 +1008,18 @@ function stopCanvasBrowserWatch(){
   CANVAS_BROWSER_WATCH = null;
 }
 
+// Rooms with no canvas pins: notes to self (one room id for everyone), and a bot DM for a coworker.
+function noCanvasRoom(room){
+  const kind = roomById(room)?.kind;
+  return kind === "self" || (isPerson() && kind === "dm");
+}
+
 // Canvases pinned in `room`, in pin order; null while the first load runs.
 // Loads in the background and redraws the canvas bar when it lands.
 function canvasPins(room){
-  // A coworker has no HQ and no tabs in DM rooms: the server answers 404, so never ask.
-  if (isPerson() && (room.startsWith("hq/") || roomById(room)?.kind === "dm")) return [];
+  // A coworker has no HQ and no tabs in DM rooms, and notes to self hold no canvases:
+  // the server answers 404, so never ask.
+  if ((isPerson() && room.startsWith("hq/")) || noCanvasRoom(room)) return [];
   const key = `${_WS}|${room}`;
   const have = CANVAS_PINS.key === key ? CANVAS_PINS.list : null;
   if (have && Date.now() - CANVAS_PINS.at < 30000) return have;
@@ -1094,7 +1101,7 @@ async function createCanvas(template){
     params.title = title;
   }
   const room = window.ChatRooms?.current();
-  if (room && !(isPerson() && roomById(room)?.kind === "dm")) params.pin = room;
+  if (room && !noCanvasRoom(room)) params.pin = room;
   const out = await canvasCmd("create-canvas", params);
   if (!out?.id) return;
   refreshCanvasPins();
@@ -1136,7 +1143,7 @@ function canvasHelpers(doc){
 async function loadCanvas(st){
   const seq = st.loadSeq = (st.loadSeq || 0) + 1;
   const room = window.ChatRooms?.current() || null;
-  const pinsP = room && !(isPerson() && roomById(room)?.kind === "dm")
+  const pinsP = room && !noCanvasRoom(room)
     ? cvFetch(`/api/canvases?${cvQuery({ room })}`).then(d => (d.pins || []).includes(st.id)).catch(() => false)
     : Promise.resolve(false);
   let doc;
@@ -6955,7 +6962,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (room?.kind === "self") {
       const el = document.createElement("div");
       el.className = "empty";
-      el.textContent = "This is your space. Jot down notes, drafts, links. Nobody else sees it and no bot answers.";
+      el.textContent = "This is your space. Jot down notes, drafts, links. Only you see it here, and no bot answers.";
       stream.appendChild(el);
       return;
     }
