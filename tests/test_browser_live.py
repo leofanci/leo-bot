@@ -515,3 +515,7 @@ class StopRun(api.Base):
         self.assertEqual(len(seen), 1, h.wfile.getvalue().decode())
         sess.close.assert_called_once()
         self.assertFalse(api.server._BROWSER_RUNS)
+        # The cut-off reply says it was stopped, on screen and (saved notice) after a reload.
+        notices = [json.loads(line[len("data: "):]).get("notice") for line in h.wfile.getvalue().decode().splitlines()
+                   if line.startswith("data: {")]
+        self.assertEqual(notices.count("Stopped"), 1)

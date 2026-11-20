@@ -265,3 +265,9 @@ class Ui(unittest.TestCase):
 
     def test_avatars_load_before_first_paint(self):
         self.assertIn("await Promise.all([ensureSchemas(), loadAvatars()]); await renderRail();", APP_JS)
+
+    def test_new_picture_repaints_open_chat(self):
+        # Message avatars carry who wrote them, and a saved picture repaints them in place.
+        self.assertIn('paintSender(div, { avatar: msgAvatar(by || "ceo"', APP_JS)
+        self.assertIn('document.querySelectorAll(".msg > .av[data-av]")', APP_JS)
+        self.assertIn("await renderRail(); repaintMsgAvatars(); renderAvatar();", APP_JS)
