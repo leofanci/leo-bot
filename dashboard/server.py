@@ -51,7 +51,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, general, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
-from core import approvals, jobs, skill_loads  # noqa: E402
+from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
@@ -2091,6 +2091,56 @@ def stop_job():
                 traceback.print_exc()
 
 
+def stop_everything(by="owner"):
+    """The owner's kill switch (core/halt.py). Deterministic: sets the stop flag first (no new
+    turn or job starts), revokes every turn token (a tool call on its way is refused at its relay),
+    then ends every run in flight: the owner's, every invited person's, the job, runner turns and
+    every bot's browser. Never reads a model's output."""
+    was = halt.state(ROOT)
+    halt.halt(ROOT, by=by)
+    for store in (os_relay.TOKENS, apps_relay.TOKENS, BROWSER_TOKENS, CANVAS_TOKENS):
+        store.revoke_where()  # no filter: every token
+    taint.GATES.revoke_all()
+    stop_job()
+    runners.HUB.drop_all()
+    with _BROWSER_RUNS_LOCK:
+        bots_browsing = {(r["ws"], r["bot"]) for r in _BROWSER_RUNS.values()}
+    for ws, bot in bots_browsing:
+        _stop_browser_runs(ws, bot)
+    sessions = [_CHAT] if _CHAT is not None else []
+    with _SLOTS_LOCK:
+        sessions += [slot[0] for slot in _PERSON_CHATS.values()]
+    sessions += [v for v in list(_EXTRA.values()) if v is not None]
+    for sess in sessions:
+        try:
+            sess.close()
+        except Exception:  # noqa: BLE001 - one session that fails to close never stops the rest
+            traceback.print_exc()
+    if was is None:
+        action_log.record(ROOT, "stop_everything", by=by, runs=len(sessions), browsers=len(bots_browsing))
+    return halt.state(ROOT)
+
+
+def _halt_watch(every=2.0):
+    """`leobot halt` writes the flag from a terminal: this ends the runs in flight within seconds."""
+    seen = halt.halted(ROOT)
+    while True:
+        time.sleep(every)
+        try:
+            now = halt.halted(ROOT)
+            if now and not seen:
+                stop_everything((halt.state(ROOT) or {}).get("by") or "cli")
+            seen = now
+        except Exception:  # noqa: BLE001 - the watcher never dies
+            traceback.print_exc()
+
+
+def resume_everything(by="owner"):
+    if halt.halted(ROOT):
+        halt.resume(ROOT)
+        action_log.record(ROOT, "resume", by=by)
+
+
 def _costs(ws, projects, days=30):
     """Estimated spend in a workspace over `days` (HQ covers every workspace); see costs.summarize."""
     return costs.summarize(ws, _spend_records(), {w["id"] for w in _workspaces(projects)}, days)
@@ -2710,6 +2760,9 @@ def _approve_browser_send(rec, arguments=None):
         out = approvals.approve_send(rec["id"], ROOT)
     except ValueError as e:
         raise _AppRefused(str(e)) from None
+    # The owner approved this page's site as a place the bot sends to (core/destinations.py).
+    destinations.learn(out.get("ws"), destinations.site(((out.get("action") or {}).get("arguments") or {}).get("url")),
+                       ROOT)
     if out.get("chat"):
         chat_store.append_note(out["chat"], out["bot"], BROWSER_APPROVED)
     return {**out, "result": BROWSER_APPROVED}
@@ -2755,6 +2808,8 @@ def _approve_app_action(aid, arguments=None):
     if (action.get("slug"), action.get("arguments")) != (rec["action"]["slug"], rec["action"]["arguments"]):
         out_rec = approvals.finish(aid, "failed", "Changed while it was being approved; nothing was sent.", ROOT)
         return out_rec
+    # The owner approved where this goes: the bot may send there on its own from now on.
+    destinations.learn(rec["ws"], destinations.of_arguments(action["arguments"]), ROOT)
     try:
         out = composio.execute(rec["person"], rec["ws"], action["slug"], action["arguments"], account, ROOT)
         if isinstance(out, dict) and (out.get("successful") is False
@@ -2768,6 +2823,9 @@ def _approve_app_action(aid, arguments=None):
         status = "failed"
         line = approvals.STALE_NOTE if e.status is None or e.status >= 500 else f"Failed: {e}"
     rec = approvals.finish(aid, status, line, ROOT)
+    action_log.record(ROOT, "app_approved", ws=rec.get("ws"), bot=rec.get("bot"), person=rec.get("person"),
+                      chat=rec.get("chat"), slug=action["slug"], account=account, status=status,
+                      arguments=action["arguments"])
     if rec.get("chat"):
         chat_store.append_note(rec["chat"], rec["bot"], line)
     return rec
@@ -3906,6 +3964,8 @@ class Handler(BaseHTTPRequestHandler):
         if job:
             chat_id = None
             live["status"] = "refused"  # until the model turn starts: every early return
+        if halt.halted(ROOT):  # Stop everything: no turn starts until the owner resumes
+            return self._sse_message(halt.MESSAGE)
         # An invited person's allowance holds on every engine, their own Mac included.
         allowance = spend.refusal(None, person["id"], records=_spend_records) if person else None
         if allowance:
@@ -4141,7 +4201,9 @@ class Handler(BaseHTTPRequestHandler):
         turn = taint.Turn(app_data=getattr(sess, "app_data", False),
                           outside=getattr(sess, "outside", False) or bool(person) or bool(shared)
                           or bool(provenance.pending(ROOT, ws))
-                          or bool(job and jobs.notes_outside(jobs.get(ROOT, job["id"]) or job)))
+                          or bool(job and jobs.notes_outside(jobs.get(ROOT, job["id"]) or job)),
+                          who={"ws": ws, "chat": chat_id,
+                               "person": (person or {}).get("id"), "job": (job or {}).get("id")})
         files_scan = provenance.scan(ROOT, ws)  # what this request changes is labeled if it is tainted
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
@@ -4920,6 +4982,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/me":
                 return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner", "deployment": DEPLOYMENT})
+            if path == "/api/halt":
+                return self._send(200, {"halted": halt.state(ROOT)})
             if path == "/api/canvases" or path.startswith(("/api/canvases/", "/api/lists/")):
                 return self._canvas_get(path, OWNER)
             if path in ("/api/people", "/api/sharing"):
@@ -5101,6 +5165,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         global _CHAT, _CHAT_SCOPE
         path = urlparse(self.path).path
+        if path in (APPS_RELAY_PATH, BROWSER_RELAY_PATH, OS_RELAY_PATH, taint.GATE_PATH, CANVAS_PATH,
+                    RUNNER_OS_PATH) and halt.halted(ROOT):
+            # Stop everything (core/halt.py): no bot tool runs, even on a token minted mid-stop.
+            if path == taint.GATE_PATH:
+                return self._send(200, {"allow": False, "reason": halt.MESSAGE})
+            return self._send(423, {"error": halt.MESSAGE})
         if path == APPS_RELAY_PATH:  # the relays: bot turn tokens, no dashboard cookie
             return self._handle_apps_relay()
         if path == BROWSER_RELAY_PATH:
@@ -5129,6 +5199,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
         try:
             body = self._read_json()
+            if path in ("/api/halt", "/api/resume"):  # Stop everything and Resume (core/halt.py)
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                if path == "/api/halt":
+                    return self._send(200, {"halted": stop_everything("owner")})
+                resume_everything("owner")
+                return self._send(200, {"halted": None})
             if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
                 return self._people_post(path, body, OWNER)
             if path == "/api/canvases":
@@ -5319,6 +5396,7 @@ class Handler(BaseHTTPRequestHandler):
                 BROWSER_TOKENS.revoke_where(ws=out["slug"])  # first: no frame of it reaches a browser now
                 old_epoch = browser.epochs(ROOT).get(out["slug"])  # its engine sessions carry this epoch
                 approvals.forget_workspace(out["slug"], ROOT)
+                destinations.forget_workspace(out["slug"], ROOT)  # a reused slug asks again before sending
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
                 browser.forget_workspace(out["slug"], ROOT)  # and its epoch: a reused slug gets new names
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
@@ -5781,6 +5859,7 @@ def main():
     write_token_file()
     _start_update_checker()
     threading.Thread(target=_canvas_trash_loop, name="canvas-trash", daemon=True).start()
+    threading.Thread(target=_halt_watch, name="halt-watch", daemon=True).start()
     # No bot-mode browser child starts until the startup close (below) has finished: held before
     # anything that can reach POOL.get (jobs, the sweeper, requests) runs.
     browser_upstream.POOL.hold_starts()

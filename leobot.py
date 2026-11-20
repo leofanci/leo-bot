@@ -947,6 +947,43 @@ def cmd_eval(args) -> int:
     return subprocess.call(cmd, cwd=str(paths.CODE))
 
 
+def cmd_halt(args) -> int:
+    """Stop everything (core/halt.py): works with the server up or down. The running server sees
+    the flag within seconds and ends every bot run in flight; a stopped server starts stopped."""
+    from core import action_log, halt
+    was = halt.state(paths.DATA)
+    halt.halt(paths.DATA, by="cli")
+    if was is None:
+        action_log.record(paths.DATA, "stop_everything", by="cli")
+    print("Stopped: no bot runs and no job starts until `leobot resume` (or Resume in the top bar).")
+    return 0
+
+
+def cmd_resume(args) -> int:
+    from core import action_log, halt
+    if halt.halted(paths.DATA):
+        halt.resume(paths.DATA)
+        action_log.record(paths.DATA, "resume", by="cli")
+        print("Resumed: bots and jobs run again.")
+    else:
+        print("Leo Bot is not stopped.")
+    return 0
+
+
+def cmd_actions(args) -> int:
+    """The action log (core/action_log.py): the newest entries, or --verify the whole chain."""
+    from core import action_log
+    if args.verify:
+        ok, n, where = action_log.verify(paths.DATA)
+        print(f"{n} entries checked: " + ("the log is whole." if ok else f"BROKEN at {where}"))
+        return 0 if ok else 1
+    for row in action_log.entries(paths.DATA, limit=args.limit):
+        when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row.get("ts") or 0))
+        rest = {k: v for k, v in row.items() if k not in ("ts", "kind", "prev", "h")}
+        print(when, row.get("kind"), json.dumps(rest, ensure_ascii=False)[:300])
+    return 0
+
+
 def cmd_rotate_token(args) -> int:
     """A new owner login token: every browser signed in with the old one is signed out. On a
     Mac the token is new on every start already; on a server it is kept until this runs."""
@@ -1001,6 +1038,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="do not ask for confirmation")
     p.add_argument("--auto-check", choices=("on", "off"),
                    help="the daily check for a new release (on by default; asks origin only)")
+    sub.add_parser("halt", help="stop everything: end every bot run now, start none until resume")
+    sub.add_parser("resume", help="let bots and jobs run again after halt")
+    p = sub.add_parser("actions", help="what bots did (the action log), newest last")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--verify", action="store_true", help="check that no entry was removed or changed")
     p = sub.add_parser("rotate-token", help="new owner login token: signs every owner browser out")
     p.add_argument("--yes", action="store_true")
     p = sub.add_parser("eval", help="check bot behavior: offline (free), or --live on a real engine")
@@ -1015,7 +1057,7 @@ COMMANDS = {"open": cmd_open, "start": cmd_start, "stop": cmd_stop, "status": cm
             "version": cmd_version, "doctor": cmd_doctor, "backup": cmd_backup,
             "move-data": cmd_move_data, "uninstall": cmd_uninstall,
             "service": cmd_service, "update": cmd_update, "eval": cmd_eval,
-            "rotate-token": cmd_rotate_token}
+            "rotate-token": cmd_rotate_token, "halt": cmd_halt, "resume": cmd_resume, "actions": cmd_actions}
 
 
 def main(argv=None) -> int:

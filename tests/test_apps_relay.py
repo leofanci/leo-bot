@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, composio, integrations
+from core import action_log, approvals, composio, destinations, integrations
 from dashboard import apps_relay, taint
 
 CAT = ["gmail", "googlecalendar", "googledrive", "instagram"]
@@ -222,9 +222,10 @@ class Gate(unittest.TestCase):
         self.assertEqual([r["status"] for r in rows], ["failed"])
         self.assertNotIn("Ran on its own", text_of(reply))
 
-    def test_send_without_asking_also_sends_after_outside_content(self):
-        # The owner's per-app choice: "Sends without asking" sends whatever the conversation read.
+    def test_send_without_asking_sends_to_a_known_destination_after_outside_content(self):
+        # The owner's per-app choice: "Sends without asking" sends where this workspace sent before.
         self.acts()
+        destinations.learn("hq", {"email:a@example.com"}, self.root)
         self.turn.saw_outside()
         send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
         reply = self.handle(multi(send, send))
@@ -232,13 +233,60 @@ class Gate(unittest.TestCase):
         self.assertEqual(approvals.pending(self.root), [])
         self.assertIn("Ran on its own", text_of(reply))
 
+    def test_new_destination_after_outside_content_waits_for_a_click(self):
+        # An injected email names its own recipient: a destination never used waits, at any level.
+        self.acts()
+        self.turn.saw_outside()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "Attacker <x@example.net>"}}
+        reply = self.handle(multi(send))
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual([r["action"]["slug"] for r in approvals.pending(self.root)], ["GMAIL_SEND_EMAIL"])
+        self.assertIn("x@example.net", text_of(reply))
+        self.assertIn("never sent to", text_of(reply))
+
+    def test_new_destination_hidden_in_another_field_waits(self):
+        self.acts()
+        destinations.learn("hq", {"email:a@example.com"}, self.root)
+        self.turn.saw_outside()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com",
+                                                               "extra_recipients": ["x@example.net"]}}
+        self.handle(multi(send))
+        self.assertEqual(self.up.frames, [])
+        self.assertEqual(len(approvals.pending(self.root)), 1)
+
+    def test_an_address_in_the_body_is_not_a_destination(self):
+        self.acts()
+        destinations.learn("hq", {"email:a@example.com"}, self.root)
+        self.turn.saw_outside()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {
+            "recipient_email": "a@example.com", "body": "write to x@example.net or see https://site.example"}}
+        self.handle(multi(send))
+        self.assertEqual(len(self.up.frames), 1)
+
+    def test_a_clean_send_teaches_the_destination(self):
+        self.acts()
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
+        self.handle(multi(send))  # the owner's own words: runs and is learned
+        self.assertEqual(len(self.up.frames), 1)
+        self.turn.saw_outside()
+        self.handle(multi(send))
+        self.assertEqual(len(self.up.frames), 2)
+        self.assertEqual(approvals.pending(self.root), [])
+
+    def test_runs_are_in_the_action_log(self):
+        self.acts()
+        self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))
+        rows = action_log.entries(self.root)
+        self.assertEqual([(r["kind"], r["slug"], r["status"]) for r in rows], [("app_run", "GMAIL_SEND_EMAIL", "done")])
+        self.assertEqual(action_log.verify(self.root)[:2], (True, 1))
+
     def test_a_read_marks_the_conversation(self):
         self.acts()
         self.handle(multi({"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {}}))
         self.assertTrue(self.turn.app_data and self.turn.outside)
         self.handle(multi({"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}))
-        self.assertEqual(len(self.up.frames), 2)  # the owner chose "Sends without asking"
-        self.assertEqual(approvals.pending(self.root), [])
+        self.assertEqual(len(self.up.frames), 1)  # the read only: a new address after app data waits
+        self.assertEqual(len(approvals.pending(self.root)), 1)
 
     def test_a_send_beside_a_read_in_one_call_runs(self):
         # Written before the read's result existed: the owner's words alone decided it.
@@ -248,12 +296,15 @@ class Gate(unittest.TestCase):
         self.assertEqual(len(self.up.frames[-1]["params"]["arguments"]["tools"]), 2)
         self.assertEqual(approvals.pending(self.root), [])
 
-    def test_send_without_asking_needs_no_taint_record(self):
+    def test_no_taint_record_counts_as_outside_content(self):
         self.acts()
         send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com"}}
-        reply, _ = apps_relay.handle(multi(send), CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
+        apps_relay.handle(multi(send), CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
+        self.assertEqual(self.up.frames, [])  # fails closed: a new address waits
+        self.assertEqual(len(approvals.pending(self.root)), 1)
+        destinations.learn("hq", {"email:a@example.com"}, self.root)
+        apps_relay.handle(multi(send), CTX, None, self.up, self.root, catalog=CAT, read_only=self.tagged)
         self.assertEqual(len(self.up.frames), 1)
-        self.assertEqual(approvals.pending(self.root), [])
 
     def test_writes_held_together_share_one_batch(self):
         sends = [{"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": f"p{i}@example.com"}}

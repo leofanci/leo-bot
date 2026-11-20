@@ -8,7 +8,9 @@ to the accounts the workspace picked), adding the key, and gates every call:
   tools/list   only the search, schema and multi-execute meta tools
   tools/call   each app tool inside a multi-execute: read -> runs now,
                a write on an "act" grant (not a delete, not paid) -> runs now and
-               is logged in Approvals as done, not a read on a write grant -> held
+               is logged in Approvals as done, unless the request holds outside
+               content and the write names a destination this workspace never
+               sent to (core/destinations.py): then it is held; not a read on a write grant -> held
                in Approvals (several in one call share a batch: one Approve all),
                a Report only job refuses every non-read, else refused;
                with several accounts of one app, the call names one of them
@@ -24,12 +26,15 @@ import secrets
 import threading
 import time
 
-from core import app_rules, approvals, bots, composio, integrations
+from core import action_log, app_rules, approvals, bots, composio, destinations, integrations
 
 MAX_AGE = 1800  # hard cap; a token normally dies with its chat request
 METHODS = ("initialize", "ping", "tools/list", "tools/call")
 PASS_THROUGH = ("COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS")
 HELD = "Held for approval ({id}): {title}. It has not run. Tell the user it is waiting in Approvals."
+NEW_DESTINATION = ("Held, not run: {title} names {where}, which this workspace has never sent to, and this "
+                   "conversation read outside content (mail, pages, app data). A new destination always "
+                   "waits for the owner's click.")
 HELD_BATCH = ("{n} actions wait for one approval (Approve all in Approvals): {titles}. None has run. "
               "Tell the user the plan is waiting for one click.")
 RAN = "Ran on its own: {title}. Say in your reply what went out."
@@ -177,12 +182,23 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         paid, holds = composio.paid_read_toolkits(items), composio.act_hold_toolkits(items)
     reads, notes, hold, runs = [], [], [], []
     read_only = read_only or (lambda slug: composio.tool_read_only(slug, root))
-    # "Send without asking" (an act grant) sends on the owner's say-so, whatever the conversation
-    # read: the owner chose it per bot and app. What always asks (payments, ads, deletes...) is
-    # held by app_rules. Reads still mark the turn (dashboard/taint.py: web off after app data).
+    # "Send without asking" (an act grant) sends on the owner's say-so: the owner chose it per bot
+    # and app. What always asks (payments, ads, deletes...) is held by app_rules. Once the request
+    # holds outside content, a send naming a destination this workspace never used is held too
+    # (core/destinations.py), so injected text cannot pick a recipient. Reads still mark the turn.
     turn = ctx.get("taint")
+    # No turn to read is counted as outside content: the new-destination rule fails closed.
+    outside = True if turn is None else bool(getattr(turn, "outside", True))
     for c in calls:
+        fresh = set()
         verdict, tk = app_rules.decide(c["tool_slug"], grant, cat, c["arguments"], read_only, paid, holds)
+        dests = None
+        if verdict == "run":
+            dests = destinations.of_arguments(c["arguments"])
+            if outside:
+                fresh = destinations.unknown(ctx["ws"], dests, root)
+            if fresh:
+                verdict = "hold"
         if verdict == "refuse":
             # An app Leo Bot knows but this bot may not use here: the owner can fix that in Apps or Team.
             known = tk and tk not in app_rules.BLOCKED_TOOLKITS
@@ -198,21 +214,23 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
             reads.append({"tool_slug": c["tool_slug"], "arguments": c["arguments"],
                           **({"account": account} if len(picks[tk]) > 1 else {})})
             if verdict == "run":
-                runs.append((tk, c, account, len(reads) - 1))
+                runs.append((tk, c, account, len(reads) - 1, None if outside else dests))
         elif ctx.get("report"):  # a Report only job: nothing waits for a click, nothing goes out
             notes.append(REPORT_ONLY.format(slug=c["tool_slug"]))
         else:
-            hold.append((tk, c, account))
+            hold.append((tk, c, account, fresh))
     batch = secrets.token_hex(6) if len(hold) > 1 else None
     held = [approvals.add_app_action(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
                                      bot=ctx["bot"], person=ctx["person"], toolkit=tk, slug=c["tool_slug"],
                                      arguments=c["arguments"], account=account, batch=batch)
-            for tk, c, account in hold]
+            for tk, c, account, _ in hold]
     if batch:
         notes.append(HELD_BATCH.format(n=len(held), titles="; ".join(r["preview"]["title"] for r in held[:5])
                                        + (f"; and {len(held) - 5} more" if len(held) > 5 else "")))
     else:
         notes += [HELD.format(id=r["id"], title=r["preview"]["title"]) for r in held]
+    notes += [NEW_DESTINATION.format(title=r["preview"]["title"], where=destinations.label(h[3]))
+              for r, h in zip(held, hold) if h[3]]
     if not reads:
         return _text(rid, notes, not held), sid
     if turn is not None and len(reads) > len(runs):  # a read's result is app data from here on
@@ -273,7 +291,7 @@ def _forward_runs(rebuilt, sid, upstream, ctx, runs, notes, root):
         line = approvals.STALE_NOTE
     per_tool = _outcomes(reply["result"]) if ok else {}
     ran, failed = [], []
-    for tk, c, account, idx in runs:
+    for tk, c, account, idx, clean_dests in runs:
         if line is None and idx in per_tool and per_tool[idx]:
             status, result = "failed", f"Failed: {per_tool[idx]}"
         elif line is None:
@@ -283,7 +301,12 @@ def _forward_runs(rebuilt, sid, upstream, ctx, runs, notes, root):
         rec = approvals.log_app_run(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"), bot=ctx["bot"],
                                     person=ctx["person"], toolkit=tk, slug=c["tool_slug"], arguments=c["arguments"],
                                     account=account, status=status, result=result)
+        action_log.record(root, "app_run", ws=ctx["ws"], bot=ctx["bot"], person=ctx.get("person"),
+                          chat=ctx.get("chat"), slug=c["tool_slug"], account=account, status=status,
+                          arguments=c["arguments"])
         if status == "done":
+            if clean_dests:  # sent from the owner's own words: known from now on
+                destinations.learn(ctx["ws"], clean_dests, root)
             ran.append(RAN.format(title=rec["preview"]["title"]))
         else:
             failed.append(NOT_SENT.format(title=rec["preview"]["title"], why=result))

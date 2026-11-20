@@ -447,7 +447,7 @@ async function adoptBrowserZone(){
     if (r.adopted) toast(`Timezone set to ${r.timezone} from your browser. Change it in Settings, General.`);
   } catch {}
 }
-async function boot(){ await loadMe(); loadUpdate(); adoptBrowserZone(); await Promise.all([ensureSchemas(), loadAvatars()]); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+async function boot(){ await loadMe(); loadUpdate(); loadHalt(); adoptBrowserZone(); await Promise.all([ensureSchemas(), loadAvatars()]); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -536,12 +536,55 @@ function renderWsBar(){
     return `<button class="ws-btn${w.id === _WS ? " active" : ""}${w.logo ? " has-logo" : url ? " ws-mark" : ` t-${hueFor(w.id)}`}" data-ws="${esc(w.id)}" title="${esc(w.name)}${w.id === "hq" ? " · holding" : ` · ${esc(w.kind)}`}" aria-label="${esc(w.name)}">${url ? `<img src="${esc(url)}" alt="">` : esc(wsBadge(w))}</button>`;
   }).join("")
     + (isPerson() ? "" : `<button class="ws-btn ws-add" id="new-project-btn" data-os-id="btn:global:new-project" title="New project (= new workspace)" aria-label="New project">${icon("plus")}</button>`)
-    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}<span class="ws-update-dot" aria-hidden="true"></span></button>`);
+    + (isPerson() ? "" : `<button class="ws-btn ws-settings" id="ws-settings" title="Settings" aria-label="Settings">${icon("settings")}<span class="ws-update-dot" aria-hidden="true"></span></button>`)
+    + (isPerson() ? "" : `<button class="ws-btn ws-halt" id="ws-halt" title="Stop everything: every bot run ends now, nothing starts until Resume (Ctrl+Shift+.)" aria-label="Stop everything">${icon("stop")}</button>`);
   bar.querySelectorAll("[data-ws]").forEach(b => b.onclick = () => switchWorkspace(b.dataset.ws));
   if ($("#new-project-btn")) $("#new-project-btn").onclick = e => { e.stopPropagation(); openNewProject(); };
   if ($("#ws-settings")) $("#ws-settings").onclick = () => STATE.view === "settings" ? closeSettings() : openSettings();
   if ($("#ws-settings") && _UPDATE?.available) $("#ws-settings").classList.add("has-update");
+  if ($("#ws-halt")) $("#ws-halt").onclick = () => haltEverything();
 }
+
+// Stop everything (core/halt.py): the owner's kill switch. No confirm on the way in, since
+// Resume undoes it; the banner stays until Resume, also after a reload or a `leobot halt`.
+let _HALTED = null;
+function renderHalt(){
+  let b = $("#halt-banner");
+  if (!_HALTED) { b?.remove(); return; }
+  if (!b) {
+    b = document.createElement("div");
+    b.id = "halt-banner"; b.className = "halt-banner"; b.setAttribute("role", "status");
+    document.body.appendChild(b);
+  }
+  b.innerHTML = `${icon("stop")}<span>Everything is stopped. No bot runs and no job starts until you resume.</span>`
+    + `<button class="btn sm" id="halt-resume">Resume</button>`;
+  $("#halt-resume").onclick = resumeEverything;
+}
+async function loadHalt(){
+  if (isPerson()) return;
+  try { _HALTED = (await api("/api/halt")).halted; } catch { return; }
+  renderHalt();
+}
+async function haltEverything(){
+  if (isPerson()) return;
+  try {
+    _HALTED = (await api("/api/halt", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).halted;
+    renderHalt();
+    toast("Stopped everything");
+  } catch (e) { toast("Stop failed: " + e.message, true); }
+}
+async function resumeEverything(){
+  try {
+    await api("/api/resume", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    _HALTED = null;
+    renderHalt();
+    toast("Resumed");
+  } catch (e) { toast("Resume failed: " + e.message, true); }
+}
+document.addEventListener("keydown", e => {
+  if (e.ctrlKey && e.shiftKey && e.code === "Period" && !isPerson()) { e.preventDefault(); haltEverything(); }
+});
+setInterval(loadHalt, 15000);  // a `leobot halt` from a terminal shows here too
 
 // Settings covers the whole machine, so it takes over the window (.settings-open)
 // and closing it returns to exactly where you were.

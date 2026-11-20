@@ -44,8 +44,9 @@ SAVE_WAITS = ("This run read outside content (mail, pages, app data), so it save
 class Turn:
     """Taint for one owner request. Only ever gains: nothing clears it."""
 
-    def __init__(self, app_data=False, outside=False):
+    def __init__(self, app_data=False, outside=False, who=None):
         self._lock = threading.Lock()
+        self.who = dict(who or {})  # {"ws", "chat", "person", "job"}: who this request is, for the action log
         self.app_data = bool(app_data)
         self.outside = bool(outside or app_data)
         self.browser_root = None  # a run of this request has a browser: its data root
@@ -85,8 +86,13 @@ class Turn:
         with self._lock:
             outside, root, sends = self.outside, self.browser_root, self.browser_sends
         walls = shell_rules.browser_walls(root, required=sends) if root else None
-        return shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir, browser=walls,
-                                cwd=cwd)
+        allow, reason, run = shell_rules.plan(command, outside=outside, writable=writable, profile_dir=profile_dir,
+                                              browser=walls, cwd=cwd)
+        if allow:  # every command a bot's gate lets through is in the action log (core/action_log.py)
+            from core import action_log
+            action_log.record(None, "shell", command=command, cwd=cwd, outside=outside,
+                              sandboxed=bool(run and run != command), **self.who)
+        return allow, reason, run
 
     def shell_profile(self, writable=(), profile_dir=None):
         """The sandbox profile file the review shell runs every command in, for this request's
@@ -312,6 +318,13 @@ class Gates:
             self._watch.pop(token, None)
             for k in [k for k, v in self._tickets.items() if v[0] == token]:
                 del self._tickets[k]
+
+    def revoke_all(self):
+        """Stop everything (core/halt.py): every run's gate refuses from now on."""
+        with self._lock:
+            self._live.clear()
+            self._watch.clear()
+            self._tickets.clear()
 
 
 GATES = Gates()

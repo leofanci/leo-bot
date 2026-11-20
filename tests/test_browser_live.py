@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from core import bots, browser
+from core import bots, browser, destinations
 from dashboard import browser_relay as relay
 from tests.test_browser_relay import FakeUpstream, call, text_of, u
 from tests import test_browser_api as api
@@ -65,6 +65,7 @@ class Captures(unittest.TestCase):
         self.root = Path(self.tmp.name)
         browser.epoch("acme", self.root)
         browser.set_bot("acme", "profile-a", "act", "bot", self.root)
+        destinations.learn("acme", destinations.site(PAGE), self.root)  # a site acted on before
         self.up = CaptureUpstream()
         live = mock.patch.dict(relay.LIVE, clear=True)
         live.start()
@@ -228,6 +229,7 @@ class LiveAPI(api.Base):
             self.addCleanup(p.stop)
         browser.epoch("acme", self.root)
         browser.set_bot("acme", "profile-a", "act", "bot", self.root)
+        destinations.learn("acme", destinations.site(PAGE), self.root)  # a site acted on before
         self.up = CaptureUpstream()
         relay.handle(call(P + "open", url=PAGE), CTX, None, self.up, self.root)
 

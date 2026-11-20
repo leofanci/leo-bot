@@ -970,9 +970,10 @@ def _need_known_entity(slug: str) -> None:
 def _forget_leftovers(slug: str) -> None:
     """A new workspace starts empty even when a delete of the same slug stopped half way
     (people, invites, approvals, app grants and engine picks are kept outside its folder)."""
-    from core import approvals, bots, browser, integrations, people
+    from core import approvals, bots, browser, destinations, integrations, people
     from dashboard.engines import config as engine_config
     approvals.forget_workspace(slug, ROOT)
+    destinations.forget_workspace(slug, ROOT)
     integrations.forget_workspace(slug, ROOT)
     browser.forget_workspace(slug, ROOT)
     people.forget_workspace(ROOT, slug)
