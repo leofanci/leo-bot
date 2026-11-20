@@ -337,6 +337,15 @@ class Hub:
                     turn.events.put(None)
             self._cond.notify_all()
 
+    def drop_all(self, why="Stopped by the owner (Stop everything)."):
+        """Stop everything (core/halt.py): every runner turn ends now."""
+        with self._cond:
+            for turn in list(self._turns.values()):
+                turn.cancelled = True
+                turn.events.put(("error", why))
+                turn.events.put(None)
+            self._cond.notify_all()
+
     def drop(self, rid):
         with self._cond:
             self._seen.pop(rid, None)

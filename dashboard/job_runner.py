@@ -16,7 +16,7 @@ import threading
 import time
 import traceback
 
-from core import approvals, bots, jobs
+from core import approvals, bots, halt, jobs
 from dashboard import chat_store, job_ledger
 
 TICK = 60
@@ -127,6 +127,8 @@ class Runner:
     def tick(self):
         """Run every due job, oldest due first, one at a time; then the digest. The ids run."""
         now = self.now()
+        if halt.halted(self.root):  # Stop everything: nothing runs until the owner resumes
+            return []
         due = []
         for job in jobs.load(self.root):
             if jobs.is_due(job, now):
@@ -142,6 +144,8 @@ class Runner:
         return ran
 
     def _run(self, job):
+        if halt.halted(self.root):  # pressed while an earlier job of this tick ran
+            return False
         try:
             job = jobs.mark_start(self.root, job["id"], self.now())
         except LookupError:  # deleted since the tick read the file

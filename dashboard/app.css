@@ -48,6 +48,13 @@ svg.i{width:var(--ui-icon);height:var(--ui-icon);flex:none;stroke:currentColor;f
 .ws-btn.ws-add::before{display:none}
 .ws-btn.ws-settings{margin-top:auto;background:transparent;color:var(--ui-color-rail-text)}
 .ws-btn.ws-settings:hover,.ws-btn.ws-settings.active{background:var(--ui-color-rail-hover);color:var(--ui-color-rail-text-strong)}
+.ws-btn.ws-halt{background:transparent;color:var(--ui-color-danger);box-shadow:inset 0 0 0 1.5px var(--ui-color-danger-border)}
+.ws-btn.ws-halt:hover{background:var(--ui-color-danger-soft)}
+.ws-btn.ws-halt::before{display:none}
+.halt-banner{position:fixed;top:var(--ui-space-3);left:50%;transform:translateX(-50%);z-index:1000;display:flex;align-items:center;gap:var(--ui-space-2-5);
+  max-width:calc(100vw - 32px);padding:var(--ui-space-2-5) var(--ui-space-3);border-radius:var(--ui-radius-card);
+  background:var(--ui-color-danger-soft);color:var(--ui-color-text);box-shadow:inset 0 0 0 1px var(--ui-color-danger-border)}
+.halt-banner .i{color:var(--ui-color-danger);flex:none}
 
 /* ---------- sidebar ---------- */
 .side{display:flex;flex-direction:column;background:var(--ui-color-rail);color:var(--ui-color-rail-text)}

@@ -14,7 +14,8 @@ agent-browser child for that bot. The relay decides what passes:
                remembered; a commit (click, select, check, uncheck, Enter) after typing is a
                send: a Report only job never
                sends, `write` needs an approved send plan for that page and text, `act` sends on
-               its own and is logged in Approvals. Both stop at the site's daily cap, counted
+               its own on a site the owner listed or approved a send to before (any other
+               site needs a plan first: core/destinations.py) and is logged in Approvals. Both stop at the site's daily cap, counted
                across every bot and workspace. After navigation the engine's own current URL is
                checked again: a redirect onto a site bound to the other mode, or a page it cannot
                name, is hidden and left.
@@ -49,7 +50,7 @@ import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from core import approvals, bots, browser, browser_engine
+from core import action_log, approvals, bots, browser, browser_engine, destinations
 from dashboard import shell_rules
 from core.browser_engine import COMMIT_TOOLS, NAV_TOOLS, READ_TOOLS, TYPE_TOOLS
 
@@ -117,6 +118,9 @@ FIELD_NO_PLAN = ("A field on this page holds text, so this click could send it, 
                  "that text. To send it, call leobot_plan_sends with the page address and the exact text, then "
                  "stop: the owner approves it in Approvals. Otherwise clear the field with fill and an empty text, "
                  "then click again. Nothing was clicked.")
+NEW_SITE = ("{host} is not a site the owner listed or approved a send to, and a page can steer where you go. "
+            "Call leobot_plan_sends with the page address and the exact text, then stop: the owner approves it in "
+            "Approvals. Nothing was sent.")
 CAPPED = ("{site} reached today's limit of {daily} sends. Nothing was sent. Try again tomorrow or ask the owner "
           "to raise the limit in Settings, Browser.")
 REPORT_ONLY = "This scheduled job only reports, so it does not send. Nothing was sent."
@@ -702,13 +706,18 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     if refusal:
         return _text(rid, refusal), sid
     daily = (browser.sites(root).get(site) or {}).get("daily") if site else None
+    planned = setting["level"] == "write"
+    # Acts on its own sends without a plan only where the owner said it may: a site listed in
+    # Settings, Browser, or one an approved plan already sent to (core/destinations.py). A page can
+    # steer the bot anywhere, so a new site waits for one approved plan.
+    new_site = not planned and not site and bool(destinations.unknown(ctx["ws"], destinations.site(url), root))
     status, rec = approvals.claim_send(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
                                        bot=ctx["bot"], person=ctx.get("person"), url=url, text=typed,
-                                       daily=daily, planned=setting["level"] == "write")
+                                       daily=daily, planned=planned or new_site)
     if status == "capped":
         return _text(rid, CAPPED.format(site=site, daily=daily)), sid
     if status != "ok":
-        return _text(rid, no_plan), sid
+        return _text(rid, NEW_SITE.format(host=browser.host_of(url) or url) if new_site else no_plan), sid
     # From here the click is sent: whatever comes back, the typed text may have gone out.
     tt["typed"] = tt["aside"] = ""
     tt["by"] = {}
@@ -718,6 +727,9 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     except Exception:
         reply = None
     approvals.end_send(rec["id"], _ok(reply), root)
+    action_log.record(root, "browser_send", ws=ctx["ws"], bot=ctx["bot"], person=ctx.get("person"),
+                      chat=ctx.get("chat"), url=url, text=typed, planned=planned or new_site,
+                      status="done" if _ok(reply) else "failed")
     if reply is None:
         return _text(rid, SEND_BROKE), sid
     return reply, sid

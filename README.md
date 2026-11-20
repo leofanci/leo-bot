@@ -287,6 +287,15 @@ Generation runs (plans, briefs, revisions) and memory tidy-ups count too, and sh
 Team screen under "Background jobs". The same view shows why each model was picked and how
 much of each engine's input was read from cache.
 
+### Stop everything and the action log
+
+The stop button at the bottom of the workspace bar (or `Ctrl+Shift+.`, or `leobot halt` in a
+terminal) ends every bot run in flight, yours, invited people's, jobs and browsers, and starts
+none until you press Resume (or run `leobot resume`). Every app write, browser send and shell
+command a bot ran is kept in an append-only log: `leobot actions` shows it, `leobot actions
+--verify` checks that no entry was removed or changed. What Leo Bot defends against and how:
+[`docs/security.md`](docs/security.md).
+
 ### Long threads
 
 A thread does not grow without limit. Each reply records how large its prompt was. Once

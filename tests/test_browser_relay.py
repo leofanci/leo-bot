@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, browser
+from core import action_log, approvals, browser, destinations
 from dashboard import browser_relay, shell_rules, taint
 
 CTX = {"ws": "acme", "bot": "b1", "chat": "c1", "room": "acme/general", "person": "ceo"}
@@ -288,6 +288,23 @@ class Gate(unittest.TestCase):
         # typed reset after the send: the next click is a plain click
         self.assertEqual(text_of(self.handle(call(P + "click"))), "ok")
 
+    def test_act_on_a_new_site_needs_a_plan_then_learns_it(self):
+        other = u("other.test/form")
+        up = FakeUpstream(other)
+        self.level("act")
+        self.handle(call(P + "fill", text="Hi"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)),
+                         browser_relay.NEW_SITE.format(host="other.test"))
+        self.assertEqual(up.calls(), [P + "fill"])  # nothing clicked
+        self.handle(call(browser_relay.PLAN_TOOL, sends=[{"url": other, "text": "Hi"}]), up=up)
+        rows = [r for r in approvals.pending(self.root) if r["action"]["toolkit"] == approvals.BROWSER]
+        approvals.approve_send(rows[0]["id"], self.root)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")
+        destinations.learn("acme", destinations.site(other), self.root)  # what an owner Approve does
+        self.handle(call(P + "fill", text="Again"), up=up)
+        self.assertEqual(text_of(self.handle(call(P + "click"), up=up)), "ok")  # known now: no plan
+        self.assertEqual([r["kind"] for r in action_log.entries(self.root)], ["browser_send", "browser_send"])
+
     def test_send_with_unknown_page_refused(self):
         for level in ("write", "act"):
             self.level(level)
@@ -541,6 +558,7 @@ class Gate(unittest.TestCase):
         chrome.forward = forward
         self.handle(call(P + "fill", text="Hi"), up=chrome)
         self.assertEqual(text_of(self.handle(call(P + "click"), up=chrome)), browser_relay.NO_PLAN)
+        destinations.learn("acme", {"host:other.test"}, self.root)  # a site b2's workspace sent to before
         self.assertEqual(text_of(self.handle(call(P + "click"), up=chrome, bot="b2")), "ok")
         self.assertEqual(approvals.sends_today("other.test", self.root), 1)
         self.assertTrue(held and all(held))
