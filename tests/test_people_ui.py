@@ -13,7 +13,7 @@ class PersonView(unittest.TestCase):
         self.assertIn('api("/api/me")', JS)
 
     def test_person_routes_are_allowlisted(self):
-        self.assertIn("const PERSON_ROUTE = /^\\/(team|room\\/new|room\\/[a-z0-9-]+\\/edit|canvas\\/cv\\d{1,6})$/;", JS)
+        self.assertIn("const PERSON_ROUTE = /^\\/(team|avatar|room\\/new|room\\/[a-z0-9-]+\\/edit|canvas\\/cv\\d{1,6})$/;", JS)
         self.assertIn('if (isPerson() && !PERSON_ROUTE.test(path)) path = "/team";', JS)
 
     def test_rail_skips_owner_reads_for_a_person(self):

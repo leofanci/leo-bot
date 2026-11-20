@@ -227,7 +227,7 @@ def _private(actor: Actor) -> bool:
 def _person_rooms(root: Path, ws: str, actor: Actor, team) -> list[dict]:
     viewer = {"kind": "person", "id": actor.id}
     return [r for r in rooms.list_rooms(_team(root, ws, team), ws, root)
-            if r.get("kind") != "dm" and rooms.can_see(r, viewer)]
+            if r.get("kind") not in ("dm", "self") and rooms.can_see(r, viewer)]
 
 
 

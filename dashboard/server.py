@@ -45,13 +45,14 @@ import db                # noqa: E402
 import fileops           # noqa: E402
 import chat_session      # noqa: E402
 import chat_store        # noqa: E402
+import self_chat         # noqa: E402
 import tokensave_bridge  # noqa: E402
 import deliverables      # noqa: E402
 from core import bots, datadir, general, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
-from core import canvases  # noqa: E402
+from core import avatars, canvases  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
@@ -2115,7 +2116,7 @@ def _folders_view(ws, projects):
     record = next((p for p in projects if p.get("slug") == ws), None)
     team = bots.team(ROOT, ws, record)
     channels = [{"id": rooms.split_id(r["id"])[1], "name": r.get("name") or ""}
-                for r in rooms.list_rooms(team, ws, ROOT) if r.get("kind") != "dm"]
+                for r in rooms.list_rooms(team, ws, ROOT) if r.get("kind") not in ("dm", "self")]
     team_rows = [{"id": b.id, "name": b.name, "handle": b.handle, "active": b.active}
                  for b in team.bots.values()]
     return {"ws": ws, "folders": rows, "rooms": data["rooms"], "bots": data["bots"],
@@ -3458,8 +3459,10 @@ class Handler(BaseHTTPRequestHandler):
             os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
             CANVAS_TOKENS.revoke_where(ws=ws, sender=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
+            chat_store.delete(self_chat.chat_id(ws, pid))  # their notes here go with them
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
+                avatars.remove(pid, ROOT)
             rooms.forget_person(ws, pid, ROOT)  # a private channel forgets them too
             return self._send(200, _people_view(ws, viewer) if pid != viewer.get("id") else {"left": ws})
         return self._send(404, {"error": "unknown endpoint"})
@@ -3632,6 +3635,15 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/me":
                 return self._send(200, {k: person[k] for k in ("kind", "id", "name", "ws")})
+            if path == "/api/avatars":
+                return self._send(200, {"avatars": avatars.all_views(ROOT)})
+            if path.startswith("/api/avatar/"):
+                return self._send_avatar(path[len("/api/avatar/"):])
+            if path == "/api/self-chat":
+                ws = mine(q("ws"))
+                if not ws:
+                    return self._send(403, {"error": "forbidden"})
+                return self._self_chat_get(ws, person["id"])
             if path == "/api/runners":
                 return self._send(200, {"runners": runners.list_for(ROOT, person["id"])})
             if path == "/api/schemas":
@@ -3698,6 +3710,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._rooms_post(path, body, person)
             if path == "/api/canvases":
                 return self._canvas_post(body, person)
+            if path == "/api/avatar":
+                return self._avatar_post(body, person["id"])
+            if path == "/api/self-note":
+                ws = _known_ws(body.get("ws"), db.tree())
+                if not ws or ws not in person["ws"]:
+                    return self._send(403, {"error": "forbidden"})
+                return self._self_note_post(ws, person["id"], body.get("text"), person["name"])
             if path.startswith("/api/chats/") and path.endswith("/react"):
                 chat_id = path[len("/api/chats/"):-len("/react")]
                 if not _person_can_read(chat_store.load(chat_id), person, db.tree()):
@@ -3746,6 +3765,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"error": "unknown endpoint"})
         return self._send(200, _jobs_view(ws))
 
+    def _send_avatar(self, who):
+        """A person's uploaded profile picture. Type sniffed at save; sandboxed like logos."""
+        got = avatars.get_image(who, ROOT)
+        if not got:
+            return self._send(404, {"error": "no picture"})
+        raw, ctype = got
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _avatar_post(self, body, who):
+        """Set (image or preset) or remove the caller's own profile picture."""
+        if body.get("remove"):
+            return self._send(200, {"ok": True, "avatar": avatars.remove(who, ROOT)})
+        if "icon" in body or "hue" in body:
+            return self._send(200, {"ok": True, "avatar": avatars.save_preset(who, body.get("icon"), body.get("hue"), ROOT)})
+        encoded = body.get("data")
+        if not isinstance(encoded, str) or len(encoded) > avatars.MAX_BYTES * 2:
+            raise ValueError("picture too large (max 512 KB)")
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("invalid base64 image") from exc
+        return self._send(200, {"ok": True, "avatar": avatars.save_image(who, data, ROOT)})
+
+    def _self_chat_get(self, ws, who):
+        return self._send(200, {"id": self_chat.chat_id(ws, who), "room": self_chat.room_id(ws)})
+
+    def _self_note_post(self, ws, who, text, name=None):
+        rec = self_chat.add(ws, who, text, name)
+        return self._send(200, {"ok": True, "id": rec["id"], "messages": rec["messages"]})
+
     def _react_post(self, chat_id, body, by, by_name=None):
         """Toggle one emoji on message `i` of a thread the caller may read."""
         rows = chat_store.toggle_reaction(chat_id, body.get("i"), body.get("emoji"), by=by, by_name=by_name)
@@ -3760,6 +3815,8 @@ class Handler(BaseHTTPRequestHandler):
         (`run_job`) speaks as the owner in its own fresh thread."""
         if viewer.get("kind") not in ("owner", "person", "job"):
             return self._send(403, {"error": "forbidden"})
+        if str(body.get("room_id") or "").endswith("/dm-self"):
+            return self._send(400, {"error": "nobody answers in your notes"})
         if viewer.get("kind") == "person":
             projects = db.tree()
             ws = _known_ws(rooms.split_id(body.get("room_id"))[0], projects)
@@ -4850,6 +4907,15 @@ class Handler(BaseHTTPRequestHandler):
                 if _CHAT is None:
                     return self._send(200, {"session_id": None, "turn_count": 0, "fresh": True})
                 return self._send(200, _CHAT.session_meta())
+            if path == "/api/avatars":
+                return self._send(200, {"avatars": avatars.all_views(ROOT)})
+            if path.startswith("/api/avatar/"):
+                return self._send_avatar(path[len("/api/avatar/"):])
+            if path == "/api/self-chat":
+                ws = _known_ws((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                if not ws:
+                    raise ValueError("unknown workspace")
+                return self._self_chat_get(ws, bots.CEO)
             if path == "/api/chats":
                 chats = chat_store.list_meta()
                 room = (parse_qs(urlparse(self.path).query).get("room") or [None])[0]
@@ -5043,6 +5109,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._canvas_post(body, OWNER)
+            if path in ("/api/avatar", "/api/self-note"):
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                if path == "/api/avatar":
+                    return self._avatar_post(body, bots.CEO)
+                ws = _known_ws(body.get("ws"), db.tree())
+                if not ws:
+                    raise ValueError("unknown workspace")
+                return self._self_note_post(ws, bots.CEO, body.get("text"))
             if path == "/api/sharing":
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
