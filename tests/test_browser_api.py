@@ -696,3 +696,36 @@ class Screens(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TeamEngineNote(unittest.TestCase):
+    """Team, a bot's Browser: the engine line once that bot's browser is on (app.js)."""
+    JS = Path(__file__).resolve().parent.parent / "dashboard" / "app.js"
+
+    def _note(self, engine, web):
+        src = self.JS.read_text(encoding="utf-8")
+        start = src.index("function browserEngineNote(")
+        fn = src[start:src.index("\n}\n", start) + 2]
+        script = ("const esc = s => String(s).replace(/</g, '&lt;');\n" + fn
+                  + f"\nprocess.stdout.write(browserEngineNote({json.dumps(engine)}, {json.dumps(web)}));")
+        return subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True, timeout=10).stdout
+
+    def test_note_follows_the_engine_state(self):
+        on = {"level": "read", "mode": "bot"}
+        self.assertEqual(self._note({"state": "ready"}, on), "")
+        self.assertEqual(self._note({"state": "missing"}, {"level": "off", "mode": "bot"}), "")
+        self.assertIn("Downloading the browser", self._note({"state": "missing", "installing": True}, on))
+        failed = self._note({"state": "missing", "last_install": {"state": "missing", "detail": "download failed: <x>"}}, on)
+        self.assertIn("download failed: &lt;x>", failed)
+        self.assertIn('href="#/settings/browser"', failed)
+        self.assertIn("not installed", self._note({"state": "missing"}, on))
+
+    def test_team_looks_again_until_the_download_ends(self):
+        src = self.JS.read_text(encoding="utf-8")
+        team = src[src.index("async function renderTeam("):src.index("// ── Approvals inbox")]
+        watch = team[team.index("const watchInstall = () => {"):]
+        watch = watch[:watch.index("\n  };\n")]
+        self.assertIn("if (!brw?.engine?.installing) return;", watch)
+        self.assertIn("view.engine?.installing ? watchInstall() : draw();", watch)
+        self.assertIn("if (!stillOn()) return;", watch)
+        self.assertEqual(team.count("watchInstall();"), 2)  # after a level change and on first load

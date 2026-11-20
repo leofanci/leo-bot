@@ -2178,6 +2178,19 @@ async function renderTeam(){
   let costs = { bots: {}, total: {}, days: 30 };
   let integ = { configured: false, connected: [] };
   let brw = null;  // this workspace's bot browser levels and modes (owner only)
+  let installTimer = null;
+  // While the engine downloads, look again every few seconds, then redraw once it ends.
+  const watchInstall = () => {
+    clearTimeout(installTimer);
+    if (!brw?.engine?.installing) return;
+    installTimer = setTimeout(async () => {
+      if (!stillOn()) return;
+      const view = await api(`/api/browser/settings?ws=${encodeURIComponent(_WS)}`).catch(() => null);
+      if (!stillOn() || !view) return;
+      brw = view;
+      view.engine?.installing ? watchInstall() : draw();
+    }, 3000);
+  };
   let eng = null;  // /api/engines: each bot's engine, model, access and instructions (owner only)
   let pv = null, link = "";
   let jobList = [];
@@ -2289,6 +2302,7 @@ async function renderTeam(){
       try { brw = await jpost("/api/browser/settings", { ws: _WS, bot, ...cur, [sel.dataset.brwK]: sel.value }); }
       catch (e) { toast("✗ " + e.message); }
       draw();
+      watchInstall();
     });
     $("#team-list").querySelectorAll("[data-bot-toggle]").forEach(btn => btn.onclick = async () => {
       try {
@@ -2379,7 +2393,7 @@ async function renderTeam(){
     eng = await api("/api/engines").catch(() => null);
     jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
   }
-  if (stillOn()) draw();
+  if (stillOn()) { draw(); watchInstall(); }
 }
 
 // ── Approvals inbox: proposals bots are waiting on you for (HQ: every company).

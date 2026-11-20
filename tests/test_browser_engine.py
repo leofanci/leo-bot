@@ -2,8 +2,10 @@
 import hashlib
 import io
 import os
+import ssl
 import subprocess
 import tempfile
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -207,6 +209,54 @@ class Install(unittest.TestCase):
         self.assertEqual(st["state"], "missing")
         self.assertIn("no route to host", st["detail"])
         self.assertEqual(calls, [])
+
+    def _tls_install(self, curl_body=None, curl_path="/usr/bin/curl", error=None):
+        """Python refuses the certificate; `curl_body` is what the system curl writes."""
+        refused = urllib.error.URLError(ssl.SSLCertVerificationError("unable to get local issuer certificate"))
+        pinned = {self.ASSET: hashlib.sha256(_engine_script()).hexdigest()}
+        curls, real_run = [], subprocess.run
+
+        def fake_run(argv, **kw):
+            if argv[1:] == ["--version"]:
+                return real_run(argv, **kw)
+            if argv[0] == curl_path:
+                curls.append(argv)
+                if error:
+                    return mock.Mock(returncode=error, stderr="curl failed", stdout="")
+                Path(argv[argv.index("-o") + 1]).write_bytes(curl_body)
+            return mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch.dict(be.SHA256, pinned), mock.patch("subprocess.run", fake_run), \
+                mock.patch.object(be.shutil, "which", lambda n: curl_path if n == "curl" else None):
+            return be.install(opener=Fetch(error=refused)), curls
+
+    def test_certificate_refusal_falls_back_to_curl_over_https_only(self):
+        st, curls = self._tls_install(_engine_script())
+        self.assertEqual(st["state"], "ready", st)
+        [argv] = curls
+        self.assertEqual(argv[-1], be.RELEASE_URL.format(v=be.VERSION, asset=self.ASSET))
+        for flag, value in (("--proto", "=https"), ("--proto-redir", "=https"), ("--max-filesize", str(be.MAX_DOWNLOAD))):
+            self.assertEqual(argv[argv.index(flag) + 1], value)
+        self.assertEqual(be.version_of(self.binary), be.VERSION)
+
+    def test_curl_download_is_still_checked(self):
+        st, _ = self._tls_install(b"not the engine")
+        self.assertIn("checksum", st["detail"])
+        self.assertFalse(self.binary.exists())
+        self.assertEqual(list(self.binary.parent.iterdir()), [])
+
+    def test_certificate_refusal_without_curl_or_with_a_failing_curl(self):
+        st, curls = self._tls_install(curl_path=None)
+        self.assertIn("curl is missing", st["detail"])
+        st, _ = self._tls_install(error=7)
+        self.assertIn("curl failed", st["detail"])
+        st, _ = self._tls_install(error=63)
+        self.assertIn("larger", st["detail"])
+        self.assertFalse(self.binary.exists())
+
+    def test_other_network_errors_do_not_try_curl(self):
+        with mock.patch.object(be, "_fetch_curl", side_effect=AssertionError("curl")):
+            st, _, _ = self._install(b"", error=urllib.error.URLError("no route to host"))
+        self.assertIn("no route to host", st["detail"])
 
     def test_unsupported_computer(self):
         with mock.patch.object(be, "asset_name", return_value=None):

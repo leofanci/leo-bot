@@ -17,8 +17,10 @@ import os
 import platform
 import re
 import shutil
+import ssl
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -97,24 +99,60 @@ def asset_name(system=None, machine=None, musl=None):
     return name if name in SHA256 else None
 
 
+def _tls_refused(e):
+    return isinstance(e, ssl.SSLError) or (isinstance(e, urllib.error.URLError)
+                                           and isinstance(getattr(e, "reason", None), ssl.SSLError))
+
+
+def _fetch_python(url, out, opener):
+    size = 0
+    with opener(url, timeout=DOWNLOAD_TIMEOUT) as resp:
+        while True:
+            chunk = resp.read(1 << 16)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_DOWNLOAD:
+                raise ValueError("the download is larger than any engine release")
+            out.write(chunk)
+
+
+def _fetch_curl(url, tmp):
+    """The system curl, which trusts the OS certificate store: a Python from python.org on a Mac
+    often has no certificates of its own. The pinned hash still decides what is kept."""
+    curl = shutil.which("curl")
+    if not curl:
+        raise OSError("this Python cannot check the download's certificate, and curl is missing")
+    r = subprocess.run([curl, "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--max-filesize", str(MAX_DOWNLOAD),
+                        "--connect-timeout", str(DOWNLOAD_TIMEOUT), "-o", tmp, url],
+                       capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
+    if r.returncode == 63:
+        raise ValueError("the download is larger than any engine release")
+    if r.returncode != 0:
+        raise OSError((r.stderr or "").strip() or f"curl exited with {r.returncode}")
+
+
 def download(asset, dest, opener=urllib.request.urlopen):
     """Fetch the pinned release `asset` to `dest`, executable. Raises OSError on a network or
-    disk failure and ValueError when the bytes are not the pinned ones (nothing is kept then)."""
+    disk failure and ValueError when the bytes are not the pinned ones (nothing is kept then).
+    When this Python refuses the site's certificate, the system curl fetches it instead."""
     url = RELEASE_URL.format(v=VERSION, asset=asset)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=".download-", dir=dest.parent)
     try:
-        digest, size = hashlib.sha256(), 0
-        with os.fdopen(fd, "wb") as out, opener(url, timeout=DOWNLOAD_TIMEOUT) as resp:
-            while True:
-                chunk = resp.read(1 << 16)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > MAX_DOWNLOAD:
-                    raise ValueError("the download is larger than any engine release")
+        try:
+            with os.fdopen(fd, "wb") as out:
+                _fetch_python(url, out, opener)
+        except (OSError, ssl.SSLError) as e:
+            if not _tls_refused(e):
+                raise
+            _fetch_curl(url, tmp)
+        digest = hashlib.sha256()
+        with open(tmp, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
                 digest.update(chunk)
-                out.write(chunk)
+        if os.path.getsize(tmp) > MAX_DOWNLOAD:
+            raise ValueError("the download is larger than any engine release")
         if digest.hexdigest() != SHA256[asset]:
             raise ValueError("the download did not match the expected checksum")
         os.chmod(tmp, 0o755)
