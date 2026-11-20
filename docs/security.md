@@ -73,9 +73,11 @@ No model takes part: it is a flag file and token revocation (`core/halt.py`).
 
 Every app write that ran, every browser send, every shell command a gate allowed, and every
 stop and resume is appended to `<data>/team/actions/<YYYY-MM>.jsonl`. No setting turns it off.
-Each line carries the hash of the line before it, so a removed or edited line is found by
-`leobot actions --verify`. `leobot actions` prints the newest entries. The log shows tampering
-after the fact; it cannot stop someone with the owner's account from replacing the whole folder.
+Each line carries the hash of the line before it, so an edited line, or a line removed from the
+middle, is found by `leobot actions --verify`. Lines cut off the very end of the log leave a valid
+chain and are not found: nothing after them points back. `leobot actions` prints the newest
+entries. The log shows tampering after the fact; it cannot stop someone with the owner's account
+from replacing the whole folder.
 
 ### 5. Poisoned memory
 
