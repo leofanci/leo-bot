@@ -2867,6 +2867,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        if getattr(self, "headers", None) is not None and self._secure():  # over https: never fall back to http
+            self.send_header("Strict-Transport-Security", "max-age=31536000")
         super().end_headers()
 
     # -- helpers ----------------------------------------------------------- #
@@ -3006,9 +3008,19 @@ class Handler(BaseHTTPRequestHandler):
         return (f"{self._member_name()}={token}; HttpOnly; SameSite=Lax; Path=/; "
                 f"Max-Age={MEMBER_MAX_AGE}{self._secure()}")
 
+    def _owner_remote_refused(self):
+        """On a server the owner's token is permanent and the sharing address is on the internet:
+        owner login and owner routes answer only through the SSH connection (this machine), unless
+        LEOBOT_OWNER_REMOTE=1 lets the owner in over the sharing address too (docs/server.md)."""
+        if DEPLOYMENT != "server" or os.environ.get("LEOBOT_OWNER_REMOTE", "").strip() == "1":
+            return False
+        return self._forwarded() or self._public_host() or not self._local_host()
+
     def _valid_cookie(self):
         if not hasattr(self, "client_address"):
             return True
+        if self._owner_remote_refused():
+            return False
         jar = SimpleCookie()
         try:
             jar.load(self.headers.get("Cookie", ""))
@@ -4349,6 +4361,9 @@ class Handler(BaseHTTPRequestHandler):
                 if kw.get("os_token"):  # osctl over the relay gets the same token (os_relay.env_for)
                     os_relay.TOKENS.update(kw["os_token"], **canvas_kw)
             try:
+                if halt.halted(ROOT):  # Stop everything pressed after this turn began: no engine starts
+                    live["stopped"] = True
+                    raise _RunFailed
                 browser_token = kw.get("browser_token")
                 if browser_token:
                     with _BROWSER_RUNS_LOCK:
@@ -4360,7 +4375,7 @@ class Handler(BaseHTTPRequestHandler):
                             "job": bool(job), "token": browser_token, "sender": sender}
                 for kind, payload in s_.ask(prompt_, with_web=web_, model=model_, web_domains=web_domains,
                                             **kw, **gate_kw, **canvas_kw):
-                    if live.get("stopped"):
+                    if live.get("stopped") or halt.halted(ROOT):
                         break
                     if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
                         so_far = payload.get("cost")
@@ -4898,7 +4913,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             token = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
             # Compare bytes: str compare_digest raises on non-ASCII input.
-            if token and hmac.compare_digest(token.encode(), AUTH_TOKEN.encode()):
+            if token and not self._owner_remote_refused() and hmac.compare_digest(token.encode(), AUTH_TOKEN.encode()):
                 # Trade the one-time URL token for the cookie, then drop it from
                 # the address bar/history with a redirect.
                 self.send_response(302)

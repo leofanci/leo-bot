@@ -125,6 +125,30 @@ Everything of yours is in `~leobot/.leobot/data` (`projects/`, `chats/`, `team/`
 `leobot backup` snapshots it into `~leobot/.leobot/backups/`, and an update takes one first.
 Copy that folder off the server yourself. `team/` holds your API keys, so keep the backup private.
 
+## Security on a server
+
+- **Owner access is through SSH only.** On a server the owner login token never changes, and
+  the sharing address is on the internet. So owner screens and the owner login link answer only
+  through `scripts/leobot-connect.sh`. A request that comes through Caddy or a tunnel (it
+  carries proxy headers, or the sharing address as its host) is refused for the owner.
+  Invited people are not affected. To also use owner screens over the sharing address, set
+  `LEOBOT_OWNER_REMOTE=1` in the service's environment. Then a leaked login link gives
+  full control from anywhere until `leobot rotate-token --yes`.
+- **Lock the machine down.** Leo Bot listens on `127.0.0.1` only, but the server itself is on
+  the internet:
+  - SSH with keys only: `PasswordAuthentication no` in `/etc/ssh/sshd_config`.
+  - A firewall that opens only SSH, and 80/443 when Caddy serves the sharing address:
+    `ufw allow OpenSSH && ufw allow 80,443/tcp && ufw enable`.
+  - Security updates on their own: `apt install unattended-upgrades`.
+- **Stop everything** from a terminal: `sudo -iu leobot ~leobot/.local/bin/leobot halt`
+  (`... resume` to undo). It works with the dashboard closed.
+- **What bots do there** is in the action log: `sudo -iu leobot ~leobot/.local/bin/leobot actions`.
+- **The hosting company can read the disk.** Your data, API keys, Claude login and bots' web
+  logins sit unencrypted on the server, readable by the provider and by anyone with root.
+  Pick a provider you trust with that, or keep Leo Bot on your Mac.
+- Bots never get a shell with Full access on a server, and invited people's turns have no
+  tools beyond their workspace ([security model](security.md)).
+
 ## Good to know
 
 - The service runs as its own `leobot` user, which holds only Leo Bot, so a bot's reach

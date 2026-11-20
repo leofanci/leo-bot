@@ -15,7 +15,8 @@ A destination becomes known when:
 What counts as a destination in an app call's arguments (fail-safe: a false match only asks):
   - every email address, international phone number (+...) and web host found in any argument value, except
     message-body fields (body, text, subject...), whose words are content, not an address;
-  - the whole value of a recipient-like field (to, cc, channel, chat_id, user, webhook...).
+  - the whole value of a recipient-like field (to, cc, channel, chat_id, user, webhook, thread_id:
+    a reply goes to whoever wrote the thread...).
 
 Stored in gitignored team/destinations.json: {"<ws>": {"<kind>:<value>": first seen}}.
 """
@@ -37,14 +38,16 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63
 _URL = re.compile(r"(?i)\b(?:https?|wss?|ftp)://[^\s\"'<>]+")
 _PHONE = re.compile(r"(?<![\w+])\+\d[\d\s().-]{6,22}\d(?![\w])")  # international form only: dates never match
 # Field names whose value is the message, not where it goes.
-_BODY_KEYS = re.compile(r"(?i)^(body|text|message|content|html|markdown|subject|title|caption|comment|"
+_BODY_KEYS = re.compile(r"(?i)(^|_)(body|text|message|content|html|markdown|subject|title|caption|comment|"
                         r"description|note|notes|summary|query|q|search|prompt|blocks|attachments?)$")
 # Field names whose whole value says where something goes.
 _RECIPIENT_KEYS = re.compile(
-    r"(?i)(^|_)(to|cc|bcc|recipients?|emails?|email_address(es)?|phone(_number)?s?|"
-    r"channel(_id|_name)?|chat(_id)?|user(_id|name)?s?|handle|webhook(_url)?|url|endpoint|address(es)?|"
-    r"target|destination|dest|conversation(_id)?|room(_id)?|space(_name)?|group(_id)?|list_id|audience(_id)?|"
-    r"member(_id)?s?|attendees?|invitees?|share_with|grantee)($|_)")
+    r"(?i)(^|_)(to|cc|bcc|recipients?|receivers?|emails?|phones?|channels?|chats?|users?|usernames?|handles?|"
+    r"webhooks?|urls?|endpoints?|address(es)?|targets?|destinations?|dest|conversations?|rooms?|spaces?|groups?|"
+    r"lists?|audiences?|members?|attendees?|invitees?|share_with|grantees?|threads?|reply_to|in_reply_to|"
+    r"messages?_id)"
+    # what a field name may end with after the word: chat_id, recipient_email, channel_ids, phone_number
+    r"(_?(ids?|emails?|address(es)?|names?|numbers?|urls?|handles?|keys?))?$")  # ends with it: not to_date
 
 
 def _path(root):
@@ -106,7 +109,7 @@ def of_arguments(arguments):
                 walk(v, key, depth + 1)
         elif isinstance(value, (str, int)) and not isinstance(value, bool):
             text = str(value)
-            if key and _BODY_KEYS.match(key):
+            if key and _BODY_KEYS.search(key):
                 return
             found = set()
             _from_text(text, found)

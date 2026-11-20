@@ -108,5 +108,7 @@ that cookie at once.
   people's messages only ever run on an API key you pick in Settings, Bots, billed to
   that key. Until you pick one, bots tell them so and nothing is spent. Each reply
   shows what it ran on.
-- Owner login works over the sharing address too, but the address travels
-  through the tunnel provider. Prefer this machine for owner work.
+- On your Mac, owner login works over the sharing address too, but the address travels
+  through the tunnel provider. Prefer this machine for owner work. On a server, owner
+  login over the sharing address is off unless you set `LEOBOT_OWNER_REMOTE=1`
+  ([server](server.md#security-on-a-server)).

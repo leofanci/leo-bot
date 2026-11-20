@@ -154,6 +154,14 @@ class Destinations(unittest.TestCase):
         self.assertEqual(got, {"email:a@example.com", "email:b@example.com", "to:c0123",
                                "host:hooks.example", "phone:393331234567"})
 
+    def test_field_names_that_only_start_with_a_recipient_word_are_not_recipients(self):
+        self.assertEqual(destinations.of_arguments({"to_date": "2026-12-01", "user_note": "x",
+                                                    "channel_ids": ["C1"]}), {"to:c1"})
+
+    def test_a_reply_names_its_thread(self):
+        self.assertEqual(destinations.of_arguments({"thread_id": "18c2f", "recipient_id": "U1", "message_body": "hi"}),
+                         {"to:18c2f", "to:u1"})
+
     def test_unreadable_arguments_count_as_new(self):
         deep = cur = {}
         for _ in range(20):
