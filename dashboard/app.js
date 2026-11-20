@@ -212,6 +212,7 @@ const ROUTES = [
   [/^\/room\/([a-z0-9-]+)\/edit$/,                ([n])    => renderRoomForm(n)],
   [/^\/needs$/,                                 ()       => { setState("needs"); renderNeeds(); }],
   [/^\/workspace\/([^/]+)\/logo$/,               ([w])    => { let id = w; try { id = decodeURIComponent(w); } catch {} renderWsLogo(id); }],
+  [/^\/avatar$/,                                 ()       => renderAvatar()],
   [/^\/project\/new$/,                          ()       => renderNewProject()],
   [/^\/project\/([^/]+)\/edit$/,                ([s])    => renderEditProject(s)],
   [/^\/project\/([^/]+)\/delete$/,              ([s])    => renderConfirmDeleteProject(s)],
@@ -255,7 +256,7 @@ const ROUTES = [
   [/^\/milestone\/([^/]+)\/edit$/,              ([id])   => renderEditMilestone(id, _NAV_EXTRAS)],
 ];
 // What an invited person may open: Team, channel forms (admins) and canvases pinned where they see.
-const PERSON_ROUTE = /^\/(team|room\/new|room\/[a-z0-9-]+\/edit|canvas\/cv\d{1,6})$/;
+const PERSON_ROUTE = /^\/(team|avatar|room\/new|room\/[a-z0-9-]+\/edit|canvas\/cv\d{1,6})$/;
 function parseRoute(hash){
   stopCanvasBrowserWatch();
   let path = (hash||"#/calendar").replace(/^#/,"").replace(/\?.*$/,"");
@@ -360,6 +361,18 @@ function botAvatar(b, cls = ""){
   const [ic, hue] = BOT_LOOK[b?.id] || [null, hueFor(b?.id || "")];
   return `<span class="av bot t-${hue}${cls ? " " + cls : ""}" aria-hidden="true">${ic ? icon(ic) : esc((b?.name || "?")[0].toUpperCase())}</span>`;
 }
+// People's profile pictures: {id: {image} | {icon, hue}}; "ceo" is the owner.
+let _AVATARS = {};
+const PICK_ICONS = ["smile", "zap", "flag", "globe", "compass", "chart", "flask", "map", "route", "mic", "book", "layers"];
+async function loadAvatars(){ try { _AVATARS = (await api("/api/avatars")).avatars || {}; } catch {} }
+// A person's avatar: their uploaded picture, a preset icon on a hue, or their initial.
+function userAvatar(who, name, cls = ""){
+  const a = _AVATARS[who || "ceo"], c = cls ? " " + cls : "";
+  if (a?.image) return `<span class="av has-img${c}" aria-hidden="true"><img src="/api/avatar/${encodeURIComponent(who || "ceo")}?v=${encodeURIComponent(a.image)}" alt=""></span>`;
+  if (a?.icon) return `<span class="av t-${esc(a.hue)}${c}" aria-hidden="true">${icon(a.icon)}</span>`;
+  return `<span class="av${c}" aria-hidden="true">${esc((name || "?")[0].toUpperCase())}</span>`;
+}
+const myAvatarId = () => isPerson() ? _ME.id : "ceo";
 // Post open in detail view. Full slot+brief inlined only when the turn needs it
 // (content keywords, @mention) — otherwise a compact pointer saves tokens.
 // Set in renderPostDetail, cleared on every navigation in parseRoute.
@@ -422,7 +435,7 @@ async function adoptBrowserZone(){
     if (r.adopted) toast(`Timezone set to ${r.timezone} from your browser. Change it in Settings, General.`);
   } catch {}
 }
-async function boot(){ await loadMe(); loadUpdate(); adoptBrowserZone(); await ensureSchemas(); await renderRail(); parseRoute(location.hash||defaultRoute()); }
+async function boot(){ await loadMe(); loadUpdate(); adoptBrowserZone(); await Promise.all([ensureSchemas(), loadAvatars()]); await renderRail(); parseRoute(location.hash||defaultRoute()); }
 
 async function ensureIdRegistry(force=false){
   if (!force && Object.keys(IdReg.lookup || {}).length) return;
@@ -606,15 +619,16 @@ async function renderRail(){
   const w = wsById(_WS) || { id: "hq", name: "HQ", kind: "hq" };
   const roomRow = r => {
     const b = r.kind === "dm" ? botById(r.lead) : null;
-    return `<a class="room-row" data-room="${esc(r.id)}"${r.private ? ' title="Private channel"' : ""}>${b ? botAvatar(b) : icon(r.private ? "lock" : "hash")}<span class="rail-name">${esc(r.name)}</span></a>`;
+    const lead = r.kind === "self" ? userAvatar(myAvatarId(), _ME.name || "You") : b ? botAvatar(b) : icon(r.private ? "lock" : "hash");
+    return `<a class="room-row" data-room="${esc(r.id)}"${r.private ? ' title="Private channel"' : ""}>${lead}<span class="rail-name">${esc(r.name)}</span>${r.kind === "self" ? '<span class="rail-note">you</span>' : ""}</a>`;
   };
   const section = (key, title, rows, add = "") => `<section class="rail-sec${RAIL_COLLAPSED.has(key) ? " collapsed" : ""}">
       <div class="rail-hdr"><button class="rail-tg" data-rail-tg="${key}" aria-expanded="${!RAIL_COLLAPSED.has(key)}">${icon("chevron")}<span>${title}</span></button>${add}</div>
       <nav class="nav${key === "time" ? "" : " rooms"}">${rows}</nav>
     </section>`;
-  const channels = _ROOMS.filter(r => r.kind !== "dm");
+  const channels = _ROOMS.filter(r => r.kind !== "dm" && r.kind !== "self");
   const manage = myRole() === "owner" || myRole() === "admin";
-  const dms = _ROOMS.filter(r => r.kind === "dm");
+  const dms = _ROOMS.filter(r => r.kind === "self").concat(_ROOMS.filter(r => r.kind === "dm"));
   $("#rail").innerHTML = `
     <div class="rail-head">
       <div class="ws-name" id="brand-btn">${wsLogoUrl(w) ? `<img class="mark" src="${esc(wsLogoUrl(w))}" alt="">` : `<span class="mark t-${hueFor(w.id)}" aria-hidden="true">${esc(wsBadge(w))}</span>`}<b>${esc(w.name)}</b></div>
@@ -720,7 +734,7 @@ function renderCanvasNav(){
     CANVAS.roomPending = room;
     requestCanvasReload();
   }
-  const canNew = !!room && !(isPerson() && roomById(room)?.kind === "dm");
+  const canNew = !!room && !noCanvasRoom(room);
   const tabs = pins && pins.length ? `<div class="cn-tabs" role="navigation" aria-label="Canvases in this channel">
       ${pins.map(c => `<button type="button" class="cn-tab" data-cn-tab="${esc(c.id)}"${c.id === openCv ? ' aria-current="page"' : ""}>${icon("layers")}<span>${esc(c.title)}</span></button>`).join("")}
     </div>` : "";
@@ -994,11 +1008,18 @@ function stopCanvasBrowserWatch(){
   CANVAS_BROWSER_WATCH = null;
 }
 
+// Rooms with no canvas pins: notes to self (one room id for everyone), and a bot DM for a coworker.
+function noCanvasRoom(room){
+  const kind = roomById(room)?.kind;
+  return kind === "self" || (isPerson() && kind === "dm");
+}
+
 // Canvases pinned in `room`, in pin order; null while the first load runs.
 // Loads in the background and redraws the canvas bar when it lands.
 function canvasPins(room){
-  // A coworker has no HQ and no tabs in DM rooms: the server answers 404, so never ask.
-  if (isPerson() && (room.startsWith("hq/") || roomById(room)?.kind === "dm")) return [];
+  // A coworker has no HQ and no tabs in DM rooms, and notes to self hold no canvases:
+  // the server answers 404, so never ask.
+  if ((isPerson() && room.startsWith("hq/")) || noCanvasRoom(room)) return [];
   const key = `${_WS}|${room}`;
   const have = CANVAS_PINS.key === key ? CANVAS_PINS.list : null;
   if (have && Date.now() - CANVAS_PINS.at < 30000) return have;
@@ -1080,7 +1101,7 @@ async function createCanvas(template){
     params.title = title;
   }
   const room = window.ChatRooms?.current();
-  if (room && !(isPerson() && roomById(room)?.kind === "dm")) params.pin = room;
+  if (room && !noCanvasRoom(room)) params.pin = room;
   const out = await canvasCmd("create-canvas", params);
   if (!out?.id) return;
   refreshCanvasPins();
@@ -1122,7 +1143,7 @@ function canvasHelpers(doc){
 async function loadCanvas(st){
   const seq = st.loadSeq = (st.loadSeq || 0) + 1;
   const room = window.ChatRooms?.current() || null;
-  const pinsP = room && !(isPerson() && roomById(room)?.kind === "dm")
+  const pinsP = room && !noCanvasRoom(room)
     ? cvFetch(`/api/canvases?${cvQuery({ room })}`).then(d => (d.pins || []).includes(st.id)).catch(() => false)
     : Promise.resolve(false);
   let doc;
@@ -5053,6 +5074,41 @@ async function renderWsLogo(id){
   });
 }
 
+// ── Profile picture: upload an image or pick an icon and a color ────────────
+async function renderAvatar(){
+  await loadAvatars();
+  const me = myAvatarId(), name = _ME.name || "You", cur = _AVATARS[me];
+  const preset = cur?.icon ? cur : null;
+  $("#main").innerHTML = `${pageHeader("Profile picture", "Back")}
+    <div class="scroll"><div class="fpage">
+      <div class="logo-edit">
+        ${userAvatar(me, name, "av-xl")}
+        <div class="logo-actions">
+          <label class="btn primary">${icon("plus")} Upload image<input type="file" id="av-file" accept="image/png,image/jpeg,image/webp" hidden></label>
+          ${cur ? `<button class="btn" id="av-remove">Use my initial</button>` : ""}
+        </div>
+      </div>
+      <p class="help">Or pick one:</p>
+      <div class="av-grid">${ID_HUES.map(h => PICK_ICONS.map(ic =>
+        `<button class="av-pick${preset?.icon === ic && preset?.hue === h ? " on" : ""}" data-icon="${ic}" data-hue="${h}" aria-label="${ic} ${h}"><span class="av t-${h}">${icon(ic)}</span></button>`).join("")).join("")}</div>
+      <p class="help">PNG, JPEG or WebP, resized to ${LOGO_PX}px square. Shown next to your messages.</p>
+    </div></div>`;
+  const done = async msg => { toast(msg); await loadAvatars(); await renderRail(); renderAvatar(); };
+  $("#av-file").onchange = async e => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try { await jpost("/api/avatar", { data: await logoPng(file) }); await done("Picture updated ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+  };
+  $("#av-remove")?.addEventListener("click", async () => {
+    try { await jpost("/api/avatar", { remove: true }); await done("Picture removed"); }
+    catch (err) { toast("✗ " + err.message); }
+  });
+  $("#main").querySelectorAll(".av-pick").forEach(b => b.onclick = async () => {
+    try { await jpost("/api/avatar", { icon: b.dataset.icon, hue: b.dataset.hue }); await done("Picture updated ✓"); }
+    catch (err) { toast("✗ " + err.message); }
+  });
+}
+
 // ── Project section artifacts (files → reindex → IDs stay in sync) ───────────
 function renderNewIntake(projectSlug){
   const projName = (_TREE.find(p => p.slug === projectSlug) || {}).name || projectSlug;
@@ -5737,13 +5793,15 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const room = roomById(activeRoomId);
     if (!room) { roomTitleEl.textContent = "# general"; return; }
     const lead = botById(room.lead);
-    roomTitleEl.textContent = room.kind === "dm" ? room.name : `# ${room.name}`;
-    roomEditBtn.hidden = room.kind !== "topic" || !["owner", "admin"].includes(myRole());
-    input.placeholder = room.kind === "dm"
+    const self = room.kind === "self";
+    roomTitleEl.textContent = self ? `${_ME.name || "You"} (you)` : room.kind === "dm" ? room.name : `# ${room.name}`;
+    roomEditBtn.hidden = self ? false : room.kind !== "topic" || !["owner", "admin"].includes(myRole());
+    roomEditBtn.title = self ? "Profile picture" : "Edit channel"; roomEditBtn.setAttribute("aria-label", roomEditBtn.title);
+    input.placeholder = self ? "Jot something down…" : room.kind === "dm"
       ? `Message ${room.name}…`
       : `Message #${room.name} (@ to tag a teammate)`;
   }
-  roomEditBtn.onclick = () => { const r = roomById(activeRoomId); if (r) { showCanvas(); navigate(`#/room/${r.name}/edit`); } };
+  roomEditBtn.onclick = () => { const r = roomById(activeRoomId); if (r) { showCanvas(); navigate(r.kind === "self" ? "#/avatar" : `#/room/${r.name}/edit`); } };
 
   function selectRoom(id){
     if (busy) return busyNote();
@@ -5755,7 +5813,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     paintRoomHeader();
     const thread = roomThreads[id];
     let opened = Promise.resolve();
-    if (!activeChatId || activeChatId !== thread) opened = thread ? openChat(thread) : Promise.resolve(newChat());
+    if (roomById(id)?.kind === "self") opened = openSelf();
+    else if (!activeChatId || activeChatId !== thread) opened = thread ? openChat(thread) : Promise.resolve(newChat());
     highlight();
     return opened;
   }
@@ -5862,7 +5921,26 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     threadUsage = { tokens: rec.tokens || 0, cost: rec.cost || 0 };
     statusEl.textContent = "Ready";
   }
+  // Notes to self: always the one thread of this person in this workspace.
+  async function openSelf(){
+    const seq = ++chatSeq;
+    const { id } = await fetch(`/api/self-chat?ws=${encodeURIComponent(_WS)}`).then(r => r.json()).catch(() => ({}));
+    if (seq !== chatSeq || !id) return;
+    const rec = await fetch(`/api/chats/${encodeURIComponent(id)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+    if (seq !== chatSeq) return;
+    setActiveChat(id, "Notes to self"); showChat(rec?.messages || []);
+    seenSig = threadSig(rec?.messages || []);
+    statusEl.textContent = "Ready";
+  }
+  async function sendNote(text){
+    input.value = ""; input.style.height = "";
+    try {
+      const r = await jpost("/api/self-note", { ws: _WS, text });
+      setActiveChat(r.id, "Notes to self"); showChat(r.messages); seenSig = threadSig(r.messages);
+    } catch (e) { input.value = text; statusEl.textContent = "✗ " + e.message; }
+  }
   function newChat(){
+    if (roomById(activeRoomId)?.kind === "self") return openSelf();
     if (busy) return busyNote();
     chatSeq++;
     setActiveChat(null); showChat([]); statusEl.textContent = "Ready";
@@ -6316,7 +6394,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     div.querySelector("time").textContent = clock(ts);
     if (role === "user") {
       const who = senderOf(by, byName);
-      paintSender(div, { avatar: `<span class="av">${esc(who.initial)}</span>`, name: who.name });
+      paintSender(div, { avatar: userAvatar(by || "ceo", who.name === "You" ? (_ME.name || "You") : who.name), name: who.name });
     }
     else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", handoffFrom || null, askedBy);
     const bubble = div.querySelector(".b");
@@ -6701,6 +6779,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   async function send(override, extra){
     const text = (typeof override === "string" ? override : input.value).trim();
     if (!text || busy) return;
+    if (roomById(activeRoomId)?.kind === "self") return sendNote(text);
     busy = true;
     if (typeof override !== "string") input.value = "";
     const hadPending = _APPROVALS.some(a => a.chat === activeChatId);
@@ -6880,6 +6959,13 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
 
   function showWelcome(){
     const room = roomById(activeRoomId);
+    if (room?.kind === "self") {
+      const el = document.createElement("div");
+      el.className = "empty";
+      el.textContent = "This is your space. Jot down notes, drafts, links. Only you see it here, and no bot answers.";
+      stream.appendChild(el);
+      return;
+    }
     const lead = botById(room?.lead || "cos");
     const wsName = wsById(_WS)?.name || "HQ";
     const hello = room?.kind === "dm"

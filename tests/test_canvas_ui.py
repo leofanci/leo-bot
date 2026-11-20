@@ -304,6 +304,7 @@ const context = {
   URLSearchParams, setInterval: () => {}, _WS: 'demo',
   window: {ChatRooms: {current: () => 'demo/general'}},
   isPerson: () => false,
+  roomById: id => ({id, kind: 'general'}),
   fetch: url => new Promise(resolve => pending.push({url, resolve})),
 };
 vm.createContext(context);
@@ -948,7 +949,7 @@ class TestCanvasLiveCheck(unittest.TestCase):
 
     def test_coworker_never_asks_for_hq_or_dm_tabs(self):
         pins = _body(APP_JS.read_text(encoding="utf-8"), "function canvasPins(")
-        self.assertIn('if (isPerson() && (room.startsWith("hq/") || roomById(room)?.kind === "dm")) return [];', pins)
+        self.assertIn('if ((isPerson() && room.startsWith("hq/")) || noCanvasRoom(room)) return [];', pins)
         self.assertLess(pins.index("isPerson()"), pins.index("api("))
 
     def test_escape_in_a_menu_returns_focus_and_arrows_move(self):

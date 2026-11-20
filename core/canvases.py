@@ -227,7 +227,7 @@ def _private(actor: Actor) -> bool:
 def _person_rooms(root: Path, ws: str, actor: Actor, team) -> list[dict]:
     viewer = {"kind": "person", "id": actor.id}
     return [r for r in rooms.list_rooms(_team(root, ws, team), ws, root)
-            if r.get("kind") != "dm" and rooms.can_see(r, viewer)]
+            if r.get("kind") not in ("dm", "self") and rooms.can_see(r, viewer)]
 
 
 
@@ -556,7 +556,7 @@ class _Run:
         rid = self.p.get("room") if self.p.get("room") is not None else self.p.get("pin")
         ws, local = rooms.split_id(rid)
         room = rooms.get_room(rid, self.team(), self.root) if ws == self.ws else None
-        if not room:
+        if not room or room.get("kind") == "self":  # one id for everyone's notes: no pins there
             raise NotFound(f"no such room: {rid!r}")
         a = self.actor
         if a.kind == "person" and (room.get("kind") == "dm" or not rooms.can_see(
@@ -834,8 +834,10 @@ def _list_canvases(r: _Run) -> dict:
     elif r.actor.kind == "bot" and r.actor.shared:
         seen_rooms = {r.actor.room}
     else:
-        seen_rooms = set(pins)
+        seen_rooms = {rid for rid in pins if not rid.endswith("/dm-self")}
     want = r.p.get("room")
+    if isinstance(want, str) and rooms.split_id(want)[1] == "dm-self":
+        raise NotFound(f"no such room: {want!r}")  # notes to self hold no canvases
     out, marked = [], False
     for cid in ids:
         rms = [rid for rid, cids in pins.items() if cid in cids and rid in seen_rooms]

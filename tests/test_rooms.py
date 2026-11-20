@@ -38,7 +38,7 @@ class Rooms(unittest.TestCase):
     def test_rooms_follow_the_workspace_team(self):
         self.assertEqual(self.ids()[0], "acme/general")
         self.assertIn("acme/dm-cto", self.ids())
-        self.assertEqual(self.ids("hq"), ["hq/general", "hq/dm-cos"])
+        self.assertEqual(self.ids("hq"), ["hq/general", "hq/dm-self", "hq/dm-cos"])
 
     def test_topic_crud_is_per_workspace(self):
         rid = rooms.save_topic("acme", "launch", ["gtm", "social"], "gtm", self.root)

@@ -6,6 +6,7 @@ Every room id is `<workspace>/<local>`:
   <ws>/general     the workspace's main channel, led by Chief of Staff
   <ws>/t-<name>    topic channel: user-created, members + lead
   <ws>/dm-<bot>    1:1 with one of the workspace's active bots
+  <ws>/dm-self     notes to yourself: no bot answers (dashboard/self_chat.py)
 
 A project workspace's rooms are bound to that project; nothing in one
 workspace is visible from another. Topic channels are stored per workspace
@@ -62,8 +63,9 @@ def list_rooms(team, ws, root=bots.ROOT):
         out.append({"id": f"{ws}/t-{t['name']}", "kind": "topic", "name": t["name"],
                     "members": members, "lead": lead, "private": bool(t.get("private")),
                     "people": [p for p in t.get("people") or [] if isinstance(p, str)]})
+    out.append({"id": f"{ws}/dm-self", "kind": "self", "name": "You", "members": [], "lead": None})
     for b in team.ordered():
-        if b.active:
+        if b.active and b.id != "self":
             out.append({"id": f"{ws}/dm-{b.id}", "kind": "dm", "name": b.name,
                         "members": [b.id], "lead": b.id})
     return out
