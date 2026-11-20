@@ -105,7 +105,11 @@ logins. Leo Bot does not defend against its own account.
 Leo Bot listens on `127.0.0.1` only. The owner reaches a server over SSH; invited people reach
 it through an https address the owner sets up ([server](server.md), [sharing](sharing.md)).
 Owner routes refuse requests without the owner's cookie and a matching origin; people's
-routes are limited to their workspaces.
+routes are limited to their workspaces. On a server the owner answers only through the SSH
+connection: a request through the sharing address is refused for the owner unless
+`LEOBOT_OWNER_REMOTE=1`. Answers over https carry HSTS. The hosting company can read the
+server's disk, keys included. Hardening the machine itself (SSH keys only, firewall,
+updates) is the owner's job: [server](server.md#security-on-a-server).
 
 ### 10. Updates
 
