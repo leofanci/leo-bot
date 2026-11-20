@@ -372,6 +372,18 @@ function userAvatar(who, name, cls = ""){
   if (a?.icon) return `<span class="av t-${esc(a.hue)}${c}" aria-hidden="true">${icon(a.icon)}</span>`;
   return `<span class="av${c}" aria-hidden="true">${esc((name || "?")[0].toUpperCase())}</span>`;
 }
+// A person's message avatar keeps who wrote it, so a new picture shows in the open chat at once.
+function msgAvatar(who, name){
+  const el = document.createElement("div");
+  el.innerHTML = userAvatar(who, name);
+  const av = el.firstElementChild;
+  av.dataset.av = who || "ceo";
+  av.dataset.avName = name || "";
+  return av.outerHTML;
+}
+function repaintMsgAvatars(){
+  document.querySelectorAll(".msg > .av[data-av]").forEach(el => { el.outerHTML = msgAvatar(el.dataset.av, el.dataset.avName); });
+}
 const myAvatarId = () => isPerson() ? _ME.id : "ceo";
 // Post open in detail view. Full slot+brief inlined only when the turn needs it
 // (content keywords, @mention) — otherwise a compact pointer saves tokens.
@@ -2083,7 +2095,10 @@ async function refreshViews(){
   if (v === "profile") return onProfileList(STATE.profile) ? renderProfile(STATE.profile) : undefined;
   if (v === "profileSetup") return renderProfileSetup(STATE.profile);
   if (v === "channelGuidelines") return renderChannelGuidelines(STATE.channelGuidelines);
-  return renderNeeds();
+  if (v === "canvas") return requestCanvasReload();   // waits while the viewer is mid-edit
+  if (v === "canvases") return renderCanvasList();
+  if (v === "needs") return renderNeeds();
+  // Any other page (a form, the picture page) is left alone: a redraw would lose what is typed.
 }
 
 async function renderNeeds(){
@@ -5093,7 +5108,7 @@ async function renderAvatar(){
         `<button class="av-pick${preset?.icon === ic && preset?.hue === h ? " on" : ""}" data-icon="${ic}" data-hue="${h}" aria-label="${ic} ${h}"><span class="av t-${h}">${icon(ic)}</span></button>`).join("")).join("")}</div>
       <p class="help">PNG, JPEG or WebP, resized to ${LOGO_PX}px square. Shown next to your messages.</p>
     </div></div>`;
-  const done = async msg => { toast(msg); await loadAvatars(); await renderRail(); renderAvatar(); };
+  const done = async msg => { toast(msg); await loadAvatars(); await renderRail(); repaintMsgAvatars(); renderAvatar(); };
   $("#av-file").onchange = async e => {
     const file = e.target.files?.[0]; if (!file) return;
     try { await jpost("/api/avatar", { data: await logoPng(file) }); await done("Picture updated ✓"); }
@@ -6394,7 +6409,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     div.querySelector("time").textContent = clock(ts);
     if (role === "user") {
       const who = senderOf(by, byName);
-      paintSender(div, { avatar: userAvatar(by || "ceo", who.name === "You" ? (_ME.name || "You") : who.name), name: who.name });
+      paintSender(div, { avatar: msgAvatar(by || "ceo", who.name === "You" ? (_ME.name || "You") : who.name), name: who.name });
     }
     else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", handoffFrom || null, askedBy);
     const bubble = div.querySelector(".b");

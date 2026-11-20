@@ -81,7 +81,7 @@ Canvas/list files are excluded from the workspace provenance ledger. Their per-i
 
 ## Browser block
 
-The browser block shows the latest screenshot, page URL, title and capture time for one bot in this workspace. It is owner-only. Stop ends that bot's current runs and closes its browser child; it does not close unrelated tabs in the owner's Chrome. The owner's plain chat Stop ends only the owner's own turns, never a coworker's.
+The browser block shows the latest screenshot, page URL, title and capture time for one bot in this workspace. It is owner-only. Stop ends that bot's current runs and closes its browser child; it does not close unrelated tabs in the owner's Chrome. The owner's plain chat Stop ends only the owner's own turns, never a coworker's. A stopped reply keeps what it wrote so far and is marked `Stopped`, also after a reload.
 
 The relay captures images after the bot's own navigation or commit calls, while still holding the browser call lock. It never reads a screenshot from a caller-provided file path, and it removes the image file the engine saved for its own capture once the bytes are back. In My Chrome mode, captures use the bot's pinned tab only. A coworker's turn that uses their own Chrome is never captured, so the owner never sees a coworker's tabs.
 

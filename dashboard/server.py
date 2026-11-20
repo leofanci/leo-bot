@@ -4337,6 +4337,11 @@ class Handler(BaseHTTPRequestHandler):
                         jobs.mark_notes_outside(ROOT, job["id"])
                     except OSError:
                         traceback.print_exc()
+            # Saved on the reply: a Stop (a browser block's, a chat's or the job watchdog's)
+            # leaves a cut-off reply that would otherwise read as finished after a reload.
+            if live.get("stopped") and "Stopped" not in msg.get("notices", []):
+                msg.setdefault("notices", []).append("Stopped")
+                emit({"notice": "Stopped"})
             usage = fin.get("usage") if isinstance(fin.get("usage"), dict) else None
             cost = fin.get("cost")
             runner = bool(eng and eng.kind == "runner")
