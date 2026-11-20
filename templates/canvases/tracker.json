@@ -1,0 +1,42 @@
+{
+  "title": "Tracker",
+  "blocks": [
+    {
+      "id": "bk1",
+      "type": "text",
+      "md": "Track work items with an owner and a stage."
+    },
+    {
+      "id": "bk2",
+      "type": "list",
+      "title": "Items",
+      "columns": [
+        {
+          "name": "Name",
+          "type": "text"
+        },
+        {
+          "name": "Stage",
+          "type": "select",
+          "options": [
+            "Todo",
+            "Doing",
+            "Done"
+          ]
+        },
+        {
+          "name": "Owner",
+          "type": "text"
+        },
+        {
+          "name": "Due",
+          "type": "date"
+        },
+        {
+          "name": "Notes",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

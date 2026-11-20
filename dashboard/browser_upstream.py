@@ -759,6 +759,58 @@ class Pool:
             old.close()
         return up
 
+    def stop_bot(self, ws, bot, root, people=None, local=True):
+        """Stop this bot's existing child, not another bot or an owner's login window. `people`:
+        only the lent Chrome of these people (None: everyone's). `local=False` keeps the bot's
+        own child here: another sender's run still uses it."""
+        with self._lock:
+            up = self._items.get((ws, bot)) if local else None
+            if up is not None and str(up.root) == str(root):
+                del self._items[(ws, bot)]
+            else:
+                up = None
+            lent = [self._lent.pop(k) for k in list(self._lent)
+                    if k[:2] == (ws, bot) and str(self._lent[k].root) == str(root)
+                    and (people is None or k[2] in people)]
+        for remote in lent:
+            remote.close(STOPPING)
+        told = {(up.hub, up.owner, up.epoch) for up in lent}
+        epoch = browser.epochs(root).get(ws)
+        if deployment.mode() == "server" and epoch is not None and (people is None or "owner" in people):
+            # As kill_where: a restart since the tab was lent keeps no lent row here, and the
+            # owner's runners still close that bot's tab of this epoch (the note is bot-scoped).
+            told.add((runners.HUB, "owner", epoch))
+        for hub, owner, epoch in told:
+            for rid in hub.lenders(owner):
+                hub.notify(owner, {"op": "close", "ws": ws, "bot": bot, "epoch": epoch, "runner": rid})
+        if up is not None:
+            up.kill()
+            up.close()
+
+    def is_live(self, ws, bot, mode, root):
+        """Existing session state only: never get/start an upstream or ask a browser."""
+        epoch = browser.epochs(root).get(ws)
+        if epoch is None:
+            return False
+        with self._lock:
+            if self._stopping:
+                return False
+            if mode == "bot" and session_name(ws, bot, mode, epoch) in self._logins:
+                return False
+            local = self._items.get((ws, bot))
+            lent = [up for (w, b, owner), up in self._lent.items() if (w, b, owner) == (ws, bot, "owner")]
+            ups = ([local] if local is not None else []) + lent
+        for up in ups:
+            if up.closed or up.mode != mode or str(up.root) != str(root) or up.epoch != epoch:
+                continue
+            if isinstance(up, BrowserUpstream):
+                child = up._child
+                if child is not None and child.proc.poll() is None:
+                    return True
+            elif up._runner is not None and up._runner in up.hub.lenders(up.owner):
+                return True
+        return False
+
     def _lent_get(self, ws, bot, root, epoch, ctx):
         """Under the pool lock: the kept RunnerChromeUpstream of (ws, bot, person)."""
         from dashboard.browser_lent import RunnerChromeUpstream

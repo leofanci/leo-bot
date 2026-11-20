@@ -78,6 +78,38 @@ class Labels(unittest.TestCase):
         (self.root / "projects/acme/memos/m1.md").unlink()
         self.assertEqual(provenance.pending(self.root, "acme"), [])
 
+    def test_canvas_and_list_files_are_left_out(self):
+        """Per-item labels replace the ledger for these (core/canvases.py)."""
+        before = provenance.scan(self.root, "demo")
+        self.write("projects/demo/canvases/cv1.json", "{}")
+        self.write("projects/demo/canvases/history/cv1.jsonl", "{}")
+        self.write("projects/demo/lists/ls1.json", "{}")
+        self.write("projects/demo/docs/x.md", "from a mail")
+        after = provenance.scan(self.root, "demo")
+        self.assertEqual(sorted(after), ["projects/demo/docs/x.md"])
+        self.assertEqual(provenance.mark(self.root, before, after), ["projects/demo/docs/x.md"])
+        self.write("team/canvases/cv1.json", "{}")
+        self.write("team/lists/ls1.json", "{}")
+        self.assertEqual(sorted(provenance.scan(self.root, "hq")), ["projects/demo/docs/x.md"])
+
+    def test_only_the_canvas_layout_is_left_out(self):
+        for rel in ("canvases/pins.json", "canvases/templates/tp1.json", "canvases/templates/.trash/tp2.json",
+                    "canvases/history/tp1.jsonl", "canvases/.trash/cv3.json", "canvases/history/cv1.1.jsonl",
+                    "lists/history/ls1.jsonl", "lists/.trash/ls2.json"):
+            self.write(f"projects/demo/{rel}", "{}")
+        for rel in ("canvases/notes.md", "lists/x.json", "canvases/history/x.md", "canvases/sub/cv1.json"):
+            self.write(f"projects/demo/{rel}", "x")
+        self.assertEqual(sorted(provenance.scan(self.root, "demo")),
+                         ["projects/demo/canvases/history/x.md", "projects/demo/canvases/notes.md",
+                          "projects/demo/canvases/sub/cv1.json", "projects/demo/lists/x.json"])
+
+
+class CanvasLayout(unittest.TestCase):
+    def test_holds_live_in_team_not_beside_canvases(self):  # M6
+        self.assertTrue(provenance._labeled_per_item("projects/demo/canvases/pins.json"))
+        self.assertTrue(provenance._labeled_per_item("projects/demo/canvases/cv1.json"))
+        self.assertFalse(provenance._labeled_per_item("projects/demo/canvases/holds.json"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,9 @@ label travels with the data (information-flow control, as in CaMeL and Microsoft
 
 Work files: projects/<slug>/** (docs, memos, posts, briefs, per-project memory) and
 team/memory/** (HQ bot memory). HQ conversations see every workspace, so any listed file counts.
+Canvas and list files (projects/<slug>/canvases/**, lists/**, and team/canvases, team/lists) are
+left out: each block, item and row carries its own label (core/canvases.py), so one coworker note
+never flags the whole workspace.
 """
 import json
 import os
@@ -36,6 +39,28 @@ def _work_roots(root, ws):
     return [root / "projects" / ws]
 
 
+# The core/canvas_store.py layout under canvases/ and lists/ (lock and temp files are skipped above).
+_CANVAS_LAYOUT = {
+    "canvases": re.compile(r"^(?:cv\d{1,6}\.json|pins\.json|\.trash/cv\d{1,6}\.json"
+                           r"|templates/(?:\.trash/)?tp\d{1,6}\.json|history/(?:cv|tp)\d{1,6}(?:\.1)?\.jsonl)$"),
+    "lists": re.compile(r"^(?:ls\d{1,6}\.json|\.trash/ls\d{1,6}\.json|history/ls\d{1,6}(?:\.1)?\.jsonl)$"),
+}
+
+
+def _labeled_per_item(rel):
+    """A canvas or list file, or one of their side files, in the canvas store's own layout: left
+    out of the ledger. Any other file in those folders is listed as usual."""
+    parts = rel.split("/")
+    if parts[0] == "projects" and len(parts) > 3:
+        folder, rest = parts[2], parts[3:]
+    elif parts[0] == "team" and len(parts) > 2:
+        folder, rest = parts[1], parts[2:]
+    else:
+        return False
+    rx = _CANVAS_LAYOUT.get(folder)
+    return bool(rx and rx.match("/".join(rest)))
+
+
 def scan(root, ws):
     """{data-relative path: (mtime_ns, size)} for every work file a run in `ws` could change."""
     root = Path(root)
@@ -50,7 +75,9 @@ def scan(root, ws):
                 st = f.stat()
             except OSError:
                 continue
-            out[f.relative_to(root).as_posix()] = (st.st_mtime_ns, st.st_size)
+            rel = f.relative_to(root).as_posix()
+            if not _labeled_per_item(rel):
+                out[rel] = (st.st_mtime_ns, st.st_size)
     return out
 
 

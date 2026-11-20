@@ -16,11 +16,11 @@ Lookup: `get-id-catalog`, `resolve-id --id <id>`. @-mentions: composed id or bar
 # Reads (one path — osctl; Read tool only when osctl path unknown)
 # --------------------------------------------------------------------------- #
 READS = """## Data access
-Each turn: COMPACT state index only — not full content. Fetch on demand:
+Each turn: compact index only; fetch content on demand:
 - `get-posts [--profile <slug>]` — post ids, dates, statuses
 - `get-project --slug <slug>` — memos, experiments, features, activities, `sections` + `subsections`
 - `resolve-id --id pr1.sec02` — section artifacts + paths
-- `read-file --path <data-relative>` — profile.md, brief JSON, intake.md, brief-specs/br{N}.md, voices/vc{N}.md, etc.
+- `read-file --path <data-relative>`: profile.md, intake.md, brief JSON, brief-specs/br{N}.md, voices/vc{N}.md
 - WebSearch / WebFetch: when listed, for live outside facts. WebFetch reaches only sites the user
   named. Queries and URLs name the topic only: never app data, notes, numbers or secrets"""
 
@@ -53,6 +53,7 @@ WRITES_TABLE = """| What | Command |
 | Scheduled job (yours to set up when the work needs a later or repeated run; no APPROVAL: line for it) | `propose-job --bot <bot-id> --skill <skill> --name "..." --message "..." --schedule "every 30m" or "daily 09:00" or "mon,thu 09:00" or "once 2026-12-01 09:00" [--cap <usd per day; 0 or none: no cap>] [--mode approval|auto|report] [--project <slug>] [--check-app <app> --check-action <READ_SLUG> [--check-args JSON]]` (saved when your reply ends, in the owner's private thread only; the owner sees it with Undo and Pause. With a check, code runs that app read first and the job's model run happens only when its answer changed: watch an inbox every 5m at no cost) · in a job's run: `job-note --text "..."` replaces that job's notepad (every run sees it: progress, who answered, what is next) · change one: `propose-job --job <id> [--schedule ...] [--cap ...] [--mode ...] [--message ...] [--skill ...] [--name ...]` · delete one: `propose-job --job <id> --delete` · `list-jobs` |
 | Calendar activity (one calendar across workspaces) | `create-activity --entity <slug> --title "..." --date YYYY-MM-DD [--time HH:MM --time-end HH:MM]` (timed ones may not overlap: `get-busy --from <date>` first) |
 | Content calendar | `generate-plan --profile <slug> --period "YYYY-MM-DD to YYYY-MM-DD"` (unscheduled by default — add `--dates` ONLY if the user explicitly asks posts to be dated/scheduled now) |
+| Canvas / list | `get-canvas --id <cv>` · `add-block --id <cv> --type text --md "..."` · `get-list --id <ls>` · `add-row --id <ls> --cells-json '{...}'` · `update-row --id <ls> --row <rw> --cells-json '{...}' --version <n>` (changes and deletes pass the `version` you read; other commands: `docs/canvases.md`; deletes and rewrites of others' text need APPROVAL) |
 
 Banned: direct file writes, `set-brief`, `patch-brief`, editing `briefs/*.json`, `brief-specs/*.md`, or `voices/*.md` by hand."""
 
@@ -103,15 +104,15 @@ MUTATION_CMDS = (
 )
 
 SUBSECTIONS = """## Tab subsections (per project)
-Nomenclature: **tab** = fixed left-panel section (sec01–sec06). **Subsection** = ordered ``##`` heading inside that tab's markdown doc.
+Tab = fixed section (sec01–sec06); subsection = ordered ``##`` heading in its markdown doc.
 Config: `projects/<slug>/subsections.json` (docs: intake, technical, roadmap + validation_tab subset). Defaults in `GET /api/schemas` → `subsections.docs.*.default_subsections`.
 Reads: `get-subsections --project <slug>` or `get-project` → `subsections`.
 Writes: subsection osctl cmds above, or doc updates — new ``##`` headings auto-register on normalize. `update-validation-tab` sets sec02 display subset of intake only.
-New project: defaults until customized. Starters + normalize always use that project's list."""
+Starters + normalize use project lists, else defaults."""
 
 SCHEMAS = """## Schemas
 `GET /api/schemas` + `core/project_schemas.py` + `core/subsections.py`. Every osctl write normalizes on save.
-Per-project subsection lists drive intake.md, technical.md, and product roadmap headings. Features → Next until shipped.
+Features → Next until shipped.
 memos: `create-memo --type <t>`; full fields for problem-validation + assessment; else summary + recommendation; default `proposed`.
 experiments: assumption, success_criteria, kill_criteria."""
 
@@ -154,6 +155,7 @@ DELIVERABLES = """## Deliverables → command
 | Content plan | `generate-plan --profile <p> --period "A to B"` (no `--dates` unless asked) |
 | Post brief / rewrite | `update-brief --id <post> --instruction "..."` · `generate-brief` · `revise-post` |
 | Timed activity | `get-busy --from <date>`, then `create-activity ... --time HH:MM` |
+Canvases/lists: `get-canvas`/`get-list` first, then `add-block`/`update-block`/`add-row`/`update-row` or another cmd (`osctl -h`); edits pass `--version`; deletes/rewrites of others' text need APPROVAL.
 Do not paste full memo/intake/roadmap text in chat; never echo artifact bodies."""
 
 TEAM_TAGGING = """## Skills and saves

@@ -122,8 +122,9 @@ class EngineLevels(unittest.TestCase):
         self.assertEqual(ClaudeCodeEngine.shell_dir(self.policy("full"), True), self.dir)
         self.assertIsNone(ClaudeCodeEngine.shell_dir(self.policy("full"), False))  # no gate
         self.assertIsNone(ClaudeCodeEngine.shell_dir(self.policy("ask", shell=False), True))
-        env = ClaudeCodeEngine().turn_env(self.policy("full"), self.tokens(), repo_dir="/repo")
-        self.assertTrue(env["PYTHONPATH"].startswith("/repo"))
+        from core import paths
+        env = ClaudeCodeEngine().turn_env(self.policy("full"), self.tokens())
+        self.assertTrue(env["PYTHONPATH"].startswith(str(paths.CODE)))  # on every turn (tests/test_code_walls.py)
 
     def test_api_engine_shell_tool(self):
         from pathlib import Path
@@ -210,7 +211,13 @@ class EngineLevels(unittest.TestCase):
 
 class Sandbox(unittest.TestCase):
     def test_plan(self):
-        self.assertEqual(shell_rules.plan("npm test"), (True, "", None))  # no outside content: as written
+        # No outside content: sandboxed for the code wall alone (tests/test_code_walls.py), as written without one
+        run = shell_rules.plan("npm test")[2]
+        if os.path.exists(shell_rules.SANDBOX_EXEC):
+            self.assertTrue(run.startswith(shell_rules.SANDBOX_EXEC), run)
+            self.assertNotIn("(deny network-outbound (remote ip))", run)
+        else:
+            self.assertIsNone(run)
         self.assertEqual(shell_rules.plan("curl x", outside=True), (False, shell_rules.SENDS_OFF, None))
         self.assertEqual(shell_rules.plan("rm -rf /", outside=True), (False, shell_rules.NEVER, None))
         # Leo Bot's own command line keeps its own rules and must write its data: it runs outside
@@ -321,7 +328,9 @@ class BrowserWall(unittest.TestCase):
     def test_turn_with_a_browser_walls_every_command(self):
         from dashboard import taint
         t = taint.Turn()
-        self.assertIsNone(t.shell("npm test", ("/w",))[2])  # no browser: as written before outside content
+        before = t.shell("npm test", ("/w",))[2]  # no browser: the code wall alone (tests/test_code_walls.py)
+        if shell_rules.can_sandbox():
+            self.assertNotIn(str(self.root), before)
         t.browsing(self.root, sends=False)
         with unittest.mock.patch.object(shell_rules, "browser_walls", wraps=shell_rules.browser_walls) as walls:
             run = t.shell("npm test", ("/w",))[2]
@@ -422,7 +431,9 @@ class OsctlExempt(unittest.TestCase):
             run = shell_rules.plan(cmd, outside=True)[2]
             if shell_rules.can_sandbox():
                 self.assertTrue(run and run.startswith(shell_rules.SANDBOX_EXEC), cmd)
-        self.assertIsNone(shell_rules.plan("./python3 -m dashboard.osctl tree")[2])  # before outside: as written
+        before = shell_rules.plan("./python3 -m dashboard.osctl tree")[2]  # before outside: the code wall alone
+        if shell_rules.can_sandbox():
+            self.assertTrue(before.startswith(shell_rules.SANDBOX_EXEC))
 
 
 class Round2Walls(unittest.TestCase):

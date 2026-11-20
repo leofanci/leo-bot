@@ -100,6 +100,10 @@ def env_for(ctx):
     if isinstance(ctx.get("gate_token"), str) and ctx["gate_token"] and isinstance(ctx.get("gate_port"), int):
         env["LEOBOT_GATE_TOKEN"] = ctx["gate_token"]
         env["LEOBOT_GATE_URL"] = f"http://127.0.0.1:{ctx['gate_port']}/api/internal/gate"
+    # The run's canvas token (osctl canvas commands post it to the server, which knows the actor).
+    if isinstance(ctx.get("canvas_token"), str) and ctx["canvas_token"] and isinstance(ctx.get("canvas_port"), int):
+        env["LEOBOT_CANVAS_TOKEN"] = ctx["canvas_token"]
+        env["LEOBOT_CANVAS_URL"] = f"http://127.0.0.1:{ctx['canvas_port']}/api/internal/canvas"
     # The turn's indexed folder (osctl code-context): never in a thread invited people can see.
     if not env.get(SHARED_ENV) and isinstance(ctx.get("code_folder"), str) and ctx["code_folder"]:
         env["LEOBOT_CODE_FOLDER"] = ctx["code_folder"]

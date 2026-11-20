@@ -51,6 +51,8 @@ from core import bots, datadir, general, memory, paths, updater, version  # noqa
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import approvals, jobs, skill_loads  # noqa: E402
+from core import canvases  # noqa: E402
+from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
 import os_relay          # noqa: E402
@@ -136,7 +138,7 @@ def rail() -> str:
 
 
 def new_chat_session():
-    return chat_session.ChatSession(repo_dir=str(paths.CODE), rail=rail())
+    return chat_session.ChatSession(repo_dir=str(paths.turn_cwd()), rail=rail())  # never the code folder
 
 # The session token is handed out only to whoever proves they already know it:
 # the macOS app reads it from this owner-only file, a terminal user gets it in
@@ -338,7 +340,7 @@ _ARTIFACT_ROUTES = {
 def _app_html_bytes() -> bytes:
     """Serve app.html with cache-busted asset URLs (mtime) so UI updates land."""
     html = APP_HTML.read_text(encoding="utf-8")
-    for name in ("ui-tokens.css", "app.css", "app.js", "os-ids.js", "post-copy.js", "content-view.js", "logo.svg"):
+    for name in ("ui-tokens.css", "app.css", "app.js", "os-ids.js", "post-copy.js", "content-view.js", "canvas-view.js", "logo.svg"):
         v = int((HERE / name).stat().st_mtime)
         html = html.replace(f"/{name}\"", f"/{name}?v={v}\"")
     return html.encode("utf-8")
@@ -416,6 +418,23 @@ def _update_check_loop(sleep=time.sleep, rounds=None) -> None:
                 updater.check()
         except Exception as e:  # noqa: BLE001
             print(f"update check failed: {e}", file=sys.stderr)
+
+
+CANVAS_TRASH_EVERY = 24 * 3600
+
+
+def _canvas_trash_loop(sleep=time.sleep, rounds=None) -> None:
+    """Remove canvases, lists and templates trashed over 30 days ago (canvas_store.purge_all),
+    in every workspace and HQ: once at start, then daily. Never raises."""
+    n = 0
+    while rounds is None or n < rounds:
+        try:
+            canvas_store.purge_all(ROOT)
+        except Exception:  # noqa: BLE001 - the next day tries again
+            traceback.print_exc()
+        n += 1
+        if rounds is None or n < rounds:
+            sleep(CANVAS_TRASH_EVERY)
 
 
 def _start_update_checker():
@@ -1381,6 +1400,113 @@ _API_APP_SESSIONS = {}  # apps turn token -> MCP session id (api engine only)
 # browser token never reaches Composio. Minted per bot run, revoked with the apps token.
 BROWSER_TOKENS = apps_relay.Tokens()
 _API_BROWSER_SESSIONS = {}  # browser turn token -> MCP session id (api engine only)
+# Canvas tokens (POST /api/internal/canvas): one per bot run, minted in run() next to the gate
+# token and revoked in its finally. The token's context is the only source of the actor.
+CANVAS_PATH = "/api/internal/canvas"
+CANVAS_TOKENS = apps_relay.Tokens()
+CANVAS_NO_ACCESS = "no canvas access for this run"
+# What a read-only run (a consulted teammate, an Approval or Report job) may still call.
+CANVAS_READS = canvases.READS
+
+
+def _canvas_token_ctx(*, ws, bot, job, s_, sess, room, shared, turn, gated, sender):
+    """A run's canvas token context. `job_mode_now` reads the run's job mode live: a run
+    switched to approval mid-run is read-only at the endpoint from then on."""
+    return {"ws": ws, "actor": "bot", "bot": bot, "job": job["id"] if job else None,
+            "job_mode": getattr(s_, "job_mode", None), "job_mode_now": lambda: getattr(s_, "job_mode", None),
+            "chat": getattr(sess, "session_id", None), "room": (room or {}).get("id"), "shared": bool(shared),
+            "people": _room_people(ws, room) if shared else (), "turn": turn, "gated": gated,
+            "readonly": bool(getattr(s_, "readonly", False)), "sender": sender}
+
+
+def _canvases_seen(ws, room, bot_id, team=None):
+    """The canvas ids a shared thread in `room` may see (its room's pins): its deliverable cards
+    name no other canvas. Fails closed (none)."""
+    try:
+        actor = canvases.Actor(kind="bot", id=bot_id, shared=True, room=(room or {}).get("id"))
+        return set(canvases.visible_canvas_ids(ROOT, ws, actor, team))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def _canvas_job_refusal(ctx, cmd):
+    """Why a scheduled job's canvas write must wait, or None. The same rules osctl applies, held
+    here so a caller that skips osctl (or its environment) meets them too: only Auto writes, an
+    Auto job's waits end with an APPROVAL line, and after outside content (or a skill other than
+    its job's own) it saves nothing by itself."""
+    if not ctx.get("job") or cmd in CANVAS_READS:
+        return None
+    now = ctx.get("job_mode_now")
+    mode = now() if callable(now) else ctx.get("job_mode")
+    if mode != "auto":
+        return canvases.JOB_READONLY_MSG if mode != "report" else (
+            "this scheduled job only reports: nothing is saved. Put what you found in your summary.")
+    if cmd in canvases.AUTO_WAITS:
+        return canvases.AUTO_WAITS_MSG.format(cmd=cmd)
+    turn = ctx.get("turn")
+    if turn is None or turn.outside:
+        return taint.SAVE_WAITS
+    own = (jobs.get(ROOT, ctx["job"]) or {}).get("skill")
+    if any(s != own for s in skill_loads.loaded(ROOT, ctx.get("chat") or "")):
+        return canvases.JOB_READONLY_MSG
+    return None
+
+
+def _canvas_actor(ctx):
+    """The rules engine's actor, built from a canvas token's context only."""
+    turn = ctx.get("turn")
+    if turn is None:  # never minted without one; fail closed: every write labeled
+        tainted, mark = (lambda: True), (lambda: None)
+    else:
+        tainted, mark = (lambda: bool(turn.outside)), turn.saw_outside
+    return canvases.Actor(kind="bot", id=ctx.get("bot"), job=ctx.get("job"), shared=bool(ctx.get("shared")),
+                          room=ctx.get("room"), people=tuple(ctx.get("people") or ()), tainted=tainted,
+                          mark_outside=mark, gated=bool(ctx.get("gated")), chat=ctx.get("chat"),
+                          job_mode=ctx.get("job_mode"))
+
+
+def _canvas_api_actor(viewer):
+    """The rules engine's actor for a dashboard request: the owner cookie, or an invited
+    person's member cookie. Bots never come through here (see _canvas_actor)."""
+    if (viewer or {}).get("kind") == "owner":
+        return canvases.Actor(kind="owner")
+    return canvases.Actor(kind="person", id=viewer["id"])
+
+
+CANVAS_404 = {"error": "not found"}  # missing, not visible, malformed: one answer
+
+
+def _room_people(ws, room):
+    """Ids of the invited people of `ws` who can see `room`."""
+    if not room:
+        return ()
+    return tuple(p["id"] for p in people.people_in(ROOT, ws)
+                 if rooms.can_see(room, {"kind": "person", "id": p["id"]}))
+
+
+def _canvas_holds_answered(chat, answer, viewer):
+    """A thread's pending approval was answered: the owner's Approve runs its held canvas
+    actions once (as their original actor); Reject, a new message, or anyone else drops them.
+    Returns what ran: [{"cmd", "target", "ok", "error"}] (empty when nothing ran). A bad holds
+    file never stops the chat turn."""
+    if not isinstance(chat, str) or not chat:
+        return []
+    try:
+        if answer == "approved" and (viewer or {}).get("kind") == "owner":
+            targets = {h.get("id"): h.get("target") for h in canvases.pending_holds(ROOT, chat)}
+            return [{"cmd": r.get("cmd"), "target": targets.get(r.get("hold")), "ok": bool(r.get("ok")),
+                     "error": None if r.get("ok") else str(r.get("error") or "failed")}
+                    for r in canvases.run_holds(ROOT, chat)]
+        canvases.drop_holds(ROOT, chat)
+    except Exception:  # noqa: BLE001 - the owner's message still gets its reply
+        traceback.print_exc()
+    return []
+
+
+def _canvas_holds_lines(ran):
+    """One line per held canvas action that ran: `cmd target: done` or `cmd target: failed (why)`."""
+    return [" ".join(x for x in (str(r.get("cmd") or "?"), r.get("target") or "") if x)
+            + (": done" if r.get("ok") else f": failed ({str(r.get('error') or '')[:200]})") for r in ran]
 
 
 def _relay_rpc(tokens, sessions, handle, upstream_of, ended, token, method, params):
@@ -1440,6 +1566,37 @@ def _browser_upstream(ctx):
 
 _BROWSER_INSTALL = {"running": False, "last": None}  # Settings, Browser: one engine install at a time
 _BROWSER_INSTALL_LOCK = threading.Lock()
+_BROWSER_LIVE_REQUESTS = {}
+_BROWSER_LIVE_LOCK = threading.Lock()
+_BROWSER_RUNS = {}  # browser token -> currently executing model run, including scheduled jobs
+_BROWSER_RUNS_LOCK = threading.Lock()
+
+
+def _stop_browser_runs(ws=None, bot=None):
+    """Targeted (the owner's Stop on a browser block): every run of that bot. Untargeted (the
+    owner's chat Stop): the owner's own turns only, never a coworker's or a scheduled job."""
+    with _BROWSER_RUNS_LOCK:
+        runs = [r for r in _BROWSER_RUNS.values()
+                if (ws is None and not r["job"] and r.get("sender") == "owner")
+                or (ws is not None and (r["ws"], r["bot"]) == (ws, bot))]
+        for r in runs:
+            r["live"]["stopped"] = True
+            BROWSER_TOKENS.revoke(r["token"])
+        if ws is not None:
+            BROWSER_TOKENS.revoke_where(ws=ws, bot=bot)
+        # Untargeted: a bot's own child is shared by every sender of that bot, so it stays while
+        # another run of it (a coworker's turn or a job) is still going.
+        busy = set() if ws is not None else {
+            (r["ws"], r["bot"]) for r in _BROWSER_RUNS.values() if not any(r is x for x in runs)}
+    for r in runs:
+        r["session"].close()
+    targets = {(r["ws"], r["bot"]) for r in runs}
+    if ws is not None:
+        targets.add((ws, bot))
+    for w, b in targets:
+        # Untargeted: a coworker's own lent Chrome of that bot stays theirs.
+        browser_upstream.POOL.stop_bot(w, b, ROOT, people=None if ws is not None else ("owner",),
+                                       local=(w, b) not in busy)
 
 
 def _browser_install_run():
@@ -2013,7 +2170,7 @@ def _reopen(rec, scope, linked):
         return new_chat_session()
     if _folder_gone(rec, linked):
         return _fresh_with_recap(rec)
-    return chat_session.ChatSession.restore(str(paths.CODE), rail(), rec)
+    return chat_session.ChatSession.restore(str(paths.turn_cwd()), rail(), rec)
 
 
 def get_chat_session(project_scope=None, chat_id=None, new=False, linked=None):
@@ -2615,6 +2772,9 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "LeoBot/1.0"
     # A client that opens a socket and sends nothing must not hold a thread forever.
     timeout = 60
+    # The join page sets "same-origin": with no-referrer a browser sends "Origin: null" on its
+    # form post, and _join_post refuses any origin but this server's own.
+    referrer_policy = "no-referrer"
 
     def end_headers(self):
         self.send_header("Content-Security-Policy", (
@@ -2623,7 +2783,7 @@ class Handler(BaseHTTPRequestHandler):
             "ws://localhost:*; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; "
             "form-action 'self'"
         ))
-        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Referrer-Policy", self.referrer_policy)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
@@ -2857,6 +3017,37 @@ class Handler(BaseHTTPRequestHandler):
                                         "error": {"code": -32000, "message": "The browser is unavailable. Try again."}})
         return self._send_rpc(202 if reply is None else 200, reply, sid)
 
+    def _handle_canvas_internal(self):
+        """A bot run's canvas command (osctl): canvas token only, this machine only. The actor
+        comes from the token's context, never from the body."""
+        auth = self.headers.get("Authorization", "")
+        ctx = CANVAS_TOKENS.lookup(auth[7:]) if auth.startswith("Bearer ") else None
+        if not self._local_request() or ctx is None:
+            return self._send(403, {"ok": False, "error": CANVAS_NO_ACCESS})
+        try:
+            body = self._read_json()
+        except ValueError:
+            return self._send(400, {"ok": False, "error": "bad request"})
+        cmd = body.get("cmd") if isinstance(body, dict) else None
+        params = body.get("params") if isinstance(body, dict) else None
+        if not isinstance(cmd, str) or not cmd or not isinstance(params, (dict, type(None))):
+            return self._send(400, {"ok": False, "error": 'bad request: {"cmd": str, "params": {...}}'})
+        if ctx.get("readonly") and cmd not in CANVAS_READS:
+            return self._send(200, {"ok": False, "error": f"{cmd}: this run is read-only, canvases can only be read"})
+        waits = _canvas_job_refusal(ctx, cmd)
+        if waits:
+            return self._send(200, {"ok": False, "error": waits})
+        try:
+            out = canvases.dispatch(ROOT, ctx.get("ws"), _canvas_actor(ctx), cmd, dict(params or {}))
+        except canvases.NeedsApproval as e:
+            return self._send(200, {"ok": False, "error": str(e), "needs_approval": True})
+        except canvases.Refused as e:
+            return self._send(200, {"ok": False, "error": str(e)})
+        except Exception:  # noqa: BLE001 - one bad call never takes the request thread down
+            traceback.print_exc()
+            return self._send(500, {"ok": False, "error": "internal error"})
+        return self._send(200, {"ok": True, **out} if isinstance(out, dict) else {"ok": True, "result": out})
+
     def _handle_gate(self):
         """May this tool run now? Asked by the Claude Code web hook and by osctl in an Auto job
         (dashboard/taint.py). Only ever adds taint; a bad or late token gets a 403 (they deny)."""
@@ -2878,14 +3069,30 @@ class Handler(BaseHTTPRequestHandler):
             if not allow:
                 self.log_message("gate deny tool=%s", tool[:40])
             return self._send(200, {"allow": allow, "reason": reason})
-        if tool == "Bash":  # a shell command: after outside content it runs sandboxed (shell_rules.plan)
+        if tool == "Bash-ran":  # Claude Code ran a Bash command (PostToolUse): did its review shell ask first?
+            taint.GATES.ran(auth[7:], body.get("id") if isinstance(body.get("id"), str) else None)
+            return self._send(200, {"allow": True, "reason": ""})
+        if tool == "Bash-shell":  # the review shell asks for its profile, or redeems an osctl ticket
+            ticket = body.get("ticket")
+            if ticket is not None:
+                run = taint.GATES.redeem(auth[7:], ticket)
+                return self._send(200, {"allow": bool(run),
+                                        **({"command": run} if run else {"reason": "no such ticket"})})
+            allow, reason, profile = taint.GATES.shell_profile(auth[7:], profile_dir=str(ROOT / "team" / "sandbox"))
+            return self._send(200, {"allow": allow, "reason": reason, **({"profile": profile} if profile else {})})
+        if tool == "Bash":  # a shell command: it runs sandboxed (shell_rules.plan), on review via its shell
             # The sandbox profile goes in Leo Bot's data folder, which a sandboxed command cannot write.
-            allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"))
+            cwd = body.get("cwd") if isinstance(body.get("cwd"), str) and body["cwd"].startswith("/") else None
+            call_id = body.get("id") if isinstance(body.get("id"), str) else None
+            allow, reason, run = taint.GATES.shell(auth[7:], command or "", profile_dir=str(ROOT / "team" / "sandbox"),
+                                                   cwd=cwd, call_id=call_id)
         else:
             allow, reason = turn.decide(tool, command)
         if not allow:
             self.log_message("gate deny tool=%s", tool[:40])
-        return self._send(200, {"allow": allow, "reason": reason, **({"command": run} if run else {})})
+        review = tool == "Bash" and taint.GATES.review(auth[7:])
+        return self._send(200, {"allow": allow, "reason": reason, **({"command": run} if run else {}),
+                                **({"review": True} if review else {})})
 
     def _runner_from(self, token):
         """The runner behind a token, while its person still belongs here."""
@@ -2963,7 +3170,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         path = urlparse(self.path).path
-        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH):
+        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH, CANVAS_PATH):
             return self._send(405, {"error": "method not allowed"})
         if not self._authorized(require_origin=True):
             return self._send(403, {"error": "forbidden"})
@@ -3036,6 +3243,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
+            browser_relay.live_frame(ws, bot_id, ROOT)  # Drop a frame from the previous mode now, even without a viewer.
             return self._send(200, _browser_view(ws))
         if path == "/api/browser/install":
             with _BROWSER_INSTALL_LOCK:
@@ -3066,6 +3274,29 @@ class Handler(BaseHTTPRequestHandler):
             except _AppRefused as e:
                 return self._send(409, {"ok": False, "error": str(e)})
         return self._send(404, {"error": "unknown endpoint"})
+
+    def _browser_live(self):
+        q = parse_qs(urlparse(self.path).query)
+        try:
+            ws, bot = _browser_bot({"ws": (q.get("ws") or [None])[0], "bot": (q.get("bot") or [None])[0]})
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        now = time.monotonic()
+        key = (str(ROOT), ws, bot, bots.CEO)  # Owner cookie is the sole viewer identity in round one.
+        with _BROWSER_LIVE_LOCK:
+            for old, at in list(_BROWSER_LIVE_REQUESTS.items()):
+                if now - at >= 1:
+                    del _BROWSER_LIVE_REQUESTS[old]
+            if key in _BROWSER_LIVE_REQUESTS:
+                return self._send(429, {"error": "try again in one second"})
+            _BROWSER_LIVE_REQUESTS[key] = now
+        frame = browser_relay.live_frame(ws, bot, ROOT) or {}
+        setting = browser.bot_setting(ws, bot, ROOT)
+        live = setting["level"] != "off" and browser_upstream.POOL.is_live(ws, bot, setting["mode"], ROOT)
+        return self._send(200, {"url": frame.get("url", ""), "title": frame.get("title", ""),
+                                "at": frame.get("at"), "live": live,
+                                "image": "data:image/png;base64," + base64.b64encode(frame["png"]).decode()
+                                if frame else None})
 
     def _engines_post(self, path, body):
         """Settings, Engines: owner only (the caller checked)."""
@@ -3138,6 +3369,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(doc)
 
     def _join_page(self, code):
+        self.referrer_policy = "same-origin"
         inv = people.invite_for(ROOT, code)
         if not inv:
             return self._page(410, "Invite expired", "<h1>This invite link no longer works</h1>"
@@ -3213,6 +3445,7 @@ class Handler(BaseHTTPRequestHandler):
             # A turn already running here ends too: close their session, cut its osctl token.
             stop_person_chat(pid, ws)
             os_relay.TOKENS.revoke_where(ws=ws, runner_owner=pid)
+            CANVAS_TOKENS.revoke_where(ws=ws, sender=pid)
             runners.HUB.drop_turns(pid, ws)  # their runner's turns here stop now, not in 30 minutes
             if not people.get(ROOT, pid):  # gone from their last workspace: their Macs too
                 runners.revoke_owner(ROOT, pid)
@@ -3238,6 +3471,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, {"error": "forbidden"})
         if path == "/api/rooms/delete":
             name = str(body.get("name") or "")
+            # Pins go first: a failed delete loses them, never hands them to a later room of that name.
+            canvas_store.drop_room_pins(ROOT, ws, f"{ws}/t-{name}")
             rooms.delete_topic(ws, name, ROOT)
             _retire_threads(lambda rec: rec.get("room") == f"{ws}/t-{name}")  # never follow the name
             return self._send(200, {"ok": True})
@@ -3262,8 +3497,119 @@ class Handler(BaseHTTPRequestHandler):
                     rec["room"] = room_id
                     chat_store.save(rec)
             approvals.move_room(f"{ws}/t-{old}", room_id, ROOT)
+            canvas_store.move_room_pins(ROOT, ws, f"{ws}/t-{old}", room_id)
         listed = rooms.list_rooms(team, ws, ROOT)
         return self._send(200, {"id": room_id, "rooms": [r for r in listed if rooms.can_see(r, viewer)]})
+
+    # -- canvases (owner cookie, or a person scoped by the rooms they see) -- #
+    def _canvas_ws(self, value, viewer):
+        """(ws, team) from our own workspace list, or None: a person only their joined
+        workspaces, never HQ. ValueError when `ws` is missing."""
+        if not isinstance(value, str) or not value:
+            raise ValueError("ws: required")
+        projects = db.tree()
+        ws = _known_ws(value, projects)
+        if not ws or (viewer.get("kind") != "owner" and (ws == bots.HQ or ws not in viewer["ws"])):
+            return None
+        record = next((p for p in projects if p.get("slug") == ws), None) if ws != bots.HQ else None
+        return ws, bots.team(ROOT, ws, record)
+
+    def _canvas_call(self, viewer, ws, team, cmd, params):
+        """(code, body) of one rules-engine call: Invalid 400, Refused 403, NotFound 404, Stale 409;
+        anything else (a KeyError included) is a bug: 500."""
+        try:
+            return 200, canvases.dispatch(ROOT, ws, _canvas_api_actor(viewer), cmd, params,
+                                          team=team, source="api")
+        except canvases.NotFound as e:
+            return 404, ({"error": str(e) or "not found"} if viewer.get("kind") == "owner" else CANVAS_404)
+        except canvases.Stale as e:
+            return 409, {"error": str(e)}
+        except canvases.Invalid as e:
+            return 400, {"error": str(e)}
+        except canvases.Refused as e:
+            return 403, {"error": str(e)}
+        except Exception:  # noqa: BLE001 - one bad call never takes the request thread down
+            traceback.print_exc()
+            return 500, {"error": "internal error"}
+
+    def _canvas_get(self, path, viewer):
+        qs = parse_qs(urlparse(self.path).query)
+        q = lambda k: (qs.get(k) or [None])[0]  # noqa: E731
+        try:
+            found = self._canvas_ws(q("ws"), viewer)
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        if not found:
+            return self._send(404, CANVAS_404)
+        ws, team = found
+        if path == "/api/canvases":
+            return self._canvas_index(viewer, ws, team, q("room"))
+        kind, _, rest = path[len("/api/"):].partition("/")
+        fid, _, sub = rest.partition("/")
+        if (kind, sub) not in {("canvases", ""), ("canvases", "history"), ("lists", ""),
+                               ("lists", "rows"), ("lists", "history")}:
+            return self._send(404, {"error": "unknown endpoint"})
+        if not canvas_store.valid("canvas" if kind == "canvases" else "list", fid):
+            return self._send(404, CANVAS_404)
+        params = {"id": fid}
+        try:
+            for k in ("offset", "limit"):
+                if q(k) is not None:
+                    params[k] = int(q(k))
+            if q("filter"):
+                params["filter"] = json.loads(q("filter"))
+                if not isinstance(params["filter"], dict):
+                    raise ValueError
+            if q("sort"):
+                params["sort"] = q("sort")
+        except ValueError:
+            return self._send(400, {"error": "offset, limit: whole numbers; filter: a JSON object"})
+        cmd = "list-history" if sub == "history" else "get-canvas" if kind == "canvases" else "get-list"
+        code, out = self._canvas_call(viewer, ws, team, cmd, params)
+        if code == 200 and sub == "rows":
+            out = {k: out.get(k) for k in ("id", "version", "total", "offset", "limit", "rows")}
+        return self._send(code, out)
+
+    def _canvas_index(self, viewer, ws, team, room):
+        """The canvases this viewer sees in `ws` (or pinned in `room`), and that room's pin order."""
+        params = {}
+        if room:
+            r = rooms.get_room(room, team, ROOT) if rooms.split_id(room)[0] == ws else None
+            if not r or (viewer.get("kind") != "owner" and (r.get("kind") == "dm" or not rooms.can_see(r, viewer))):
+                return self._send(404, CANVAS_404)
+            params["room"] = room
+        code, out = self._canvas_call(viewer, ws, team, "list-canvases", params)
+        if code != 200:
+            return self._send(code, out)
+        rows = []
+        for c in out.get("canvases") or []:
+            row = {**c, "pinned_in": c.get("rooms") or [], "updated": canvas_store.updated(ROOT, ws, c["id"])}
+            row.pop("rooms", None)
+            rows.append(row)
+        seen = {c["id"] for c in rows}
+        pins = [c for c in canvas_store.pins(ROOT, ws).get(room, []) if c in seen] if room else []
+        extra = {}
+        if viewer.get("kind") == "owner" and not room:  # All canvases: deleted ones to restore
+            extra["trash"] = canvases.trashed_canvases(ROOT, ws)
+        return self._send(200, {"ws": ws, "canvases": rows, "pins": pins, **extra})
+
+    def _canvas_post(self, body, viewer):
+        """One write (or read) command; the actor comes from the cookie, never the body."""
+        if not isinstance(body, dict):
+            return self._send(400, {"error": 'bad request: {"ws", "cmd", "params"}'})
+        cmd, params = body.get("cmd"), body.get("params")
+        if not isinstance(cmd, str) or cmd not in canvases.COMMANDS or not isinstance(params, (dict, type(None))):
+            return self._send(400, {"error": 'bad request: {"ws", "cmd": a canvas command, "params": {...}}'})
+        try:
+            found = self._canvas_ws(body.get("ws"), viewer)
+        except ValueError as e:
+            return self._send(400, {"error": str(e)})
+        if not found:
+            return self._send(404, CANVAS_404)
+        params = dict(params or {})
+        params.pop("project", None)  # the workspace is `ws`, checked above
+        code, out = self._canvas_call(viewer, found[0], found[1], cmd, params)
+        return self._send(code, out)
 
     def _person_get(self, path, person):
         """The only reads an invited person gets, each bound to their workspaces."""
@@ -3305,6 +3651,8 @@ class Handler(BaseHTTPRequestHandler):
                 chats = [_for_person(c) for c in chat_store.list_meta()
                          if rooms.room_of_chat(c, ids, spaces) == room["id"] and rooms.chat_visible(c, room, person)]
                 return self._send(200, {"chats": chats})
+            if path == "/api/canvases" or path.startswith(("/api/canvases/", "/api/lists/")):
+                return self._canvas_get(path, person)
             if path.startswith("/api/chats/"):
                 rec = chat_store.load(path[len("/api/chats/"):])
                 if _person_can_read(rec, person, projects):
@@ -3323,6 +3671,8 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/api/runners", "/api/runners/revoke"):
                 return self._runners_post(path, body, person["id"])
             if path == "/api/chat-stop":
+                if "ws" in body or "bot" in body:
+                    return self._send(403, {"error": "owner only"})
                 stop_person_chat(person["id"])
                 return self._send(200, {"ok": True})
             if path == "/api/chat-reset":  # new thread: drop their active session only
@@ -3335,6 +3685,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._people_post(path, body, person)
             if path in ("/api/rooms", "/api/rooms/delete"):
                 return self._rooms_post(path, body, person)
+            if path == "/api/canvases":
+                return self._canvas_post(body, person)
             if path.startswith("/api/chats/") and path.endswith("/react"):
                 chat_id = path[len("/api/chats/"):-len("/react")]
                 if not _person_can_read(chat_store.load(chat_id), person, db.tree()):
@@ -3481,11 +3833,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             sess = get_chat_session(project_scope, chat_id, new=not chat_id, linked=linked)
         card_bot = None
+        held_ran = []
         if chat_id:
             answer = body.get("approval")
             if answer in ("approved", "rejected"):
                 card_bot = approvals.asking_bot(chat_id, ROOT)
             approvals.resolve_chat(chat_id, answer if answer in ("approved", "rejected") else "answered", ROOT)
+            held_ran = _canvas_holds_answered(chat_id, answer, viewer)
         sess.workspace = ws
         sess.deny_dirs = _workspace_deny_dirs(ws, projects)
         sess.deny_files = _workspace_deny_files(ws)
@@ -3731,6 +4085,9 @@ class Handler(BaseHTTPRequestHandler):
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
         )
+        if held_ran:  # the owner's Approve already ran them: the bot must not ask or do them again
+            text = ("Approved canvas actions already ran: " + "; ".join(_canvas_holds_lines(held_ran))
+                    + ". Do not repeat them.\n\n" + text)
         # What crosses between engines: the thread's visible messages, never a transcript.
         sess.recap = chat_store.recap(saved_rec)
         missed = "" if compacted else chat_store.recap(saved_rec, engine.id)  # the recap has it all
@@ -3821,16 +4178,39 @@ class Handler(BaseHTTPRequestHandler):
             gate_kw, mode_was = {}, getattr(s_, "job_mode", None)
             port = (getattr(getattr(self, "server", None), "server_address", None) or (None, None))[1]
             if (gated or hooked) and isinstance(port, int):
-                gate_kw = {"gate_token": taint.GATES.mint(turn, writable=(kw.get("edit_dirs") or () if getattr(s_, "shell", False) else ()),
-                                                          wrap=not getattr(eng, "own_sandbox", False)),
+                shell_ = bool(getattr(s_, "shell", False))
+                # Approve for me on Claude Code: its reviewer judges each command, its shell sandboxes it.
+                review_ = (shell_ and getattr(s_, "level", "") == "approve"
+                           and bool(eng) and eng.id == chat_session.ClaudeCodeEngine.id)
+                gate_kw = {"gate_token": taint.GATES.mint(turn, writable=(kw.get("edit_dirs") or () if shell_ else ()),
+                                                          wrap=not getattr(eng, "own_sandbox", False), review=review_),
                            "gate_port": port}
             if (not gated or not gate_kw) and (web_ or (eng and eng.full_disk)):
                 turn.saw_outside()
                 if mode_was == "auto":
                     s_.job_mode = "approval"
+            # This run's canvas token: the endpoint takes the actor from it alone (revoked below).
+            canvas_kw = {}
+            if isinstance(port, int):
+                canvas_kw = {"canvas_token": CANVAS_TOKENS.mint(_canvas_token_ctx(
+                    ws=ws, bot=msg.get("bot"), job=job, s_=s_, sess=sess, room=room, shared=shared,
+                    turn=turn, gated=gated, sender=sender)), "canvas_port": port}
+                if kw.get("os_token"):  # osctl over the relay gets the same token (os_relay.env_for)
+                    os_relay.TOKENS.update(kw["os_token"], **canvas_kw)
             try:
+                browser_token = kw.get("browser_token")
+                if browser_token:
+                    with _BROWSER_RUNS_LOCK:
+                        if BROWSER_TOKENS.lookup(browser_token) is None:
+                            live["stopped"] = True
+                            raise _RunFailed
+                        _BROWSER_RUNS[browser_token] = {
+                            "ws": ws, "bot": msg.get("bot"), "session": s_, "live": live,
+                            "job": bool(job), "token": browser_token, "sender": sender}
                 for kind, payload in s_.ask(prompt_, with_web=web_, model=model_, web_domains=web_domains,
-                                            **kw, **gate_kw):
+                                            **kw, **gate_kw, **canvas_kw):
+                    if live.get("stopped"):
+                        break
                     if kind == "spent" and isinstance(payload, dict):  # a model call ended, its tools run next
                         so_far = payload.get("cost")
                         if so_far is None:
@@ -3851,8 +4231,13 @@ class Handler(BaseHTTPRequestHandler):
                     elif kind == "done":
                         fin = payload or {}
             finally:
+                if kw.get("browser_token"):
+                    with _BROWSER_RUNS_LOCK:
+                        _BROWSER_RUNS.pop(kw["browser_token"], None)
                 if gate_kw:
                     taint.GATES.revoke(gate_kw["gate_token"])
+                if canvas_kw:
+                    CANVAS_TOKENS.revoke(canvas_kw["canvas_token"])
                 if getattr(s_, "job_mode", None) != mode_was:
                     s_.job_mode = mode_was
                 # The thread keeps what its context now holds: taint only ever grows.
@@ -4020,6 +4405,8 @@ class Handler(BaseHTTPRequestHandler):
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
+            for line in _canvas_holds_lines(held_ran):  # the owner sees each approved action's outcome
+                notice(f"Approved canvas action {line}")
             folder_kw = {"read_dirs": read_dirs, "edit_dirs": edit_dirs}
             lead_kw = {"skill_": skill, "reason_": reason}
             lead_text = run(sess, text, model, with_web, msgs[0], **lead_kw, **folder_kw, **apps_kw)
@@ -4118,7 +4505,8 @@ class Handler(BaseHTTPRequestHandler):
                     if job:
                         live["status"] = "waiting"
             if files_before is not None:
-                handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts())
+                handed = deliverables.changed(ROOT, ws, files_before, db.tree(), db.posts(),
+                                              canvases_seen=_canvases_seen(ws, room, bot_id, team) if shared else None)
                 if handed:
                     msgs[last]["deliverables"] = handed
                     emit({"deliverables": handed, "msg": last})
@@ -4389,7 +4777,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/join/"):
             return self._join_page(path[len("/join/"):])
 
-        if path in ("/ui-tokens.css", "/app.css", "/app.js", "/os-ids.js", "/post-copy.js", "/content-view.js", "/logo.svg"):
+        if path in ("/ui-tokens.css", "/app.css", "/app.js", "/os-ids.js", "/post-copy.js", "/content-view.js", "/canvas-view.js", "/logo.svg"):
             f = HERE / path.lstrip("/")
             ctype = (
                 "text/css" if path.endswith(".css")
@@ -4413,8 +4801,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if not path.startswith("/api/"):
             return self._send(404, {"error": "not found"})
-        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH):
+        if path in (APPS_RELAY_PATH, OS_RELAY_PATH, BROWSER_RELAY_PATH, CANVAS_PATH):
             return self._send(405, {"error": "method not allowed"})  # no server-sent stream
+        if path == "/api/browser/live" and not self._authorized():
+            return self._send(403, {"error": "owner only"})
         if not self._authorized():
             person = None if self._valid_cookie() else self._person_authorized()
             if person and db.db_exists():
@@ -4436,6 +4826,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/me":
                 return self._send(200, {"kind": "owner", "id": bots.CEO, "name": "Owner", "deployment": DEPLOYMENT})
+            if path == "/api/canvases" or path.startswith(("/api/canvases/", "/api/lists/")):
+                return self._canvas_get(path, OWNER)
             if path in ("/api/people", "/api/sharing"):
                 if path == "/api/sharing":
                     return self._send(200, {"public_url": people.public_url(ROOT)})
@@ -4491,6 +4883,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ws": ws, "files": files})
             if path == "/api/engines":
                 return self._send(200, _engines_view())
+            if path == "/api/browser/live":
+                return self._browser_live()
             if path == "/api/browser/settings":  # owner only (checked above)
                 ws = (parse_qs(urlparse(self.path).query).get("ws") or [None])[0]
                 try:
@@ -4612,6 +5006,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_os_relay()
         if path == taint.GATE_PATH:  # a bot run's web hook or osctl: gate token only
             return self._handle_gate()
+        if path == CANVAS_PATH:  # osctl canvas commands: canvas token only
+            return self._handle_canvas_internal()
         if path.startswith(RUNNER_PREFIX):  # a person's Mac: runner token, no cookie
             return self._handle_runner(path)
         if path.startswith("/join/"):  # the invite form (no cookie yet)
@@ -4632,6 +5028,10 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_json()
             if path in ("/api/invites", "/api/invites/revoke", "/api/people/remove"):
                 return self._people_post(path, body, OWNER)
+            if path == "/api/canvases":
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                return self._canvas_post(body, OWNER)
             if path == "/api/sharing":
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
@@ -4815,6 +5215,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Turns still running for the deleted workspace lose their tokens and sessions now.
                 os_relay.TOKENS.revoke_where(ws=out["slug"])
                 apps_relay.TOKENS.revoke_where(ws=out["slug"])
+                CANVAS_TOKENS.revoke_where(ws=out["slug"])
                 # Tidying only: its old-epoch browsers close and their saved logins go. A reused slug
                 # has a new epoch, so it never reaches them whatever is left (the startup sweep).
                 # Its children are killed now; their engine close and the rest of the tidy run in the
@@ -5076,6 +5477,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if path == "/api/approvals/dismiss":
                 approvals.resolve_chat(str(body.get("chat") or ""), "rejected", ROOT)
+                _canvas_holds_answered(str(body.get("chat") or ""), "rejected", OWNER)
                 return self._send(200, {"ok": True})
             if path in ("/api/rooms", "/api/rooms/delete"):
                 return self._rooms_post(path, body, OWNER)
@@ -5123,6 +5525,13 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(data)
                 return self._send(200, {"path": fpath})
             if path == "/api/chat-stop":
+                if "ws" in body or "bot" in body:
+                    if not self._authorized(require_origin=True):
+                        return self._send(403, {"error": "forbidden"})
+                    ws, bot = _browser_bot(body)
+                    _stop_browser_runs(ws, bot)
+                    return self._send(200, {"ok": True})
+                _stop_browser_runs()
                 # Abort the in-flight turn (kills the claude subprocess so it
                 # stops consuming tokens) but KEEP the session so the next
                 # message resumes the same context. Unlike chat-reset.
@@ -5249,6 +5658,7 @@ def main():
         raise
     write_token_file()
     _start_update_checker()
+    threading.Thread(target=_canvas_trash_loop, name="canvas-trash", daemon=True).start()
     # No bot-mode browser child starts until the startup close (below) has finished: held before
     # anything that can reach POOL.get (jobs, the sweeper, requests) runs.
     browser_upstream.POOL.hold_starts()

@@ -1,6 +1,7 @@
 """Connected apps over HTTP: relay route, integrations API, approve/reject."""
 import io
 import json
+import os
 import tempfile
 import unittest
 from email.message import Message
@@ -609,7 +610,12 @@ class Gate(Base):
     def test_a_shell_command_after_outside_content_comes_back_sandboxed(self):
         code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
                                    origin=False, headers={"Authorization": f"Bearer {self.token}"})
-        self.assertEqual((code, data["allow"], data.get("command")), (200, True, None))  # clean: as written
+        self.assertEqual((code, data["allow"]), (200, True))
+        from dashboard import shell_rules
+        if shell_rules.can_sandbox():  # clean: sandboxed for the code wall alone (tests/test_code_walls.py)
+            self.assertTrue(data["command"].startswith(shell_rules.SANDBOX_EXEC))
+        else:
+            self.assertIsNone(data.get("command"))
         self.turn.saw_outside()
         code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
                                    origin=False, headers={"Authorization": f"Bearer {self.token}"})
@@ -620,6 +626,44 @@ class Gate(Base):
         code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "curl x"}, cookie=False,
                                    origin=False, headers={"Authorization": f"Bearer {self.token}"})
         self.assertEqual((data["allow"], data.get("command")), (False, None))
+
+    def test_review_level_leaves_the_command_to_the_reviewer_and_sandboxes_its_shell(self):
+        from dashboard import shell_rules
+        tok = server.taint.GATES.mint(self.turn, writable=("/w",), review=True)
+        self.addCleanup(server.taint.GATES.revoke, tok)
+        auth = {"Authorization": f"Bearer {tok}"}
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "npm test"}, cookie=False,
+                                   origin=False, headers=auth)
+        self.assertEqual((code, data["allow"], data.get("review")), (200, True, True))
+        self.assertIsNone(data.get("command"))  # the hook stays silent: Claude Code's reviewer decides
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "curl x"}, cookie=False,
+                                   origin=False, headers=auth)
+        self.assertTrue(data["allow"])  # no outside content yet: sends are fine, the reviewer judges
+        if shell_rules.can_sandbox():
+            code, data, _, _ = request("POST", self.PATH, {"tool": "Bash-shell"}, cookie=False, origin=False,
+                                       headers=auth)
+            self.assertTrue(data["allow"])
+            profile = Path(data["profile"]).read_text()
+            self.assertIn(os.path.realpath(str(shell_rules.REPO)), profile)
+            self.assertNotIn("(deny network-outbound (remote ip))", profile)
+            self.turn.saw_outside()
+            code, data, _, _ = request("POST", self.PATH, {"tool": "Bash-shell"}, cookie=False, origin=False,
+                                       headers=auth)
+            self.assertIn("(deny network-outbound (remote ip))", Path(data["profile"]).read_text())
+        # Leo Bot's own osctl: a one-time ticket the shell redeems, run outside the sandbox
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash", "command": "python3 -m dashboard.osctl tree"},
+                                   cookie=False, origin=False, headers=auth)
+        ticket = data["command"].split()[-1]
+        self.assertRegex(data["command"], r"^: leobot-osctl-ticket [0-9a-f]{32}$")
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash-shell", "ticket": ticket}, cookie=False,
+                                   origin=False, headers=auth)
+        self.assertIn("-I -c", data["command"])
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash-shell", "ticket": ticket}, cookie=False,
+                                   origin=False, headers=auth)
+        self.assertFalse(data["allow"])  # once only
+        code, data, _, _ = request("POST", self.PATH, {"tool": "Bash-shell"}, cookie=False, origin=False,
+                                   headers={"Authorization": f"Bearer {self.token}"})
+        self.assertFalse(data["allow"])  # a Full access token has no review shell
 
     def test_refuses_without_a_live_token_or_from_another_host(self):
         self.assertEqual(self.ask("WebSearch", token="nope")[0], 403)

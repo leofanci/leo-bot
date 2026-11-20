@@ -183,6 +183,10 @@ def normalize_path(value, root=bots.ROOT, must_exist=True) -> str:
     # Leo Bot's own data is written only through osctl; a link inside it would bypass that.
     if any(under(resolved, p) for p in (workspace_root, code_root, leobot_home)):
         raise FolderError(own_msg)
+    # The Python that runs Leo Bot and the rest of the code wall: never linked, nor a folder holding them.
+    from dashboard import shell_rules  # here: dashboard imports this module
+    if shell_rules.holds_code(resolved):
+        raise FolderError(own_msg)
     return str(resolved)
 
 

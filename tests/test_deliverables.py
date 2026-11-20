@@ -68,6 +68,50 @@ class Describe(unittest.TestCase):
         self.assertEqual(card["post"], "p1")
         self.assertEqual(card["profile"], "profile-a")
 
+    def test_a_changed_canvas_is_a_canvas_card(self):
+        touch(self.p / "canvases" / "cv2.json", json.dumps({"title": "Other", "blocks": []}))
+        before = deliverables.snapshot(self.root, "acme")
+        touch(self.p / "canvases" / "cv1.json", json.dumps({"title": "Launch plan", "blocks": []}))
+        (card,) = deliverables.changed(self.root, "acme", before, [], [])
+        self.assertEqual((card["kind"], card["key"], card["label"], card["link"]),
+                         ("canvas", "canvas:cv1", "Launch plan", "#/canvas/cv1"))
+
+    def test_a_changed_list_is_the_card_of_the_first_canvas_embedding_it(self):
+        touch(self.p / "canvases" / "cv1.json", json.dumps({"title": "Notes", "blocks": [{"type": "text"}]}))
+        touch(self.p / "canvases" / "cv2.json", json.dumps({"title": "Pipeline", "blocks": [
+            {"id": "bk1", "type": "list", "list": "ls1"}]}))
+        touch(self.p / "canvases" / "cv3.json", json.dumps({"title": "Again", "blocks": [
+            {"id": "bk1", "type": "list", "list": "ls1"}]}))
+        before = deliverables.snapshot(self.root, "acme")
+        touch(self.p / "lists" / "ls1.json", json.dumps({"title": "Leads", "rows": []}))
+        (card,) = deliverables.changed(self.root, "acme", before, [], [])
+        self.assertEqual((card["key"], card["label"], card["link"]), ("canvas:cv2", "Pipeline", "#/canvas/cv2"))
+
+    def test_shared_thread_sees_only_its_rooms_canvases(self):  # M3
+        touch(self.p / "canvases" / "cv1.json", json.dumps({"title": "Hidden", "blocks": [
+            {"id": "bk1", "type": "list", "list": "ls1"}]}))
+        touch(self.p / "canvases" / "cv2.json", json.dumps({"title": "Shown", "blocks": [
+            {"id": "bk1", "type": "list", "list": "ls1"}]}))
+        before = deliverables.snapshot(self.root, "acme")
+        touch(self.p / "canvases" / "cv1.json", json.dumps({"title": "Hidden 2", "blocks": []}))
+        touch(self.p / "canvases" / "cv3.json", json.dumps({"title": "Also hidden", "blocks": []}))
+        touch(self.p / "lists" / "ls1.json", json.dumps({"title": "Leads", "rows": []}))
+        got = deliverables.changed(self.root, "acme", before, [], [], canvases_seen={"cv2"})
+        self.assertEqual([(c["key"], c["label"]) for c in got], [("canvas:cv2", "Shown")])
+        self.assertEqual(deliverables.changed(self.root, "acme", before, [], [], canvases_seen=set()), [])
+        self.assertEqual(len(deliverables.changed(self.root, "acme", before, [], [])), 3)  # the owner: all
+
+    def test_canvas_side_files_and_orphan_lists_are_no_cards(self):
+        before = deliverables.snapshot(self.root, "acme")
+        touch(self.p / "lists" / "ls9.json", json.dumps({"title": "Alone", "rows": []}))
+        touch(self.p / "canvases" / "history" / "cv1.jsonl", "{}")
+        touch(self.p / "canvases" / ".trash" / "cv4.json", "{}")
+        touch(self.p / "canvases" / "templates" / "tp1.json", "{}")
+        touch(self.p / "canvases" / "pins.json", "{}")
+        touch(self.p / "canvases" / "cv1.json.lock", "")
+        self.assertEqual(deliverables.changed(self.root, "acme", before, [], []), [])
+        self.assertEqual(deliverables.list_files(self.root, "acme", [], []), [])
+
 
 class TurnCards(unittest.TestCase):
     def setUp(self):

@@ -51,6 +51,7 @@ STATE_FILE = Path.home() / ".leobot-runner-sessions.json"
 SETTINGS_FILE = Path.home() / ".leobot-runner-settings.json"  # this computer's own: Lend my Chrome
 BROWSER_ROOT = Path.home() / ".leobot-runner-browser"  # the lent Chrome's engine key, config and tools
 MAX_LENT = 20  # bot tabs kept open at once; the least recently used one closes first
+SCREENSHOT = "agent_browser_screenshot"
 _EPOCH_RE = re.compile(r"[0-9a-f]{6}")
 _TURN_RE = re.compile(r"[0-9a-f]{32}")
 _CHAT_RE = re.compile(r"[0-9a-f-]{36}")
@@ -222,7 +223,7 @@ def check_browser_job(job):
             or not isinstance(job.get("turn"), str) or not _TURN_RE.fullmatch(job["turn"])
             or not isinstance(job.get("epoch"), str) or not _EPOCH_RE.fullmatch(job["epoch"])
             or any(not isinstance(job.get(k), str) or not 0 < len(job[k]) <= 200
-                   for k in (("ws",) if job["op"] == "close" else ("ws", "bot")))
+                   for k in (("ws",) if job["op"] == "close" and "bot" not in job else ("ws", "bot")))
             or (job["op"] in ("call", "list") and not isinstance(job.get("frame"), dict))):
         raise ValueError("bad browser job from the server")
 
@@ -258,8 +259,8 @@ class Lender:
     def answer(self, job):
         """The reply to one browser job (check_browser_job first)."""
         check_browser_job(job)
-        if job["op"] == "close":  # a deleted workspace: always allowed, nothing goes back
-            self.close_where(job["ws"], job["epoch"])
+        if job["op"] == "close":  # cleanup is allowed even after lending is turned off
+            self.close_where(job["ws"], job["epoch"], job.get("bot"))
             return None
         if not lend_on(self.settings):  # read again for every call: off takes effect at once
             return {"refused": "lend_off"}
@@ -275,7 +276,12 @@ class Lender:
             if refusal is not None:
                 return refusal
         reply, _ = up.forward(frame, None)
-        return browser_lent.runner_list(reply) if frame["method"] == "tools/list" else reply
+        if frame["method"] == "tools/list":
+            return browser_lent.runner_list(reply)
+        if frame["params"].get("name") == SCREENSHOT and isinstance(reply, dict) and isinstance(reply.get("result"), dict):
+            # The image bytes travel in the reply; the server cannot reach this computer's file.
+            browser_lent.browser_relay.prune_screenshot(reply["result"])
+        return reply
 
     def sweep(self, now=None):
         now = time.time() if now is None else now
@@ -288,12 +294,12 @@ class Lender:
                     if self._ups.get(key) is up:
                         del self._ups[key]
 
-    def close_where(self, ws, epoch):
+    def close_where(self, ws, epoch, bot=None):
         with self._lock:
-            keys = [k for k in self._ups if k[0] == ws and k[2] == epoch]
+            keys = [k for k in self._ups if k[0] == ws and k[2] == epoch and (bot is None or k[1] == bot)]
             ups = [self._ups.pop(k) for k in keys]
         for up in ups:
-            _close(up)
+            _close(up, interrupt=bot is not None)
 
     def close_all(self):
         with self._lock:
@@ -302,8 +308,11 @@ class Lender:
             _close(up)
 
 
-def _close(up):
+def _close(up, interrupt=False):
     try:
+        killer = getattr(up, "kill", None) if interrupt else None
+        if killer is not None:
+            killer()  # Stop must not wait for the call holding the upstream's lock.
         closer = getattr(up, "close", None)
         if closer is not None:
             closer()

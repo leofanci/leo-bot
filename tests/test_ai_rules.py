@@ -5,6 +5,30 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class TestAiRules(unittest.TestCase):
+    def test_chat_rail_points_at_canvases(self):
+        from dashboard.ai_rules import CHAT_RAIL
+        for command in ("get-canvas", "add-block", "add-row", "update-row"):
+            self.assertIn(command, CHAT_RAIL)
+        self.assertIn("others' text", CHAT_RAIL)
+
+    def test_canvas_rail_line_is_not_an_exhaustive_list(self):
+        from dashboard.ai_rules import CHAT_RAIL
+        line = next(l for l in CHAT_RAIL.splitlines() if l.startswith("Canvases/lists:"))
+        self.assertIn("get-list", line)
+        self.assertIn("osctl -h", line)   # points at the rest: block edits, columns, undo
+
+    def test_read_file_line_names_concrete_files(self):
+        from dashboard.ai_rules import CHAT_RAIL
+        line = next(l for l in CHAT_RAIL.splitlines() if "read-file --path" in l)
+        for name in ("profile.md", "intake.md", "brief JSON"):
+            self.assertIn(name, line)
+
+    def test_canvas_docs_name_store_paths(self):
+        text = (ROOT / "docs" / "canvases.md").read_text()
+        for path in ("canvases/history/", "lists/history/", "canvases/.trash/", "lists/.trash/"):
+            self.assertIn(path, text)
+        self.assertNotIn("canvases/trash/", text)
+
     def test_chat_rail_has_single_brief_spec_path(self):
         from dashboard.ai_rules import CHAT_RAIL
         self.assertEqual(CHAT_RAIL.count("update-brief-spec"), 2)

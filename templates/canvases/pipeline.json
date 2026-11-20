@@ -1,0 +1,44 @@
+{
+  "title": "Pipeline",
+  "blocks": [
+    {
+      "id": "bk1",
+      "type": "text",
+      "md": "Move each entry through the stages."
+    },
+    {
+      "id": "bk2",
+      "type": "list",
+      "title": "Pipeline",
+      "columns": [
+        {
+          "name": "Name",
+          "type": "text"
+        },
+        {
+          "name": "Stage",
+          "type": "select",
+          "options": [
+            "New",
+            "Contacted",
+            "Replied",
+            "Won",
+            "Lost"
+          ]
+        },
+        {
+          "name": "Owner",
+          "type": "text"
+        },
+        {
+          "name": "Due",
+          "type": "date"
+        },
+        {
+          "name": "Notes",
+          "type": "text"
+        }
+      ]
+    }
+  ]
+}

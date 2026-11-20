@@ -239,6 +239,85 @@ class Lent(Base):
 
 
 class LenderClose(unittest.TestCase):
+    def test_bot_close_keeps_siblings_other_workspaces_and_epochs(self):
+        tabs = {}
+
+        class Tab(FakeLocal):
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = Path(tmp) / "s.json"
+            runner_client.set_lend(settings, True)
+            lender = runner_client.Lender(Path(tmp) / "lend", settings,
+                                          make=lambda *key: tabs.setdefault(key, Tab()))
+            job = {"kind": "browser", "turn": "b" * 32, "op": "url", "ws": "demo",
+                   "epoch": EPOCH, "bot": "profile-a"}
+            keys = [("demo", "profile-a", EPOCH), ("demo", "profile-b", EPOCH),
+                    ("acme", "profile-a", EPOCH), ("demo", "profile-a", "dddddd")]
+            for ws, bot, epoch in keys:
+                lender.answer({**job, "ws": ws, "bot": bot, "epoch": epoch})
+            runner_client.set_lend(settings, False)  # cleanup still runs after lending is off
+            self.assertIsNone(lender.answer({**job, "op": "close"}))
+            self.assertTrue(tabs[keys[0]].closed)
+            self.assertNotIn(keys[0], lender._ups)
+            for key in keys[1:]:
+                self.assertFalse(tabs[key].closed, key)
+                self.assertIn(key, lender._ups)
+            lender.answer({k: v for k, v in {**job, "op": "close"}.items() if k != "bot"})
+            self.assertTrue(tabs[keys[1]].closed)  # old workspace-wide notes keep their meaning
+            self.assertFalse(tabs[keys[2]].closed)
+            self.assertFalse(tabs[keys[3]].closed)
+            lender.close_all()
+
+    def test_invalid_bot_scope_never_becomes_workspace_close(self):
+        job = {"kind": "browser", "turn": "b" * 32, "op": "close", "ws": "demo", "epoch": EPOCH}
+        lender = runner_client.Lender(make=lambda *a: self.fail("close must not create a browser"))
+        for bot in (None, "", 7, False, [], "b" * 201):
+            with self.subTest(bot=bot), mock.patch.object(lender, "close_where") as close:
+                with self.assertRaises(ValueError):
+                    lender.answer({**job, "bot": bot})
+                close.assert_not_called()
+        runner_client.check_browser_job({**job, "bot": "profile-a"})
+        runner_client.check_browser_job(job)
+
+    def test_lender_removes_the_screenshot_file_it_sent_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            folder = home / ".agent-browser" / "tmp" / "screenshots"
+            folder.mkdir(parents=True)
+            shot = folder / "screenshot-1.png"
+            shot.write_bytes(b"png")
+
+            class Shooter(FakeLocal):
+                def forward(self, frame, sid):
+                    self.frames.append(frame)
+                    if frame.get("method") == "tools/list":
+                        return {"jsonrpc": "2.0", "id": 0, "result": {"tools": [
+                            {"name": P + "screenshot", "inputSchema": {"type": "object", "properties": {"format": {}}}},
+                            {"name": P + "get_url", "inputSchema": {"type": "object", "properties": {}}}]}}, sid
+                    if frame["params"]["name"] != P + "screenshot":
+                        return ok(frame.get("id"), str(shot)), sid
+                    return {"jsonrpc": "2.0", "id": frame.get("id"), "result": {
+                        "content": [{"type": "text", "text": str(shot)},
+                                    {"type": "image", "mimeType": "image/png", "data": "cG5n"}],
+                        "structuredContent": {"response": {"data": {"path": str(shot)}}}}}, sid
+
+            settings = Path(tmp) / "s.json"
+            runner_client.set_lend(settings, True)
+            lender = runner_client.Lender(Path(tmp) / "lend", settings, make=lambda *key: Shooter())
+            job = {"kind": "browser", "turn": "b" * 32, "op": "call", "ws": "demo", "bot": "profile-a",
+                   "epoch": EPOCH}
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                lender.answer({**job, "frame": call(1, P + "get_url")})
+                self.assertTrue(shot.exists())  # no image bytes went back: the file stays
+                reply = lender.answer({**job, "frame": call(2, P + "screenshot", format="png")})
+            self.assertEqual(reply["result"]["content"][1]["data"], "cG5n")
+            self.assertFalse(shot.exists())
+            lender.close_all()
+
     def test_close_all_closes_each_tab(self):
         closed = []
 
@@ -420,6 +499,56 @@ class CloseOnDelete(Base):
             time.sleep(0.02)
         self.assertEqual([(j["ws"], j["epoch"], j["runner"]) for j in r.jobs if j["op"] == "close"],
                          [("demo", EPOCH, "rn-o")])
+
+    def test_bot_stop_notifies_the_owners_lenders_with_no_lent_row_here(self):
+        r = self.runner("rn-o", "owner", answer=lambda job: None)
+        pool = bu.Pool()
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "server"}), \
+                mock.patch.object(bu.runners, "HUB", self.hub), \
+                mock.patch.object(bu.browser, "epochs", return_value={"demo": EPOCH}):
+            pool.stop_bot("demo", "profile-a", self.root)
+        deadline = time.time() + 2
+        while not any(j["op"] == "close" for j in r.jobs) and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertEqual([(j["ws"], j.get("bot"), j["epoch"], j["runner"]) for j in r.jobs if j["op"] == "close"],
+                         [("demo", "profile-a", EPOCH, "rn-o")])
+
+    def test_owner_only_bot_stop_keeps_a_coworkers_lent_chrome(self):
+        owner = self.runner("rn-o", "owner", answer=lambda job: None)
+        coworker = self.runner("rn-p", "pm-1", answer=lambda job: None)
+        pool = bu.Pool()
+        mine = browser_lent.RunnerChromeUpstream("demo", "profile-a", self.root, "owner", EPOCH, hub=self.hub)
+        theirs = browser_lent.RunnerChromeUpstream("demo", "profile-a", self.root, "pm-1", EPOCH, hub=self.hub)
+        pool._lent.update({("demo", "profile-a", "owner"): mine, ("demo", "profile-a", "pm-1"): theirs})
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "server"}), \
+                mock.patch.object(bu.runners, "HUB", self.hub), \
+                mock.patch.object(bu.browser, "epochs", return_value={"demo": EPOCH}):
+            pool.stop_bot("demo", "profile-a", self.root, people=("owner",))
+        deadline = time.time() + 2
+        while not any(j["op"] == "close" for j in owner.jobs) and time.time() < deadline:
+            time.sleep(0.02)
+        time.sleep(0.2)
+        self.assertTrue(mine.closed)
+        self.assertFalse(theirs.closed)
+        self.assertIs(pool._lent[("demo", "profile-a", "pm-1")], theirs)
+        self.assertEqual(len([j for j in owner.jobs if j["op"] == "close"]), 1)
+        self.assertEqual([j for j in coworker.jobs if j["op"] == "close"], [])
+
+    def test_bot_stop_without_local_keeps_the_shared_child(self):
+        pool = bu.Pool()
+        child = mock.Mock(root=self.root)
+        pool._items[("demo", "profile-a")] = child
+        mine = browser_lent.RunnerChromeUpstream("demo", "profile-a", self.root, "owner", EPOCH, hub=self.hub)
+        pool._lent[("demo", "profile-a", "owner")] = mine
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}):
+            pool.stop_bot("demo", "profile-a", self.root, people=("owner",), local=False)
+        self.assertIs(pool._items[("demo", "profile-a")], child)
+        child.kill.assert_not_called()
+        self.assertTrue(mine.closed)
+        with mock.patch.dict(os.environ, {"LEOBOT_DEPLOYMENT": "local"}):
+            pool.stop_bot("demo", "profile-a", self.root)
+        self.assertNotIn(("demo", "profile-a"), pool._items)
+        child.kill.assert_called_once()
 
     def test_delete_on_a_local_install_notifies_no_runner(self):
         r = self.runner("rn-o", "owner", answer=lambda job: None)
@@ -649,6 +778,30 @@ class Routes(sp.Base):
             good = sp.request("POST", f"/api/runner/reply/{turn.id}", {"reply": {"url": "x"}}, origin="", headers=h)
             self.assertEqual((good[0], good[1]["ok"]), (200, True))
             self.assertEqual(turn.events.get_nowait(), ("reply", {"url": "x"}))
+
+    def test_bot_close_note_uses_authenticated_runner_owner_not_poll_body(self):
+        hub = runners.Hub()
+        owner_id, owner_token = runners.create(self.root, "owner", "Demo")
+        other_id, _ = self.join(name="Demo")
+        _, other_token = runners.create(self.root, other_id, "Demo")
+        _, sibling_token = runners.create(self.root, "owner", "Demo")
+        note = {"op": "close", "ws": "demo", "bot": "profile-a", "epoch": EPOCH, "runner": owner_id}
+        hub.notify("owner", note)
+        quick = lambda rid, owner, wait=25, caps=None: runners.Hub.next(hub, rid, owner, wait=0, caps=caps)
+        body = {**LEND, "owner": "owner", "runner": owner_id, "ws": "acme", "epoch": "dddddd"}
+        with mock.patch.object(runners, "HUB", hub), mock.patch.object(hub, "next", side_effect=quick):
+            for token in (other_token, sibling_token):
+                code, data, _ = sp.request("POST", "/api/runner/next", body, origin="",
+                                           headers={"Authorization": f"Bearer {token}"})
+                assert isinstance(data, dict)
+                self.assertEqual((code, data["job"]), (200, None))
+            self.assertEqual(sp.request("POST", "/api/runner/next", body, origin="")[0], 403)
+            code, data, _ = sp.request("POST", "/api/runner/next", body, origin="",
+                                       headers={"Authorization": f"Bearer {owner_token}"})
+        self.assertEqual(code, 200)
+        assert isinstance(data, dict)
+        self.assertEqual({key: data["job"][key] for key in note}, note)
+        self.assertEqual(hub._turns, {})
 
     def test_browser_ctx_names_the_turn_owner(self):
         src = (Path(sp.server.__file__)).read_text()
