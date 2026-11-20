@@ -23,3 +23,6 @@ Four modules form one continuous operating system. Friendliest and most modular,
 
 ### Recommendation
 Advance Kernel. Distinct at 16 px, scalable to monochrome, compatible with current product color system.
+
+### Outcome
+Superseded: the shipped logo is the illustrated portrait icon in `dashboard/logo.svg`, which the app icon, favicon and HQ workspace logo all render from. These sketches are kept as history only.
