@@ -1,4 +1,8 @@
 """Pinned browser engine: where the binary lives, its status, and the relay's tool name sets."""
+import hashlib
+import io
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -105,77 +109,139 @@ class ToolSets(unittest.TestCase):
             self.assertIn("agent_browser_" + t, be.TYPE_TOOLS)
 
 
+class Fetch:
+    """A fake urlopen: serves `body` and records the URL."""
+    def __init__(self, body=b"", error=None):
+        self.body, self.error, self.urls = body, error, []
+
+    def __call__(self, url, timeout=None):
+        self.urls.append(url)
+        if self.error:
+            raise self.error
+        return io.BytesIO(self.body)
+
+
+def _engine_script(version=be.VERSION):
+    return f"#!/bin/sh\necho 'agent-browser {version}'\n".encode()
+
+
+class Platform(unittest.TestCase):
+    def test_asset_for_each_supported_computer(self):
+        cases = {
+            ("Darwin", "arm64", False): "agent-browser-darwin-arm64",
+            ("Darwin", "x86_64", False): "agent-browser-darwin-x64",
+            ("Linux", "x86_64", False): "agent-browser-linux-x64",
+            ("Linux", "aarch64", False): "agent-browser-linux-arm64",
+            ("Linux", "x86_64", True): "agent-browser-linux-musl-x64",
+            ("Linux", "aarch64", True): "agent-browser-linux-musl-arm64",
+            ("Windows", "AMD64", False): "agent-browser-win32-x64.exe",
+            ("Windows", "ARM64", False): "agent-browser-win32-x64.exe",
+        }
+        for (system, machine, musl), want in cases.items():
+            self.assertEqual(be.asset_name(system, machine, musl), want, (system, machine, musl))
+            self.assertIn(want, be.SHA256)
+
+    def test_unsupported_computer_has_no_asset(self):
+        self.assertIsNone(be.asset_name("FreeBSD", "x86_64", False))
+        self.assertIsNone(be.asset_name("Linux", "riscv64", False))
+
+    def test_pinned_hashes_are_sha256(self):
+        for asset, h in be.SHA256.items():
+            self.assertRegex(h, r"^[0-9a-f]{64}$", asset)
+
+
 class Install(unittest.TestCase):
-    def _run(self, side_effect, make_binary=True):
+    ASSET = "agent-browser-darwin-arm64"
+
+    def setUp(self):
         d = tempfile.TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        data = Path(d.name) / "data"
-        binary = data / "tools" / "agent-browser" / be.VERSION / "node_modules" / ".bin" / "agent-browser"
+        self.data = Path(d.name) / "data"
+        self.binary = self.data / "tools" / "agent-browser" / be.VERSION / "agent-browser"
+        for p in (mock.patch.object(paths, "DATA", self.data), mock.patch("shutil.which", return_value=None),
+                  mock.patch.object(be, "asset_name", return_value=self.ASSET), mock.patch("os.name", "posix")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _install(self, body, run=None, error=None):
+        fetch = Fetch(body, error)
+        pinned = {self.ASSET: hashlib.sha256(_engine_script()).hexdigest()}
         calls = []
+        real_run = subprocess.run
 
-        def fake(argv, **kw):
+        def fake_run(argv, **kw):  # --version really runs the fake engine; `install` is recorded
+            if argv[1:] == ["--version"]:
+                return real_run(argv, **kw)
             calls.append(argv)
-            if make_binary and argv[0] == "npm":
-                _exe(binary)
-            if isinstance(side_effect, BaseException):
-                raise side_effect
-            return side_effect
+            if isinstance(run, BaseException):
+                raise run
+            return run or mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch.dict(be.SHA256, pinned), mock.patch("subprocess.run", fake_run):
+            return be.install(opener=fetch), fetch, calls
 
-        with mock.patch.object(paths, "DATA", data), mock.patch("subprocess.run", fake), \
-                mock.patch("shutil.which", return_value=None):
-            return be.install(), calls
+    def test_downloads_the_pinned_release_then_installs_chrome(self):
+        st, fetch, calls = self._install(_engine_script())
+        self.assertEqual(st["state"], "ready", st)
+        self.assertEqual(fetch.urls, [be.RELEASE_URL.format(v=be.VERSION, asset=self.ASSET)])
+        self.assertTrue(fetch.urls[0].startswith("https://github.com/vercel-labs/agent-browser/releases/"))
+        self.assertTrue(os.access(self.binary, os.X_OK))
+        self.assertEqual(calls, [[str(self.binary), "install"]])
 
-    def test_npm_missing(self):
-        st, _ = self._run(FileNotFoundError())
+    def test_checksum_mismatch_keeps_nothing(self):
+        st, _, calls = self._install(b"not the engine")
         self.assertEqual(st["state"], "missing")
-        self.assertIn("npm not found", st["detail"])
+        self.assertIn("checksum", st["detail"])
+        self.assertFalse(self.binary.exists())
+        self.assertEqual(list(self.binary.parent.iterdir()), [])  # no temp file left
+        self.assertEqual(calls, [])
 
-    def test_timeout(self):
-        import subprocess
-        st, _ = self._run(subprocess.TimeoutExpired("npm", 1))
+    def test_oversized_download_is_refused(self):
+        with mock.patch.object(be, "MAX_DOWNLOAD", 10):
+            st, _, _ = self._install(_engine_script())
         self.assertEqual(st["state"], "missing")
-        self.assertIn("timed out", st["detail"])
+        self.assertIn("larger", st["detail"])
+        self.assertFalse(self.binary.exists())
 
-    def test_nonzero_exit(self):
-        r = mock.Mock(returncode=1, stderr="boom\n", stdout="")
-        st, calls = self._run(r)
+    def test_network_failure(self):
+        st, _, calls = self._install(b"", error=OSError("no route to host"))
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("no route to host", st["detail"])
+        self.assertEqual(calls, [])
+
+    def test_unsupported_computer(self):
+        with mock.patch.object(be, "asset_name", return_value=None):
+            st = be.install(opener=Fetch(error=AssertionError("no download")))
+        self.assertEqual(st["state"], "missing")
+        self.assertIn("no build for this computer", st["detail"])
+
+    def test_chrome_install_failure(self):
+        st, _, _ = self._install(_engine_script(), run=mock.Mock(returncode=1, stderr="boom\n", stdout=""))
         self.assertEqual(st["state"], "missing")
         self.assertIn("boom", st["detail"])
-        self.assertEqual(len(calls), 1)
 
-    def test_binary_missing_after_npm(self):
-        r = mock.Mock(returncode=0, stderr="", stdout="")
-        st, calls = self._run(r, make_binary=False)
-        self.assertEqual(st["state"], "missing")
-        self.assertIn("engine binary is missing", st["detail"])
-        self.assertEqual(len(calls), 1)
+    def test_chrome_install_timeout(self):
+        st, _, _ = self._install(_engine_script(), run=subprocess.TimeoutExpired("x", 1))
+        self.assertIn("timed out", st["detail"])
 
-    def test_success_runs_npm_then_engine_install(self):
-        r = mock.Mock(returncode=0, stderr="", stdout="")
-        st, calls = self._run(r)
-        self.assertEqual(st["state"], "ready")
-        self.assertEqual([c[0] == "npm" for c in calls], [True, False])
-        self.assertEqual(calls[1][1:], ["install"])
+    def test_present_pinned_binary_is_not_downloaded_again(self):
+        _exe(self.binary)
+        st, fetch, calls = self._install(b"", error=AssertionError("downloaded again"))
+        self.assertEqual(st["state"], "ready", st)
+        self.assertEqual(fetch.urls, [])
+        self.assertEqual(calls, [[str(self.binary), "install"]])
 
-    def test_engine_install_that_deletes_the_binary_reads_missing(self):
-        d = tempfile.TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        data = Path(d.name) / "data"
-        binary = data / "tools" / "agent-browser" / be.VERSION / "node_modules" / ".bin" / "agent-browser"
-        ok = mock.Mock(returncode=0, stderr="", stdout="")
+    def test_pinned_binary_of_another_version_is_replaced(self):
+        _exe(self.binary, version="0.40.2")
+        st, fetch, _ = self._install(_engine_script())
+        self.assertEqual(st["state"], "ready", st)
+        self.assertEqual(len(fetch.urls), 1)
+        self.assertEqual(be.version_of(self.binary), be.VERSION)
 
-        def fake(argv, **kw):
-            if argv[0] == "npm":
-                _exe(binary)
-            else:  # `<binary> install` ends fine but leaves no binary behind
-                binary.unlink()
-            return ok
-
-        with mock.patch.object(paths, "DATA", data), mock.patch("subprocess.run", fake), \
-                mock.patch("shutil.which", return_value=None):
-            st = be.install()
-        self.assertEqual(st["state"], "missing")
-        self.assertIn("engine binary is missing", st["detail"])
+    def test_downloaded_binary_wins_over_an_older_npm_install(self):
+        npm = _exe(self.data / "tools" / "agent-browser" / be.VERSION / "node_modules" / ".bin" / "agent-browser")
+        self.assertEqual(be.resolve({}), npm)  # an older Leo Bot's npm install keeps working
+        _exe(self.binary)
+        self.assertEqual(be.resolve({}), self.binary)
 
 
 if __name__ == "__main__":

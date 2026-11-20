@@ -2238,7 +2238,7 @@ async function renderTeam(){
           ${!person && web ? `<div class="td-sec"><h4>Browser</h4><div class="app-grants">
             <label>Level <select data-brw-bot="${esc(b.id)}" data-brw-k="level">${browserOptionsHtml(brw.levels || ["off", "read", "write", "act"], browserLevelLabel, web.level)}</select></label>
             <label>Opens in <select data-brw-bot="${esc(b.id)}" data-brw-k="mode">${browserOptionsHtml(brw.modes || ["bot", "my_chrome"], browserModeLabel, web.mode)}</select></label></div>
-            <small>${browserLevelHelp()}</small></div>` : ""}
+            <small>${browserLevelHelp()}</small>${browserEngineNote(brw.engine, web)}</div>` : ""}
           ${person ? "" : `<div class="td-sec"><h4>Memory</h4><div class="mem-box" hidden></div></div>`}
         </div>
       </div>`;
@@ -2851,6 +2851,15 @@ async function renderAccess(){
     try { form.url.value = (await jpost("/api/sharing", { url: form.url.value })).public_url || ""; toast("Sharing address saved ✓"); }
     catch (err) { toast("✗ " + err.message); }
   };
+}
+
+// Team, a bot's Browser: what the engine is doing once this bot's browser is on.
+function browserEngineNote(e, web){
+  if (!e || !web || web.level === "off" || e.state === "ready") return "";
+  const link = ` <a href="#/settings/browser">Settings, Browser</a>`;
+  if (e.installing) return `<small role="status">Downloading the browser (about 16 MB, then its own Chrome). Progress in${link}.</small>`;
+  const failed = e.last_install && e.last_install.state !== "ready";
+  return `<small class="integ-bad">${failed ? esc(e.last_install.detail || "Install failed.") : "The browser is not installed."} Install it from${link}.</small>`;
 }
 
 // Settings, Browser: the engine, the sites list, the My Chrome check and each bot's first login.

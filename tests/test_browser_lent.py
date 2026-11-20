@@ -712,13 +712,35 @@ class LenderFlow(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600)
         self.settings.write_text("not json")
         self.assertFalse(runner_client.lend_on(self.settings))
-        with self.assertRaises(SystemExit) as done, contextlib.redirect_stdout(io.StringIO()):
+        with self.assertRaises(SystemExit) as done, contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(runner_client.browser_engine, "resolve", return_value=Path("/x/agent-browser")):
             runner_client.main(["--lend-chrome", "on", "--settings-file", str(self.settings)])
         self.assertEqual(done.exception.code, 0)
         self.assertTrue(runner_client.lend_on(self.settings))
         with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()):
             runner_client.main(["--lend-chrome", "off", "--settings-file", str(self.settings)])
         self.assertFalse(runner_client.lend_on(self.settings))
+
+    def test_lend_on_downloads_a_missing_engine_here(self):
+        ready = {"state": "ready", "detail": "/x/agent-browser"}
+        out = io.StringIO()
+        with self.assertRaises(SystemExit) as done, contextlib.redirect_stdout(out), \
+                mock.patch.object(runner_client.browser_engine, "resolve", return_value=None), \
+                mock.patch.object(runner_client.browser_engine, "install", return_value=ready) as inst:
+            runner_client.main(["--lend-chrome", "on", "--settings-file", str(self.settings)])
+        self.assertEqual((done.exception.code, inst.call_count), (0, 1))
+        self.assertIn("Browser installed", out.getvalue())
+        failed = {"state": "missing", "detail": "download failed: offline"}
+        out = io.StringIO()
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(out), \
+                mock.patch.object(runner_client.browser_engine, "resolve", return_value=None), \
+                mock.patch.object(runner_client.browser_engine, "install", return_value=failed):
+            runner_client.main(["--lend-chrome", "on", "--settings-file", str(self.settings)])
+        self.assertIn("download failed: offline", out.getvalue())
+        self.assertTrue(runner_client.lend_on(self.settings))  # the setting stays on; the next call says why
+        with self.assertRaises(SystemExit), contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(runner_client.browser_engine, "install", side_effect=AssertionError("install")):
+            runner_client.main(["--lend-chrome", "off", "--settings-file", str(self.settings)])
 
     def test_answers_through_the_local_upstream_after_its_check(self):
         runner_client.set_lend(self.settings, True)
