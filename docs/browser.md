@@ -1,6 +1,6 @@
 # Bot browser
 
-Bots drive a real browser through `agent-browser` (Vercel Labs, Apache-2.0, npm package), run as a pinned child process. Leo Bot never sends the engine's tools straight to a bot: a relay in front of it decides which tool calls pass. This page records what the engine really offers, measured by probing it, so the relay encodes real names.
+Bots drive a real browser through `agent-browser` (Vercel Labs, Apache-2.0), a native program run as a pinned child process. Leo Bot never sends the engine's tools straight to a bot: a relay in front of it decides which tool calls pass. This page records what the engine really offers, measured by probing it, so the relay encodes real names.
 
 ## Engine facts
 
@@ -179,7 +179,9 @@ Probed in a scratch namespace on a 127.0.0.1 page, every process cleaned up afte
 
 ### Install in Leo Bot
 
-`core/browser_engine.py`: `resolve()` checks `LEOBOT_AGENT_BROWSER`, then `<data>/tools/agent-browser/0.41.0/node_modules/.bin/agent-browser`, then `PATH`; a binary found on `PATH` is used only when its `--version` reports 0.41.0 (the gate relies on facts probed on that version), and Settings names the other version it found. `install()` runs `npm install --prefix <that folder> agent-browser@0.41.0`, then `<binary> install`, with a 600 s timeout, and returns `status()`.
+`core/browser_engine.py`: `resolve()` checks `LEOBOT_AGENT_BROWSER`, then `<data>/tools/agent-browser/0.41.0/agent-browser` (the downloaded binary), then `<data>/tools/agent-browser/0.41.0/node_modules/.bin/agent-browser` (an older npm install), then `PATH`; a binary found on `PATH` is used only when its `--version` reports 0.41.0 (the gate relies on facts probed on that version), and Settings names the other version it found.
+
+`install()` needs no Node or npm. `asset_name()` picks this computer's release binary (`agent-browser-darwin-arm64`, `-darwin-x64`, `-linux-x64`, `-linux-arm64`, the `-linux-musl-` pair, or `-win32-x64.exe`, which Windows on ARM also runs). `download()` fetches it from the engine's GitHub release of 0.41.0, refuses a file over 64 MB, and keeps it only when its SHA-256 equals the one pinned in `SHA256` (taken from the npm package of 0.41.0, whose registry integrity was checked, and equal to the release copies). Then `<binary> install` downloads Chrome for Testing, with a 600 s timeout, and `install()` returns `status()`. A pinned binary that already reports 0.41.0 is not downloaded again. Changing `VERSION` means taking the hashes again.
 
 ## The gate (`dashboard/browser_relay.py`)
 
@@ -236,7 +238,7 @@ Probed in a scratch namespace on a 127.0.0.1 page, every process cleaned up afte
 
 ### Install the engine
 
-Settings, Browser, "Install" runs `npm install --prefix <data>/tools/agent-browser/0.41.0 agent-browser@0.41.0`, then `agent-browser install` (Chrome for Testing into `~/.agent-browser/browsers`, about 190 MB). It needs Node and npm. The same screen shows the exact command when the install cannot run. `LEOBOT_AGENT_BROWSER` can point at a binary instead.
+Nothing to set up by hand. Turning a bot's browser on in Team (any level but Off) downloads the engine when it is missing: about 16 MB for this computer's binary, checked against its pinned hash, then Chrome for Testing into `~/.agent-browser/browsers` (about 190 MB). The bot's Browser section and Settings, Browser show the progress; Settings, Browser, "Install" starts the same download by hand. No Node or npm is needed. On a server, My Chrome uses the owner's runner, so the server downloads nothing for it, and `python3 -m dashboard.runner --lend-chrome on` downloads the engine on that computer instead. `LEOBOT_AGENT_BROWSER` can point at a binary instead.
 
 ### Levels (Team, a bot's Details, Browser)
 

@@ -215,6 +215,39 @@ class Settings(Base):
         self.assertFalse(data["chrome"])
         self.assertEqual(request("GET", "/api/browser/settings?ws=gone")[0], 400)
 
+    def _wait_install(self):
+        deadline = time.monotonic() + 5
+        while server._BROWSER_INSTALL["running"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    def test_turning_a_bot_on_installs_a_missing_engine(self):
+        ready = {"state": "ready", "detail": "/x/agent-browser"}
+        with mock.patch.object(server.browser_engine, "resolve", return_value=None), \
+                mock.patch.object(server.browser_engine, "install", return_value=ready) as inst:
+            code, data = request("POST", "/api/browser/settings", {"ws": "acme", "bot": "cmo", "level": "read", "mode": "bot"})
+            self.assertEqual(code, 200, data)
+            self._wait_install()
+        self.assertEqual(inst.call_count, 1)
+
+    def test_no_install_when_the_engine_is_there_or_the_bot_stays_off(self):
+        with mock.patch.object(server.browser_engine, "install", side_effect=AssertionError("install")):
+            with mock.patch.object(server.browser_engine, "resolve", return_value=Path("/x/agent-browser")):
+                body = {"ws": "acme", "bot": "cmo", "level": "act", "mode": "bot"}
+                self.assertEqual(request("POST", "/api/browser/settings", body)[0], 200)
+            with mock.patch.object(server.browser_engine, "resolve", return_value=None):
+                body = {"ws": "acme", "bot": "cmo", "level": "off", "mode": "bot"}
+                self.assertEqual(request("POST", "/api/browser/settings", body)[0], 200)
+            self._wait_install()
+
+    def test_my_chrome_on_a_server_installs_nothing_there(self):
+        # The owner's runner lends Chrome; the server needs no engine of its own for it.
+        with mock.patch.object(server, "DEPLOYMENT", "server"), \
+                mock.patch.object(server.browser_engine, "resolve", return_value=None), \
+                mock.patch.object(server.browser_engine, "install", side_effect=AssertionError("install")):
+            body = {"ws": "acme", "bot": "cmo", "level": "read", "mode": "my_chrome"}
+            self.assertEqual(request("POST", "/api/browser/settings", body)[0], 200)
+            self._wait_install()
+
     def test_sites_add_change_remove(self):
         code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "my_chrome", "daily": "7"})
         self.assertEqual(code, 200, data)

@@ -1609,6 +1609,14 @@ def _browser_install_run():
         _BROWSER_INSTALL.update(running=False, last=out)
 
 
+def _start_browser_install():
+    """Start the engine install in the background unless one is running."""
+    with _BROWSER_INSTALL_LOCK:
+        if not _BROWSER_INSTALL["running"]:
+            _BROWSER_INSTALL.update(running=True, last=None)
+            threading.Thread(target=_browser_install_run, name="browser-install", daemon=True).start()
+
+
 def _browser_view(ws=None):
     """Settings, Browser and Team: the engine, the sites, the My Chrome check, open logins and,
     with `ws`, that workspace's bot levels and modes. Owner only (the caller checked)."""
@@ -3244,12 +3252,15 @@ class Handler(BaseHTTPRequestHandler):
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
             browser_relay.live_frame(ws, bot_id, ROOT)  # Drop a frame from the previous mode now, even without a viewer.
+            setting = browser.bot_setting(ws, bot_id, ROOT)
+            # Turning a bot's browser on fetches a missing engine. On a server, My Chrome uses the
+            # owner's runner and its engine, so the server fetches nothing for it.
+            lent = DEPLOYMENT == "server" and setting["mode"] == "my_chrome"
+            if setting["level"] != "off" and not lent and browser_engine.resolve() is None:
+                _start_browser_install()
             return self._send(200, _browser_view(ws))
         if path == "/api/browser/install":
-            with _BROWSER_INSTALL_LOCK:
-                if not _BROWSER_INSTALL["running"]:
-                    _BROWSER_INSTALL.update(running=True, last=None)
-                    threading.Thread(target=_browser_install_run, name="browser-install", daemon=True).start()
+            _start_browser_install()
             return self._send(202, _browser_view())
         if path == "/api/browser/login/send":
             # The login of this computer's bot browser, to the server: from this machine only.

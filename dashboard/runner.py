@@ -38,7 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core import runners  # noqa: E402
+from core import browser_engine, runners  # noqa: E402
 from dashboard import browser_lent  # noqa: E402
 from dashboard.engines.base import EngineRefused, SessionLost, TurnPolicy, TurnTokens  # noqa: E402
 from dashboard.engines.claude_code import (  # noqa: E402
@@ -445,6 +445,11 @@ def main(argv=None):
     if args.lend_chrome:
         set_lend(settings, args.lend_chrome == "on")
         print(f"Lend my Chrome is {args.lend_chrome} on this computer.")
+        if args.lend_chrome == "on" and browser_engine.resolve() is None:
+            # The lent Chrome is driven by this computer's own engine: fetch it now, once.
+            print("Downloading the browser (about 16 MB, then its own Chrome). This can take a few minutes.")
+            st = browser_engine.install()
+            print("Browser installed." if st["state"] == "ready" else f"Browser not installed: {st['detail']}")
         if not args.server:
             sys.exit(0)
     if not args.server or not args.token_file:
