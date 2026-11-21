@@ -201,7 +201,7 @@ class Routing(unittest.TestCase):
         self.assertNotIn("Untagged messages go to the lead only", js)
         self.assertNotIn("untagged → lead", js)
         self.assertIn("info.handoff_from || null", js)
-        self.assertIn("m.by_name, m.handoff_from)", js)
+        self.assertIn("m.by_name, m.handoff_from, m.hop)", js)
 
     def dm(self, msg, bot="social", **kw):
         return server._route_bot(self.team, msg, self._sess(**kw), default_bot=bot, dm=bot)

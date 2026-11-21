@@ -4687,7 +4687,8 @@ class Handler(BaseHTTPRequestHandler):
                 if text4 != m4["content"]:
                     m4["content"] = text4
                     emit({"clean": text4, "msg": len(msgs) - 1})
-                asked_ok = bool(approvals.extract(text4)[1])
+                # Only a bot that may make a card waits on one (a stray marker gets no buttons).
+                asked_ok = bool(hst.may_write and approvals.extract(text4)[1])
                 h_answers = []
                 # Its consults only: a bot co-tagged in the user's message ran with the lead already.
                 for b2, question, asked_by in _plan_teammates(team, target, from_bot, "", h_asks):
@@ -4715,7 +4716,7 @@ class Handler(BaseHTTPRequestHandler):
                         m5["content"] = text5
                         emit({"clean": text5, "msg": len(msgs) - 1})
                     nxt = nxt or h5
-                    asked_ok = asked_ok or bool(approvals.extract(text5)[1])
+                    asked_ok = asked_ok or bool(hst.may_write and approvals.extract(text5)[1])
                 if named and not nxt:
                     notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
                 if nxt and asked_ok:
