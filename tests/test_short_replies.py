@@ -83,6 +83,20 @@ class SettingsScreen(unittest.TestCase):
         self.assertIn('id="gen-short"', general)
         self.assertIn("save({ short_replies: e.target.checked }", general)
 
+    def test_general_tab_has_the_chain_limits(self):
+        js = (paths.CODE / "dashboard" / "app.js").read_text()
+        general = js.split("async function renderGeneral(){", 1)[1].split("\n}\n", 1)[0]
+        for fid, note, key in (("gen-hops", "0 = no limit", "chain_hops"), ("gen-chain-cost", "0 = no cap", "chain_cost")):
+            self.assertIn(f'id="{fid}"', general)
+            self.assertIn(note, general)
+            self.assertIn(f"save({{ {key}: ", general)
+
+    def test_thread_shows_the_hop(self):
+        js = (paths.CODE / "dashboard" / "app.js").read_text()
+        self.assertIn("info.hop", js)  # live: msg_start carries it
+        self.assertIn("m.hop", js)  # reload: saved on the message
+        self.assertIn("hop ${hop}", js)  # shown from the second link on
+
 
 if __name__ == "__main__":
     unittest.main()

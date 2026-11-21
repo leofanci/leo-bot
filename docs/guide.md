@@ -64,6 +64,17 @@ Each project expands into six sections:
 
 ---
 
+## Bots passing work on
+
+In chat a bot can pass the work to a teammate with a `HANDOFF @handle: <task>` line, or ask one for a read-only view with `CONSULT @handle: <question>`. The teammate that gets the work may pass it on again, so one message can travel along a chain of bots (for example research, then marketing, then social). Every link shows in the thread (`from @bot · hop 2`), and your next untagged message goes to the last bot.
+
+- Each bot keeps its own engine, access and approvals. A chain never widens what one bot may do.
+- A bot can pass work only to an active bot in the same room.
+- When two bots keep handing the work back and forth (four turns in a row), the chain pauses and asks you what to do next.
+- A bot that asks for your approval ends the chain there: approve or reject, and the thread continues with that bot.
+- Settings, General, *Bots passing work on*: hops per message and a cost cap per message. Both default to 0, which means no limit. Daily spending caps and Stop still apply.
+- A scheduled job never passes its run to another bot.
+
 ## The content pipeline (two stages)
 
 The system splits **cheap idea → expensive content** so you never generate posts

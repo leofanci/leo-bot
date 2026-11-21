@@ -97,7 +97,8 @@ class HandoffTurn(unittest.TestCase):
                 self._last_bot = bot_id
 
             def ask(self, text, **kw):
-                test.runs.append({"text": text, "model": kw.get("model"), "edit_dirs": kw.get("edit_dirs")})
+                test.runs.append({"text": text, "model": kw.get("model"), "edit_dirs": kw.get("edit_dirs"),
+                                  "read_dirs": kw.get("read_dirs")})
                 reply = test.replies.pop(0) if test.replies else "ok"
                 yield ("delta", reply)
                 yield ("done", {"tokens": 100, "cost": 0.01})
@@ -137,7 +138,8 @@ class HandoffTurn(unittest.TestCase):
         self.assertIn("taking it from @cos", self.runs[1]["text"])
         self.assertIn("@cos passed this to you", self.runs[1]["text"])  # a bot's handoff, not a user tag
         self.assertNotIn("user tagged", self.runs[1]["text"])
-        self.assertIn("No HANDOFF of your own this message", self.runs[1]["text"])  # one per message, said up front
+        self.assertNotIn("No HANDOFF of your own", self.runs[1]["text"])  # chains: it may pass it on
+        self.assertIn("answer the user in full", self.runs[1]["text"])
         msgs = rec["messages"][-2:]
         self.assertEqual((msgs[0]["bot"], msgs[0]["content"]), ("cos", "That's research's area."))
         self.assertEqual((msgs[1]["bot"], msgs[1]["handoff_from"], msgs[1]["content"]),
@@ -198,10 +200,116 @@ class HandoffTurn(unittest.TestCase):
         self.assertEqual(rec["messages"][-1]["approval"], pend[0]["id"])
         self.assertEqual(rec["messages"][-1]["content"], "One memo.")
 
-    def test_target_handoff_lines_are_ignored(self):
-        out, rec = self.ask("x?", ["HANDOFF @research: a", "Done.\nHANDOFF @cmo: b"])
+    def limits(self, hops=0, cost=0.0):
+        return mock.patch.object(server.chain, "limits", return_value=(hops, cost))
+
+    @staticmethod
+    def notices(rec):
+        return " ".join(n for m in rec["messages"] for n in (m.get("notices") or []))
+
+    def test_chain_follows_the_targets_handoff(self):
+        out, rec = self.ask("x?", ["HANDOFF @research: a", "HANDOFF @cmo: b", "Done."])
+        self.assertEqual(len(self.runs), 3)
+        self.assertEqual([m["bot"] for m in rec["messages"][-3:]], ["cos", "research", "cmo"])
+        last = rec["messages"][-1]
+        self.assertEqual((last["handoff_from"], last["hop"], last["content"]), ("research", 2, "Done."))
+        ev = events(out)
+        self.assertIn({"chain": {"hop": 1}}, ev)
+        self.assertIn({"chain": {"hop": 2}}, ev)
+        self.assertIn("@research passed this to you", self.runs[2]["text"])
+        self.assertEqual(self.sess._last_bot, "cmo")
+
+    def test_target_consult_then_handoff(self):
+        bots.set_active("social", True, self.root, "acme")
+        _, rec = self.ask("x?", ["HANDOFF @research: a", "CONSULT @cmo: tone?\nHANDOFF @social: posts",
+                                 "warm", "follow-up", "posted"])
+        self.assertEqual(len(self.runs), 5)
+        self.assertEqual([m["bot"] for m in rec["messages"][-5:]], ["cos", "research", "cmo", "research", "social"])
+        self.assertIn("@research (", self.runs[2]["text"])  # the hop bot asked, not the lead
+        self.assertIn("tone?", self.runs[2]["text"])
+        self.assertIn("warm", self.runs[3]["text"])  # research's follow-up reads the answer
+        self.assertEqual(rec["messages"][-4]["content"], "")  # consult line stripped
+        self.assertEqual(rec["messages"][-1]["handoff_from"], "research")
+
+    def test_cotagged_bot_runs_once(self):
+        _, rec = self.ask("@cos @cmo x?", ["HANDOFF @research: a", "cmo view", "Done."])
+        self.assertEqual(len(self.runs), 3)
+        self.assertEqual([m["bot"] for m in rec["messages"][-3:]].count("cmo"), 1)
+
+    def test_hop_consult_reads_only_what_the_hop_may_read(self):
+        a, b = self.root / "a", self.root / "b"
+        a.mkdir()
+        b.mkdir()
+        reads = {"cos": (a, b), "research": (a,), "cmo": (a, b)}
+
+        def folders(ws, room, bot_id, **kw):
+            return [], reads[bot_id], ()
+        self.ask("x?", ["HANDOFF @research: a", "CONSULT @cmo: tone?", "warm", "ok"], _turn_folders=folders)
+        self.assertEqual(len(self.runs), 4)
+        self.assertEqual([str(d) for d in self.runs[2]["read_dirs"]], [str(a)])
+
+    def test_hop_handoff_respects_room_members(self):
+        real = server.rooms.get_room
+
+        def get_room(rid, team, root):
+            r = real(rid, team, root)
+            return {**r, "kind": "topic", "members": ["cos", "research"]} if r else r
+        with mock.patch.object(server.rooms, "get_room", get_room):
+            _, rec = self.ask("x?", ["HANDOFF @research: a", "Sure.\nHANDOFF @cmo: b"])
         self.assertEqual(len(self.runs), 2)
+        self.assertEqual(rec["messages"][-1]["content"], "Sure.")
+        self.assertIn("Could not pass this on", self.notices(rec))
+
+    def test_hop_limit_stops_the_chain(self):
+        with self.limits(hops=1):
+            _, rec = self.ask("x?", ["HANDOFF @research: a", "HANDOFF @cmo: b", "never"])
+        self.assertEqual(len(self.runs), 2)
+        self.assertIn("hop limit", self.notices(rec))
+
+    def test_pingpong_pauses_with_a_notice(self):
+        with self.limits():
+            _, rec = self.ask("x?", ["HANDOFF @research: a", "HANDOFF @cos: b", "HANDOFF @research: c",
+                                     "HANDOFF @cos: d", "never"])
+        self.assertEqual(len(self.runs), 4)
+        self.assertIn("back and forth", self.notices(rec))
+
+    def test_one_return_is_not_pingpong(self):
+        _, rec = self.ask("x?", ["HANDOFF @research: a", "HANDOFF @cos: b", "Done."])
+        self.assertEqual(len(self.runs), 3)
+        self.assertNotIn("back and forth", self.notices(rec))
         self.assertEqual(rec["messages"][-1]["content"], "Done.")
+
+    def test_chain_cost_cap_stops(self):
+        with self.limits(cost=0.015):
+            _, rec = self.ask("x?", ["HANDOFF @research: a", "HANDOFF @cmo: b", "never"])
+        self.assertEqual(len(self.runs), 2)
+        self.assertIn("cost cap", self.notices(rec))
+
+    def test_cap_refusal_mid_chain_keeps_earlier_replies(self):
+        calls = []
+
+        def refusal(*a, **kw):
+            calls.append(kw)
+            return "You reached today's daily cap." if len(calls) > 2 else None
+        with mock.patch.object(server.spend, "refusal", side_effect=refusal):
+            out, rec = self.ask("x?", ["HANDOFF @research: a", "Half done.\nHANDOFF @cmo: b", "never"])
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual([m["bot"] for m in rec["messages"][-2:]], ["cos", "research"])
+        self.assertEqual(rec["messages"][-1]["content"], "Half done.")
+        self.assertIn("daily cap", out)
+
+    def test_unavailable_target_mid_chain_ends_it(self):
+        _, rec = self.ask("x?", ["HANDOFF @research: a", "Sure.\nHANDOFF @social: posts"])
+        self.assertEqual(len(self.runs), 2)
+        self.assertEqual(rec["messages"][-1]["content"], "Sure.")
+        self.assertIn("Could not pass this on", " ".join(rec["messages"][-1].get("notices") or []))
+
+    def test_approval_in_a_hop_ends_the_chain(self):
+        _, rec = self.ask("x?", ["HANDOFF @research: a", "Memo.\nAPPROVAL: save memo\nHANDOFF @cmo: b", "never"])
+        self.assertEqual(len(self.runs), 2)
+        pend = approvals.pending(self.root, "acme")
+        self.assertEqual([(p["bot"], p["summary"]) for p in pend], [("research", "save memo")])
+        self.assertIn("Waiting for your approval", self.notices(rec))
 
     def test_invalid_target_runs_nothing_more(self):
         out, rec = self.ask("x?", ["Sure.\nHANDOFF @social: posts"])
@@ -267,6 +375,30 @@ class HandoffTurn(unittest.TestCase):
         self.assertEqual(set(rec["engines"]), {"claude-code", "codex"})
         n = len(rec["messages"])
         self.assertEqual((rec["engines"]["claude-code"]["seen"], rec["engines"]["codex"]["seen"]), (n - 1, n))
+
+    def test_three_engines_record_what_each_missed(self):
+        class E:
+            kind, full_disk, supports, label, shared_safe = "cli", False, frozenset(), "E", True
+
+            def __init__(self, eid):
+                self.id = eid
+
+            def resolve_model(self, m):
+                return m
+
+            def is_fresh(self, s):
+                return False
+        engines = {"cos": E("claude-code"), "research": E("codex"), "cmo": E("gemini")}
+        with mock.patch.object(server.engine_registry, "pick", side_effect=lambda r, w, b, **k: engines[b]), \
+                mock.patch.object(server.engine_registry, "metered", return_value=True):
+            _, rec = self.ask("market size?", ["Over to research.\nHANDOFF @research: size it",
+                                               "Sized.\nHANDOFF @cmo: price it", "Priced."])
+        self.assertEqual(len(self.runs), 3)
+        self.assertIn("@cos just replied: Over to research.", self.runs[2]["text"])
+        self.assertIn("@research just replied: Sized.", self.runs[2]["text"])
+        n = len(rec["messages"])
+        seen = {e: rec["engines"][e]["seen"] for e in ("claude-code", "codex", "gemini")}
+        self.assertEqual(seen, {"claude-code": n - 2, "codex": n - 1, "gemini": n})
 
     def test_consult_and_failed_runs_leave_no_load_record(self):
         from core import skill_loads

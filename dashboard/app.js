@@ -3099,6 +3099,15 @@ async function renderGeneral(){
       <div class="eng-choice"><label class="eng-check"><input type="checkbox" id="gen-short"${g.short_replies ? " checked" : ""}> <span>Short replies</span></label>
         <small>Bots answer first and skip filler in chat. Saved work (memos, posts, briefs) stays in full prose. New threads pick it up.</small></div>
     </section>
+    <section class="integ-group"><h3>Bots passing work on</h3>
+      <p class="eng-hint">A bot that gets work from a teammate may pass it on again. Two bots that keep handing it back and forth pause and ask you.</p>
+      <div class="eng-choice"><label><span>Hops per message</span> <input id="gen-hops" type="number" min="0" step="1" inputmode="numeric"
+          value="${g.chain_hops ? esc(String(g.chain_hops)) : ""}" placeholder="No limit" aria-label="Hops per message, 0 = no limit"></label>
+        <small>How many times one message may pass between bots. 0 = no limit.</small></div>
+      <div class="eng-choice"><label><span>Cost per message</span> <input id="gen-chain-cost" type="number" min="0" step="0.01" inputmode="decimal"
+          value="${g.chain_cost ? esc(String(g.chain_cost)) : ""}" placeholder="No cap" aria-label="Cost per message in dollars, 0 = no cap"></label>
+        <small>Dollars one message may spend before the chain stops. 0 = no cap. Daily caps still apply.</small></div>
+    </section>
     <section class="integ-group"><h3>Time</h3>
       <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
           <option value="">This machine's${g.machine_timezone ? ` (${esc(g.machine_timezone)})` : ""}</option>
@@ -3115,6 +3124,13 @@ async function renderGeneral(){
   $("#gen-lang").onchange = e => save({ reply_language: e.target.value });
   $("#gen-short").onchange = e => save({ short_replies: e.target.checked }, e.target.checked ? "Short replies on ✓" : "Short replies off ✓");
   $("#gen-tz").onchange = e => save({ timezone: e.target.value });
+  const num = v => v.trim() === "" ? null : Number(v);
+  $("#gen-hops").onchange = async e => {
+    if (!await save({ chain_hops: num(e.target.value) }, "Hop limit saved ✓")) e.target.value = g.chain_hops || "";
+  };
+  $("#gen-chain-cost").onchange = async e => {
+    if (!await save({ chain_cost: num(e.target.value) }, "Cost cap saved ✓")) e.target.value = g.chain_cost || "";
+  };
   const useZone = $("#gen-tz-browser");
   if (useZone) useZone.onclick = async () => { if (await save({ timezone: zoneHint })) renderGeneral(); };
   box.querySelectorAll("[data-cap]").forEach(inp => inp.onchange = async () => {
@@ -5937,7 +5953,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (!msgs || !msgs.length) return showWelcome();
     msgs.forEach((m, i) => {
       history.push(m);
-      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name, m.handoff_from).closest(".msg");
+      const row = addMsg(m.role, m.content, m.bot, m.asked_by, m.ts, m.by, m.by_name, m.handoff_from, m.hop).closest(".msg");
       row.dataset.i = i;   // its index in the saved thread: what a reaction points at
       if (m.role === "assistant") decorateReply(row, m);
       // A reply with nothing to show (only an emoji, or an approval since answered): kept for its index and spend.
@@ -6366,13 +6382,14 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
 
   // askedBy: a teammate pulled this bot in ("asked by @cmo"); "user" = co-tagged.
   // handoffFrom: a teammate passed the work to this bot (HANDOFF line, or a tag it does not own).
-  function botLabel(div, bot, handoffFrom, askedBy){
+  function botLabel(div, bot, handoffFrom, askedBy, hop){
     const b = typeof bot === "string" ? botById(bot) : bot;
     if (!b) return;
     const from = handoffFrom ? botById(handoffFrom) : null;
     const asker = askedBy && askedBy !== "user" ? botById(askedBy) : null;
+    const via = from ? `from @${from.handle}` + (hop > 1 ? ` · hop ${hop}` : "") : "";   // a chain's later links
     paintSender(div, { avatar: botAvatar(b), name: b.name,
-      note: asker ? `asked by @${asker.handle}` : from ? `from @${from.handle}` : "" });
+      note: asker ? `asked by @${asker.handle}` : via });
     div.classList.toggle("consulted", !!asker);
   }
 
@@ -6444,7 +6461,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     const name = who === "ceo" ? "Owner" : (byName || "Teammate");
     return { initial: name[0].toUpperCase(), name };
   }
-  function addMsg(role, text, bot, askedBy, ts, by, byName, handoffFrom){
+  function addMsg(role, text, bot, askedBy, ts, by, byName, handoffFrom, hop){
     const div = document.createElement("div");
     div.className = "msg " + (role === "user" ? "me" : "ai");
     div.innerHTML = `<span class="av"></span><div class="msg-main"><div class="mh"><b class="mh-name"></b><span class="mh-note"></span><time></time></div><div class="b"></div></div>
@@ -6454,7 +6471,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       const who = senderOf(by, byName);
       paintSender(div, { avatar: msgAvatar(by || "ceo", who.name === "You" ? (_ME.name || "You") : who.name), name: who.name });
     }
-    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", handoffFrom || null, askedBy);
+    else botLabel(div, bot || roomById(activeRoomId)?.lead || "cos", handoffFrom || null, askedBy, hop);
     const bubble = div.querySelector(".b");
     setMsgContent(bubble, role, text);
     stream.appendChild(div);
@@ -6870,7 +6887,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       bubble.closest(".msg").classList.add("streaming");   // typing dots until text arrives
       replies.push({ bubble, meta: turnMeta });
       startTurnSteps(bubble);
-      if (info) { botLabel(bubble.closest(".msg"), info, info.handoff_from || null, info.asked_by || null); turnMeta.bot = info.id; }
+      if (info) { botLabel(bubble.closest(".msg"), info, info.handoff_from || null, info.asked_by || null, info.hop); turnMeta.bot = info.id; }
     };
     startReply(null);
     const replyAt = i => (Number.isInteger(i) && replies[i]) || replies[replies.length - 1];

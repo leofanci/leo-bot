@@ -6,6 +6,8 @@
   short_replies   Leo Bot's short reply style (on by default)
   caps            {"owner" | "workspace" | "person": dollars per 24 hours}; 0 is no cap. An
                   environment variable (dashboard/spend.py) still wins over a saved value.
+  chain_hops      bot-to-bot hops one message may take (core/chain.py); 0 is no limit
+  chain_cost      dollars one message's chain may spend; 0 is no cap
 """
 import math
 import os
@@ -20,6 +22,8 @@ ABOUT_MAX = 1500
 LANGUAGE_MAX = 40
 CAP_KINDS = ("owner", "workspace", "person")
 CAP_MAX = 10000.0
+CHAIN_HOPS_MAX = 1000
+CHAIN_COST_MAX = CAP_MAX
 _MACHINE_TZ = os.environ.get("TZ")  # what the process started with, for "" (the machine's own)
 
 
@@ -47,8 +51,20 @@ def view():
         v = raw.get(kind)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= CAP_MAX:
             caps[kind] = float(v)
+    hops = s.get("chain_hops")
+    cost = s.get("chain_cost")
     return {"about_me": about[:ABOUT_MAX], "reply_language": lang[:LANGUAGE_MAX], "timezone": tz,
-            "short_replies": s["short_replies"], "caps": caps}
+            "short_replies": s["short_replies"], "caps": caps,
+            "chain_hops": hops if _whole(hops, CHAIN_HOPS_MAX) else 0,
+            "chain_cost": float(cost) if _dollars(cost, CHAIN_COST_MAX) else 0.0}
+
+
+def _whole(v, top):
+    return isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= top
+
+
+def _dollars(v, top):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= top
 
 
 def update(body):
@@ -92,6 +108,20 @@ def update(body):
                 raise ValueError(f"caps.{kind}: dollars from 0 (no cap) to {CAP_MAX:.0f}")
             caps[kind] = float(v)
         out["caps"] = caps
+    if "chain_hops" in body:
+        v = body["chain_hops"]
+        if v is None or v == "":
+            v = 0
+        if not _whole(v, CHAIN_HOPS_MAX):
+            raise ValueError(f"chain_hops: a whole number from 0 (no limit) to {CHAIN_HOPS_MAX}")
+        out["chain_hops"] = v
+    if "chain_cost" in body:
+        v = body["chain_cost"]
+        if v is None or v == "":
+            v = 0
+        if not _dollars(v, CHAIN_COST_MAX):
+            raise ValueError(f"chain_cost: dollars from 0 (no cap) to {CHAIN_COST_MAX:.0f}")
+        out["chain_cost"] = float(v)
     if out:
         updater.save_settings(out)
     if "timezone" in out:

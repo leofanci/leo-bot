@@ -53,6 +53,7 @@ from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
+from core import chain  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
@@ -1047,7 +1048,7 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         peers = [o for o in team.ordered() if o.active and o.id != bot_id
                  and (members is None or o.id in members)]
         if peers:
-            lines.append("In this channel (teammates; hand off only when asked, or when routing is your role):\n"
+            lines.append("In this channel (teammates; hand off when one of them is better placed):\n"
                          + "\n".join(team.roster_line(o.id) + (f" · apps: {a}" if (a := apps_of(o.id)) else "")
                                      for o in peers))
         # Like a DM: what the owner tells a bot privately never reaches a thread people can see.
@@ -1084,8 +1085,8 @@ def _bot_block(team, bot_id, session, project_slug=None, handoff_from=None, fres
         why = (f"@{h.handle} passed this to you; it is yours now." if handed_by_bot
                else f"user tagged @{h.handle}; this is your skill, so you own it.")
         lines.append(f"Handoff: {why} Open with one short line that you are taking it from @{h.handle}."
-                     + (" No HANDOFF of your own this message: name who should take it next instead."
-                        if handed_by_bot else ""))
+                     + (" If another teammate is better placed, you may HANDOFF or CONSULT again; when "
+                        "nothing is left to pass on, answer the user in full." if handed_by_bot else ""))
     return "\n".join(lines)
 
 
@@ -1236,7 +1237,7 @@ def _extract_consults(text, team):
 
 
 # A bot passes the work to a teammate with one line `HANDOFF @handle: <task>`: that teammate
-# runs next in the same message, with its own rights. One per message, no chains.
+# runs next in the same message, with its own rights, and may pass it on again (core/chain.py).
 _HANDOFF_RE = re.compile(r"^[ \t>*_-]*HANDOFF[*_ \t]+@([a-z][a-z0-9-]*)[*_ \t]*:[*_ \t]*(.+?)[ \t*_]*$",
                          re.M | re.I)
 
@@ -4300,6 +4301,13 @@ class Handler(BaseHTTPRequestHandler):
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
 
         engines_seen = {engine.id: 0}  # engine id → this turn's replies it did not see
+        thread_runs = [(engine.id, 0)]  # (engine id, message index) of each run on the thread's session
+
+        def ran_on(eid, i):
+            """A run on the thread's session finished: what each engine missed (chain.missed)."""
+            thread_runs.append((eid, i))
+            engines_seen.clear()
+            engines_seen.update(chain.missed(thread_runs, max(j for _, j in thread_runs) + 1))
 
         def notice(text):
             """A line under the latest reply; saved on it, so a reload keeps it."""
@@ -4451,8 +4459,9 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, TypeError, ValueError):
                 traceback.print_exc()
 
-        def run_teammate(b2, question, asked_by, msg):
-            """A teammate answers once, read-only, in its own fresh session."""
+        def run_teammate(b2, question, asked_by, msg, asker_read=None):
+            """A teammate answers once, read-only, in its own fresh session. `asker_read`: the
+            asking bot's read folders (the lead's by default; a hop's own in a chain)."""
             c = new_chat_session()
             c.workspace, c.deny_files, c.readonly = ws, sess.deny_files, True
             c.shared = locked
@@ -4472,11 +4481,11 @@ class Handler(BaseHTTPRequestHandler):
             # Its prompt quotes the lead's reply: app data once the lead has read an app.
             c.apps_used = bool(getattr(sess, "apps_used", False) or turn.app_data)
             # Consulted: its own layered folders, read-only, and its own walls, but never a folder
-            # the lead cannot read: its answer goes back into the lead's turn, so a teammate must
-            # not carry in what the lead's own folder limits keep out.
+            # the asking bot cannot read: its answer goes back into that bot's turn, so a teammate
+            # must not carry in what the asker's own folder limits keep out.
             c_rows, c_read, _ = _turn_folders(ws, room, b2, locked=locked, may_edit=False,
                                               drop_edit=True, engine=c.engine)
-            lead_read = {str(d) for d in read_dirs}
+            lead_read = {str(d) for d in (read_dirs if asker_read is None else asker_read)}
             c_read = tuple(d for d in c_read if str(d) in lead_read)
             c_rows = [r for r in c_rows if str(r.get("path")) in lead_read]
             c.deny_dirs = _workspace_deny_dirs(ws, projects, c_read)
@@ -4610,6 +4619,7 @@ class Handler(BaseHTTPRequestHandler):
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
                 run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
+                ran_on(engine.id, len(msgs) - 1)
                 if not job:
                     _adopt_loaded_skill(sess)
                 clean3, h3 = _extract_handoff(m3["content"], team, speaker=bot_id, members=members)
@@ -4617,54 +4627,125 @@ class Handler(BaseHTTPRequestHandler):
                     m3["content"] = clean3
                     emit({"clean": clean3, "msg": len(msgs) - 1})
                 handoff = handoff or h3
-            writers = {0: may_write}  # message index → may that run's APPROVAL line make a card
+            writers = {0: may_write}
             if handoff and job:
                 # A job is one bot's work in its approved mode: it never passes the run to a teammate.
                 notice(f"A scheduled job does not hand off: ask @{team.get(handoff[0]).handle} "
                        "in a thread of your own.")
                 handoff = None
-            if handoff and not cap_hit and may_run():
-                target, task = handoff
+
+            def said_since(eid):
+                """This message's replies the engine `eid` has not seen, each labeled with its bot
+                (another bot's words are input, not instructions), plus the thread recap when that
+                engine has not run in this message at all."""
+                last_i = max((i for e, i in thread_runs if e == eid), default=None)
+                lines = [] if last_i is not None else [chat_store.recap(saved_rec, eid)]
+                for m in msgs[(last_i + 1 if last_i is not None else 0):]:
+                    said = approvals.extract(_extract_reacts(m.get("content") or "")[0])[0].strip()
+                    if said:
+                        lines.append(f"@{team.get(m['bot']).handle} just replied: {said[:1500]}")
+                return [x for x in lines if x]
+
+            def run_hop(target, task, from_bot, hop):
+                """One link of a chain: `target` takes the work from `from_bot` with its own rights,
+                settles its own consults and follow-up, and returns its next (bot_id, task) or None."""
                 # Its own rights, as if tagged; folder edits only when the user's message allowed them.
-                hst = _turn_setup((target, None, True, bot_id), edit_ok=may_edit)
+                hst = _turn_setup((target, None, True, from_bot), edit_ok=may_edit)
                 if isinstance(hst, str):
                     notice(hst)
-                else:
-                    h_kw = _mint(hst)
-                    h_text = compose_turn_prompt(
-                        user_msg=(_speaker_note(person, ws) if person else "")
-                        + f"{task}\n\n(Original request: {user_msg})",
-                        context=context, skill=None, session=sess, projects=projects, workspace=hst.workspace,
-                        bot=_bot_block(team, target, sess, project_slug if project_record else None, bot_id,
-                                       fresh=True, shared=shared, query=task, code_index=bool(hst.graph_folder),
-                                       apps_on=bool(hst.mount), handed_by_bot=True,
-                                       members=members),
-                        only_project=(project_slug or None))
-                    if hst.engine.id != engine.id:
-                        # Another engine: what it missed of the thread, and what the lead just said.
-                        lead_said = (msgs[0]["content"] or "").strip()[:1500]
-                        h_text = "\n\n".join(x for x in (
-                            chat_store.recap(saved_rec, hst.engine.id),
-                            f"@{team.get(bot_id).handle} just replied: {lead_said}" if lead_said else "",
-                            h_text) if x)
-                    emit({"msg_start": {**_bot_info(team, target), "handoff_from": bot_id}})
-                    m4 = {"bot": target, "content": "", "handoff_from": bot_id}
-                    msgs.append(m4)
+                    return None
+                h_kw = _mint(hst)
+                h_text = compose_turn_prompt(
+                    user_msg=(_speaker_note(person, ws) if person else "")
+                    + f"{task}\n\n(Original request: {user_msg})",
+                    context=context, skill=None, session=sess, projects=projects, workspace=hst.workspace,
+                    bot=_bot_block(team, target, sess, project_slug if project_record else None, from_bot,
+                                   fresh=True, shared=shared, query=task, code_index=bool(hst.graph_folder),
+                                   apps_on=bool(hst.mount), handed_by_bot=True,
+                                   members=members),
+                    only_project=(project_slug or None))
+                # Another engine, or one that missed part of this message: what it did not see.
+                h_text = "\n\n".join([*said_since(hst.engine.id), h_text])
+                emit({"chain": {"hop": hop}})
+                emit({"msg_start": {**_bot_info(team, target), "handoff_from": from_bot, "hop": hop}})
+                m4 = {"bot": target, "content": "", "handoff_from": from_bot, "hop": hop}
+                msgs.append(m4)
+                writers[len(msgs) - 1] = hst.may_write
+                if hasattr(sess, "note_bot"):
+                    sess.note_bot(target)  # the thread's next untagged message goes to the chain's last bot
+                self.log_message("chat handoff from=%s to=%s hop=%d model=%s", from_bot, target, hop, hst.model)
+                hop_kw = {"read_dirs": hst.read_dirs, "edit_dirs": hst.edit_dirs, **h_kw}
+                run(sess, h_text, hst.model, hst.with_web, m4, skill_=None, reason_=hst.reason, **hop_kw)
+                ran_on(hst.engine.id, len(msgs) - 1)
+                if not job:
+                    _adopt_loaded_skill(sess)
+                text4, got = _extract_reacts(m4["content"])
+                reacts.extend((target, e) for e in got)
+                named = bool(_HANDOFF_RE.search(text4))
+                text4, nxt = _extract_handoff(text4, team, speaker=target, members=members)
+                text4, h_asks = _extract_consults(text4, team)
+                if text4 != m4["content"]:
+                    m4["content"] = text4
+                    emit({"clean": text4, "msg": len(msgs) - 1})
+                # Only a bot that may make a card waits on one (a stray marker gets no buttons).
+                asked_ok = bool(hst.may_write and approvals.extract(text4)[1])
+                h_answers = []
+                # Its consults only: a bot co-tagged in the user's message ran with the lead already.
+                for b2, question, asked_by in _plan_teammates(team, target, from_bot, "", h_asks):
+                    if not may_run():
+                        break
+                    emit({"msg_start": {**_bot_info(team, b2), "asked_by": asked_by, "question": question}})
+                    m2 = {"bot": b2, "content": "", "asked_by": asked_by}
+                    msgs.append(m2)
+                    h_answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2,
+                                                                       asker_read=hst.read_dirs))[0]))
+                if h_asks and h_answers and not cap_hit and may_run():
+                    emit({"msg_start": {**_bot_info(team, target), "followup": True}})
+                    m5 = {"bot": target, "content": ""}
+                    msgs.append(m5)
                     writers[len(msgs) - 1] = hst.may_write
-                    if hasattr(sess, "note_bot"):
-                        sess.note_bot(target)  # the thread's next untagged message goes to it
-                    self.log_message("chat handoff from=%s to=%s model=%s", bot_id, target, hst.model)
-                    run(sess, h_text, hst.model, hst.with_web, m4, skill_=None, reason_=hst.reason,
-                        read_dirs=hst.read_dirs, edit_dirs=hst.edit_dirs, **h_kw)
-                    if hst.engine.id != engine.id:
-                        engines_seen = {engine.id: 1, hst.engine.id: 0}
+                    run(sess, _followup_prompt(team, h_answers), hst.model, hst.with_web, m5,
+                        skill_=None, reason_=hst.reason, **hop_kw)
+                    ran_on(hst.engine.id, len(msgs) - 1)
                     if not job:
                         _adopt_loaded_skill(sess)
-                    # One handoff per message: its own HANDOFF and CONSULT lines go unanswered.
-                    clean4 = _extract_consults(_extract_handoff(m4["content"], team, speaker=target)[0], team)[0]
-                    if clean4 != m4["content"]:
-                        m4["content"] = clean4
-                        emit({"clean": clean4, "msg": len(msgs) - 1})
+                    text5 = _extract_consults(_extract_reacts(m5["content"])[0], team)[0]
+                    named = named or bool(_HANDOFF_RE.search(text5))
+                    text5, h5 = _extract_handoff(text5, team, speaker=target, members=members)
+                    if text5 != m5["content"]:
+                        m5["content"] = text5
+                        emit({"clean": text5, "msg": len(msgs) - 1})
+                    nxt = nxt or h5
+                    asked_ok = asked_ok or bool(hst.may_write and approvals.extract(text5)[1])
+                if named and not nxt:
+                    notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
+                if nxt and asked_ok:
+                    # One card per message, answered by the bot that asked: the chain waits for it.
+                    notice("Waiting for your approval before passing this on.")
+                    return None
+                return nxt
+
+            # A chain: each target may pass the work on again, within the owner's limits (Settings,
+            # General; none by default), the daily caps, Stop, and a pause when two bots ping-pong.
+            max_hops, max_cost = chain.limits()
+            path, hops, from_bot = [bot_id], 0, bot_id
+            while handoff and not cap_hit:
+                if not chain.within_hops(hops, max_hops):
+                    notice(f"Stopped at the hop limit ({max_hops}).")
+                    break
+                if max_cost and sum(m.get("cost") or 0 for m in msgs) >= max_cost:
+                    notice("Stopped at this message's cost cap.")
+                    break
+                if chain.pingpong(path):
+                    notice("These two bots keep handing back and forth. Paused: tell them what to do next.")
+                    break
+                if not may_run():
+                    break
+                target, task = handoff
+                hops += 1
+                handoff = run_hop(target, task, from_bot, hops)
+                path.append(target)
+                from_bot = target
             last = len(msgs) - 1
             # What the apps or browser relay held this turn (a send plan is an app action): cards in the thread.
             if any(k.get("apps_token") or k.get("browser_token") for k in minted):
