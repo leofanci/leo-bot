@@ -54,6 +54,7 @@ from core import folders  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import chain  # noqa: E402
+from core import workflows  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
 import apps_relay        # noqa: E402
@@ -62,6 +63,7 @@ import ws                # noqa: E402
 import terminal_session  # noqa: E402
 from dashboard import deployment as deployment_settings  # noqa: E402
 from dashboard import taint  # noqa: E402
+from dashboard import workflow_turns  # noqa: E402
 from dashboard import shell_rules  # noqa: E402
 from dashboard import browser_relay, browser_upstream  # noqa: E402  (one gate module: its locks are global)
 from core import provenance  # noqa: E402  (one registry: the API engine imports it by this name)
@@ -1160,7 +1162,8 @@ def _skills_index():
             continue
         fm, _ = fileops._parse_frontmatter(f.read_text(encoding="utf-8"))
         out.append({"name": fm.get("name", d.name),
-                    "description": fm.get("description", "")})
+                    "description": fm.get("description", ""),
+                    "kind": fm.get("kind", "skill").strip().lower() or "skill"})
     return out
 
 
@@ -3927,6 +3930,22 @@ class Handler(BaseHTTPRequestHandler):
                             and rooms.chat_visible(rec, _room_for_chat(rec, team, ws, projects), viewer)):
                 return self._send(403, {"error": "forbidden"})
             body = {**body, "project_slug": None}
+        # A workflow start, its next step (the browser's tick) or an approval that moves it on:
+        # the step's own body and bot (dashboard/workflow_turns.py), or a refusal line.
+        if workflow_turns.involved(body, ROOT):
+            projects = db.tree()
+            ws, record = _resolve_workspace(
+                rooms.split_id(body.get("room_id"))[0] or str(body.get("project_slug") or "").strip(), projects)
+            team = bots.team(ROOT, ws, record)
+            room = (rooms.get_room(str(body.get("room_id") or ""), team, ROOT)
+                    or rooms.get_room(f"{ws}/general", team, ROOT))
+            shared = viewer.get("kind") != "owner" or _shared_room(ws, room)
+            got = workflow_turns.prepare(body, viewer, ws, team, room, shared, ROOT)
+            if isinstance(got, str):
+                return self._sse_message(got)
+            body, wf_ctx = got
+            if wf_ctx:
+                viewer = {**viewer, "workflow": wf_ctx}
         chat_id = body.get("chat_id") if isinstance(body.get("chat_id"), str) else None
         if not _mark_busy(chat_id):
             return self._send(409, {"error": BUSY_MSG})
@@ -4028,6 +4047,10 @@ class Handler(BaseHTTPRequestHandler):
         if (cb and cb.active and (members is None or cb.id in members) and (room or {}).get("kind") != "dm"
                 and not _explicit_skill(user_msg) and not team.mentioned(user_msg)):
             route = (cb.id, *route[1:])
+        # A workflow step goes to the bot its template names, whatever the label's wording matches.
+        wf_ctx = viewer.get("workflow")
+        if wf_ctx and wf_ctx.get("route"):
+            route = wf_ctx["route"]
         # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
 
@@ -4577,6 +4600,7 @@ class Handler(BaseHTTPRequestHandler):
         # get it, a consulted teammate never does; revoked in the finally below.
         minted = []
         turn_started = time.time()
+        wf_out = {"card": False, "stopped": False, "failed": False}  # how this turn went, for a workflow
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
@@ -4760,6 +4784,7 @@ class Handler(BaseHTTPRequestHandler):
                         if r.get("kind") == approvals.APP and r.get("chat") == getattr(sess, "session_id", None)
                         and (r.get("created") or 0) >= turn_started]
                 if held:
+                    wf_out["card"] = True
                     emit({"app_actions": held, "msg": last})
                     if job:
                         live["status"] = "waiting"
@@ -4788,6 +4813,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec = approvals.add(ROOT, ws=ws, room=(room or {}).get("id"), chat=sess.session_id,
                                     bot=msgs[i]["bot"], summary=summary)
                 msgs[i]["approval"] = rec["id"]
+                wf_out["card"] = True
                 emit({"approval": rec, "msg": i})
                 for j in dict.fromkeys(dropped):  # one card per thread: an earlier ask is replaced
                     note = f"This proposal was replaced by @{team.get(msgs[i]['bot']).handle}'s below."
@@ -4807,11 +4833,13 @@ class Handler(BaseHTTPRequestHandler):
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
                 m["content"] = _HANDOFF_RE.sub("", m["content"]).rstrip() if _HANDOFF_RE.search(m["content"]) else m["content"]
         except (BrokenPipeError, ConnectionResetError):
-            pass  # client stopped/closed; still save what streamed so far
+            wf_out["stopped"] = True  # client stopped/closed; still save what streamed so far
         except _RunFailed:
             live["status"] = "failed"  # the error is already on screen; save what streamed so far
+            wf_out["failed"] = True
         except Exception:  # noqa: BLE001
             live["status"] = "failed"
+            wf_out["failed"] = True
             traceback.print_exc()
             emit({"error": "internal error"})
             if msgs:  # saved too: a reload would otherwise show a reply that just stops
@@ -4853,6 +4881,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001 - the turn is still saved
                 traceback.print_exc()
             if cards:
+                wf_out["card"] = True
                 _quiet(emit, {"app_actions": cards, "msg": len(msgs) - 1})
             for kw_ in minted:
                 if kw_.get("apps_token"):
@@ -4913,6 +4942,21 @@ class Handler(BaseHTTPRequestHandler):
                                                                records=_spend_records)
                             except Exception:  # noqa: BLE001 - never fails the reply
                                 traceback.print_exc()
+            if wf_ctx:  # a workflow step: the run moves on, and the browser learns what comes next
+                try:
+                    ev = workflow_turns.finish(wf_ctx, {
+                        "chat": getattr(sess, "session_id", None),
+                        "cost": sum(m.get("cost") or 0 for m in msgs),
+                        "card": wf_out["card"], "answer": body.get("approval"),
+                        "stopped": wf_out["stopped"] or bool(live.get("stopped")) or halt.halted(ROOT),
+                        "failed": wf_out["failed"] or any(str(n).startswith("Run failed")
+                                                          for m in msgs for n in m.get("notices") or ()),
+                        "replies": [(m.get("bot"), m.get("content") or "") for m in msgs]}, ROOT)
+                except Exception:  # noqa: BLE001 - the turn is still saved
+                    traceback.print_exc()
+                    ev = None
+                if ev:
+                    _quiet(emit, ev)
             try:
                 self.wfile.write(b"data: [DONE]\n\n")
                 self.wfile.flush()
@@ -5182,6 +5226,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/jobs":
                 ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 return self._send(200, _jobs_view(ws))
+            if path == "/api/workflow":  # the open thread's workflow run, or {}
+                chat = (parse_qs(urlparse(self.path).query).get("chat") or [""])[0]
+                return self._send(200, workflow_turns.current(ROOT, chat))
             if path in ("/api/approvals", "/api/costs", "/api/memory"):
                 qs = parse_qs(urlparse(self.path).query)
                 ws, record = _resolve_workspace((qs.get("ws") or [None])[0], db.tree())
@@ -5502,6 +5549,7 @@ class Handler(BaseHTTPRequestHandler):
                 old_epoch = browser.epochs(ROOT).get(out["slug"])  # its engine sessions carry this epoch
                 approvals.forget_workspace(out["slug"], ROOT)
                 destinations.forget_workspace(out["slug"], ROOT)  # a reused slug asks again before sending
+                workflows.drop_ws(ROOT, out["slug"])  # its threads' workflow runs go too
                 integrations.forget_workspace(out["slug"], ROOT)  # after: a refused delete keeps its apps
                 browser.forget_workspace(out["slug"], ROOT)  # and its epoch: a reused slug gets new names
                 # ...and its people, invite links, threads and engine picks: a reused slug starts empty.
@@ -5824,6 +5872,9 @@ class Handler(BaseHTTPRequestHandler):
                 with os.fdopen(fd, "wb") as f:
                     f.write(data)
                 return self._send(200, {"path": fpath})
+            if path == "/api/workflow/stop":  # the run ends where it is; the thread stays
+                got = workflow_turns.stop(ROOT, body.get("chat") if isinstance(body.get("chat"), str) else "")
+                return self._send(200, got) if got else self._send(404, {"error": "no workflow in this thread"})
             if path == "/api/chat-stop":
                 if "ws" in body or "bot" in body:
                     if not self._authorized(require_origin=True):
@@ -5868,6 +5919,7 @@ class Handler(BaseHTTPRequestHandler):
                 rec = chat_store.load(chat_id)
                 gone = chat_store.delete(chat_id)
                 chat_session.forget_transcripts(rec)
+                workflows.drop(ROOT, chat_id)
                 return self._send(200, {"ok": gone})
         except LookupError as exc:
             return self._send(404, {"error": str(exc)})

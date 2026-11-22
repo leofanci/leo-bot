@@ -75,6 +75,18 @@ In chat a bot can pass the work to a teammate with a `HANDOFF @handle: <task>` l
 - Settings, General, *Bots passing work on*: hops per message and a cost cap per message. Both default to 0, which means no limit. Daily spending caps and Stop still apply.
 - A scheduled job never passes its run to another bot.
 
+## Workflows
+
+A workflow is a fixed sequence of skills, each run by a named bot. Start one in your own thread with `/<workflow> <brief>`, for example `/idea-to-experiment` followed by the idea in a few lines. The `/` menu tags workflows as "workflow".
+
+- Each step is one ordinary chat turn by the bot the step names, so caps, chain limits, Stop and approval cards all apply as usual. The open tab sends the next step as soon as one ends.
+- A step can name a checker: a second bot that answers PASS or WEAK. A weak or blocked step is tried once more with the notes. If it is still weak, the run pauses.
+- A workflow never saves on its own. A step either writes its output in the thread, or proposes the save with an approval card. Approve and the run goes on; reject and it waits.
+- The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
+- Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
+- Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
+- A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off or lacks the step's skill.
+
 ## The content pipeline (two stages)
 
 The system splits **cheap idea → expensive content** so you never generate posts

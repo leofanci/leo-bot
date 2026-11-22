@@ -8,6 +8,7 @@
                   environment variable (dashboard/spend.py) still wins over a saved value.
   chain_hops      bot-to-bot hops one message may take (core/chain.py); 0 is no limit
   chain_cost      dollars one message's chain may spend; 0 is no cap
+  workflow_cost   dollars one workflow run may spend over all its steps (core/workflows.py); 0 is no cap
 """
 import math
 import os
@@ -53,10 +54,12 @@ def view():
             caps[kind] = float(v)
     hops = s.get("chain_hops")
     cost = s.get("chain_cost")
+    wcost = s.get("workflow_cost")
     return {"about_me": about[:ABOUT_MAX], "reply_language": lang[:LANGUAGE_MAX], "timezone": tz,
             "short_replies": s["short_replies"], "caps": caps,
             "chain_hops": hops if _whole(hops, CHAIN_HOPS_MAX) else 0,
-            "chain_cost": float(cost) if _dollars(cost, CHAIN_COST_MAX) else 0.0}
+            "chain_cost": float(cost) if _dollars(cost, CHAIN_COST_MAX) else 0.0,
+            "workflow_cost": float(wcost) if _dollars(wcost, CHAIN_COST_MAX) else 0.0}
 
 
 def _whole(v, top):
@@ -115,13 +118,15 @@ def update(body):
         if not _whole(v, CHAIN_HOPS_MAX):
             raise ValueError(f"chain_hops: a whole number from 0 (no limit) to {CHAIN_HOPS_MAX}")
         out["chain_hops"] = v
-    if "chain_cost" in body:
-        v = body["chain_cost"]
+    for key in ("chain_cost", "workflow_cost"):
+        if key not in body:
+            continue
+        v = body[key]
         if v is None or v == "":
             v = 0
         if not _dollars(v, CHAIN_COST_MAX):
-            raise ValueError(f"chain_cost: dollars from 0 (no cap) to {CHAIN_COST_MAX:.0f}")
-        out["chain_cost"] = float(v)
+            raise ValueError(f"{key}: dollars from 0 (no cap) to {CHAIN_COST_MAX:.0f}")
+        out[key] = float(v)
     if out:
         updater.save_settings(out)
     if "timezone" in out:
