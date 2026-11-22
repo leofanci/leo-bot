@@ -1242,6 +1242,14 @@ _HANDOFF_RE = re.compile(r"^[ \t>*_-]*HANDOFF[*_ \t]+@([a-z][a-z0-9-]*)[*_ \t]*:
                          re.M | re.I)
 
 
+def _names_other(text, team, speaker):
+    """True when a HANDOFF line names someone other than `speaker`: a bot naming itself has
+    nobody to pass to, so its line is dropped quietly (it already answered)."""
+    own = team.get(speaker)
+    own = own.handle.lower() if own else None
+    return any(h.lower() != own for h, _ in _HANDOFF_RE.findall(text or ""))
+
+
 def _extract_handoff(text, team, *, speaker, members=None):
     """(text without any HANDOFF line, (bot_id, task) or None): the first line naming an active
     teammate other than `speaker` (in `members`, when given). Every HANDOFF line goes."""
@@ -4592,14 +4600,14 @@ class Handler(BaseHTTPRequestHandler):
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
-            named_handoff = bool(_HANDOFF_RE.search(lead_text))
+            named_handoff = _names_other(lead_text, team, bot_id)
             lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
             if named_handoff and not handoff and not job:
                 # The line is stripped from the reply: without this the user reads "passing it on" and
-                # nothing follows (teammate off, not in this room, or the bot named itself).
+                # nothing follows (teammate off, or not in this room).
                 notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
             answers = []
             for b2, question, asked_by in _plan_teammates(team, bot_id, handoff_from, user_msg, asks):
@@ -4678,7 +4686,7 @@ class Handler(BaseHTTPRequestHandler):
                     _adopt_loaded_skill(sess)
                 text4, got = _extract_reacts(m4["content"])
                 reacts.extend((target, e) for e in got)
-                named = bool(_HANDOFF_RE.search(text4))
+                named = _names_other(text4, team, target)
                 text4, nxt = _extract_handoff(text4, team, speaker=target, members=members)
                 text4, h_asks = _extract_consults(text4, team)
                 if text4 != m4["content"]:
@@ -4709,7 +4717,7 @@ class Handler(BaseHTTPRequestHandler):
                     text5, got5 = _extract_reacts(m5["content"])
                     reacts.extend((target, e) for e in got5)
                     text5 = _extract_consults(text5, team)[0]
-                    named = named or bool(_HANDOFF_RE.search(text5))
+                    named = named or _names_other(text5, team, target)
                     text5, h5 = _extract_handoff(text5, team, speaker=target, members=members)
                     if text5 != m5["content"]:
                         m5["content"] = text5
