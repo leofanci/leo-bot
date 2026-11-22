@@ -4300,14 +4300,11 @@ class Handler(BaseHTTPRequestHandler):
         metered_turn = engine.kind != "runner"
         cap_hit = []  # set once a cap stops this message: no further run, no 80% note
 
-        engines_seen = {engine.id: 0}  # engine id → this turn's replies it did not see
-        thread_runs = [(engine.id, 0)]  # (engine id, message index) of each run on the thread's session
+        # (engine id, message index) of each run on the thread's session: what each engine missed.
+        thread_runs = [(engine.id, 0)]
 
         def ran_on(eid, i):
-            """A run on the thread's session finished: what each engine missed (chain.missed)."""
             thread_runs.append((eid, i))
-            engines_seen.clear()
-            engines_seen.update(chain.missed(thread_runs, max(j for _, j in thread_runs) + 1))
 
         def notice(text):
             """A line under the latest reply; saved on it, so a reload keeps it."""
@@ -4709,7 +4706,9 @@ class Handler(BaseHTTPRequestHandler):
                     ran_on(hst.engine.id, len(msgs) - 1)
                     if not job:
                         _adopt_loaded_skill(sess)
-                    text5 = _extract_consults(_extract_reacts(m5["content"])[0], team)[0]
+                    text5, got5 = _extract_reacts(m5["content"])
+                    reacts.extend((target, e) for e in got5)
+                    text5 = _extract_consults(text5, team)[0]
                     named = named or bool(_HANDOFF_RE.search(text5))
                     text5, h5 = _extract_handoff(text5, team, speaker=target, members=members)
                     if text5 != m5["content"]:
@@ -4891,7 +4890,9 @@ class Handler(BaseHTTPRequestHandler):
                         shared=shared, reactions=reacts, ws=ws,
                         job=job["id"] if job else None,
                         title=f"Job: {job['name']}" if job else None,
-                        engines_seen=engines_seen)
+                        # Saved replies after each engine's last run: its next recap carries them.
+                        engines_seen=chain.missed(thread_runs, [bool(m.get("content") or chat_store.kept(m))
+                                                                for m in msgs]))
                 except (OSError, ValueError):
                     traceback.print_exc()
                 else:
