@@ -35,6 +35,22 @@ class ChainSettings(unittest.TestCase):
             general.update({"chain_hops": reset, "chain_cost": reset})
             self.assertEqual(chain.limits(), (0, 0.0))
 
+    def test_workflow_cost_validates(self):
+        from core import workflows
+        self.assertEqual(general.view()["workflow_cost"], 0.0)
+        general.update({"workflow_cost": 2.5})
+        self.assertEqual(workflows.cost_cap(), 2.5)
+        for bad in (-0.1, "x", float("inf"), True, general.CHAIN_COST_MAX + 1):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                general.update({"workflow_cost": bad})
+            self.assertEqual(workflows.cost_cap(), 2.5)
+        general.update({"workflow_cost": ""})
+        self.assertEqual(workflows.cost_cap(), 0.0)
+        paths.SETTINGS.write_text(json.dumps({"workflow_cost": "lots"}))
+        self.assertEqual(workflows.cost_cap(), 0.0)
+        paths.SETTINGS.write_text("{not json")
+        self.assertEqual(workflows.cost_cap(), 0.0)
+
     def test_hand_edited_file_never_breaks(self):
         paths.SETTINGS.write_text(json.dumps({"chain_hops": "lots", "chain_cost": [1]}))
         self.assertEqual(chain.limits(), (0, 0.0))
