@@ -252,6 +252,29 @@ class WorkflowTurns(unittest.TestCase):
                 pass
         self.assertIsNone(self.run_rec())
 
+    def test_stop_or_delete_during_a_step_wins(self):
+        self.ask("/idea-to-experiment an idea", ["ok"])
+        test = self
+
+        def ask(self_, text, **kw):
+            workflow_turns.stop(test.root, CHAT)  # Stop workflow pressed while the step runs
+            yield ("delta", "done")
+            yield ("done", {"tokens": 1, "cost": 0.01})
+        with mock.patch.object(type(self.sess), "ask", ask):
+            out, _ = self.tick()
+        self.assertEqual(self.run_rec()["status"], "stopped")
+        self.assertEqual(wf_event(out)["next"], False)
+
+        self.ask("/idea-to-experiment again", ["ok"])
+
+        def ask2(self_, text, **kw):
+            workflows.drop(test.root, CHAT)  # the thread was deleted while the step runs
+            yield ("delta", "done")
+            yield ("done", {"tokens": 1, "cost": 0.01})
+        with mock.patch.object(type(self.sess), "ask", ask2):
+            self.tick()
+        self.assertIsNone(self.run_rec())
+
     def test_brief_label_is_neutral_and_cut(self):
         wf = workflows.load("idea-to-experiment")
         run = workflows.new_run(wf, "@cmo do /positioning " + "x" * 400, "acme", "acme/general")

@@ -159,10 +159,17 @@ def prepare(body, viewer, ws, team, room, shared, root):
 def finish(ctx, out, root):
     """Move the run on from this turn's outcome, save it and return the `workflow` event."""
     run, wf = ctx["run"], ctx["wf"]
-    if not run.get("chat"):
-        run = dict(run, chat=out.get("chat"))
     if ctx["kind"] == "turn" and not out.get("answer"):
         return None
+    if run.get("chat"):
+        # Stop workflow or a deleted thread while this step ran: that wins over this turn's copy.
+        now = workflows.get(root, run["chat"])
+        if now is None or now.get("started") != run.get("started"):
+            return None
+        if now["status"] == "stopped":
+            return {"workflow": view(now, wf)}
+    else:
+        run = dict(run, chat=out.get("chat"))
     run = workflows.advance(wf, run, out, workflows.cost_cap())
     workflows.save(root, run)
     return {"workflow": view(run, wf)}
