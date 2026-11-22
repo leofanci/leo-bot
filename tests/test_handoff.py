@@ -317,6 +317,17 @@ class HandoffTurn(unittest.TestCase):
         self.assertEqual(rec["messages"][-1]["content"], "Sure.")
         self.assertIn("Could not pass this on", " ".join(rec["messages"][-1].get("notices") or []))
 
+    def test_handoff_to_itself_is_dropped_quietly(self):
+        """A bot naming itself has nobody to pass to: the line goes, no notice, it already answered."""
+        for replies in (["Done.\nHANDOFF @cos: again"],
+                        ["HANDOFF @research: a", "Done.\nHANDOFF @research: again"]):
+            with self.subTest(replies):
+                self.runs.clear()
+                _, rec = self.ask("x?", replies)
+                self.assertEqual(len(self.runs), len(replies))
+                self.assertEqual(rec["messages"][-1]["content"], "Done.")
+                self.assertNotIn("Could not pass this on", self.notices(rec))
+
     def test_consults_run_before_the_handoff(self):
         out, rec = self.ask("x?", ["CONSULT @cmo: tone?\nHANDOFF @research: size it", "warm", "follow-up", "sized"])
         self.assertEqual([m["bot"] for m in rec["messages"][-4:]], ["cos", "cmo", "cos", "research"])
