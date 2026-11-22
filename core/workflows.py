@@ -7,9 +7,11 @@ Step line (one numbered line per step, fields split by `|`, keys case-insensitiv
     1. skill: problem-validation | bot: product | output: problem verdict | gate: no | checker: research
 """
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from core import bots, general, skill_loads
 
@@ -36,10 +38,19 @@ class Workflow:
     body: str           # the file body without the steps list
 
 
+def _inside(base, *parts):
+    """base/parts as a Path, or None when the result would leave `base`."""
+    base = os.path.normpath(str(base))
+    full = os.path.normpath(os.path.join(base, *parts))
+    return Path(full) if full.startswith(base + os.sep) else None
+
+
 def _is_workflow_file(name):
     from dashboard import fileops  # same frontmatter parser as skills
-    f = skill_loads.SKILLS_DIR / name / "SKILL.md"
-    if not _NAME_RE.match(name or "") or not f.is_file():
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        return None
+    f = _inside(skill_loads.SKILLS_DIR, name, "SKILL.md")
+    if f is None or not f.is_file():
         return None
     text = f.read_text(encoding="utf-8")
     fm, _ = fileops._parse_frontmatter(text)
@@ -144,7 +155,7 @@ def _path(root, chat):
     chat = (chat or "").strip() if isinstance(chat, str) else ""
     if not skill_loads._CHAT_RE.match(chat):
         return None
-    return root / "team" / "workflow_runs" / f"{chat}.json"
+    return _inside(Path(root) / "team" / "workflow_runs", f"{chat}.json")
 
 
 def new_run(wf, brief, ws, room):
