@@ -9,7 +9,8 @@ from unittest import mock
 from core import bots, paths
 import dashboard.server as server
 
-SKILLS = {d.name for d in (Path(paths.CODE) / "skills").iterdir() if (d / "SKILL.md").exists()}
+SKILLS = {d.name for d in (Path(paths.CODE) / "skills").iterdir()
+          if (d / "SKILL.md").exists() and "\nkind: workflow\n" not in (d / "SKILL.md").read_text()}
 # A venture with profiles and a linked app: its smart default switches every bot on.
 VENTURE = {"slug": "acme", "kind": "venture", "profiles": [{"slug": "profile-a"}],
            "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}]}

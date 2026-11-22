@@ -1160,7 +1160,8 @@ def _skills_index():
             continue
         fm, _ = fileops._parse_frontmatter(f.read_text(encoding="utf-8"))
         out.append({"name": fm.get("name", d.name),
-                    "description": fm.get("description", "")})
+                    "description": fm.get("description", ""),
+                    "kind": fm.get("kind", "skill").strip().lower() or "skill"})
     return out
 
 
