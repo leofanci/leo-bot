@@ -58,10 +58,13 @@ class ChainHelpers(unittest.TestCase):
         self.assertFalse(chain.pingpong([]))
 
     def test_missed(self):
-        self.assertEqual(chain.missed([("a", 0)], 1), {"a": 0})
-        self.assertEqual(chain.missed([("a", 0), ("b", 1)], 2), {"a": 1, "b": 0})
-        self.assertEqual(chain.missed([("a", 0), ("b", 1), ("a", 2), ("c", 3)], 4), {"a": 1, "b": 2, "c": 0})
-
+        self.assertEqual(chain.missed([("a", 0)], [True]), {"a": 0})
+        self.assertEqual(chain.missed([("a", 0), ("b", 1)], [True, True]), {"a": 1, "b": 0})
+        self.assertEqual(chain.missed([("a", 0), ("b", 1), ("a", 2), ("c", 3)], [True] * 4),
+                         {"a": 1, "b": 2, "c": 0})
+        # a dropped (empty) reply is not counted; one after the last run (a consult) is
+        self.assertEqual(chain.missed([("a", 0), ("b", 1), ("b", 3)], [True, False, True, True, True]),
+                         {"a": 3, "b": 1})
 
 if __name__ == "__main__":
     unittest.main()

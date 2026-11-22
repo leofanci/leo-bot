@@ -371,10 +371,7 @@ def _record_turn(sess, scope, user_msg, reply, bot=None, room=None, meta=None, e
     # them in its next recap).
     engine = getattr(sess, "engine", None)
     seen = dict(engines_seen or ({engine.id: 0} if engine is not None else {}))
-    last = rec["messages"][-1] if rec["messages"] else {}
-    for eid, missed in seen.items():
-        if missed and not (last.get("role") == "assistant" and last.get("content")):
-            missed = 0  # the reply it missed was dropped (empty)
+    for eid, missed in seen.items():  # `missed` counts saved replies only (core/chain.missed)
         state = dict((getattr(sess, "engine_state", None) or {}).get(eid) or {})
         rec["engines"][eid] = {**state, "seen": len(rec["messages"]) - missed}
     if room and not rec.get("room"):

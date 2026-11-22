@@ -400,6 +400,35 @@ class HandoffTurn(unittest.TestCase):
         seen = {e: rec["engines"][e]["seen"] for e in ("claude-code", "codex", "gemini")}
         self.assertEqual(seen, {"claude-code": n - 2, "codex": n - 1, "gemini": n})
 
+    def test_an_empty_last_reply_does_not_hide_earlier_ones(self):
+        """The lead's engine missed two replies; the last one is only an emoji. Its next recap
+        must still carry the first one."""
+        class E:
+            kind, full_disk, supports, label, shared_safe = "cli", False, frozenset(), "E", True
+
+            def __init__(self, eid):
+                self.id = eid
+
+            def resolve_model(self, m):
+                return m
+
+            def is_fresh(self, s):
+                return False
+        engines = {"cos": E("claude-code"), "research": E("codex"), "cmo": E("codex")}
+        with mock.patch.object(server.engine_registry, "pick", side_effect=lambda r, w, b, **k: engines[b]), \
+                mock.patch.object(server.engine_registry, "metered", return_value=True):
+            _, rec = self.ask("market size?", ["Over to research.\nHANDOFF @research: size it",
+                                               "Sized.\nHANDOFF @cmo: price it", "REACT: 👍"])
+        n = len(rec["messages"])
+        self.assertEqual(rec["engines"]["claude-code"]["seen"], n - 2)
+        self.assertIn("Sized.", server.chat_store.recap(rec, "claude-code"))
+
+    def test_a_hop_follow_up_may_react(self):
+        self.ask("tone?", ["HANDOFF @research: check it", "CONSULT @cmo: tone?", "warm",
+                           "Warm it is.\nREACT: 👍"])
+        first = server.chat_store.load(CHAT)["messages"][0]
+        self.assertIn("👍", json.dumps(first.get("reactions"), ensure_ascii=False))
+
     def test_consult_and_failed_runs_leave_no_load_record(self):
         from core import skill_loads
         test = self

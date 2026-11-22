@@ -29,10 +29,11 @@ def pingpong(path):
     return a != b and tail == [a, b, a, b]
 
 
-def missed(runs, total):
-    """{engine_id: how many of this message's `total` replies came after its last run}.
-    `runs`: (engine_id, message_index) for each run on the thread's own session."""
+def missed(runs, saved):
+    """{engine_id: how many saved replies of this message came after its last run}.
+    `runs`: (engine_id, message_index) for each run on the thread's own session; `saved`: one
+    bool per message of the turn, False for a reply the thread record drops (empty)."""
     last = {}
     for eid, i in runs:
         last[eid] = max(i, last.get(eid, -1))
-    return {eid: max(0, total - 1 - i) for eid, i in last.items()}
+    return {eid: sum(1 for k in saved[i + 1:] if k) for eid, i in last.items()}
