@@ -188,6 +188,7 @@ class WorkflowTurns(unittest.TestCase):
         bots.set_active("cmo", False, self.root, "acme", self.tree[0])
         out, _ = self.ask("/idea-to-experiment an idea", ["ok"])
         self.assertIn("@cmo", out)
+        self.assertIn("Switch them on in this workspace's Team", out)
         self.assertEqual(self.runs, [])
         self.assertIsNone(self.run_rec())
 
@@ -274,6 +275,22 @@ class WorkflowTurns(unittest.TestCase):
         with mock.patch.object(type(self.sess), "ask", ask2):
             self.tick()
         self.assertIsNone(self.run_rec())
+
+    def test_stop_during_step_one_wins(self):
+        test, seen = self, []
+
+        def ask(self_, text, **kw):
+            seen.append(workflows.get(test.root, CHAT))  # saved before the model runs
+            workflow_turns.stop(test.root, CHAT)  # Stop workflow pressed during step 1
+            yield ("delta", "done")
+            yield ("done", {"tokens": 1, "cost": 0.01})
+        with mock.patch.object(type(self.sess), "ask", ask):
+            out, _ = self.ask("/idea-to-experiment an idea")
+        self.assertEqual(seen[0]["status"], "running")
+        self.assertEqual(self.run_rec()["status"], "stopped")
+        self.assertEqual(wf_event(out)["next"], False)
+        live = [e["workflow_live"] for e in events(out) if "workflow_live" in e]
+        self.assertEqual((live[0]["step"], live[0]["status"], live[0]["next"]), (1, "running", False))
 
     def test_brief_label_is_neutral_and_cut(self):
         wf = workflows.load("idea-to-experiment")
