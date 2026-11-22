@@ -3107,6 +3107,9 @@ async function renderGeneral(){
       <div class="eng-choice"><label><span>Cost per message</span> <input id="gen-chain-cost" type="number" min="0" step="0.01" inputmode="decimal"
           value="${g.chain_cost ? esc(String(g.chain_cost)) : ""}" placeholder="No cap" aria-label="Cost per message in dollars, 0 = no cap"></label>
         <small>Dollars one message may spend before the chain stops. 0 = no cap. Daily caps still apply.</small></div>
+      <div class="eng-choice"><label><span>Cost per workflow run</span> <input id="gen-wf-cost" type="number" min="0" step="0.01" inputmode="decimal"
+          value="${g.workflow_cost ? esc(String(g.workflow_cost)) : ""}" placeholder="No cap" aria-label="Cost per workflow run in dollars, 0 = no cap"></label>
+        <small>Dollars one workflow run may spend over all its steps before it pauses. 0 = no cap.</small></div>
     </section>
     <section class="integ-group"><h3>Time</h3>
       <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
@@ -3130,6 +3133,9 @@ async function renderGeneral(){
   };
   $("#gen-chain-cost").onchange = async e => {
     if (!await save({ chain_cost: num(e.target.value) }, "Cost cap saved ✓")) e.target.value = g.chain_cost || "";
+  };
+  $("#gen-wf-cost").onchange = async e => {
+    if (!await save({ workflow_cost: num(e.target.value) }, "Workflow cap saved ✓")) e.target.value = g.workflow_cost || "";
   };
   const useZone = $("#gen-tz-browser");
   if (useZone) useZone.onclick = async () => { if (await save({ timezone: zoneHint })) renderGeneral(); };
@@ -5937,7 +5943,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   const chatTitleEl = document.getElementById("chat-title");
 
   function setActiveChat(id, title, project){
+    const moved = (id || null) !== activeChatId;
     activeChatId = id || null;
+    if (moved) loadWorkflow();
     if (!id) threadUsage = { tokens: 0, cost: 0 };
     chatTitleEl.textContent = (id && title) || "New thread";
     chatTitleEl.title = chatTitleEl.textContent;
@@ -5982,6 +5990,38 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     });
   }
   function busyNote(){ statusEl.textContent = "Reply in progress · Esc to stop"; }
+
+  // ── workflow run bar: the open thread's run (dashboard/workflow_turns.py) ──
+  // The server keeps the run; this tab sends each next step as soon as one ends.
+  // Stop (Esc or the button) ends the chain of steps here; Continue picks it up.
+  const wfBar = document.getElementById("wf-bar");
+  let wfView = null;
+  function paintWorkflow(v){
+    wfView = v && v.name && !["done", "stopped"].includes(v.status) ? v : null;
+    wfBar.hidden = !wfView;
+    if (!wfView) { wfBar.innerHTML = ""; return; }
+    const state = wfView.status === "running" ? (busy ? "running" : "waiting to continue") : `paused: ${wfView.why || "waiting"}`;
+    wfBar.innerHTML = `<span class="wf-sum"><b>/${esc(wfView.name)}</b> · step ${wfView.step} of ${wfView.total} · ${esc(state)}</span>
+      <span class="wf-btns">${!busy ? `<button class="btn sm primary" type="button" data-wf="go">Continue</button>` : ""}
+      <button class="btn sm" type="button" data-wf="stop">Stop workflow</button></span>`;
+    wfBar.querySelector('[data-wf="go"]')?.addEventListener("click", wfContinue);
+    wfBar.querySelector('[data-wf="stop"]').addEventListener("click", wfStop);
+  }
+  async function loadWorkflow(){
+    const id = activeChatId;
+    if (!id) return paintWorkflow(null);
+    const v = await api(`/api/workflow?chat=${encodeURIComponent(id)}`).catch(() => null);
+    if (id === activeChatId && !busy) paintWorkflow(v);
+  }
+  function wfContinue(){
+    if (wfView && !busy) send(wfView.label || `Continue /${wfView.name}`, { workflow: "next" });
+  }
+  async function wfStop(){
+    const id = activeChatId;
+    if (busy) stopChat();
+    paintWorkflow(null);
+    if (id) await jpost("/api/workflow/stop", { chat: id }).catch(e => { statusEl.textContent = "✗ " + e.message; });
+  }
   // Bumped by every thread switch: a slow load drops out once you moved on.
   let chatSeq = 0;
   async function openChat(id){
@@ -6244,7 +6284,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       out.push({ type:"action", slug:"__attach", name:"Attach file…", meta:"upload a document" });
       out.push({ type:"tool",   slug:"web",      name:"Web search",   meta:"let the OS research online this turn" });
       for (const s of _SKILLS)
-        out.push({ type:"skill", slug:s.name, name:s.name, meta:(s.description||"").slice(0, 90) });
+        out.push({ type:"skill", slug:s.name, name:s.name,
+                   meta:(s.kind === "workflow" ? "workflow · " : "") + (s.description||"").replace(/^Workflow\.\s*/, "").slice(0, 90) });
       return out;
     }
     const members = roomById(activeRoomId)?.members || [];
@@ -6891,7 +6932,8 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     };
     startReply(null);
     const replyAt = i => (Number.isInteger(i) && replies[i]) || replies[replies.length - 1];
-    let pendingBreak = false, reload = false, stored = false;
+    let pendingBreak = false, reload = false, stored = false, wfNext = null, aborted = false;
+    if (extra?.workflow) paintWorkflow(wfView && { ...wfView, status: "running" });
 
     chatAbort = new AbortController();
     try {
@@ -6954,6 +6996,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
               if (r.bubble === bubble) full = obj.clean;
             }
             if (obj.reactions) paintReactions(userEl, obj.reactions);
+            if (obj.workflow) wfNext = obj.workflow;
             if (obj.approval) {
               const r = replyAt(obj.msg);
               _APPROVALS.unshift(obj.approval); r.meta.approval = obj.approval; r.bubble.closest(".msg").hidden = false;
@@ -6990,6 +7033,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       await refreshChatStatus("Ready");
     } catch(e) {
       if (e.name === "AbortError") {
+        aborted = true;
         bubble.innerHTML = formatChatText(full ? full + "  ⏹ stopped" : "⏹ stopped");
         if (full) history.push({ role: "assistant", content: full });
         statusEl.textContent = "Stopped";
@@ -7015,6 +7059,10 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       renderAppCards();
       // Re-read the saved thread: this turn's rows get their index (reactions) and final form.
       if (reload) { seenSig = null; pollThread(); }
+      // A workflow step ended: its next step goes out now, unless you stopped it.
+      if (wfNext) paintWorkflow(wfNext);
+      if (wfNext?.next && !aborted) setTimeout(() => send(wfNext.label, { workflow: "next" }), 0);
+      else if (aborted || (extra?.workflow && !wfNext)) setTimeout(loadWorkflow, aborted ? 1500 : 0);   // a refusal or Stop: show where it is
     }
   }
 
