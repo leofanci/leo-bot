@@ -179,6 +179,15 @@ def drop(root, chat):
         f.unlink(missing_ok=True)
 
 
+def drop_ws(root, ws):
+    """Every run of a deleted workspace goes with it."""
+    d = root / "team" / "workflow_runs"
+    for f in d.glob("*.json") if d.is_dir() else ():
+        run = get(root, f.stem)
+        if run is None or run.get("ws") == ws:
+            f.unlink(missing_ok=True)
+
+
 def cost_cap():
     """Settings, General, workflow_cost: dollars per run, 0.0 for no cap. Never raises."""
     try:
