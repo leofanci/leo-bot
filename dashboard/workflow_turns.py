@@ -16,6 +16,7 @@ NO_DM = "Start a workflow in a channel, not a direct message: its steps go to se
 ANSWER_CARD = "Approve or reject the card first."
 CAPPED = ("This run reached its cost cap (Settings, General, workflow cost). "
           "Raise the cap, then Continue.")
+SWITCH_ON = "\nSwitch them on in this workspace's Team, then start again."
 BRIEF_MAX = 2000
 LABEL_BRIEF_MAX = 300
 _START_RE = re.compile(r"^\s*/([a-z0-9][a-z0-9-]*)(?:\s+(.*))?$", re.S)
@@ -130,7 +131,8 @@ def prepare(body, viewer, ws, team, room, shared, root):
             return NO_DM
         bad = workflows.problems(wf, team)
         if bad:
-            return f"/{wf.name} cannot start here:\n" + "\n".join(f"- {b}" for b in bad)
+            hint = SWITCH_ON if any("switched off" in b for b in bad) else ""
+            return f"/{wf.name} cannot start here:\n" + "\n".join(f"- {b}" for b in bad) + hint
         return _turn(body, workflows.new_run(wf, brief[:BRIEF_MAX], ws, (room or {}).get("id")), wf)
     if tick:
         wf = workflows.load(live["name"]) if live else None
@@ -154,6 +156,19 @@ def prepare(body, viewer, ws, team, room, shared, root):
         if wf:
             return body, {"run": live, "wf": wf, "kind": "turn", "route": None}
     return body, None
+
+
+def begin(ctx, chat, root):
+    """The turn's thread is known: a new run is saved now, so Stop workflow and the bar work
+    during step 1. Returns the `workflow_live` event (no tick: `next` stays False)."""
+    run, wf = ctx["run"], ctx["wf"]
+    if ctx["kind"] == "turn":
+        return None
+    if not run.get("chat") and isinstance(chat, str):
+        run = dict(run, chat=chat)
+        workflows.save(root, run)
+        ctx["run"] = run  # only once saved: finish re-reads a run that has its thread
+    return {"workflow_live": dict(view(run, wf), next=False)}
 
 
 def finish(ctx, out, root):

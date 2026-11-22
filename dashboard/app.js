@@ -6997,6 +6997,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             }
             if (obj.reactions) paintReactions(userEl, obj.reactions);
             if (obj.workflow) wfNext = obj.workflow;
+            if (obj.workflow_live) paintWorkflow(obj.workflow_live);   // step under way: Stop workflow works now
             if (obj.approval) {
               const r = replyAt(obj.msg);
               _APPROVALS.unshift(obj.approval); r.meta.approval = obj.approval; r.bubble.closest(".msg").hidden = false;

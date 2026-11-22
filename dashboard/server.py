@@ -4613,6 +4613,14 @@ class Handler(BaseHTTPRequestHandler):
                 emit({"chat_id": sess.session_id,
                       "title": (saved or {}).get("title") or chat_store.title_from(user_msg),
                       "project": project_scope[0] if project_scope else None})
+            if wf_ctx:  # the run is saved under its thread now: the bar and Stop work in step 1
+                try:
+                    ev = workflow_turns.begin(wf_ctx, getattr(sess, "session_id", None), ROOT)
+                except OSError:  # finish still saves it when the step ends
+                    traceback.print_exc()
+                    ev = None
+                if ev:
+                    emit(ev)
             emit({"bot": {**_bot_info(team, bot_id), "skill": skill, "handoff_from": handoff_from}})
             for line in _canvas_holds_lines(held_ran):  # the owner sees each approved action's outcome
                 notice(f"Approved canvas action {line}")
