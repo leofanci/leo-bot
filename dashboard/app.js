@@ -3138,6 +3138,14 @@ async function renderGeneral(){
           value="${g.workflow_cost ? esc(String(g.workflow_cost)) : ""}" placeholder="No cap" aria-label="Cost per workflow run in dollars, 0 = no cap"></label>
         <small>Dollars one workflow run may spend over all its steps before it pauses. 0 = no cap.</small></div>
     </section>
+    <section class="integ-group"><h3>Loops</h3>
+      <div class="eng-choice"><label><span>New loops start in</span> <select id="gen-loop-mode" aria-label="Mode a new loop starts in">
+          ${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${g.loop_mode === m ? " selected" : ""}>${label}</option>`).join("")}</select></label>
+        <small>A bot's new scheduled job starts in this mode unless its card says otherwise. You promote a loop yourself, in Loops.</small></div>
+      <div class="eng-choice"><label><span>Loops expire after</span> <input id="gen-loop-days" type="number" min="0" max="365" step="1" inputmode="numeric"
+          value="${esc(String(g.loop_days ?? 30))}" aria-label="Days until a new loop expires, 0 = never"></label>
+        <small>Days. A loop past this pauses and asks you to renew it. 0 = never expires.</small></div>
+    </section>
     <section class="integ-group"><h3>Time</h3>
       <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
           <option value="">This machine's${g.machine_timezone ? ` (${esc(g.machine_timezone)})` : ""}</option>
@@ -3160,6 +3168,12 @@ async function renderGeneral(){
   };
   $("#gen-chain-cost").onchange = async e => {
     if (!await save({ chain_cost: num(e.target.value) }, "Cost cap saved ✓")) e.target.value = g.chain_cost || "";
+  };
+  $("#gen-loop-mode").onchange = async e => {
+    if (!await save({ loop_mode: e.target.value }, "Loop mode saved ✓")) e.target.value = g.loop_mode;
+  };
+  $("#gen-loop-days").onchange = async e => {
+    if (!await save({ loop_days: num(e.target.value) }, "Loop expiry saved ✓")) e.target.value = g.loop_days;
   };
   $("#gen-wf-cost").onchange = async e => {
     if (!await save({ workflow_cost: num(e.target.value) }, "Workflow cap saved ✓")) e.target.value = g.workflow_cost || "";

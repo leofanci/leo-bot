@@ -9,6 +9,8 @@
   chain_hops      bot-to-bot hops one message may take (core/chain.py); 0 is no limit
   chain_cost      dollars one message's chain may spend; 0 is no cap
   workflow_cost   dollars one workflow run may spend over all its steps (core/workflows.py); 0 is no cap
+  loop_mode       the mode a new loop (scheduled job) starts in: report (default), approval or auto
+  loop_days       days until a new loop expires and asks to be renewed (default 30); 0 never expires
 """
 import math
 import os
@@ -25,6 +27,9 @@ CAP_KINDS = ("owner", "workspace", "person")
 CAP_MAX = 10000.0
 CHAIN_HOPS_MAX = 1000
 CHAIN_COST_MAX = CAP_MAX
+LOOP_MODES = ("approval", "auto", "report")  # core/jobs.MODES
+LOOP_DAYS_DEFAULT = 30
+LOOP_DAYS_MAX = 365
 _MACHINE_TZ = os.environ.get("TZ")  # what the process started with, for "" (the machine's own)
 
 
@@ -55,11 +60,14 @@ def view():
     hops = s.get("chain_hops")
     cost = s.get("chain_cost")
     wcost = s.get("workflow_cost")
+    lmode, ldays = s.get("loop_mode"), s.get("loop_days")
     return {"about_me": about[:ABOUT_MAX], "reply_language": lang[:LANGUAGE_MAX], "timezone": tz,
             "short_replies": s["short_replies"], "caps": caps,
             "chain_hops": hops if _whole(hops, CHAIN_HOPS_MAX) else 0,
             "chain_cost": float(cost) if _dollars(cost, CHAIN_COST_MAX) else 0.0,
-            "workflow_cost": float(wcost) if _dollars(wcost, CHAIN_COST_MAX) else 0.0}
+            "workflow_cost": float(wcost) if _dollars(wcost, CHAIN_COST_MAX) else 0.0,
+            "loop_mode": lmode if lmode in LOOP_MODES else "report",
+            "loop_days": ldays if _whole(ldays, LOOP_DAYS_MAX) else LOOP_DAYS_DEFAULT}
 
 
 def _whole(v, top):
@@ -127,6 +135,17 @@ def update(body):
         if not _dollars(v, CHAIN_COST_MAX):
             raise ValueError(f"{key}: dollars from 0 (no cap) to {CHAIN_COST_MAX:.0f}")
         out[key] = float(v)
+    if "loop_mode" in body:
+        if body["loop_mode"] not in LOOP_MODES:
+            raise ValueError(f"loop_mode: one of {', '.join(LOOP_MODES)}")
+        out["loop_mode"] = body["loop_mode"]
+    if "loop_days" in body:
+        v = body["loop_days"]
+        if v is None or v == "":
+            v = LOOP_DAYS_DEFAULT
+        if not _whole(v, LOOP_DAYS_MAX):
+            raise ValueError(f"loop_days: a whole number of days from 0 (never expires) to {LOOP_DAYS_MAX}")
+        out["loop_days"] = v
     if out:
         updater.save_settings(out)
     if "timezone" in out:

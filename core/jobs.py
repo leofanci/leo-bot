@@ -12,8 +12,12 @@ Record: id, name, workspace, bot, skill, message, schedule, cap (dollars per rol
 24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat; optional
 `check` ({"app", "action", "args"}: a connected-app read the server runs before the model;
 the run goes ahead only when its answer changed since `check_seen`, else it ends `quiet`
-at no cost) and `notes` (the job's notepad: the bot keeps it with `osctl job-note`, and
-every run's prompt carries it).
+at no cost) and `check` may instead be {"own": <source>, "id"}: a change in Leo Bot's own data (core/own_checks.py).
+`notes` (the job's notepad: the bot keeps it with `osctl job-note`, and
+every run's prompt carries it), `stop` (its stop condition: a run that finds it met ends its reply
+with `LOOP DONE: <why>` and the job turns itself off, status `finished`) and `expires` (epoch:
+past it the runner turns the job off, status `expired`, until the owner renews it; None never
+expires, as for every job saved before loops had one).
 
 Modes: `approval` (reads and drafts; every save waits for Approve), `auto` (creates and
 updates in Leo Bot by itself; deletes, memory and app writes still wait), `report` (reads
@@ -46,18 +50,22 @@ MIN_EVERY = 300
 MAX_JOBS = 50  # across workspaces: a runaway bot cannot pile up recurring spend
 NAME_MAX = 60
 MESSAGE_MAX = 2000
-STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted", "quiet"}
+STATUSES = {"running", "done", "waiting", "capped", "failed", "timeout", "refused", "interrupted", "quiet",
+            "expired", "finished"}
+STOP_MAX = 300
 NOTES_MAX = 16000
 CHECK_MAX = 2000  # the check's JSON, args included
 _ACTION_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,99}$")
 _APP_RE = re.compile(r"^[a-z0-9_]{1,60}$")
+OWN_SOURCES = ("approvals", "list", "memos", "experiments")  # core/own_checks.py
+_LIST_RE = re.compile(r"^ls\d{1,6}$")
 DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _EVERY_RE = re.compile(r"^every\s+(\d{1,4})\s*([mhd])$")
 _WEEKLY_RE = re.compile(r"^([a-z]+(?:\s*,\s*[a-z]+)*)\s+(\d{1,2}):(\d{2})$")  # no overlap: linear
 _ONCE_RE = re.compile(r"^once\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})$")
 _UNIT = {"m": 60, "h": 3600, "d": 86400}
 MODES = ("approval", "auto", "report")
-_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode", "check", "notes"}
+_EDITABLE = {"name", "message", "schedule", "cap", "skill", "enabled", "mode", "check", "notes", "stop"}
 PROPOSALS_PER_CHAT = 5
 PROPOSAL_TTL = 86400  # a proposal no turn collected (crash, spoofed thread) is dropped
 
@@ -226,6 +234,11 @@ def clean(field, value):
         if v not in MODES:
             raise ValueError(f"mode: one of {', '.join(MODES)}")
         return v
+    if field == "stop":  # what ends the loop; "" on a job saved before loops had one
+        v = " ".join(str(value or "").split())
+        if len(v) > STOP_MAX:
+            raise ValueError(f"stop: at most {STOP_MAX} characters")
+        return v
     if field == "notes":
         v = str(value or "").strip()
         if len(v) > NOTES_MAX:
@@ -239,6 +252,13 @@ def clean(field, value):
                 value = json.loads(value)
             except ValueError:
                 raise ValueError("check: JSON {\"app\", \"action\", \"args\"}") from None
+        if isinstance(value, dict) and "own" in value:  # Leo Bot's own data, not an app
+            if set(value) - {"own", "id"} or value.get("own") not in OWN_SOURCES:
+                raise ValueError(f"check: {{\"own\": one of {', '.join(OWN_SOURCES)}, \"id\"}} only")
+            ref = value.get("id") or None
+            if (value["own"] == "list") != bool(ref) or (ref and not _LIST_RE.match(str(ref))):
+                raise ValueError("check: a list check names its list (id ls<N>); other own checks name none")
+            return {"own": value["own"], "id": ref}
         if not isinstance(value, dict) or set(value) - {"app", "action", "args"}:
             raise ValueError("check: {\"app\", \"action\", \"args\"} only")
         app, action = str(value.get("app") or "").strip().lower(), str(value.get("action") or "").strip()
@@ -252,13 +272,15 @@ def clean(field, value):
     raise ValueError(f"unknown field {field}")
 
 
-def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", check=None, now=None):
+def create(root, *, ws, bot, skill, name, message, schedule, cap, mode="approval", check=None, now=None,
+           stop="", expires=None):
     job = {"id": uuid.uuid4().hex[:8], "name": clean("name", name), "workspace": clean("workspace", ws),
            "bot": clean("bot", bot), "skill": clean("skill", skill), "message": clean("message", message),
            "schedule": clean("schedule", schedule), "cap": clean("cap", cap),
            "mode": clean("mode", mode), "enabled": True, "check": clean("check", check), "notes": "",
            "created": time.time() if now is None else now, "last_run": None, "last_status": None,
-           "last_chat": None}
+           "last_chat": None, "stop": clean("stop", stop),
+           "expires": float(expires) if expires is not None else None}
 
     def fn(data):
         if len(data["jobs"]) >= MAX_JOBS:
@@ -326,6 +348,41 @@ def mark_start(root, job_id, now):
         job.update(last_run=now, last_status="running")
         if str(job.get("schedule") or "").startswith("once "):
             job["enabled"] = False  # one run: off after it, kept for its record
+        return dict(job)
+    return _change(root, fn)
+
+
+def _expired(job, now):
+    try:
+        return bool(job.get("enabled")) and job.get("expires") is not None and now >= float(job["expires"])
+    except (TypeError, ValueError):
+        return False
+
+
+def expire_due(root, now):
+    """Turn off every job past its expiry (status `expired`); the ids turned off. Reads first: the
+    file is locked and rewritten only when one expired."""
+    if not any(_expired(j, now) for j in load(root)):
+        return []
+
+    def fn(data):
+        out = []
+        for job in data["jobs"]:
+            if _expired(job, now):
+                job.update(enabled=False, last_status="expired")
+                out.append(job["id"])
+        return out
+    return _change(root, fn)
+
+
+def renew(root, job_id, now, days):
+    """The owner renews a loop: on again, expiring `days` from now (0: never). Its last run stays, so
+    a missed slot runs once at the next check, never once per slot missed."""
+    days = int(days)
+
+    def fn(data):
+        job = _find(data, job_id)
+        job.update(enabled=True, expires=now + days * 86400 if days > 0 else None)
         return dict(job)
     return _change(root, fn)
 

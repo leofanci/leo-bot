@@ -51,6 +51,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, general, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
+from core import own_checks  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import chain  # noqa: E402
@@ -1962,10 +1963,31 @@ def _job_notepad(job):
     notes = str(job.get("notes") or "").strip() or "(empty: this may be the first run)"
     text = JOB_NOTEPAD.format(max=jobs.NOTES_MAX, notes=notes)
     c = job.get("check")
-    if c:
+    if c and "own" in c:
+        text += (f"\n\nThis run started because {own_checks.label(c)} changed since the last run. "
+                 "Read it yourself to see what changed.")
+    elif c:
         text += (f"\n\nThis run started because {c.get('app')} {c.get('action')} answered something new since "
                  "the last run. Read it yourself to see what changed.")
+    stop = str(job.get("stop") or "").strip()
+    if stop:
+        text += JOB_STOP.format(stop=stop)
     return text
+
+
+JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
+            "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
+            "and the owner sees why. Never write that line otherwise.")
+# A job's own bot ends its reply with this when its stop condition holds (JOB_STOP).
+_LOOP_DONE_RE = re.compile(r"^[ \t>*_-]*LOOP[ \t]+DONE[*_ \t]*:[*_ \t]*(.*?)[ \t*_]*$", re.M | re.I)
+
+
+def _extract_loop_done(text):
+    """(text without LOOP DONE lines, why or None). A bare line still counts: why is "" then."""
+    found = _LOOP_DONE_RE.findall(text or "")
+    if not found:
+        return text or "", None
+    return _LOOP_DONE_RE.sub("", text or "").rstrip(), found[0].strip()
 
 
 BROWSER_SHELL_OFF = shell_rules.BROWSER_SHELL_OFF
@@ -2068,7 +2090,7 @@ def run_job(job, srv):
         elif not rec and isinstance(ev.get("delta"), str):
             detail += ev["delta"]  # a zero-model reply (cap, engine): why it did not run
     status = live.get("status") or "failed"
-    if seen is not None and status in ("done", "waiting"):
+    if seen is not None and status in ("done", "waiting", "finished"):
         jobs.set_check_seen(ROOT, job["id"], seen)  # a failed run sees the same news again next time
     return {"status": status, "chat": chat if rec else None,
             "cost": float((rec or {}).get("cost") or 0), "detail": detail[:300]}
@@ -2079,6 +2101,14 @@ def _job_check(job):
     connected-app read held to a bot's own read rules (composio.read_metric)."""
     c = job["check"]
     ws = job.get("workspace") or bots.HQ
+    if "own" in c:  # Leo Bot's own data: no app, no bot rights involved
+        try:
+            return own_checks.digest(ROOT, ws, c.get("own"), c.get("id")), None
+        except ValueError as e:
+            return None, f"its check could not run: {e}"[:300]
+        except Exception as e:  # noqa: BLE001 - one job's check never stops the runner
+            traceback.print_exc()
+            return None, f"its check failed: {type(e).__name__}"
     try:
         out = composio.read_metric(c.get("app"), c.get("action"), c.get("args") or {}, ws, job["bot"], ROOT)
     except composio.ComposioError as e:
@@ -4608,6 +4638,7 @@ class Handler(BaseHTTPRequestHandler):
         minted = []
         turn_started = time.time()
         wf_out = {"card": False, "stopped": False, "failed": False}  # how this turn went, for a workflow
+        loop_done = None  # a job's LOOP DONE reason, once its own bot wrote one
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
@@ -4839,6 +4870,18 @@ class Handler(BaseHTTPRequestHandler):
                     reacts.extend((m["bot"], e) for e in got)
             if reacts:
                 emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
+            if job:  # the job's own bot says its stop condition holds; a consulted teammate never ends it
+                for i, m in enumerate(msgs):
+                    clean, why = _extract_loop_done(m["content"])
+                    if why is None:
+                        continue
+                    m["content"] = clean
+                    emit({"clean": clean, "msg": i})
+                    if m["bot"] == job["bot"] and not m.get("asked_by") and loop_done is None:
+                        loop_done = why or "its stop condition holds"
+                if loop_done is not None:
+                    notice(f"This loop met its stop condition and turned itself off: {loop_done[:200]}. "
+                           "Turn it back on in Loops.")
             for m in msgs[1:]:  # a teammate never asks for approval or consults on its own
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
                 m["content"] = _HANDOFF_RE.sub("", m["content"]).rstrip() if _HANDOFF_RE.search(m["content"]) else m["content"]
@@ -4857,6 +4900,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
+            if job and loop_done is not None:
+                try:
+                    jobs.update(ROOT, job["id"], enabled=False)
+                    if live.get("status") in ("done", "waiting", "capped"):
+                        live["status"] = "finished"
+                except (LookupError, OSError, ValueError):  # deleted while it ran
+                    traceback.print_exc()
             if job:  # the turn's spend is saved below: no longer live
                 try:
                     jobs.set_live(ROOT, None, 0)

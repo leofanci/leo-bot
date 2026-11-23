@@ -238,6 +238,25 @@ class JobTurn(unittest.TestCase):
         self.assertEqual((out["status"], len(self.asks)), ("waiting", 2))
         self.assertNotEqual(jobs.get(self.root, jid)["check_seen"], seen)
 
+    def test_job_quiet_when_own_data_unchanged(self):
+        jid = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="cards", message="m",
+                          schedule="every 5m", cap=None, check={"own": "approvals"})["id"]
+        job = lambda: jobs.get(self.root, jid)  # noqa: E731
+        self.reply = "Nothing to chase."
+        self.assertEqual(server.run_job(job(), self.srv)["status"], "done")
+        self.assertIn("cards waiting for you", self.asks[0]["text"])
+        out = server.run_job(job(), self.srv)
+        self.assertEqual((out["status"], out["cost"], len(self.asks)), ("quiet", 0.0, 1))  # no model turn
+        approvals.add(self.root, ws=WS, room=f"{WS}/general", chat="c9", bot="cmo", summary="save it")
+        self.assertEqual(server.run_job(job(), self.srv)["status"], "done")
+        self.assertEqual(len(self.asks), 2)
+
+    def test_own_check_on_missing_list_fails_without_model(self):
+        out = self.run_job(check={"own": "list", "id": "ls9"})
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("no list ls9", out["detail"])
+        self.assertEqual(self.asks, [])
+
     def test_failed_check_runs_nothing(self):
         out, _ = self.checked(server.composio.ComposioError("no gmail account is connected for acme"))
         self.assertEqual(out["status"], "failed")
@@ -260,6 +279,45 @@ class JobTurn(unittest.TestCase):
         self.assertEqual([a["outside"] for a in self.asks], [False, True])
         self.run_job(notes="", notes_outside=True)  # an empty notepad carries nothing
         self.assertFalse(self.asks[2]["outside"])
+
+    def saved_job(self, **kw):
+        return jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                           message="review the week", schedule="mon 09:00", cap=0.5,
+                           stop="the market is sized", **kw)
+
+    def test_stop_condition_is_in_the_prompt(self):
+        server.run_job(self.saved_job(mode="report"), self.srv)
+        self.assertIn("the market is sized", self.asks[0]["text"])
+        self.assertIn("LOOP DONE:", self.asks[0]["text"])
+        self.run_job()  # a job saved before loops had a stop condition: no LOOP DONE line asked
+        self.assertNotIn("LOOP DONE:", self.asks[1]["text"])
+
+    def test_loop_done_turns_off(self):
+        job = self.saved_job(mode="report")
+        self.reply = "Sized at 40k.\nLOOP DONE: the market is sized"
+        out = server.run_job(job, self.srv)
+        self.assertEqual(out["status"], "finished")
+        self.assertFalse(jobs.get(self.root, job["id"])["enabled"])
+        rec = server.chat_store.load(out["chat"])
+        last = rec["messages"][-1]
+        self.assertNotIn("LOOP DONE", last["content"])
+        self.assertIn("Sized at 40k.", last["content"])
+        self.assertTrue(any("stop condition" in n for n in last.get("notices", [])))
+
+    def test_loop_done_in_consult_answer_ignored(self):
+        bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
+        job = self.saved_job(mode="report")
+        replies = iter(["CONSULT @research: is it sized?", "LOOP DONE: sized", "Not yet, still sizing."])
+
+        def ask(sess, text, **kw):
+            self.asks.append({"sess": sess, "text": text})
+            yield ("delta", next(replies))
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = server.run_job(job, self.srv)
+        self.assertEqual(len(self.asks), 3)
+        self.assertEqual(out["status"], "done")
+        self.assertTrue(jobs.get(self.root, job["id"])["enabled"])
 
     def test_notepad_is_in_every_run(self):
         self.run_job(notes="Sent 12 of 30. Replies: 2.")
@@ -489,7 +547,7 @@ class JobTurn(unittest.TestCase):
 
     NEW = {"op": "create", "fields": {"bot": "cmo", "skill": "positioning", "name": "weekly",
                                       "message": "review the week", "schedule": "mon 09:00", "cap": 0.5,
-                                      "mode": "auto"}}
+                                      "mode": "auto", "stop": "the review is saved"}}
 
     def post(self, path, body):
         h = server.Handler.__new__(server.Handler)

@@ -3,12 +3,13 @@ import contextlib
 import io
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import index
-from core import approvals, bots, jobs, memory
+from core import approvals, bots, general, jobs, memory, paths
 from dashboard import db, fileops, job_cards
 from dashboard.engines import registry
 
@@ -20,7 +21,7 @@ class _Engine:
 
 
 NEW = {"bot": "cmo", "skill": "positioning", "name": "weekly", "message": "review the week",
-       "schedule": "mon 09:00", "cap": "0.5"}
+       "schedule": "mon 09:00", "cap": "0.5", "stop": "the review is saved"}
 
 
 class JobCardsBase(unittest.TestCase):
@@ -54,13 +55,47 @@ class JobCardsBase(unittest.TestCase):
 
 
 class Proposal(JobCardsBase):
+    def settings(self, **values):
+        saved = paths.SETTINGS.read_text() if paths.SETTINGS.exists() else None
+        self.addCleanup(lambda: paths.SETTINGS.write_text(saved) if saved is not None
+                        else paths.SETTINGS.unlink(missing_ok=True))
+        paths.SETTINGS.unlink(missing_ok=True)
+        if values:
+            general.update(values)
+
+    def test_create_needs_stop(self):
+        for stop in (None, "", "   "):
+            with self.subTest(stop=stop), self.assertRaises(ValueError):
+                self.propose(**dict(NEW, stop=stop))
+        rows = dict(self.propose()["preview"]["fields"])
+        self.assertEqual(rows["Stops when"], "the review is saved")
+
+    def test_default_mode_is_setting(self):
+        self.settings()
+        self.assertEqual(self.propose()["fields"]["mode"], "report")
+        self.settings(loop_mode="approval")
+        self.assertEqual(self.propose()["fields"]["mode"], "approval")
+        self.assertEqual(self.propose(**dict(NEW, mode="auto"))["fields"]["mode"], "auto")  # the owner sees it on the card
+
+    def test_expires_from_loop_days(self):
+        self.settings()
+        p = self.propose()
+        self.assertAlmostEqual(p["fields"]["expires"], time.time() + 30 * 86400, delta=60)
+        self.assertIn("renew", dict(p["preview"]["fields"])["Expires"])
+        job_cards.apply(self.root, {"ws": "acme", "job": {k: p[k] for k in ("op", "job_id", "fields")}}, self.projects)
+        self.assertAlmostEqual(jobs.load(self.root)[0]["expires"], time.time() + 30 * 86400, delta=60)
+        self.settings(loop_days=0)
+        p = self.propose(**dict(NEW, name="never"))
+        self.assertIsNone(p["fields"]["expires"])
+        self.assertEqual(dict(p["preview"]["fields"])["Expires"], "never")
+
     def test_create_card_shows_what_approve_saves(self):
         p = self.propose()
         self.assertEqual(p["summary"], "New job: weekly")
         rows = dict(p["preview"]["fields"])
         self.assertEqual(rows["Bot"], "@cmo /positioning")
         self.assertEqual(rows["Workspace"], "acme")
-        self.assertEqual(rows["Mode"], job_cards.MODE_TEXT["approval"])
+        self.assertEqual(rows["Mode"], job_cards.MODE_TEXT["report"])  # a new loop starts in Report only
         self.assertEqual(rows["Cap"], "$0.5 per 24 hours")
         self.assertIn("Next run", rows)
         self.assertEqual(p["fields"]["cap"], 0.5)

@@ -37,6 +37,18 @@ class ChainSettings(unittest.TestCase):
             general.update({"chain_hops": reset, "chain_cost": reset})
             self.assertEqual(chain.limits(), (0, 0.0))
 
+    def test_loop_fields_validate(self):
+        v = general.view()
+        self.assertEqual((v["loop_mode"], v["loop_days"]), ("report", 30))
+        general.update({"loop_mode": "auto", "loop_days": 0})
+        self.assertEqual((general.view()["loop_mode"], general.view()["loop_days"]), ("auto", 0))
+        for bad in ({"loop_mode": "free"}, {"loop_mode": None}, {"loop_days": -1}, {"loop_days": 366},
+                    {"loop_days": 2.5}, {"loop_days": True}):
+            with self.subTest(bad), self.assertRaises(ValueError):
+                general.update(bad)
+        general.update({"loop_days": ""})
+        self.assertEqual(general.view()["loop_days"], 30)
+
     def test_workflow_cost_validates(self):
         from core import workflows
         self.assertEqual(general.view()["workflow_cost"], 0.0)

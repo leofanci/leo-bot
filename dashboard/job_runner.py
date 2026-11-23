@@ -129,6 +129,10 @@ class Runner:
         now = self.now()
         if halt.halted(self.root):  # Stop everything: nothing runs until the owner resumes
             return []
+        try:
+            jobs.expire_due(self.root, now)  # a loop past its expiry waits for the owner to renew it
+        except (OSError, ValueError):
+            traceback.print_exc()
         due = []
         for job in jobs.load(self.root):
             if jobs.is_due(job, now):
