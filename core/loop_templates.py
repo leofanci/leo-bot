@@ -22,10 +22,11 @@ def _split(text):
 
 
 def _read(name):
+    from core import workflows  # its path guard: the file stays inside skills/
     if not isinstance(name, str) or not _NAME_RE.match(name) or name not in skill_loads.names():
         return None
-    f = skill_loads.SKILLS_DIR / name / "SKILL.md"
-    return f.read_text(encoding="utf-8") if f.is_file() else None
+    f = workflows._inside(skill_loads.SKILLS_DIR, name, "SKILL.md")
+    return f.read_text(encoding="utf-8") if f is not None and f.is_file() else None
 
 
 def is_loop(text):
