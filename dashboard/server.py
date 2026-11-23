@@ -4939,7 +4939,7 @@ class Handler(BaseHTTPRequestHandler):
                         msgs[i]["workflow_offer"] = {"name": wf.name, "brief": brief[:workflow_turns.BRIEF_MAX]}
                         emit({"workflow_offer": msgs[i]["workflow_offer"], "msg": i})
                 if loop_done is not None:
-                    notice(f"This loop met its stop condition and turned itself off: {loop_done[:200]}. "
+                    notice(f"This loop met its stop condition and turned itself off: {loop_done[:200].rstrip('. ')}. "
                            "Turn it back on in Loops.")
             for m in msgs[1:]:  # a teammate never asks for approval or consults on its own
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
