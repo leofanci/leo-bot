@@ -210,6 +210,21 @@ class Cli(unittest.TestCase):
             self.assertEqual(leobot.cmd_eval(args), 0)
         self.assertEqual(call.call_args[0][0][-5:], ["evals", "--live", "--case", "c1", "--yes"])
 
+    def test_live_run_starts_outside_the_test_runner(self):
+        # The live parent reads the real home's engine settings. Importing the turn harness
+        # (which loads unittest.mock) before the paths module must not trip the test guard.
+        import os
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as home:
+            env = {k: v for k, v in os.environ.items() if k != "LEOBOT_HOME"}
+            env["HOME"] = home
+            proc = subprocess.run([sys.executable, "-m", "evals", "--live", "--case", "no-such-case"],
+                                  cwd=str(Path(__file__).resolve().parent.parent), env=env,
+                                  capture_output=True, text=True, timeout=60)
+        self.assertEqual(proc.returncode, 2, proc.stderr[-500:])
+        self.assertIn("Unknown case: no-such-case", proc.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,12 +18,14 @@ import tempfile
 import time
 from pathlib import Path
 
+from core import paths  # noqa: F401 - first: turns loads unittest.mock, which the paths guard reads as a test run
 from evals import turns
 
 CASES = Path(__file__).parent / "cases" / "live.json"
 _LIVE_KEYS = ("mentions", "max_chars", "max_bullets", "teammates_include", "reaches")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+", re.M)
 KEEP_RUNS = 20
+REPLY_KEEP = 8000  # enough of a memo-length reply to judge a skill rewrite
 
 
 def load(path=CASES):
@@ -73,7 +75,7 @@ def _child(args):
         results.append({"id": case["id"], "pass": not fails, "fails": fails,
                         "cost": outcome.get("cost") or 0, "engine": outcome.get("engine"),
                         "model": outcome.get("model"), "seconds": round(time.time() - started, 1),
-                        "reply": (outcome.get("reply") or "")[:2000]})
+                        "reply": (outcome.get("reply") or "")[:REPLY_KEEP]})
         print(f"{'ok  ' if not fails else 'FAIL'} {case['id']}", file=sys.stderr, flush=True)
     Path(args.out).write_text(json.dumps(results, indent=1), encoding="utf-8")
     return 0
