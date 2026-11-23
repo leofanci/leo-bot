@@ -296,14 +296,34 @@ class JobTurn(unittest.TestCase):
             self.run_job(mode="auto", message="draft the weekly email")
         self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
 
-    def test_job_turn_never_hands_off(self):
+    def test_job_hands_off_in_its_mode(self):
+        bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
+        replies = iter(["Research should size it.\nHANDOFF @research: size the market",
+                        "Market sized."])
+        test = self
+
+        def ask(sess, text, **kw):
+            test.asks.append({"sess": sess, "text": text, "readonly": sess.readonly, "kw": kw})
+            yield ("delta", next(replies))
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job(mode="report")
+        self.assertEqual(len(self.asks), 2)
+        self.assertTrue(self.asks[1]["readonly"])  # the hop runs in the job's mode
+        self.assertEqual(self.asks[1]["sess"].job_mode, "report")
+        rec = server.chat_store.load(out["chat"])
+        hop = rec["messages"][-1]
+        self.assertEqual(hop["bot"], "research")
+        self.assertEqual(hop.get("handoff_from"), "cmo")
+        self.assertNotIn("HANDOFF", rec["messages"][0]["content"])
+
+    def test_job_hop_counts_against_job_cap(self):
         bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
         self.reply = "Research should size it.\nHANDOFF @research: size the market"
-        out = self.run_job(mode="auto")
+        self.events = [("delta", self.reply), ("done", {"cost": 0.02})]
+        out = self.run_job(cap=0.01, mode="auto")
         self.assertEqual(len(self.asks), 1)
-        rec = server.chat_store.load(out["chat"])
-        self.assertNotIn("HANDOFF", rec["messages"][-1]["content"])
-        self.assertTrue(any("does not hand off" in n for n in rec["messages"][-1].get("notices", [])))
+        self.assertEqual(out["status"], "capped")
 
     def test_job_turn_searches_the_web(self):
         # A research job runs unattended end to end: web search on, fetch hosts none (below).

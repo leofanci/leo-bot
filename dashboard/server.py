@@ -4637,7 +4637,7 @@ class Handler(BaseHTTPRequestHandler):
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
-            if named_handoff and not handoff and not job:
+            if named_handoff and not handoff:
                 # The line is stripped from the reply: without this the user reads "passing it on" and
                 # nothing follows (teammate off, or not in this room).
                 notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
@@ -4665,11 +4665,6 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"clean": clean3, "msg": len(msgs) - 1})
                 handoff = handoff or h3
             writers = {0: may_write}
-            if handoff and job:
-                # A job is one bot's work in its approved mode: it never passes the run to a teammate.
-                notice(f"A scheduled job does not hand off: ask @{team.get(handoff[0]).handle} "
-                       "in a thread of your own.")
-                handoff = None
 
             def said_since(eid):
                 """This message's replies the engine `eid` has not seen, each labeled with its bot

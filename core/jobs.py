@@ -5,7 +5,8 @@ server (dashboard/job_runner.py) in its mode, with its own daily cap. The file s
 workspaces like team/approvals.json, so company bots cannot read it. A bot schedules work
 itself from the owner's private thread (`osctl propose-job`, applied when its turn ends,
 with Undo and Pause on the receipt); the owner also changes jobs on the Team screen. A
-job's own run never schedules more.
+job's own run never schedules more. A run may hand off and consult along a chain (core/chain.py): every
+hop runs in the job's mode and counts against its cap.
 
 Record: id, name, workspace, bot, skill, message, schedule, cap (dollars per rolling
 24 hours, above 0), mode, enabled, created, last_run, last_status, last_chat; optional
