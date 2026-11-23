@@ -11,7 +11,7 @@ from unittest import mock
 
 import leobot
 from core import memory
-from evals import live, recall, turns
+from evals import compare, live, recall, turns
 
 
 class OfflineTurns(unittest.TestCase):
@@ -199,6 +199,171 @@ class LiveGrading(unittest.TestCase):
         run.assert_not_called()
 
 
+
+SCORES = {"specific": 4, "grounded": 4, "risks": 3, "doable": 4, "consistent": 5}
+
+
+class Compare(unittest.TestCase):
+    def write(self, tmp, cases):
+        path = Path(tmp) / "cases.json"
+        path.write_text(json.dumps(cases))
+        return path
+
+    def test_load_checks_cases(self):
+        cases = compare.load()
+        self.assertEqual(len(cases), 3)
+        for c in cases:
+            self.assertEqual(set(c), {"id", "workflow", "brief", "intake"})
+            self.assertIn("acme", (c["brief"] + c["intake"]).lower())
+        good = cases[0]
+        bad = {"unknown key": [dict(good, extra=1)],
+               "missing brief": [{k: v for k, v in good.items() if k != "brief"}],
+               "empty brief": [dict(good, brief=" ")],
+               "duplicate id": [good, dict(good)],
+               "unknown workflow": [dict(good, workflow="no-such-flow")],
+               "not one step": [dict(good, workflow="idea-to-experiment")],
+               "not a list": {"id": "x"}}
+        with tempfile.TemporaryDirectory() as tmp:
+            for why, data in bad.items():
+                with self.subTest(why), self.assertRaises(ValueError):
+                    compare.load(self.write(tmp, data))
+
+    def test_drive_ticks_until_the_run_stops(self):
+        sent = []
+        replies = [[{"chat_id": "c1"}, {"workflow": {"chat": "c1", "next": True, "status": "running",
+                                                     "label": "@cmo Advise on step 1 of /x", "why": ""}}],
+                   [{"workflow": {"chat": "c1", "next": True, "status": "running", "label": "@gtm Revise",
+                                  "why": ""}}],
+                   [{"workflow": {"chat": "c1", "next": False, "status": "paused",
+                                  "label": "", "why": "Waiting for your approval."}}]]
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        got = compare.drive(post, {"messages": [{"role": "user", "content": "/x go"}], "room_id": "acme/general"})
+        self.assertEqual(got, {"chat": "c1", "status": "paused", "why": "Waiting for your approval.", "ticks": 2})
+        self.assertEqual(len(sent), 3)
+        self.assertNotIn("workflow", sent[0])
+        for p in sent[1:]:
+            self.assertEqual((p["workflow"], p["chat_id"], p["room_id"]), ("next", "c1", "acme/general"))
+        self.assertEqual(sent[1]["messages"][0]["content"], "@cmo Advise on step 1 of /x")
+
+        sent.clear()
+        forever = [{"workflow": {"chat": "c1", "next": True, "status": "running", "label": "x", "why": ""}}]
+        got = compare.drive(lambda p: sent.append(p) or forever, {"messages": []}, limit=4)
+        self.assertEqual((got["ticks"], got["status"], len(sent)), (4, "running", 5))
+        got = compare.drive(lambda p: [{"error": "internal error"}], {"messages": []})
+        self.assertEqual((got["status"], got["ticks"]), ("failed", 0))
+
+    def test_judge_prompt_is_blind_and_order_varies(self):
+        case = compare.load()[0]
+        plans = {"workflow": "Goal: 40 signups by 2027-01-15. @research said the segment is small.",
+                 "single": "Goal: 30 signups. Ask @cmo for copy."}
+        prompt = compare.judge_prompt(case, plans, ["single", "workflow"])
+        for word in ("Plan A", "Plan B", case["brief"], case["intake"].strip()[:40], "40 signups"):
+            self.assertIn(word, prompt)
+        self.assertLess(prompt.index("30 signups"), prompt.index("40 signups"))
+        self.assertIn("the research bot said", prompt)  # a task owner stays a bot, not a stranger
+        for word in ("workflow", "single", "@research", "@cmo", "@gtm", "consult", "checker"):
+            self.assertNotIn(word, prompt.lower() if word.islower() else prompt)
+        orders = {tuple(compare.order_for(c["id"])) for c in compare.load()}
+        self.assertEqual(len(orders), 2)
+        self.assertEqual(compare.order_for("x"), compare.order_for("x"))
+
+    def test_verdict_maps_back(self):
+        order = ["single", "workflow"]
+        text = "Here you go:\n" + json.dumps({"A": SCORES, "B": dict(SCORES, risks=5), "better": "B",
+                                              "why": "B names its risks."}) + "\nthanks"
+        got = compare.verdict(text, order)
+        self.assertEqual(got["better"], "workflow")
+        self.assertEqual(got["scores"], {"single": 20, "workflow": 22})
+        self.assertEqual(got["why"], "B names its risks.")
+        self.assertEqual(compare.verdict(json.dumps({"A": SCORES, "B": SCORES, "better": "tie", "why": ""}),
+                                         order)["better"], "tie")
+        for bad in ("no json", "{bad", json.dumps({"A": SCORES, "B": {"specific": 3}, "better": "A"}),
+                    json.dumps({"A": SCORES, "B": dict(SCORES, risks=9), "better": "A"}),
+                    json.dumps({"A": SCORES, "B": SCORES, "better": "C"}), None):
+            with self.subTest(bad):
+                self.assertEqual(compare.verdict(bad, order)["better"], "none")
+
+    def test_paused_workflow_is_marked_not_judged(self):
+        case = compare.load()[0]
+        arms = {"workflow": {"status": "paused", "why": "Step 1 is still weak: x", "plan": "", "cost": 0.2},
+                "single": {"status": "done", "why": "", "plan": "A plan.", "cost": 0.1}}
+        judge = mock.Mock()
+        got = compare.judge_case(case, arms, judge)
+        judge.assert_not_called()
+        self.assertEqual(got["better"], "none")
+        self.assertEqual(got["arms"]["workflow"]["status"], "paused")
+        self.assertIn("still weak", got["arms"]["workflow"]["why"])
+        self.assertIn("no plan", got["why"])
+
+        arms["workflow"]["plan"] = "Another plan."
+        judge = mock.Mock(return_value=(json.dumps({"A": SCORES, "B": SCORES, "better": "A", "why": "w"}), 0.05))
+        got = compare.judge_case(case, arms, judge)
+        judge.assert_called_once()
+        self.assertEqual(got["better"], got["order"][0])
+        self.assertEqual(got["judge_cost"], 0.05)
+
+    def test_summary_gain_line(self):
+        def res(better, wc=0.3, sc=0.1):
+            return {"id": "c", "better": better, "scores": {}, "why": "",
+                    "arms": {"workflow": {"cost": wc}, "single": {"cost": sc}}, "judge_cost": 0.01}
+        text = compare.summary([res("workflow"), res("workflow"), res("single")])
+        self.assertIn("Gain: yes", text)
+        self.assertIn("$0.9000", text)  # the workflow arm over 3 cases
+        self.assertIn("$0.3000", text)
+        self.assertIn("3.0x", text)
+        self.assertIn("Gain: no", compare.summary([res("workflow"), res("tie"), res("none")]))
+        self.assertIn("Gain: no", compare.summary([]))
+
+    def test_results_saved_private_and_trimmed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = Path(tmp) / "evals"
+            for i in range(compare.KEEP_RUNS + 2):
+                path = compare.save_run(folder, {"when": str(i), "results": []})
+            self.assertEqual(len(list(folder.glob("compare-*.json"))), compare.KEEP_RUNS)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_declined_compare_sends_nothing(self):
+        with mock.patch("builtins.input", return_value="n"), \
+                mock.patch.object(compare.subprocess, "run") as run, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(compare.main([]), 1)
+        run.assert_not_called()
+        with mock.patch.object(compare.subprocess, "run") as run, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(compare.main(["--case", "nope", "--yes"]), 2)
+        run.assert_not_called()
+
+    def test_main_runs_child_in_throwaway_home(self):
+        seen = {}
+
+        def fake_run(cmd, cwd, env):
+            home = Path(env["LEOBOT_HOME"])
+            seen["engine"] = json.loads((home / "data" / "team" / "engines.json").read_text())["default"]
+            seen["cmd"] = cmd
+            Path(cmd[cmd.index("--out") + 1]).write_text(json.dumps([
+                {"id": "c1", "better": "workflow", "scores": {}, "why": "", "judge_cost": 0.0,
+                 "arms": {"workflow": {"cost": 0.2}, "single": {"cost": 0.1}}}]))
+            return mock.Mock(returncode=0)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(compare, "_runs_dir", return_value=Path(tmp)), \
+                mock.patch.object(compare.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            code = compare.main(["--engine", "codex", "--yes"])
+            self.assertEqual(len(list(Path(tmp).glob("compare-*.json"))), 1)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["engine"], "codex")
+        self.assertIn("--cases-file", seen["cmd"])
+        self.assertIn("Gain: yes", out.getvalue())
+
+    def test_evals_entry_routes_compare(self):
+        import evals.__main__ as entry
+        with mock.patch.object(compare, "main", return_value=0) as m:
+            self.assertEqual(entry.main(["--compare", "--yes"]), 0)
+        m.assert_called_once_with(["--yes"])
+
+
 class Cli(unittest.TestCase):
     def test_live_flags_need_live(self):
         args = leobot.build_parser().parse_args(["eval", "--engine", "claude-code"])
@@ -209,6 +374,19 @@ class Cli(unittest.TestCase):
         with mock.patch.object(leobot.subprocess, "call", return_value=0) as call:
             self.assertEqual(leobot.cmd_eval(args), 0)
         self.assertEqual(call.call_args[0][0][-5:], ["evals", "--live", "--case", "c1", "--yes"])
+
+    def test_compare_flags_pass_through(self):
+        args = leobot.build_parser().parse_args(["eval", "--compare", "--cases-file", "x.json", "--yes"])
+        with mock.patch.object(leobot.subprocess, "call", return_value=0) as call:
+            self.assertEqual(leobot.cmd_eval(args), 0)
+        cmd = call.call_args[0][0]
+        self.assertEqual(cmd[1:4], ["-m", "evals", "--compare"])
+        self.assertEqual(Path(cmd[cmd.index("--cases-file") + 1]), Path("x.json").resolve())
+        self.assertEqual(cmd[-1], "--yes")
+        with contextlib.redirect_stderr(io.StringIO()):
+            for argv in (["eval", "--live", "--compare"], ["eval", "--cases-file", "x.json"],
+                         ["eval", "--compare", "--engine", "all"]):
+                self.assertEqual(leobot.cmd_eval(leobot.build_parser().parse_args(argv)), 2)
 
     def test_live_run_starts_outside_the_test_runner(self):
         # The live parent reads the real home's engine settings. Importing the turn harness

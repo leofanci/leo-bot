@@ -1,4 +1,5 @@
-"""python -m evals: the offline scorecard (free). python -m evals --live: see evals/live.py."""
+"""python -m evals: the offline scorecard (free). python -m evals --live: see evals/live.py.
+python -m evals --compare: a workflow against a single bot, see evals/compare.py."""
 import atexit
 import os
 import shutil
@@ -10,8 +11,13 @@ def main(argv):
     if "--live" in argv:
         from evals import live
         return live.main([a for a in argv if a != "--live"])
+    if "--compare" in argv:
+        from evals import compare
+        return compare.main([a for a in argv if a != "--compare"])
     if argv:
-        print("usage: python -m evals [--live [--engine ID] [--case ID ...] [--yes]]", file=sys.stderr)
+        print("usage: python -m evals [--live [--engine ID] [--case ID ...] [--yes]]\n"
+              "       python -m evals --compare [--engine ID] [--case ID ...] [--cases-file PATH] [--yes]",
+              file=sys.stderr)
         return 2
     # Offline evals never touch the real home folder: a temp one, set before anything imports paths.
     home = tempfile.mkdtemp(prefix="leobot-evals-")

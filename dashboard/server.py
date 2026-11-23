@@ -1982,6 +1982,11 @@ JOB_NOTES = {
         "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
         "line is ignored."),
 }
+# Claude Code allows osctl only as a plain command (claude_code.BASE_ALLOWED_TOOLS): anything wrapped
+# around it is refused, and a bot that gives up after that answers without the project's data.
+OSCTL_BASH_NOTE = ("## Running osctl\nRun each osctl command as its own Bash call, exactly "
+                   "`python3 -m dashboard.osctl <command> ...` from the folder you start in: no `cd`, no pipe "
+                   "(`| head`), no `2>&1`, no `;` or `&&`. Anything around it is refused. Read long output in full.")
 AGENTS_NOTE = ("## Sub-agents\nFor a big job with independent parts (research 30 people, check several sites, "
                "build and test separate pieces), start sub-agents with the Task tool so the parts run in "
                "parallel. Each gets your tools and rules; give each a complete brief and merge what they "
@@ -4193,6 +4198,10 @@ class Handler(BaseHTTPRequestHandler):
         wf_ctx = viewer.get("workflow")
         if wf_ctx and wf_ctx.get("route"):
             route = wf_ctx["route"]
+        # A workflow's consult or check turn, or a draft that goes out for advice: no writes, edits,
+        # app actions or card.
+        wf_advice = workflow_turns.advisory(wf_ctx)
+        wf_solo = workflow_turns.solo(wf_ctx)  # a step with consults: the workflow asks, not the bot
         # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
 
@@ -4219,7 +4228,7 @@ class Handler(BaseHTTPRequestHandler):
             # The bot's permission level (Settings, Bots): "edits" and "full" change files on any
             # private turn; only the owner's own turns ever get more than "ask".
             level = "ask" if shared or person else engine_config.access(ws, bot_id, ROOT)
-            may_edit = False if not edit_ok else (job_mode == "auto" if job
+            may_edit = False if not edit_ok or wf_advice else (job_mode == "auto" if job
                                                   else routed or level != "ask"
                                                   or _may_edit(explicit, room, user_msg, team, sess))
             # A bot's granted apps are on every private turn its engine can carry them: the bot
@@ -4362,7 +4371,7 @@ class Handler(BaseHTTPRequestHandler):
             elif engine.full_disk:
                 workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
             if not locked and engine.id == chat_session.ClaudeCodeEngine.id:
-                workspace = "\n\n".join(x for x in (workspace, AGENTS_NOTE) if x)
+                workspace = "\n\n".join(x for x in (workspace, OSCTL_BASH_NOTE, AGENTS_NOTE) if x)
             if getattr(sess, "shell", False):
                 lvl, rv = SHELL_LEVELS.get(sess.level, SHELL_LEVELS["full"])
                 workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
@@ -4417,7 +4426,7 @@ class Handler(BaseHTTPRequestHandler):
             explicit=bool(explicit),
             workspace=workspace,
             bot=_bot_block(team, bot_id, sess, project_slug if project_record else None,
-                           handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg,
+                           handoff_from, fresh=sess.is_fresh(), shared=shared, query=user_msg, readonly=wf_advice,
                            code_index=bool(graph_folder), apps_on=bool(mount),
                            members=(room["members"] if room and room["kind"] == "topic" else None)),
             only_project=(project_slug or None),
@@ -4669,7 +4678,10 @@ class Handler(BaseHTTPRequestHandler):
                 c_model = chat_session.CHAT_MODEL if c_pinned == "fast" else chat_session.ESCALATED_MODEL
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, shared=shared,
-                                      folders_block=linked_workspace_prompt(project_slug, c_rows))
+                                      folders_block="\n\n".join(x for x in (
+                                          linked_workspace_prompt(project_slug, c_rows),
+                                          OSCTL_BASH_NOTE if not locked and c.engine.id == chat_session.ClaudeCodeEngine.id
+                                          else "") if x))
             slot = person["id"] if person else ("job" if job else f"sess-{next(_EXTRA_SEQ)}")
             _EXTRA[slot] = c
             c_kw = {"read_dirs": c_read, "edit_dirs": ()}
@@ -4699,7 +4711,7 @@ class Handler(BaseHTTPRequestHandler):
                 kw.update({"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report", "hold_sends": hold_sends,
+                           "report": job_mode == "report" or wf_advice, "hold_sends": hold_sends,
                            "taint": turn,  # reads mark it; actions wait once it holds outside content
                            # the first app call marks the thread: no web search after app data
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
@@ -4711,7 +4723,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = browser.with_epoch(ws, lambda: _workspace_exists(ws), lambda _e: BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report", "hold_sends": hold_sends,
+                           "report": job_mode == "report" or wf_advice, "hold_sends": hold_sends,
                            # On a server, My Chrome is this sender's own Chrome via their runner only.
                            "runner_owner": sender, "shared": shared,
                            "taint": turn}), ROOT)
@@ -4747,6 +4759,9 @@ class Handler(BaseHTTPRequestHandler):
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
+        readonly_before = getattr(sess, "readonly", False)
+        if wf_advice:  # this turn only: the thread's session is writable again in the finally
+            sess.readonly = True
         try:
             apps_kw = _mint(st)  # inside: a failed mint still reaches the finally that revokes
             # Tell the client which saved chat this turn belongs to (a scope
@@ -4775,8 +4790,12 @@ class Handler(BaseHTTPRequestHandler):
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
+            if wf_solo:
+                asks = []
             named_handoff = _names_other(lead_text, team, bot_id)
             lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
+            if wf_solo or wf_advice:  # the workflow decides who goes next, not this turn's bot
+                handoff, named_handoff = None, False
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
@@ -4954,7 +4973,8 @@ class Handler(BaseHTTPRequestHandler):
                         dropped.append(asked[0])
                     asked = (i, summary, writers.get(i, may_write))
             # A chat-only turn's stray marker gets no buttons; a Report only job saves nothing.
-            if asked and asked[2] and job_mode != "report" and isinstance(getattr(sess, "session_id", None), str):
+            if (asked and asked[2] and job_mode != "report" and not wf_advice
+                    and isinstance(getattr(sess, "session_id", None), str)):
                 i, summary, _ = asked
                 rec = approvals.add(ROOT, ws=ws, room=(room or {}).get("id"), chat=sess.session_id,
                                     bot=msgs[i]["bot"], summary=summary)
@@ -5023,6 +5043,8 @@ class Handler(BaseHTTPRequestHandler):
             if msgs:  # saved too: a reload would otherwise show a reply that just stops
                 msgs[-1].setdefault("notices", []).append("Run failed: internal error")
         finally:
+            if wf_advice:
+                sess.readonly = readonly_before
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
             if job and loop_done is not None:

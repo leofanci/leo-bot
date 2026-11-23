@@ -1,10 +1,11 @@
 """Workflows: a skill file with `kind: workflow` whose `## Steps` list names, per step, the skill,
-the bot, the output, the gate and an optional checker bot. The server (dashboard/workflow_turns.py)
+the bot, the output, the gate, an optional checker bot and up to 3 bots consulted in order. The server (dashboard/workflow_turns.py)
 runs one step per chat turn in the owner's private thread; this module holds the template parser,
 the per-thread run record and the pure state machine that decides what comes after each turn.
 
 Step line (one numbered line per step, fields split by `|`, keys case-insensitive):
     1. skill: problem-validation | bot: product | output: problem verdict | gate: no | checker: research
+    2. skill: launch-plan | bot: gtm | output: the plan | gate: approval | checker: product | consult: research, cmo
 """
 import json
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 from core import bots, general, skill_loads
 
 MAX_STEPS = 12
+MAX_CONSULTS = 3
 _STEPS_RE = re.compile(r"^##\s+Steps\s*$", re.M)
 _STEP_LINE_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -28,6 +30,7 @@ class Step:
     output: str
     gate: bool          # True: the step ends in one APPROVAL: line (a card)
     checker: str | None
+    consult: tuple = ()  # bots that advise on the draft, in order, before the maker revises
 
 
 @dataclass(frozen=True)
@@ -80,7 +83,17 @@ def _parse_step(n, line):
     checker = (fields.get("checker") or "").lower().lstrip("@") or None
     if checker == bot:
         raise ValueError(f"step {n}: the checker must be a different bot from the maker")
-    return Step(skill, bot, fields["output"], gate == "approval", checker)
+    consult = tuple(c.strip().lower().lstrip("@") for c in fields.get("consult", "").split(","))
+    consult = () if consult == ("",) else consult
+    if any(not c for c in consult):
+        raise ValueError(f"step {n}: consult names an empty bot")
+    if len(consult) > MAX_CONSULTS:
+        raise ValueError(f"step {n}: consult names more than {MAX_CONSULTS} bots")
+    if len(set(consult)) != len(consult):
+        raise ValueError(f"step {n}: consult names a bot twice")
+    if bot in consult or (checker and checker in consult):
+        raise ValueError(f"step {n}: consult must name bots other than the maker and the checker")
+    return Step(skill, bot, fields["output"], gate == "approval", checker, consult)
 
 
 def parse(text, name):
@@ -144,12 +157,18 @@ def problems(wf, team):
             why = _bot_problem(team, s.checker)
             if why:
                 out.append(f"Step {n} checker: {why}.")
+        for c in s.consult:
+            why = _bot_problem(team, c)
+            if why:
+                out.append(f"Step {n} consult: {why}.")
     return out
 
 
 # --- run record ---------------------------------------------------------------------------
 # One run per thread: root/team/workflow_runs/<chat>.json. Phases of the current step:
-#   stage   the step's bot does the work
+#   stage   the step's bot does the work (a draft when the step has consults)
+#   consult one turn per consultant, in order (`consulted` counts them): advice, read-only
+#   revise  the step's bot rewrites its draft with the advice
 #   check   the checker bot answers PASS or WEAK: <notes>
 #   save    approval gate with a checker: the step's bot proposes the save once the check passed
 #   approve waiting on a card raised in `card_phase`
@@ -164,7 +183,7 @@ def _path(root, chat):
 def new_run(wf, brief, ws, room):
     now = time.time()
     return {"name": wf.name, "chat": None, "ws": ws, "room": room, "brief": brief, "step": 0,
-            "phase": "stage", "card_phase": "", "retried": False, "notes": "", "status": "running",
+            "phase": "stage", "card_phase": "", "consulted": 0, "retried": False, "notes": "", "status": "running",
             "why": "", "cost": 0.0, "started": now, "updated": now}
 
 
@@ -236,17 +255,41 @@ def _last_reply(out, bot_id):
 
 
 def _step_done(wf, run):
-    run.update(step=run["step"] + 1, phase="stage", card_phase="", retried=False, notes="",
+    run.update(step=run["step"] + 1, phase="stage", card_phase="", consulted=0, retried=False, notes="",
                status="running", why="")
     if run["step"] >= len(wf.steps):
         run["status"] = "done"
 
 
-def _weak(run, n, notes):
+def _weak(run, n, notes, phase="stage"):
+    """One retry of `phase` with the notes, then a pause."""
     if not run["retried"]:
-        run.update(phase="stage", retried=True, notes=notes, status="running", why="")
+        run.update(phase=phase, retried=True, notes=notes, status="running", why="")
     else:
-        run.update(phase="stage", notes=notes, status="paused", why=f"Step {n} is still weak: {notes}")
+        run.update(phase=phase, notes=notes, status="paused", why=f"Step {n} is still weak: {notes}")
+
+
+def _next_phase(step, phase, run):
+    """The phase after `phase` went through (consults already counted), or None: the step is done."""
+    if phase == "stage" and step.consult:
+        return "consult"
+    if phase == "consult":
+        return "consult" if int(run.get("consulted") or 0) < len(step.consult) else "revise"
+    if phase in ("stage", "revise"):
+        return "check" if step.checker else None
+    if phase == "check":
+        return "save" if step.gate else None
+    return None
+
+
+def _go(wf, run, step, phase):
+    nxt = _next_phase(step, phase, run)
+    if nxt == "consult" and phase == "stage":  # the draft is in: the revise phase gets its own retry
+        run.update(retried=False, notes="")
+    if nxt:
+        run.update(phase=nxt, card_phase="", status="running", why="")
+    else:
+        _step_done(wf, run)
 
 
 def advance(wf, run, out, cap):
@@ -260,28 +303,27 @@ def advance(wf, run, out, cap):
         run.update(status="paused", why="Stopped." if out.get("stopped") else "The last step failed.")
     elif phase == "approve":
         if out.get("answer") == "approved" and not out.get("card"):
-            if run.get("card_phase") == "stage" and step.checker:
-                run.update(phase="check", card_phase="", status="running", why="")
-            else:
-                _step_done(wf, run)
+            done = run.get("card_phase") or "stage"
+            if done == "consult":
+                run["consulted"] = int(run.get("consulted") or 0) + 1
+            _go(wf, run, step, done)
     elif out.get("card"):
         run.update(phase="approve", card_phase=phase, status="paused", why="Waiting for your approval.")
-    elif phase == "stage":
+    elif phase in ("stage", "revise"):
         m = _BLOCKED_RE.search(_last_reply(out, step.bot))
         if m:
-            _weak(run, n, m.group(1).strip())
-        elif step.checker:
-            run.update(phase="check", status="running", why="")
+            _weak(run, n, m.group(1).strip(), phase)
         else:
-            _step_done(wf, run)
+            _go(wf, run, step, phase)
+    elif phase == "consult":  # advice only: a consultant's BLOCKED line never stops the step
+        run["consulted"] = int(run.get("consulted") or 0) + 1
+        _go(wf, run, step, phase)
     elif phase == "check":
         ok, notes = verdict(_last_reply(out, step.checker))
         if not ok:
-            _weak(run, n, notes)
-        elif step.gate:
-            run.update(phase="save", status="running", why="")
+            _weak(run, n, notes, "revise" if step.consult else "stage")
         else:
-            _step_done(wf, run)
+            _go(wf, run, step, phase)
     else:  # save
         _step_done(wf, run)
     if run["status"] != "done" and cap > 0 and run["cost"] >= cap:
@@ -296,6 +338,6 @@ def resume(run):
     run = dict(run, status="running", why="")
     if run["phase"] == "approve":  # its card was answered no: Continue redoes that turn
         run.update(phase=run.get("card_phase") or "stage", card_phase="")
-    elif run["phase"] == "stage" and run.get("retried") and run.get("notes"):
+    elif run["phase"] in ("stage", "revise") and run.get("retried") and run.get("notes"):
         run["retried"] = False  # paused still weak: Continue gives the step a fresh retry
     return run

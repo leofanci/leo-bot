@@ -98,11 +98,14 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 
 - Each step is one ordinary chat turn by the bot the step names, so caps, chain limits, Stop and approval cards all apply as usual. The open tab sends the next step as soon as one ends.
 - A step can name a checker: a second bot that answers PASS or WEAK. A weak or blocked step is tried once more with the notes. If it is still weak, the run pauses.
+- A step can name up to 3 teammates under `consult:`. The step's bot writes a draft, each teammate advises on it in turn, then the bot revises it before the checker sees it. Advice and checks are read-only: they save nothing and raise no card. A weak check retries only the revision.
 - A workflow never saves on its own. A step either writes its output in the thread, or proposes the save with an approval card. Approve and the run goes on; reject and it waits.
 - The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
 - Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
+- The default team brings `/idea-to-experiment` and `/team-launch-plan` (@gtm drafts a launch plan, @research and @cmo advise, @product checks).
 - The add-on bots bring one workflow each: `/deal-prep` and `/outreach` (@sales), `/price-to-runway` (@finance), `/feedback-to-test` (@support), `/process-setup` (@ops) and `/hire-plan` (@people). Switch the bot on first.
+- `leobot eval --compare` (or `python -m evals --compare`) checks whether a one-step workflow beats its maker bot working alone. It runs each case both ways in a throwaway home on your default engine, then a strong model scores the two plans without knowing which is which. It spends, so it asks first. Results are saved in `~/.leobot/evals/`. The shipped cases are made up; `--cases-file <path>` runs your own cases from a file kept outside the repo.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
 
 ## Loops

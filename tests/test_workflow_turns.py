@@ -59,7 +59,7 @@ class WorkflowTurns(unittest.TestCase):
                 self._last_bot = bot_id
 
             def ask(self, text, **kw):
-                test.runs.append({"text": text})
+                test.runs.append({"text": text, "readonly": bool(getattr(self, "readonly", False))})
                 reply = test.replies.pop(0) if test.replies else "ok"
                 yield ("delta", reply)
                 yield ("done", {"tokens": 100, "cost": 0.01})
@@ -301,6 +301,108 @@ class WorkflowTurns(unittest.TestCase):
         self.assertEqual(wf_event(out)["next"], False)
         live = [e["workflow_live"] for e in events(out) if "workflow_live" in e]
         self.assertEqual((live[0]["step"], live[0]["status"], live[0]["next"]), (1, "running", False))
+
+    def consult_flow(self):
+        """A one-step workflow with two consultants and a checker, served as /demo-flow."""
+        text = ("---\nname: demo-flow\nkind: workflow\ndescription: Workflow. Demo.\n---\n\nIntro.\n\n"
+                "## Steps\n1. skill: experiment-design | bot: product | output: a test | gate: approval"
+                " | checker: gtm | consult: research, cmo\n\n## Stop when\nDone.\n")
+        wf = workflows.parse(text, "demo-flow")
+        real = workflows.load
+        p = mock.patch.object(workflows, "load", side_effect=lambda n: wf if n == "demo-flow" else real(n))
+        p.start()
+        self.addCleanup(p.stop)
+        return wf
+
+    def test_consult_and_revise_labels_and_instructions(self):
+        wf = self.consult_flow()
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        stage = workflow_turns._instructions(run, wf)
+        self.assertIn("@research, then @cmo", stage)
+        self.assertIn("Do not save anything", stage)
+        run = dict(run, phase="consult")
+        self.assertEqual(workflow_turns.label(run, wf), "@research Advise on step 1 of /demo-flow")
+        body, ctx = workflow_turns._turn({}, run, wf)
+        self.assertEqual(ctx["route"], ("research", None, False, None))
+        self.assertEqual(ctx["kind"], "consult")
+        self.assertIn("Do not rewrite", body["context"])
+        self.assertIn("Do not save anything", body["context"])
+        self.assertEqual(workflow_turns.label(dict(run, consulted=1), wf), "@cmo Advise on step 1 of /demo-flow")
+        run = dict(run, phase="revise", consulted=2)
+        self.assertEqual(workflow_turns.label(run, wf), "@product Revise step 1 of /demo-flow")
+        body, ctx = workflow_turns._turn({}, run, wf)
+        self.assertEqual(ctx["route"], ("product", "experiment-design", True, None))
+        self.assertIn("advice", body["context"])
+        self.assertIn("Do not save anything", body["context"])  # the checker comes first
+        self.assertIn("stands alone", body["context"])
+
+    def test_full_consult_round_runs_through_the_server(self):
+        self.consult_flow()
+        out, _ = self.ask("/demo-flow an idea", ["Draft test."])
+        self.assertEqual(self.lead(out), "product")
+        out, _ = self.tick(["Research advice."])
+        self.assertEqual(self.lead(out), "research")
+        out, _ = self.tick(["Marketing advice."])
+        self.assertEqual(self.lead(out), "cmo")
+        self.assertEqual(wf_event(out)["phase"], "revise")
+        out, _ = self.tick(["Revised test."])
+        self.assertEqual(self.lead(out), "product")
+        self.assertIn("advice", self.runs[-1]["text"])
+        self.assertEqual(wf_event(out)["phase"], "check")
+
+    def test_check_turn_is_read_only_and_raises_no_card(self):
+        self.consult_flow()
+        minted = []
+        real = server.os_relay.TOKENS.mint
+        apps = []
+        real_apps = server.apps_relay.TOKENS.mint
+        self.ask("/demo-flow an idea", ["Draft test."])
+        workflows.save(self.root, dict(self.run_rec(), phase="consult"))
+        with mock.patch.object(server.os_relay.TOKENS, "mint", side_effect=lambda c: minted.append(c) or real(c)), \
+                mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda c: apps.append(c) or real_apps(c)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": "act"}):
+            out, _ = self.tick(["Advice.\nAPPROVAL: create-memo the plan"])
+            self.assertFalse([e for e in events(out) if "approval" in e])
+            self.assertFalse(approvals.pending(self.root, "acme"))
+            self.assertEqual(self.run_rec()["consulted"], 1)
+            workflows.save(self.root, dict(self.run_rec(), phase="check", consulted=2))
+            out, _ = self.tick(["PASS\nAPPROVAL: create-memo the plan"])
+        self.assertFalse([e for e in events(out) if "approval" in e])
+        self.assertFalse(approvals.pending(self.root, "acme"))
+        self.assertEqual(self.run_rec()["phase"], "save")
+        self.assertEqual([r["readonly"] for r in self.runs], [True, True, True])
+        self.assertTrue(all(c.get("readonly") for c in minted))
+        self.assertTrue(apps and all(c.get("report") for c in apps))
+        self.assertFalse(self.sess.readonly)  # the thread's session is writable again after the turn
+        out, _ = self.tick(["Saving.\nAPPROVAL: create-memo the plan"])  # the save turn still asks
+        self.assertTrue([e for e in events(out) if "approval" in e])
+        self.assertFalse(self.runs[-1]["readonly"])
+
+    def test_draft_turn_runs_no_own_consults_and_raises_no_card(self):
+        self.consult_flow()
+        out, rec = self.ask("/demo-flow an idea", ["Draft test.\nCONSULT @research: is it big?\n"
+                                                   "HANDOFF @cmo: write the copy\nAPPROVAL: save the test"])
+        self.assertEqual(len(self.runs), 1)  # the workflow runs the consults, not the bot
+        self.assertTrue(self.runs[0]["readonly"])
+        self.assertFalse([e for e in events(out) if "approval" in e])
+        self.assertFalse(approvals.pending(self.root, "acme"))
+        self.assertEqual((self.run_rec()["phase"], self.run_rec()["status"]), ("consult", "running"))
+        self.tick(["Advice."])
+        self.tick(["More advice."])
+        out, _ = self.tick(["Revised.\nCONSULT @cmo: again?"])
+        self.assertEqual(len(self.runs), 4)
+        self.assertFalse(self.runs[-1]["readonly"])
+        self.assertEqual(wf_event(out)["phase"], "check")
+
+    def test_consultant_switched_off_pauses(self):
+        self.consult_flow()
+        self.ask("/demo-flow an idea", ["Draft test."])
+        bots.set_active("cmo", False, self.root, "acme", self.tree[0])
+        out, _ = self.tick()
+        self.assertIn("@cmo is switched off", out)
+        self.assertEqual(self.run_rec()["status"], "paused")
+        self.assertEqual(len(self.runs), 1)
 
     def test_brief_label_is_neutral_and_cut(self):
         wf = workflows.load("idea-to-experiment")

@@ -8,6 +8,7 @@ and what the run cost.
     python -m evals --live [--engine ID|all] [--case ID ...] [--yes]
 """
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -173,9 +174,10 @@ def main(argv=None):
     return 0 if all(x["pass"] for r in runs for x in r["results"]) else 1
 
 
-def _run_engine(engine, args):
-    """One engine's live run in a throwaway home: saved, compared with that engine's last run
-    and printed. None when the run stopped before it finished."""
+@contextlib.contextmanager
+def throwaway_home(engine):
+    """A temp LEOBOT_HOME whose only setting is a copy of the owner's engines on `engine`: the
+    child process runs there, and the key copy is deleted first when the block ends."""
     from core import paths
     with tempfile.TemporaryDirectory(prefix="leobot-eval-home-") as home:
         team = Path(home) / "data" / "team"
@@ -187,6 +189,17 @@ def _run_engine(engine, args):
         copy = team / "engines.json"
         copy.touch(mode=0o600)
         copy.write_text(json.dumps(data), encoding="utf-8")
+        try:
+            yield home
+        finally:
+            shutil.rmtree(team, ignore_errors=True)  # the key copy goes first, before the folder
+
+
+def _run_engine(engine, args):
+    """One engine's live run in a throwaway home: saved, compared with that engine's last run
+    and printed. None when the run stopped before it finished."""
+    from core import paths
+    with throwaway_home(engine) as home:
         out = Path(home) / "results.json"
         cmd = [sys.executable, "-m", "evals.live", "--child", "--out", str(out)]
         for c in args.case or ():
@@ -197,7 +210,6 @@ def _run_engine(engine, args):
                   file=sys.stderr)
             return None
         results = json.loads(out.read_text(encoding="utf-8"))
-        shutil.rmtree(team, ignore_errors=True)  # the key copy goes first, before the folder
     run = {"when": time.strftime("%Y-%m-%d %H:%M"), "engine": engine, "results": results}
     folder = _runs_dir()
     last = last_run(folder, engine)

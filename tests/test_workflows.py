@@ -84,6 +84,30 @@ class Templates(unittest.TestCase):
         self.assertTrue(wf.steps[3].gate)
         self.assertEqual(workflows.problems(wf, venture_team()), [])
         self.assertTrue(workflows.problems(wf, bots.team()))  # HQ starts with cos only
+        team = workflows.load("team-launch-plan")
+        self.assertIsNotNone(team)
+        self.assertEqual(len(team.steps), 1)
+        step = team.steps[0]
+        self.assertEqual((step.skill, step.bot, step.checker, step.gate, step.consult),
+                         ("launch-plan", "gtm", "product", True, ("research", "cmo")))
+        self.assertEqual(workflows.problems(team, venture_team()), [])
+
+    def test_parse_consult(self):
+        base = "1. skill: experiment-design | bot: product | output: test | gate: no | checker: gtm"
+        wf = workflows.parse(wf_text([base + " | consult: research, @cmo"]), "x")
+        self.assertEqual(wf.steps[0].consult, ("research", "cmo"))
+        self.assertEqual(workflows.parse(wf_text([base]), "x").steps[0].consult, ())
+        for why, extra in {"maker": "product, cmo", "checker": "gtm", "repeat": "cmo, cmo",
+                           "four": "research, cmo, cos, social", "empty": " , "}.items():
+            with self.subTest(why), self.assertRaises(ValueError):
+                workflows.parse(wf_text([base + " | consult: " + extra]), "x")
+
+    def test_consultant_problems(self):
+        got = workflows.problems(CONSULTED, FakeTeam(off={"cmo"}))
+        self.assertEqual(got, ["Step 1 consult: @cmo is switched off."])
+        wf = workflows.parse(wf_text([
+            "1. skill: experiment-design | bot: product | output: test | gate: no | consult: nobody"]), "x")
+        self.assertEqual(workflows.problems(wf, FakeTeam()), ["Step 1 consult: @nobody is not on the team."])
 
     def test_plain_skill_is_not_a_workflow(self):
         self.assertIsNone(workflows.load("positioning"))
@@ -118,6 +142,12 @@ GATED = workflows.parse(wf_text([
     "1. skill: experiment-design | bot: product | output: test | gate: approval | checker: research"]), "demo-flow")
 GATED_SOLO = workflows.parse(wf_text([
     "1. skill: experiment-design | bot: product | output: test | gate: approval"]), "demo-flow")
+CONSULTED = workflows.parse(wf_text([
+    "1. skill: experiment-design | bot: product | output: test | gate: approval | checker: gtm"
+    " | consult: research, cmo"]), "demo-flow")
+CONSULTED_SOLO = workflows.parse(wf_text([
+    "1. skill: experiment-design | bot: product | output: test | gate: approval | consult: research, cmo"]),
+    "demo-flow")
 
 
 class Runs(unittest.TestCase):
@@ -252,6 +282,75 @@ class Runs(unittest.TestCase):
         again = workflows.resume(weak)
         self.assertEqual((again["status"], again["phase"], again["retried"]), ("running", "stage", False))
         self.assertEqual(again["notes"], "thin")
+
+    def test_consults_run_in_order_then_revise(self):
+        run = self.run_of(CONSULTED)
+        self.assertEqual(run["consulted"], 0)
+        run = workflows.advance(CONSULTED, run, out(replies=[("product", "draft")]), 0)
+        self.assertEqual((run["phase"], run["consulted"]), ("consult", 0))
+        run = workflows.advance(CONSULTED, run, out(replies=[("research", "advice")]), 0)
+        self.assertEqual((run["phase"], run["consulted"]), ("consult", 1))
+        run = workflows.advance(CONSULTED, run, out(replies=[("cmo", "advice")]), 0)
+        self.assertEqual((run["phase"], run["consulted"]), ("revise", 2))
+        run = workflows.advance(CONSULTED, run, out(replies=[("product", "revised")]), 0)
+        self.assertEqual(run["phase"], "check")
+        run = workflows.advance(CONSULTED, run, out(replies=[("gtm", "PASS")]), 0)
+        self.assertEqual(run["phase"], "save")
+        run = workflows.advance(CONSULTED, run, out(card=True), 0)
+        self.assertEqual((run["phase"], run["card_phase"]), ("approve", "save"))
+        run = workflows.advance(CONSULTED, run, out(answer="approved"), 0)
+        self.assertEqual((run["status"], run["consulted"]), ("done", 0))
+
+    def test_weak_check_retries_revise_not_consults(self):
+        run = dict(self.run_of(CONSULTED), phase="check", consulted=2)
+        run = workflows.advance(CONSULTED, run, out(replies=[("gtm", "WEAK: no date")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"], run["consulted"]),
+                         ("revise", True, "no date", 2))
+        run = workflows.advance(CONSULTED, run, out(replies=[("product", "revised again")]), 0)
+        self.assertEqual(run["phase"], "check")
+        run = workflows.advance(CONSULTED, run, out(replies=[("gtm", "WEAK: still no date")]), 0)
+        self.assertEqual((run["status"], run["phase"]), ("paused", "revise"))
+        self.assertIn("still weak", run["why"])
+        again = workflows.resume(run)
+        self.assertEqual((again["status"], again["phase"], again["retried"]), ("running", "revise", False))
+
+    def test_blocked_in_revise_retries_revise(self):
+        run = dict(self.run_of(CONSULTED), phase="revise", consulted=2)
+        run = workflows.advance(CONSULTED, run, out(replies=[("product", "BLOCKED: no intake")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["status"]), ("revise", True, "running"))
+
+    def test_blocked_in_stage_retries_stage(self):
+        run = workflows.advance(CONSULTED, self.run_of(CONSULTED), out(replies=[("product", "BLOCKED: no intake")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"]), ("stage", True, "no intake"))
+
+    def test_stage_retry_does_not_use_up_the_revise_retry(self):
+        run = workflows.advance(CONSULTED, self.run_of(CONSULTED), out(replies=[("product", "BLOCKED: x")]), 0)
+        run = workflows.advance(CONSULTED, run, out(replies=[("product", "draft")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"]), ("consult", False, ""))
+
+    def test_consultant_blocked_is_ignored(self):
+        run = dict(self.run_of(CONSULTED), phase="consult")
+        run = workflows.advance(CONSULTED, run, out(replies=[("research", "BLOCKED: not my area")]), 0)
+        self.assertEqual((run["phase"], run["consulted"], run["status"]), ("consult", 1, "running"))
+
+    def test_card_in_consult_counts_after_approval(self):
+        run = dict(self.run_of(CONSULTED), phase="consult")
+        run = workflows.advance(CONSULTED, run, out(card=True), 0)
+        self.assertEqual((run["phase"], run["card_phase"], run["consulted"]), ("approve", "consult", 0))
+        run = workflows.advance(CONSULTED, run, out(answer="approved"), 0)
+        self.assertEqual((run["phase"], run["consulted"], run["status"]), ("consult", 1, "running"))
+
+    def test_card_in_stage_of_consult_step_goes_to_consults(self):
+        run = workflows.advance(CONSULTED, self.run_of(CONSULTED), out(card=True), 0)
+        run = workflows.advance(CONSULTED, run, out(answer="approved"), 0)
+        self.assertEqual((run["phase"], run["consulted"]), ("consult", 0))
+
+    def test_gate_without_checker_saves_in_revise(self):
+        run = dict(self.run_of(CONSULTED_SOLO), phase="revise", consulted=2)
+        run = workflows.advance(CONSULTED_SOLO, run, out(card=True), 0)
+        self.assertEqual((run["phase"], run["card_phase"]), ("approve", "revise"))
+        run = workflows.advance(CONSULTED_SOLO, run, out(answer="approved"), 0)
+        self.assertEqual(run["status"], "done")
 
     def test_advance_is_pure(self):
         run = self.run_of(PLAIN)
