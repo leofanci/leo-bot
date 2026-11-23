@@ -43,6 +43,10 @@ click from the owner. Each piece is enforced in code at the moment a tool runs.
   refused and an Approve click leaves the card waiting (`core/approvals.py` `start_app_run`,
   `claim`). A send is any write that sends, replies, forwards, publishes or posts
   (`core/app_rules.py` `is_send`).
+- **Browser sends are paced per site.** Two sends on one site, by any bot, are at least its gap
+  apart (LinkedIn 120 seconds, Instagram 180, others 30; 0 to 3600 in Settings, Browser). A send
+  due within two minutes waits its turn; a later one is refused with the time it may go
+  (`dashboard/browser_relay.py` `_send`).
 - **Web fetches stay on typed hosts.** A fetch reaches only addresses the owner typed; a page
   cannot steer it elsewhere.
 - **Shell after outside content runs offline.** Allowed commands run in the OS sandbox with no

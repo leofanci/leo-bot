@@ -1683,13 +1683,15 @@ def _browser_view(ws=None):
     with `ws`, that workspace's bot levels and modes. Owner only (the caller checked)."""
     with _BROWSER_INSTALL_LOCK:
         install = dict(_BROWSER_INSTALL)
-    proxies = browser.site_proxies(ROOT)
+    proxies, listed = browser.site_proxies(ROOT), browser.sites(ROOT)
     out = {"engine": {**browser_engine.status(), "version": browser_engine.VERSION,
                       "installing": install["running"], "last_install": install["last"]},
            "levels": list(browser.LEVELS), "modes": list(browser.MODES), "max_daily": browser.MAX_DAILY,
            # A site's proxy is shown masked (core/browser.mask_proxy): its password never leaves here.
-           "sites": [{"site": host, **row, "proxy": browser.mask_proxy(proxies.get(host))}
-                     for host, row in sorted(browser.sites(ROOT).items())],
+           "sites": [{"site": host, **row, "gap_effective": browser.gap_of(host, ROOT, listed),
+                      "proxy": browser.mask_proxy(proxies.get(host))}
+                     for host, row in sorted(listed.items())],
+           "default_gap": browser.DEFAULT_GAP, "max_gap": browser.MAX_GAP,
            # On a server, My Chrome is the owner's own Chrome lent by their runner (browser_lent).
            "chrome": (bool(runners.HUB.lenders("owner")) if DEPLOYMENT == "server"
                       else browser_upstream.find_chrome_debug_url() is not None),
@@ -1707,6 +1709,16 @@ def _browser_bot(body):
     if bot_id not in bots.load_defs():
         raise ValueError(f"unknown bot: {bot_id}")
     return ws, bot_id
+
+
+def _browser_gap(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and value.strip().isdecimal():
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"seconds between sends must be a whole number from 0 to {browser.MAX_GAP}, or empty")
+    return value
 
 
 def _browser_daily(value):
@@ -3449,7 +3461,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     mode = body.get("mode") or None
                     browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT, new=bool(body.get("add")),
-                                     proxy=_browser_site_proxy(site, body))
+                                     proxy=_browser_site_proxy(site, body), gap=_browser_gap(body.get("gap")))
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)

@@ -2724,12 +2724,13 @@ function browserModeLabel(mode){
 function browserOptionsHtml(values, label, current){
   return values.map(v => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(label(v))}</option>`).join("");
 }
-// One row of the sites table: the site, where it opens (empty: each bot's own choice), its daily limit.
+// One row of the sites table: the site, where it opens (empty: each bot's own choice), its daily limit, its gap between sends.
 function browserSiteRowHtml(s, maxDaily){
   const opens = [["", "Bot's choice"], ["bot", "Bot browser"], ["my_chrome", "My Chrome"]];
   return `<div class="post brw-site" data-site="${esc(s.site)}"><div class="t"><b>${esc(s.site)}</b></div>
     <label>Opens in <select data-site-mode>${opens.map(([v, l]) => `<option value="${v}"${(s.mode || "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
     <label>Daily limit <input data-site-daily type="number" min="1" max="${+maxDaily || 500}" step="1" inputmode="numeric" placeholder="None" value="${s.daily ? esc(String(s.daily)) : ""}" aria-label="Daily limit for ${esc(s.site)} (empty: none)"></label>
+    <label>Seconds between sends <input data-site-gap type="number" min="0" max="3600" step="1" inputmode="numeric" placeholder="${esc(String(s.gap_effective ?? 30))}" value="${s.gap != null ? esc(String(s.gap)) : ""}" aria-label="Seconds between two sends on ${esc(s.site)}, by any bot (empty: ${esc(String(s.gap_effective ?? 30))})"></label>
     ${s.mode === "my_chrome" ? "" : s.proxy
       ? `<span class="brw-proxy"><small>Proxy: ${esc(s.proxy)}</small><button class="more" data-site-proxy-rm>Remove proxy</button></span>`
       : `<label>Proxy <input data-site-proxy type="password" placeholder="http://proxy.example:3128" autocomplete="new-password" spellcheck="false" aria-label="Proxy for ${esc(s.site)}, bot browser only, an http address with user:password@ before the host if it needs one (empty: none)"></label>`}
@@ -3074,13 +3075,16 @@ async function renderBrowserSettings(){
     });
     box.querySelectorAll(".brw-site").forEach(row => {
       const site = row.dataset.site, mode = row.querySelector("[data-site-mode]"), daily = row.querySelector("[data-site-daily]");
-      const save = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null });
+      const gap = row.querySelector("[data-site-gap]");
+      const fields = () => ({ mode: mode.value || null, daily: daily.value.trim() || null, gap: gap.value.trim() || null });
+      const save = () => saveSite(site, fields());
       mode.onchange = save;
       daily.onchange = save;
+      gap.onchange = save;
       const proxy = row.querySelector("[data-site-proxy]");
-      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: proxy.value.trim() }); };
+      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { ...fields(), proxy: proxy.value.trim() }); };
       const proxyRm = row.querySelector("[data-site-proxy-rm]");
-      if (proxyRm) proxyRm.onclick = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: null });
+      if (proxyRm) proxyRm.onclick = () => saveSite(site, { ...fields(), proxy: null });
       row.querySelector("[data-site-rm]").onclick = ev => {
         const b = ev.currentTarget;
         if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again: it then has no daily limit"; return; }

@@ -93,6 +93,9 @@ class Gate(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        gap = mock.patch.object(browser, "DEFAULT_GAP", 0)  # pacing has its own tests (test_send_caps)
+        gap.start()
+        self.addCleanup(gap.stop)
         browser.set_site("acme.test", None, 20, self.root)
         browser.set_site("demo.test", "my_chrome", None, self.root)
         self.page = u("acme.test/messages/42")
@@ -740,6 +743,9 @@ class FinalReview(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        gap = mock.patch.object(browser, "DEFAULT_GAP", 0)  # pacing has its own tests (test_send_caps)
+        gap.start()
+        self.addCleanup(gap.stop)
         browser.set_site("acme.test", None, 20, self.root)
         browser.set_site("demo.test", "my_chrome", None, self.root)
         self.page = u("acme.test/messages/42")

@@ -4,8 +4,11 @@ import time
 import unittest
 from pathlib import Path
 
-from core import app_rules, approvals, integrations
-from dashboard import apps_relay, taint
+from unittest import mock
+
+from core import app_rules, approvals, browser, integrations
+from dashboard import apps_relay, browser_relay, taint
+from tests.test_browser_relay import CTX as BCTX, P, FakeUpstream as BrowserUpstream, call, text_of, u
 
 CAT = ["gmail", "googlecalendar", "slack", "linkedin"]
 CTX = {"ws": "hq", "bot": "cos", "chat": "c1", "room": "hq/general", "person": "ceo"}
@@ -133,6 +136,106 @@ class AppSendCap(unittest.TestCase):
         third = handle(SEND)
         self.assertIn("reached today's limit", third)
         self.assertEqual(len(up.frames), 2)  # nothing left to forward
+
+
+class BrowserPace(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.clock = [time.time()]
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def sent(self, page, ago, bot="b9", ws="demo"):
+        status, rec = approvals.claim_send(self.root, ws=ws, bot=bot, url=page, text="x", planned=False,
+                                           now=self.clock[0] - ago)
+        self.assertEqual(status, "ok")
+        approvals.end_send(rec["id"], True, self.root)
+
+    def test_gap_defaults(self):
+        self.assertEqual(browser.gap_of("linkedin.com", self.root), 120)
+        self.assertEqual(browser.gap_of("instagram.com", self.root), 180)
+        self.assertEqual(browser.gap_of("example.com", self.root), browser.DEFAULT_GAP)
+        self.assertEqual(browser.gap_of(None, self.root), 30)
+        self.assertEqual(browser.set_site("example.com", None, None, self.root, gap=0)["gap"], 0)
+        self.assertEqual(browser.gap_of("example.com", self.root), 0)
+        self.assertEqual(browser.gap_of("linkedin.com", self.root), 120)  # a stored list without gaps
+        for bad in (3601, -1, "5", True):
+            with self.assertRaises(ValueError):
+                browser.set_site("example.com", None, None, self.root, gap=bad)
+        self.assertIsNone(browser.set_site("example.com", None, None, self.root)["gap"])
+        self.assertEqual(browser.gap_of("example.com", self.root), 30)
+
+    def test_claim_inside_gap_waits(self):
+        page = u("example.com/inbox/1")
+        self.sent(page, 10)
+        now = self.clock[0]
+        out = approvals.claim_send(self.root, ws="acme", bot="b1", url=page, text="y", planned=False, gap=30,
+                                   now=now)
+        self.assertEqual(out[0], "wait")
+        self.assertAlmostEqual(out[1], 20.0, places=3)
+        self.assertEqual(len(approvals.load(self.root)), 1)  # no row written
+        self.assertEqual(approvals.claim_send(self.root, ws="acme", bot="b1", url=page, text="y", planned=False,
+                                              gap=30, now=now + 21)[0], "ok")
+
+    def test_cap_checked_before_gap(self):
+        page = u("example.com/inbox/1")
+        self.sent(page, 5)
+        self.assertEqual(approvals.claim_send(self.root, ws="acme", bot="b1", url=page, text="y", planned=False,
+                                              daily=1, gap=30, now=self.clock[0])[0], "capped")
+
+    def relay_send(self, page):
+        browser.set_bot("acme", "b1", "act", "bot", self.root)
+        up = BrowserUpstream(page)
+        naps = []
+
+        def nap(s):
+            naps.append(s)
+            self.clock[0] += s
+        ctx = {**BCTX, "taint": taint.Turn()}
+        with mock.patch("core.approvals.time.time", side_effect=lambda: self.clock[0]), \
+                mock.patch.object(browser_relay.time, "sleep", side_effect=nap):
+            browser_relay.handle(call(P + "fill", text="Hi there"), ctx, "s-1", up, self.root)
+            reply, _ = browser_relay.handle(call(P + "click"), ctx, "s-1", up, self.root)
+        return reply, up, naps
+
+    def test_send_inside_gap_waits_then_sends(self):
+        page = u("www.linkedin.com/messaging/thread/1")
+        self.sent(page, 100)
+        reply, up, naps = self.relay_send(page)
+        self.assertEqual(len(naps), 1)
+        self.assertAlmostEqual(naps[0], 20.0, places=3)
+        self.assertEqual(up.calls(), [P + "fill", P + "click"])
+        self.assertEqual(text_of(reply), "ok")
+
+    def test_tab_moved_while_waiting_sends_nothing(self):
+        page = u("www.linkedin.com/messaging/thread/1")
+        self.sent(page, 100)
+        browser.set_bot("acme", "b1", "act", "bot", self.root)
+        up = BrowserUpstream(page)
+
+        def nap(s):
+            self.clock[0] += s
+            up.url = u("www.linkedin.com/feed/")
+        ctx = {**BCTX, "taint": taint.Turn()}
+        with mock.patch("core.approvals.time.time", side_effect=lambda: self.clock[0]), \
+                mock.patch.object(browser_relay.time, "sleep", side_effect=nap):
+            browser_relay.handle(call(P + "fill", text="Hi there"), ctx, "s-1", up, self.root)
+            reply, _ = browser_relay.handle(call(P + "click"), ctx, "s-1", up, self.root)
+        self.assertEqual(text_of(reply), browser_relay.MOVED_WHILE_WAITING)
+        self.assertEqual(up.calls(), [P + "fill"])
+
+    def test_send_far_inside_gap_refused(self):
+        page = u("www.instagram.com/direct/t/1")
+        self.sent(page, 10)
+        reply, up, naps = self.relay_send(page)
+        self.assertEqual(naps, [])
+        self.assertEqual(up.calls(), [P + "fill"])
+        text = text_of(reply)
+        self.assertIn("instagram.com takes one send every 180 seconds", text)
+        self.assertIn("Nothing was sent", text)
+        self.assertRegex(text, r"can go at \d\d:\d\d")
 
 
 if __name__ == "__main__":

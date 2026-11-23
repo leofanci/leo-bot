@@ -397,8 +397,10 @@ def _count_sends(rows, site, root, now):
 
 
 def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, url, text, daily=None,
-               planned, now=None):
-    """Start one browser send, atomically with the daily cap: ("capped" | "no_plan" | "ok", record).
+               planned, now=None, gap=None):
+    """Start one browser send, atomically with the daily cap: ("capped" | "no_plan" | "ok", record),
+    or ("wait", seconds left) when the newest send on the page's site (every bot, every
+    workspace) started less than `gap` seconds ago. Nothing is written for "wait".
 
     Under one lock it counts today's sends of the page's site (every bot, every workspace)
     against `daily`, then either moves this bot's matching approved plan item (same ws, page
@@ -413,6 +415,12 @@ def claim_send(root=bots.ROOT, *, ws, room=None, chat=None, bot, person=None, ur
         _housekeep(rows)
         if daily and _count_sends(rows, site, root, now) >= daily:
             return "capped", None
+        if gap:
+            listed = browser.sites(root)
+            last = max((r.get("started") or r.get("resolved") or 0 for r in rows
+                        if _cap_row(r, now) and _send_site(r, root, listed) == site), default=None)
+            if last is not None and now - last < gap:
+                return "wait", gap - (now - last)
         if planned:
             hits = [] if place is None or not want else [
                 r for r in rows if _is_send(r) and r.get("status") == "approved"
