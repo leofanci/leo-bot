@@ -641,6 +641,23 @@ _SKILL_ROUTES = [
     ("workspace",             r"fill.{0,40}\btabs?\b|fill.{0,40}\bpanel\b|left panel|project sections?|divide.{0,50}\btabs?\b|populate.{0,40}(tabs?|panel|sections?)"),
     ("product-build",      r"product roadmap|build status|feature roadmap|plan (the )?features"),
     ("gtm-assessment",     r"assess\w*|where (do|does) (we|this) stand|pace call|gtm assessment"),
+    # Add-on domain bots (off by default): tagged routing skips these while their bot is off.
+    ("discovery-call",     r"discovery call|sales call|call (script|prep)|demo prep|what (should|do) i (ask|say) (on|in) (the|a|my) (call|demo)"),
+    ("prospect-list",      r"prospect\w*|lead list|list of (leads|people to contact)|target accounts?|find (me )?leads"),
+    ("deal-review",        r"\bdeals?\b|sales pipeline|pipeline review"),
+    ("objection-handling", r"objection\w*|push.?back from (a |the )?(buyer|prospect)"),
+    ("unit-economics",     r"unit economics|\bcac\b|\bltv\b|lifetime value|payback|gross margin|cost to (acquire|win|serve)"),
+    ("runway-plan",        r"runway|burn rate|\bburn\b|cash (flow|left)|how long (will|does) (the|our|my) money last|can (we|i) afford"),
+    ("contract-check",     r"\bcontracts?\b|agreement|terms of service|\bnda\b|before i sign"),
+    ("support-triage",     r"support (ticket|queue|inbox|email|request)s?|\btickets?\b|triage|customer complaints?|what to answer first"),
+    ("faq-builder",        r"\bfaqs?\b|help (center|centre|page|docs?)|knowledge base"),
+    ("feedback-synthesis", r"feedback|what (are )?customers (are )?saying|survey (answers|results)"),
+    ("weekly-plan",        r"plan (my|the|this|next) (week|day)\b|weekly plan|time.?block\w*|fit everything in"),
+    ("process-doc",        r"\bsops?\b|standard operating|process doc\w*|write (down|up) (the|a|our) process|by hand every"),
+    ("vendor-compare",     r"vendors?|which tool|compare (tools|software|apps|suppliers)|switch (software|tools)|subscriptions?\b|suppliers?"),
+    ("role-scope",         r"job description|(should|can) (we|i) hire\b|\bhiring\b|\bhire (a|an|someone)\b|freelancer|contractor|role scope"),
+    ("interview-plan",     r"interview (plan|questions?|process|scorecard)|ask (in|during) (the|an) interview|\bcandidates?\b"),
+    ("onboarding-plan",    r"first (30|60|90) days|new hire|onboard\w* (plan|the new|a new|new (hire|person|employee))"),
     ("folder-work",        r"\bfix(es|ed|ing)?\b|\brefactor\w*|\bimplement\w*|edit the code"),
     # workspace is the catch-all dispatcher for strategic asks that matched nothing
     # specific — handled separately in _route_skill so it has lowest priority.
@@ -668,12 +685,13 @@ def _explicit_skill(text):
     return None
 
 
-def _suggest_skill(text, among=None):
+def _suggest_skill(text, among=None, skip=()):
     """The skill a tagged bot's (or a DM's) message matches by wording. Untagged messages
-    never use it: their bot loads a skill itself. `among` checks those skills first."""
+    never use it: their bot loads a skill itself. `among` checks those skills first; `skip`
+    (a switched-off add-on bot's skills) never matches."""
     if not text:
         return None
-    routes = _COMPILED_ROUTES
+    routes = [r for r in _COMPILED_ROUTES if r[0] not in skip]
     # folder-work matches everyday words ("fix", "implement"): only a bot that owns it
     # (CTO, tagged or in its DM) routes there; it never takes over another bot's turn.
     routes = [r for r in routes if r[0] not in _OWNER_ONLY_ROUTES or r[0] in (among or ())]
@@ -698,7 +716,7 @@ def _route_dm(team, user_msg, session, bot):
     if _continuation_allowed(session, user_msg):
         return bot, None, False, None
     own = team.skills_of(bot)
-    hit = _suggest_skill(user_msg, among=own + sorted(bots.SHARED_SKILLS))
+    hit = _suggest_skill(user_msg, among=own + sorted(bots.SHARED_SKILLS), skip=team.hidden_skills())
     if hit in own or hit in bots.SHARED_SKILLS:
         return bot, hit, True, None
     if len(own) == 1:
@@ -741,7 +759,7 @@ def _route_bot(team, user_msg, session, default_bot=bots.ROOT_BOT, dm=None, memb
         return bot, tagged_skill, True, (mentioned if mentioned and mentioned != bot else None)
     if mentioned:
         own = team.skills_of(mentioned)
-        hit = _suggest_skill(user_msg, among=own + sorted(bots.SHARED_SKILLS))
+        hit = _suggest_skill(user_msg, among=own + sorted(bots.SHARED_SKILLS), skip=team.hidden_skills())
         if hit:
             owner = _skill_owner(team, hit, mentioned)
             return owner, hit, True, (mentioned if owner != mentioned else None)

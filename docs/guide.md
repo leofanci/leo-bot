@@ -64,6 +64,22 @@ Each project expands into six sections:
 
 ---
 
+## Add-on bots
+
+Five domain bots ship switched off in every workspace. Switch one on in the workspace's Team when you need it:
+
+| Bot | Skills |
+|---|---|
+| @sales, Sales Lead | discovery-call, prospect-list, deal-review, objection-handling |
+| @finance, Finance Lead | unit-economics, runway-plan, contract-check |
+| @support, Support Lead | support-triage, faq-builder, feedback-synthesis |
+| @ops, Operations Lead | weekly-plan, process-doc, vendor-compare |
+| @people, People Lead | role-scope, interview-plan, onboarding-plan |
+
+- While an add-on bot is off, its skills are on no bot's card, so they cost nothing per message. Typing `/<skill>` still runs it, as @cos.
+- They draft and recommend. Sending, paying, signing, buying and posting stay your actions, or wait for your approval.
+- *contract-check*, *runway-plan* and *unit-economics* are not legal, tax or investment advice. They flag what to confirm with a professional.
+
 ## Bots passing work on
 
 In chat a bot can pass the work to a teammate with a `HANDOFF @handle: <task>` line, or ask one for a read-only view with `CONSULT @handle: <question>`. The teammate that gets the work may pass it on again, so one message can travel along a chain of bots (for example research, then marketing, then social). Every link shows in the thread (`from @bot · hop 2`), and your next untagged message goes to the last bot.
