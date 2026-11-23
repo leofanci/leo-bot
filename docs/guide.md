@@ -73,7 +73,8 @@ In chat a bot can pass the work to a teammate with a `HANDOFF @handle: <task>` l
 - When two bots keep handing the work back and forth (four turns in a row), the chain pauses and asks you what to do next.
 - A bot that asks for your approval ends the chain there: approve or reject, and the thread continues with that bot.
 - Settings, General, *Bots passing work on*: hops per message and a cost cap per message. Both default to 0, which means no limit. Daily spending caps and Stop still apply.
-- A scheduled job never passes its run to another bot.
+- A workspace can set its own limits in Team, *Bot chains here*. An empty field uses the Settings value.
+- A scheduled job may pass work along a chain too. Every hop runs in the job's mode, and its spend counts against the job's cap.
 
 ## Workflows
 
@@ -86,6 +87,17 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
 - Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
+
+## Loops
+
+A loop is a scheduled job: one bot, one skill and one message, run on a schedule. A bot sets one up from your private thread, and you see it with Undo. Manage every loop in Team, *Manage loops*.
+
+- A new loop starts in Report only: it reads and reports and saves nothing. Settings, General, *New loops start in* changes that default. You promote a loop to Approval or Auto yourself, on the Loops screen. A loop never raises its own mode or cap.
+- Every new loop has a stop condition. When a run finds that it holds, the bot ends its reply with `LOOP DONE: <why>` and the loop turns itself off.
+- A loop expires after 30 days (Settings, General, *Loops expire after*; 0 means it never expires). An expired loop pauses until you click Renew. Renewing never runs the slots it missed: it runs once at the next check.
+- A loop can wake only when something changed. It can watch a connected app (as before), or Leo Bot's own data: the workspace's waiting cards, one list, its memos or its experiments. The check runs as code before the model, so a quiet run costs nothing.
+- A loop never starts a workflow. It can suggest one with a `START: /<workflow> <brief>` line. You then get a *Start* button that opens a new thread with that message typed in for you to send.
+- The Loops screen shows each loop's mode, cap, schedule, stop condition, expiry, last and next run, cost over 7 days and its notepad (*State*). It lets you pause, edit, renew or delete each loop.
 
 ## The content pipeline (two stages)
 
@@ -308,7 +320,7 @@ Source: `core/subsections.py`. Chat and dashboard mutations go through `osctl` /
 Experiments and memos stay honest against what actually happened.
 
 - **Metric source.** `osctl set-metric --project demo --stem will-pay --app acme --action ACME_GET_STATS --path data.followers` saves where an experiment's number comes from. Only a read-only app action is accepted; a write action, a URL argument or a paid or blocked app is refused with the reason. `path` is dotted keys, with digits for a list index. `update-experiment` cannot set it.
-- **Scoring job.** Create a scheduled job with the `score-experiments` skill (Team, Scheduled jobs). On each run the server reads every metric source (no click), takes the number, and asks the engine for a verdict against the success and kill criteria written in advance: on track, met, killed or inconclusive. What a source returns is quoted as data and never read by a bot. A failed read or bad path is `inconclusive` with the reason. Calls count against the job's cap.
+- **Scoring job.** Create a scheduled job with the `score-experiments` skill (ask a bot in your private thread; manage it in Loops). On each run the server reads every metric source (no click), takes the number, and asks the engine for a verdict against the success and kill criteria written in advance: on track, met, killed or inconclusive. What a source returns is quoted as data and never read by a bot. A failed read or bad path is `inconclusive` with the reason. Calls count against the job's cap.
 - **Verdict card.** Each verdict is a card in the job's thread with the number, window, date, criteria and reason. Approve saves the result on the experiment (status `done` for met or killed, `running` for on track) and adds one evidence entry. No saves nothing. A second click does nothing. A repeat run with the same number does not make a second card; a new number replaces the old pending one.
 - **Evidence log.** `osctl add-evidence --project demo --text "..." --ref <experiment or assumption id>` appends a dated, numbered entry (ids like `pr1.sec02.ev3`) under the intake's Evidence log. Entries are never edited.
 - **Assumptions.** `osctl extract-assumptions` proposes the assumptions a memo rests on from its prose; once you agree, `--items-json` saves them with stable ids (`pr1.sec04.mm1.as2`) that carry across memo versions. `list-assumptions` shows them with their status.

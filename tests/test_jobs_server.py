@@ -694,6 +694,42 @@ class JobTurn(unittest.TestCase):
         self.post(f"/api/jobs/{other['id']}/delete", {"ws": "hq"})
         self.assertIsNone(jobs.get(self.root, other["id"]))
 
+    def test_edit_endpoint_cleans_fields(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1, stop="old")
+        code, body = self.post(f"/api/jobs/{job['id']}/edit",
+                               {"ws": WS, "schedule": "Daily 09:00", "stop": " list  empty ", "message": "new"})
+        self.assertEqual(code, 200)
+        got = jobs.get(self.root, job["id"])
+        self.assertEqual((got["schedule"], got["stop"], got["message"]), ("daily 09:00", "list empty", "new"))
+        for bad in ({"ws": WS, "schedule": "whenever"}, {"ws": WS, "name": ""}, {"ws": WS},
+                    {"ws": WS, "mode": "auto"}, {"ws": WS, "stop": "x" * 301}):
+            self.assertEqual(self.post(f"/api/jobs/{job['id']}/edit", bad)[0], 400, bad)
+        self.assertEqual(jobs.get(self.root, job["id"])["schedule"], "daily 09:00")
+
+    def test_renew_endpoint_checks_target(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1, expires=time.time() - 10)
+        jobs.expire_due(self.root, time.time())
+        with mock.patch.object(server.general, "view", return_value={"loop_days": 30}):
+            bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})
+            self.assertEqual(self.post(f"/api/jobs/{job['id']}/renew", {"ws": WS})[0], 409)
+            self.assertFalse(jobs.get(self.root, job["id"])["enabled"])
+            bots.set_active("cmo", True, self.root, WS, {"slug": WS, "kind": "venture"})
+            code, body = self.post(f"/api/jobs/{job['id']}/renew", {"ws": WS})
+        self.assertEqual(code, 200)
+        got = jobs.get(self.root, job["id"])
+        self.assertTrue(got["enabled"])
+        self.assertAlmostEqual(got["expires"], time.time() + 30 * 86400, delta=60)
+
+    def test_jobs_view_has_cost_7d(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1)
+        self.assertEqual(server._jobs_view(WS)["jobs"][0]["cost_7d"], 0.0)
+        out = server.run_job(job, self.srv)
+        self.assertEqual(out["status"], "waiting")
+        self.assertAlmostEqual(server._jobs_view(WS)["jobs"][0]["cost_7d"], 0.01)
+
     def test_invited_person_has_no_job_routes(self):
         h = server.Handler.__new__(server.Handler)
         sent = []

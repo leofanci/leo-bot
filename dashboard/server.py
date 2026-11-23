@@ -1972,9 +1972,11 @@ def _job_notepad(job):
     stop = str(job.get("stop") or "").strip()
     if stop:
         text += JOB_STOP.format(stop=stop)
-    return text
+    return text + JOB_OFFER
 
 
+JOB_OFFER = ("\n\nTo suggest that the owner start a workflow (a skill set up as `kind: workflow`), end with one "
+             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself.")
 JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
             "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
             "and the owner sees why. Never write that line otherwise.")
@@ -2612,11 +2614,17 @@ def _chain_view(ws):
 def _jobs_view(ws):
     """The Team screen's jobs: every one from HQ, a workspace's own elsewhere."""
     out = []
+    try:  # what each job spent in the last 7 days, from the same records as Costs
+        spent = costs.summarize(bots.HQ, _spend_records(), set(), 7)["by_job"]
+    except Exception:  # noqa: BLE001 - the list still shows without its costs
+        traceback.print_exc()
+        spent = {}
     for j in jobs.load(ROOT):
         jws = j.get("workspace") or bots.HQ
         if ws != bots.HQ and jws != ws:
             continue
-        out.append({**jobs.view(j), "room": f"{jws}/dm-{j.get('bot')}"})
+        out.append({**jobs.view(j), "room": f"{jws}/dm-{j.get('bot')}",
+                    "cost_7d": round(float((spent.get(j["id"]) or {}).get("cost") or 0), 6)})
     return {"ws": ws, "jobs": out}
 
 
@@ -3882,8 +3890,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(403, {"error": "forbidden"})
 
     def _jobs_post(self, path, body):
-        """Owner only: a job's mode, cap, on/off and delete, from the Team screen. Everything else
-        about a job changes through a bot's proposal and its card."""
+        """Owner only, from the Loops screen: a job's mode, cap, on/off, delete, renew, and edits to
+        its name, message, schedule and stop condition. A bot changes a job only through a proposal."""
         jid, _, verb = path[len("/api/jobs/"):].partition("/")
         ws = _strict_ws(body.get("ws"))
         job = jobs.get(ROOT, jid)
@@ -3911,6 +3919,21 @@ class Handler(BaseHTTPRequestHandler):
             jobs.update(ROOT, jid, enabled=on)
         elif verb == "delete":
             jobs.delete(ROOT, jid)
+        elif verb == "edit":
+            fields = {k: body[k] for k in ("name", "message", "schedule", "stop") if k in body}
+            if not fields or set(body) - {"ws", "name", "message", "schedule", "stop"}:
+                return self._send(400, {"error": "edit: name, message, schedule or stop"})
+            try:
+                jobs.update(ROOT, jid, **{k: "" if v is None and k == "stop" else v for k, v in fields.items()})
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+        elif verb == "renew":  # on again, expiring Settings' loop days from now; it must still be able to run
+            try:
+                job_cards.check_target(ROOT, job.get("workspace") or bots.HQ, job.get("bot"),
+                                       job.get("skill"), db.tree())
+            except ValueError as e:
+                return self._send(409, {"error": str(e)})
+            jobs.renew(ROOT, jid, time.time(), general.view()["loop_days"])
         else:
             return self._send(404, {"error": "unknown endpoint"})
         return self._send(200, _jobs_view(ws))
