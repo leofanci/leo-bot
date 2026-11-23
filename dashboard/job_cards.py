@@ -11,7 +11,7 @@ untrusted text a bot wrote; the receipt shows exactly what was saved.
 """
 import time
 
-from core import bots, general, jobs, own_checks
+from core import bots, general, jobs, loop_templates, own_checks
 
 OPS = ("create", "update", "delete")
 _CREATE_NEEDS = ("bot", "skill", "name", "message", "schedule", "stop")
@@ -21,6 +21,15 @@ _LABELS = {"name": "Name", "message": "Message", "schedule": "Schedule", "cap": 
 MODE_TEXT = {"approval": "Approval: saves wait for your click",
              "auto": "Auto: saves by itself; deletes, whole-document replaces, memory and app actions wait for you",
              "report": "Report only: reads and reports, saves nothing"}
+
+
+def skill_problem(team, bot, skill):
+    """Why `bot` cannot run `skill` as a job, else None. A loop template runs only as the bot
+    it was made for; any other skill must be one of the bot's own."""
+    tpl = loop_templates.load(skill)
+    if tpl:
+        return None if tpl["bot"] == bot else f"/{skill} is a loop made for @{tpl['bot']}"
+    return None if skill in team.skills_of(bot) else f"/{skill} is not one of @{bot}'s skills"
 
 
 def check_target(root, ws, bot, skill, projects):
@@ -34,8 +43,9 @@ def check_target(root, ws, bot, skill, projects):
     b = team.get(bot)
     if not b or not b.active:
         raise ValueError(f"@{bot} is not an active bot in {ws}")
-    if skill not in team.skills_of(bot):
-        raise ValueError(f"/{skill} is not one of @{bot}'s skills")
+    problem = skill_problem(team, bot, skill)
+    if problem:
+        raise ValueError(problem)
     from dashboard.engines import registry
     from dashboard.engines.base import EngineRefused
     try:

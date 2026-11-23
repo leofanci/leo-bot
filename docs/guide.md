@@ -97,6 +97,8 @@ A loop is a scheduled job: one bot, one skill and one message, run on a schedule
 - A loop expires after 30 days (Settings, General, *Loops expire after*; 0 means it never expires). An expired loop pauses until you click Renew. Renewing never runs the slots it missed: it runs once at the next check.
 - A loop can wake only when something changed. It can watch a connected app (as before), or Leo Bot's own data: the workspace's waiting cards, one list, its memos or its experiments. The check runs as code before the model, so a quiet run costs nothing.
 - A loop never starts a workflow. It can suggest one with a `START: /<workflow> <brief>` line. You then get a *Start* button that opens a new thread with that message typed in for you to send.
+- Before proposing a loop, a bot loads the *loop-design* skill: it picks the loop type and cadence, writes down the stop condition and what the notepad keeps, and shows you the design first. Each item a loop works on gets at most 3 tries; after that the loop stops and lists it for you.
+- Two loop templates ship with Leo Bot. *weekly-review-loop* (@cos, Mondays) compares the week with last week's priorities. *signal-sweep* (@research, daily) reports only new outside signals that touch a decision. A template runs only as the bot it was made for.
 - The Loops screen shows each loop's mode, cap, schedule, stop condition, expiry, last and next run, cost over 7 days and its notepad (*State*). It lets you pause, edit, renew or delete each loop.
 
 ## The content pipeline (two stages)
