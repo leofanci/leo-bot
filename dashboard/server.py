@@ -4198,8 +4198,10 @@ class Handler(BaseHTTPRequestHandler):
         wf_ctx = viewer.get("workflow")
         if wf_ctx and wf_ctx.get("route"):
             route = wf_ctx["route"]
-        # A workflow's consult or check turn advises or judges: no writes, edits, app actions or card.
+        # A workflow's consult or check turn, or a draft that goes out for advice: no writes, edits,
+        # app actions or card.
         wf_advice = workflow_turns.advisory(wf_ctx)
+        wf_solo = workflow_turns.solo(wf_ctx)  # a step with consults: the workflow asks, not the bot
         # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
 
@@ -4788,8 +4790,12 @@ class Handler(BaseHTTPRequestHandler):
             lead_text, lead_reacts = _extract_reacts(lead_text)  # a teammate never sees the marker
             reacts.extend((bot_id, e) for e in lead_reacts)
             lead_text, asks = _extract_consults(lead_text, team)
+            if wf_solo:
+                asks = []
             named_handoff = _names_other(lead_text, team, bot_id)
             lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
+            if wf_solo or wf_advice:  # the workflow decides who goes next, not this turn's bot
+                handoff, named_handoff = None, False
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})

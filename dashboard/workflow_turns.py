@@ -41,8 +41,15 @@ def _neutral(text):
 
 
 def advisory(ctx):
-    """True for a consult or check turn: it reads and replies, it never saves, acts or asks."""
-    return bool(ctx) and ctx.get("kind") in ADVISORY
+    """True for a consult or check turn, and for the draft of a step with consults: it reads and
+    replies, it never saves, acts or asks."""
+    return bool(ctx) and (ctx.get("kind") in ADVISORY or (ctx.get("kind") == "stage" and bool(ctx.get("solo"))))
+
+
+def solo(ctx):
+    """True for the draft and revise turns of a step with consults: the workflow runs the advice
+    round, so the bot's own CONSULT lines are dropped."""
+    return bool(ctx) and bool(ctx.get("solo"))
 
 
 def involved(body, root):
@@ -151,7 +158,8 @@ def _turn(body, run, wf):
         route = (step.bot, None, False, None)
     else:
         route = (step.bot, step.skill, True, None)
-    return out, {"run": run, "wf": wf, "kind": phase, "route": route}
+    return out, {"run": run, "wf": wf, "kind": phase, "route": route,
+                 "solo": phase in ("stage", "revise") and bool(step.consult)}
 
 
 def prepare(body, viewer, ws, team, room, shared, root):

@@ -371,13 +371,29 @@ class WorkflowTurns(unittest.TestCase):
         self.assertFalse([e for e in events(out) if "approval" in e])
         self.assertFalse(approvals.pending(self.root, "acme"))
         self.assertEqual(self.run_rec()["phase"], "save")
-        self.assertEqual([r["readonly"] for r in self.runs], [False, True, True])
+        self.assertEqual([r["readonly"] for r in self.runs], [True, True, True])
         self.assertTrue(all(c.get("readonly") for c in minted))
         self.assertTrue(apps and all(c.get("report") for c in apps))
         self.assertFalse(self.sess.readonly)  # the thread's session is writable again after the turn
         out, _ = self.tick(["Saving.\nAPPROVAL: create-memo the plan"])  # the save turn still asks
         self.assertTrue([e for e in events(out) if "approval" in e])
         self.assertFalse(self.runs[-1]["readonly"])
+
+    def test_draft_turn_runs_no_own_consults_and_raises_no_card(self):
+        self.consult_flow()
+        out, rec = self.ask("/demo-flow an idea", ["Draft test.\nCONSULT @research: is it big?\n"
+                                                   "HANDOFF @cmo: write the copy\nAPPROVAL: save the test"])
+        self.assertEqual(len(self.runs), 1)  # the workflow runs the consults, not the bot
+        self.assertTrue(self.runs[0]["readonly"])
+        self.assertFalse([e for e in events(out) if "approval" in e])
+        self.assertFalse(approvals.pending(self.root, "acme"))
+        self.assertEqual((self.run_rec()["phase"], self.run_rec()["status"]), ("consult", "running"))
+        self.tick(["Advice."])
+        self.tick(["More advice."])
+        out, _ = self.tick(["Revised.\nCONSULT @cmo: again?"])
+        self.assertEqual(len(self.runs), 4)
+        self.assertFalse(self.runs[-1]["readonly"])
+        self.assertEqual(wf_event(out)["phase"], "check")
 
     def test_consultant_switched_off_pauses(self):
         self.consult_flow()
