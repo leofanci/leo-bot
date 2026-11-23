@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from core import bots
+from core import bots, loop_templates, workflows
 import dashboard.server as server
 
 NEW = ("sales", "finance", "support", "ops", "people")
@@ -102,6 +102,44 @@ class DomainBots(unittest.TestCase):
         for bid in NEW:
             for s in bots.load_defs()[bid].skills:
                 self.assertNotIn(s, menu)
+
+
+class DomainLibrary(unittest.TestCase):
+    WORKFLOWS = ("deal-prep", "price-to-runway", "feedback-to-test", "process-setup", "hire-plan")
+    LOOPS = {"pipeline-watch": "sales", "runway-check": "finance", "feedback-digest": "support",
+             "daily-plan": "ops", "hiring-watch": "people"}
+
+    def test_workflows_parse_and_run_with_their_bots_on(self):
+        defs = bots.load_defs()
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "projects" / "acme").mkdir(parents=True)
+            for bid in NEW + ("cmo", "product", "research"):
+                bots.set_active(bid, True, tmp, "acme", PLAIN)
+            team = bots.team(tmp, "acme", PLAIN)
+            for name in self.WORKFLOWS:
+                with self.subTest(name):
+                    wf = workflows.load(name)
+                    self.assertIsNotNone(wf)
+                    self.assertTrue(any(s.gate for s in wf.steps))
+                    for st in wf.steps:
+                        self.assertIn(st.skill, defs[st.bot].skills)
+                    self.assertEqual(workflows.problems(wf, team), [])
+                    text = (Path(__file__).resolve().parent.parent / "skills" / name / "SKILL.md").read_text()
+                    for line in ("## Stop when", "## Always ask first", "Sending", "Spending", "Deleting"):
+                        self.assertIn(line, text)
+
+    def test_workflow_refused_while_its_bot_is_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "projects" / "acme").mkdir(parents=True)
+            out = workflows.problems(workflows.load("deal-prep"), bots.team(tmp, "acme", PLAIN))
+            self.assertIn("@sales is switched off", " ".join(out))
+
+    def test_loop_templates_name_their_addon(self):
+        for name, bid in self.LOOPS.items():
+            with self.subTest(name):
+                tpl = loop_templates.load(name)
+                self.assertEqual(tpl["bot"], bid)
+                self.assertIn("report", tpl["body"].lower())
 
 
 class _Session:

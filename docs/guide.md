@@ -102,6 +102,7 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 - The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
 - Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
+- The add-on bots bring one workflow each: `/deal-prep` (@sales), `/price-to-runway` (@finance), `/feedback-to-test` (@support), `/process-setup` (@ops) and `/hire-plan` (@people). Switch the bot on first.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
 
 ## Loops
@@ -115,6 +116,7 @@ A loop is a scheduled job: one bot, one skill and one message, run on a schedule
 - A loop never starts a workflow. It can suggest one with a `START: /<workflow> <brief>` line. You then get a *Start* button that opens a new thread with that message typed in for you to send.
 - Before proposing a loop, a bot loads the *loop-design* skill: it picks the loop type and cadence, writes down the stop condition and what the notepad keeps, and shows you the design first. Each item a loop works on gets at most 3 tries; after that the loop stops and lists it for you.
 - Two loop templates ship with Leo Bot. *weekly-review-loop* (@cos, Mondays) compares the week with last week's priorities. *signal-sweep* (@research, daily) reports only new outside signals that touch a decision. A template runs only as the bot it was made for.
+- The add-on bots bring one template each: *pipeline-watch* (@sales, daily, wakes on the deals list), *runway-check* (@finance, Mondays), *feedback-digest* (@support, Fridays), *daily-plan* (@ops, weekday mornings) and *hiring-watch* (@people, daily, wakes on the candidate list).
 - The Loops screen shows each loop's mode, cap, schedule, stop condition, expiry, last and next run, cost over 7 days and its notepad (*State*). It lets you pause, edit, renew or delete each loop.
 
 ## The content pipeline (two stages)

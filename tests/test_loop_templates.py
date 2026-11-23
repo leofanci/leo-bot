@@ -6,7 +6,8 @@ from core import loop_templates, skill_loads, workflows
 from dashboard import job_cards, server
 from tests.test_job_cards import JobCardsBase
 
-SHIPPED = ("weekly-review-loop", "signal-sweep")
+SHIPPED = ("weekly-review-loop", "signal-sweep", "pipeline-watch", "runway-check", "feedback-digest",
+           "daily-plan", "hiring-watch")
 
 
 def _text(bot="cos", drop=None):
