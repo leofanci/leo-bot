@@ -37,6 +37,12 @@ click from the owner. Each piece is enforced in code at the moment a tool runs.
   "Acts on its own" sends without a plan only on sites the owner listed or approved before.
 - **Some actions always ask.** Payments, ads, deletes, code and query runs, sharing and access
   changes wait for a click on every grant (`core/app_rules.py`).
+- **Sends are capped per account.** Each connected app account sends at most its daily limit
+  (50 unless the owner sets 1 to 500 in Apps), counted across every bot and workspace for 24
+  hours, because the account is what an app flags for spam. Over the limit, a bot's own send is
+  refused and an Approve click leaves the card waiting (`core/approvals.py` `start_app_run`,
+  `claim`). A send is any write that sends, replies, forwards, publishes or posts
+  (`core/app_rules.py` `is_send`).
 - **Web fetches stay on typed hosts.** A fetch reaches only addresses the owner typed; a page
   cannot steer it elsewhere.
 - **Shell after outside content runs offline.** Allowed commands run in the OS sandbox with no

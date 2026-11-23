@@ -2577,6 +2577,8 @@ def _integrations_view():
         except composio.ComposioError:
             view["offline"] = True
     view["picked"] = {w["id"]: integrations.accounts_for(w["id"], ROOT) for w in workspaces}
+    view["send_caps"] = integrations.send_caps(ROOT)
+    view["default_send_cap"] = integrations.DEFAULT_SEND_CAP
     return view
 
 
@@ -2910,9 +2912,14 @@ def _approve_app_action(aid, arguments=None):
         raise _AppRefused(f"that {toolkit} account is no longer picked for this workspace")
     if account not in live:
         raise _AppRefused(f"that {toolkit} account is not connected")
+    daily = integrations.send_cap(account, ROOT)
     try:
-        claimed = approvals.claim(aid, ROOT)
+        claimed = approvals.claim(aid, ROOT, daily=daily, account=account)
     except ValueError as e:
+        if str(e) == "capped":
+            label = (integrations.known(ROOT).get(account) or {}).get("label") or account
+            raise _AppRefused(f"{label} reached today's limit of {daily} sends; approve it again tomorrow "
+                              "or raise the limit in Apps") from None
         raise _AppRefused(str(e)) from None
     # Run what was claimed, not the copy read before: a second edit in between must not slip through.
     action = claimed.get("action") or action
@@ -5941,6 +5948,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(502, {"ok": False, "error": str(e)})
                     integrations.set_label(account, alias, ROOT)
                     return self._send(200, {"account": account, "label": alias})
+                if path == "/api/integrations/send-cap":
+                    account, daily = body.get("account"), body.get("daily")
+                    return self._send(200, {"account": account,
+                                            "daily": integrations.set_send_cap(account, daily, ROOT)})
                 if path == "/api/integrations/grants":
                     ws = _strict_ws(body.get("ws"))
                     bot_id = str(body.get("bot") or "")

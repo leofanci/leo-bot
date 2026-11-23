@@ -834,6 +834,8 @@ summary.pf-head::-webkit-details-marker{display:none}
 .integ-ws{display:flex;flex-wrap:wrap;gap:var(--ui-space-1-5) var(--ui-space-3);color:var(--ui-color-text-secondary)}
 .integ-ws label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
 .integ-disc{margin-left:auto}
+.integ-cap{display:inline-flex;align-items:center;gap:var(--ui-space-1-5);font-size:var(--ui-type-caption);color:var(--ui-color-text-muted)}
+.integ-cap input{width:64px;font:inherit}
 .integ-bad{color:var(--ui-color-danger)}
 .integ-key-hint{flex-basis:100%;color:var(--ui-color-text-muted);font-size:var(--ui-type-caption)}
 .integ-disc.danger{color:var(--ui-color-danger);border-color:var(--ui-color-danger)}

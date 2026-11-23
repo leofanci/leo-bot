@@ -42,7 +42,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
 
-from core import app_preview, bots, browser, integrations
+from core import app_preview, app_rules, bots, browser, integrations
 
 MARKER_RE = re.compile(r"^[ \t>*_-]*APPROVAL:[*_ \t]*(.+?)[ \t*_]*$", re.M)
 SUMMARY_MAX = 200
@@ -99,13 +99,33 @@ def _is_send(r):
     return r.get("kind") == APP and isinstance(r.get("action"), dict) and r["action"].get("toolkit") == BROWSER
 
 
+def _is_app_send(r):
+    """An app action (not a browser send) whose tool sends: it counts against its account's cap."""
+    a = r.get("action") if r.get("kind") == APP else None
+    return isinstance(a, dict) and a.get("toolkit") != BROWSER and isinstance(a.get("slug"), str) \
+        and isinstance(a.get("toolkit"), str) and app_rules.is_send(a["slug"], a["toolkit"])
+
+
+def _app_cap_row(r, now):
+    """An app send that still counts toward its account's daily cap: running, done or failed (a
+    failed call may have gone out), started in the last day."""
+    return r.get("status") in ("done", "failed", "running") and _is_app_send(r) \
+        and 0 <= now - (r.get("started") or r.get("resolved") or 0) < DAY
+
+
+def count_app_sends(rows, account, now):
+    """App sends from `account` in the 24 hours before `now`, by every bot in every workspace."""
+    return sum(1 for r in rows if _app_cap_row(r, now) and (r.get("action") or {}).get("account") == account)
+
+
 def _protected(r):
     # A bot's own runs of the last day stay too: they are its daily limit and the owner's record.
+    # So do app sends of the last day (clicked ones too): an account's daily cap counts them.
     # So do approved plans and browser sends of the last week: the site's daily cap counts them,
     # and Approvals shows them as the "Sent from the browser" log for PLAN_TTL.
     now = time.time()
     return (_is_held(r) and r.get("status") in ("pending", "running")) or \
-        (r.get("auto") and now - (r.get("resolved") or 0) < AUTO_KEEP) or \
+        (r.get("auto") and now - (r.get("resolved") or 0) < AUTO_KEEP) or _app_cap_row(r, now) or \
         (_is_send(r) and (r.get("status") == "approved"
                           or (r.get("status") in ("done", "failed")
                               and now - (r.get("resolved") or r.get("started") or 0) < PLAN_TTL)))
@@ -264,6 +284,38 @@ def log_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, a
         rows.append(rec)
         _save(root, rows)
     return rec
+
+
+def start_app_run(root=bots.ROOT, *, ws, room, chat, bot, person, toolkit, slug, arguments, account, daily,
+                  now=None):
+    """Start an app call a bot runs on its own (an "act" grant), before it is forwarded: a
+    `running` row with no card, or None when it sends and `account` already made `daily` sends
+    in the last day. Counted and written under one lock: two turns cannot both take the last
+    send. The caller forwards, then calls end_app_run."""
+    now = time.time() if now is None else now
+    rec = _app_record(root, ws=ws, room=room, chat=chat, bot=bot, person=person, toolkit=toolkit,
+                      slug=slug, arguments=arguments, account=account)
+    rec.update(status="running", started=now, auto=True)
+    with LOCK:
+        rows = load(root)
+        _housekeep(rows)
+        if daily and _is_app_send(rec) and count_app_sends(rows, account, now) >= daily:
+            return None
+        rows.append(rec)
+        _save(root, rows)
+    return dict(rec)
+
+
+def end_app_run(aid, status, result, root=bots.ROOT):
+    """running -> done or failed for a bot's own app call. A row no longer running (housekept
+    to failed while the call hung) keeps what it has."""
+    if status not in ("done", "failed"):
+        raise ValueError("bad status")
+
+    def fn(r):
+        if r.get("status") == "running":
+            r.update(status=status, result=result, resolved=time.time())
+    return _mutate_held(aid, root, fn, kinds=(APP,))
 
 
 def _norm(text):
@@ -578,12 +630,25 @@ def _need(rec, status):
         raise ValueError(f"not {status}")
 
 
-def claim(aid, root=bots.ROOT):
-    """pending -> running, once: a double click or a second tab cannot run it twice."""
-    def fn(r):
-        _need(r, "pending")
-        r.update(status="running", started=time.time())
-    return _mutate_held(aid, root, fn)
+def claim(aid, root=bots.ROOT, daily=None, account=None):
+    """pending -> running, once: a double click or a second tab cannot run it twice. With
+    `daily`, a send whose account (`account`, the one it runs as, else the row's) already made
+    that many sends today raises ValueError("capped") and stays pending. `account` is written on
+    the row, so the send counts against the account it ran as."""
+    with LOCK:
+        rows = load(root) if daily else []
+
+        def fn(r):
+            _need(r, "pending")
+            now = time.time()
+            action = r.get("action") if isinstance(r.get("action"), dict) else None
+            acct = account or (action or {}).get("account")
+            if daily and _is_app_send(r) and count_app_sends(rows, acct, now) >= daily:
+                raise ValueError("capped")
+            if account and action is not None:
+                action["account"] = account
+            r.update(status="running", started=now)
+        return _mutate_held(aid, root, fn)
 
 
 def finish(aid, status, result, root=bots.ROOT):

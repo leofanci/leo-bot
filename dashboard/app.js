@@ -3377,6 +3377,9 @@ async function renderIntegrations(){
     const acctRow = (slug, a) => `<div class="integ-acct">
         <span class="integ-acct-name" data-rename="${esc(a.id)}" title="Rename" tabindex="0">${esc(a.label || a.id)}</span>
         <span class="integ-ws">${(d.workspaces || []).map(w => `<label><input type="checkbox" data-pick="${esc(a.id)}" data-ws="${esc(w.id)}"${acctPicked(d.picked, w.id, slug, a.id) ? " checked" : ""}> ${esc(w.name)}</label>`).join("")}</span>
+        <label class="integ-cap" title="Messages, replies and posts this account may send a day, across every bot and workspace">Sends per day
+          <input type="number" min="1" max="500" step="1" data-send-cap="${esc(a.id)}" placeholder="${esc(String(d.default_send_cap || 50))}"
+            value="${(d.send_caps || {})[a.id] && (d.send_caps || {})[a.id] !== d.default_send_cap ? esc(String(d.send_caps[a.id])) : ""}"></label>
         <button class="btn sm ghost integ-disc" data-disconnect="${esc(a.id)}">Disconnect</button></div>`;
     const appRow = (slug, meta) => {
       const m = meta || d.apps_meta?.[slug] || { slug, name: slug };
@@ -3458,6 +3461,22 @@ async function renderIntegrations(){
           (d.picked ||= {})[r.ws] = r.picked;
         } catch (err) { cb.checked = !cb.checked; toast("✗ " + err.message); }
         cb.disabled = false;
+      });
+      root.querySelectorAll("[data-send-cap]").forEach(inp => inp.onchange = async () => {
+        const id = inp.dataset.sendCap, raw = inp.value.trim();
+        const daily = raw === "" ? null : Number(raw);
+        inp.disabled = true;
+        try {
+          const r = await jpost("/api/integrations/send-cap", { account: id, daily });
+          (d.send_caps ||= {})[id] = r.daily;
+          inp.value = r.daily === d.default_send_cap ? "" : String(r.daily);
+          toast(`✓ ${r.daily} sends a day`);
+        } catch (err) {
+          const was = (d.send_caps || {})[id];
+          inp.value = was && was !== d.default_send_cap ? String(was) : "";
+          toast("✗ " + err.message);
+        }
+        inp.disabled = false;
       });
       root.querySelectorAll("[data-rename]").forEach(el => {
         const edit = () => {

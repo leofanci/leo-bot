@@ -103,10 +103,30 @@ def toolkit_of(slug, catalog):
 def is_read(slug, toolkit):
     if slug in KNOWN_READS:
         return True
-    words = [w for w in re.split(r"[^A-Z0-9]+", slug[len(toolkit) + 1:].upper()) if w]
+    words = _words(slug, toolkit)
     if not words or words[0] not in READ_VERBS or WRITE_VERBS.intersection(words):
         return False
     return not any(w in NOUNISH_VERBS and words[i - 1] in JOINERS for i, w in enumerate(words) if i)
+
+
+# A write that reaches another person: it counts against the account's daily send cap and is
+# held in a job run or a workflow step. When unsure it counts: a false send only uses up cap.
+SEND_WORDS = frozenset("SEND SENDS REPLY REPLIES FORWARD PUBLISH BROADCAST NOTIFY COMMENT TWEET DM DMS".split())
+
+
+def _words(slug, toolkit):
+    return [w for w in re.split(r"[^A-Z0-9]+", slug[len(toolkit) + 1:].upper()) if w]
+
+
+def is_send(slug, toolkit):
+    """True for a non-read whose action words send, reply, publish or post ("GMAIL_SEND_DRAFT",
+    "SLACK_CHAT_POST_MESSAGE"); a draft ("GMAIL_CREATE_EMAIL_DRAFT") is not a send."""
+    if is_read(slug, toolkit):
+        return False
+    words = _words(slug, toolkit)
+    if SEND_WORDS.intersection(words):
+        return True
+    return "POST" in words and words[0] not in READ_VERBS
 
 
 def calls_in(name, args):
