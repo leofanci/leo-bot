@@ -459,6 +459,14 @@ class JobTurn(unittest.TestCase):
         self.pick.assert_not_called()
         self.assertEqual(self.asks, [])
 
+    def test_loop_template_runs_as_its_own_bot_only(self):
+        out = self.run_job(bot="cos", skill="weekly-review-loop")
+        self.assertNotEqual(out["status"], "refused", out["detail"])
+        self.assertIn("/weekly-review-loop", self.asks[0]["text"])
+        out = self.run_job(skill="weekly-review-loop")  # made for @cos, not @cmo
+        self.assertEqual(out["status"], "refused")
+        self.assertIn("made for @cos", out["detail"])
+
     def test_failed_engine_turn(self):
         self.events = [("delta", "half"), ("error", "boom")]
         out = self.run_job()

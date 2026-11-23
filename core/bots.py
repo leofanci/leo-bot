@@ -29,6 +29,8 @@ ROOT = paths.DATA  # user data; bot definitions ship in paths.CODE
 ROOT_BOT = "cos"
 CEO = "ceo"  # the user; top of the org chart, not a bot
 HQ = "hq"    # the holding's own workspace (CEO office); every other workspace is a project
+# Skills on no bot's card that any tagged bot runs for itself (loop templates name their own bot).
+SHARED_SKILLS = frozenset({"loop-design"})
 
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _MENTION_RE = re.compile(r"(?<![\w@/])@([a-z][a-z0-9-]*)\b")

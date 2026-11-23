@@ -74,6 +74,9 @@ def _parse_step(n, line):
         raise ValueError(f"step {n}: unknown skill {skill}")
     if _is_workflow_file(skill) is not None:
         raise ValueError(f"step {n}: {skill} is a workflow, not a skill")
+    from core import loop_templates
+    if loop_templates.load(skill):
+        raise ValueError(f"step {n}: {skill} is a loop, not a skill")
     checker = (fields.get("checker") or "").lower().lstrip("@") or None
     if checker == bot:
         raise ValueError(f"step {n}: the checker must be a different bot from the maker")

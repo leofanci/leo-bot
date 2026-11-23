@@ -172,5 +172,8 @@
   {"id": "handoff-target-may-ask-approval", "category": "routing",
    "msg": "who is our ideal customer?",
    "reply": "HANDOFF @research: define the ICP", "followup_reply": "Small agencies.\nAPPROVAL: save the ICP memo",
-   "expect": {"bot": "cos", "handoff": "research", "approval": true, "runs": 2}}
+   "expect": {"bot": "cos", "handoff": "research", "approval": true, "runs": 2}},
+  {"id": "loop-request-loads-loop-design", "category": "routing",
+   "msg": "@cos set up a loop that checks my experiments every week",
+   "expect": {"bot": "cos", "skill": "loop-design"}}
 ]
