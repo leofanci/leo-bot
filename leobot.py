@@ -931,10 +931,22 @@ def cmd_update(args) -> int:
 
 
 def cmd_eval(args) -> int:
-    """Behavior evals: the offline scorecard (free), or --live on a real engine (spends)."""
+    """Behavior evals: the offline scorecard (free), --live on a real engine, or --compare (a
+    workflow against a single bot, judged blind). Both of those spend."""
     cmd = [sys.executable, "-m", "evals"]
-    if args.live:
-        cmd.append("--live")
+    if args.live and args.compare:
+        print("Pick one: --live or --compare.", file=sys.stderr)
+        return 2
+    if args.cases_file and not args.compare:
+        print("--cases-file goes with --compare.", file=sys.stderr)
+        return 2
+    if args.compare and args.engine == "all":
+        print("--compare runs on one engine: name it, or leave --engine out for your default.", file=sys.stderr)
+        return 2
+    if args.live or args.compare:
+        cmd.append("--live" if args.live else "--compare")
+        if args.cases_file:
+            cmd += ["--cases-file", str(Path(args.cases_file).resolve())]
         if args.engine:
             cmd += ["--engine", args.engine]
         for case in args.case or ():
@@ -942,7 +954,7 @@ def cmd_eval(args) -> int:
         if args.yes:
             cmd.append("--yes")
     elif args.engine or args.case or args.yes:
-        print("--engine, --case and --yes go with --live.", file=sys.stderr)
+        print("--engine, --case and --yes go with --live or --compare.", file=sys.stderr)
         return 2
     return subprocess.call(cmd, cwd=str(paths.CODE))
 
@@ -1049,7 +1061,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--live", action="store_true", help="send the live cases to a real engine (spends)")
     p.add_argument("--engine", help="with --live: engine id, or all: every ready engine (default: your default engine)")
     p.add_argument("--case", action="append", help="with --live: run only this case (repeatable)")
-    p.add_argument("--yes", action="store_true", help="with --live: do not ask before spending")
+    p.add_argument("--compare", action="store_true",
+                   help="run a workflow and its maker bot alone on the same cases, judged blind (spends)")
+    p.add_argument("--cases-file", help="with --compare: a cases JSON of your own (default: the shipped ones)")
+    p.add_argument("--yes", action="store_true", help="with --live or --compare: do not ask before spending")
     return ap
 
 

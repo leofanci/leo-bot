@@ -1,0 +1,14 @@
+[
+ {"id": "acme-soft-launch",
+  "workflow": "team-launch-plan",
+  "brief": "Plan the soft launch of Acme's invoice reminder app to the first 50 small agencies on our waitlist, starting in three weeks.",
+  "intake": "# Acme\n\nAcme makes a web app that sends polite payment reminders for unpaid invoices.\n\n- Customer: small design and marketing agencies, 2 to 15 people, that invoice clients monthly.\n- Problem: owners chase late invoices by hand and avoid it because it feels awkward.\n- Stage: private beta with 8 agencies; 120 people on the waitlist from a landing page.\n- Price: planned at 19 per month, not yet charged.\n- Team: one founder and one part-time developer. Budget for the launch: 500.\n"},
+ {"id": "acme-feature-launch",
+  "workflow": "team-launch-plan",
+  "brief": "Plan the launch of Acme's new client portal feature to existing customers next month.",
+  "intake": "# Acme\n\nAcme sells scheduling software to independent physiotherapy clinics.\n\n- Customers: 140 paying clinics, mostly 1 to 4 therapists each.\n- New feature: a client portal where patients book, move and cancel their own sessions.\n- Evidence: 30 support requests a month ask for self-booking; two clinics left for a rival that has it.\n- Price: included in the current plan; no extra charge.\n- Team: four people; one handles support and the newsletter (1,900 subscribers).\n"},
+ {"id": "acme-local-launch",
+  "workflow": "team-launch-plan",
+  "brief": "Plan a loud launch for Acme's meal-prep subscription in one new city, opening in six weeks.",
+  "intake": "# Acme\n\nAcme delivers weekly meal-prep boxes for busy parents.\n\n- Today: 600 subscribers in its first city after one year, 9% monthly churn.\n- New city: about 2 hours away; kitchen partner signed, no customers yet.\n- Channels that worked: school parent groups and referral codes (a third of sign-ups).\n- Price: 79 per week for a family box.\n- Team: two founders, one ops lead. Launch budget: 6,000.\n"}
+]
