@@ -98,6 +98,7 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 
 - Each step is one ordinary chat turn by the bot the step names, so caps, chain limits, Stop and approval cards all apply as usual. The open tab sends the next step as soon as one ends.
 - A step can name a checker: a second bot that answers PASS or WEAK. A weak or blocked step is tried once more with the notes. If it is still weak, the run pauses.
+- A step can name up to 3 teammates under `consult:`. The step's bot writes a draft, each teammate advises on it in turn, then the bot revises it before the checker sees it. Advice and checks are read-only: they save nothing and raise no card. A weak check retries only the revision.
 - A workflow never saves on its own. A step either writes its output in the thread, or proposes the save with an approval card. Approve and the run goes on; reject and it waits.
 - The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
