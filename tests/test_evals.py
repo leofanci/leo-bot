@@ -263,6 +263,7 @@ class Compare(unittest.TestCase):
         for word in ("Plan A", "Plan B", case["brief"], case["intake"].strip()[:40], "40 signups"):
             self.assertIn(word, prompt)
         self.assertLess(prompt.index("30 signups"), prompt.index("40 signups"))
+        self.assertIn("the research bot said", prompt)  # a task owner stays a bot, not a stranger
         for word in ("workflow", "single", "@research", "@cmo", "@gtm", "consult", "checker"):
             self.assertNotIn(word, prompt.lower() if word.islower() else prompt)
         orders = {tuple(compare.order_for(c["id"])) for c in compare.load()}

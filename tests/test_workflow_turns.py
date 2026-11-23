@@ -334,6 +334,7 @@ class WorkflowTurns(unittest.TestCase):
         self.assertEqual(ctx["route"], ("product", "experiment-design", True, None))
         self.assertIn("advice", body["context"])
         self.assertIn("Do not save anything", body["context"])  # the checker comes first
+        self.assertIn("stands alone", body["context"])
 
     def test_full_consult_round_runs_through_the_server(self):
         self.consult_flow()
