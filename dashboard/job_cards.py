@@ -81,7 +81,7 @@ def _show(field, value):
     return str(value)
 
 
-def _name_free(existing, ws, name, skip=None):
+def name_free(existing, ws, name, skip=None):
     """One name per workspace: a second card for the same job never makes a twin."""
     if any(j.get("id") != skip and j.get("workspace") == ws
            and str(j.get("name") or "").lower() == name.lower() for j in existing):
@@ -120,7 +120,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
         existing = jobs.load(root)
         if len(existing) >= jobs.MAX_JOBS:
             raise ValueError(f"at most {jobs.MAX_JOBS} jobs: delete one first")
-        _name_free(existing, ws, clean["name"])
+        name_free(existing, ws, clean["name"])
         now = time.time()
         next_run = jobs.next_due({"schedule": clean["schedule"], "created": now})
         clean["expires"] = _expiry(now)
@@ -149,7 +149,7 @@ def proposal(root, *, thread_ws, op, job_id=None, fields=None, projects=()):
     if not clean:
         raise ValueError("say what changes: name, message, schedule, cap, skill, mode, check or stop")
     if "name" in clean:
-        _name_free(jobs.load(root), job.get("workspace"), clean["name"], skip=job["id"])
+        name_free(jobs.load(root), job.get("workspace"), clean["name"], skip=job["id"])
     if "skill" in clean:
         check_target(root, job.get("workspace") or bots.HQ, job.get("bot"), clean["skill"], projects)
     if clean.get("check"):

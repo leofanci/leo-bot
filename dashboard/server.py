@@ -3924,6 +3924,9 @@ class Handler(BaseHTTPRequestHandler):
             if not fields or set(body) - {"ws", "name", "message", "schedule", "stop"}:
                 return self._send(400, {"error": "edit: name, message, schedule or stop"})
             try:
+                if "name" in fields:  # one name per workspace, as for a bot's proposal
+                    job_cards.name_free(jobs.load(ROOT), job.get("workspace"), jobs.clean("name", fields["name"]),
+                                         skip=jid)
                 jobs.update(ROOT, jid, **{k: "" if v is None and k == "stop" else v for k, v in fields.items()})
             except ValueError as e:
                 return self._send(400, {"error": str(e)})

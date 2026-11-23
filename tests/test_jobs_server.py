@@ -706,6 +706,9 @@ class JobTurn(unittest.TestCase):
                     {"ws": WS, "mode": "auto"}, {"ws": WS, "stop": "x" * 301}):
             self.assertEqual(self.post(f"/api/jobs/{job['id']}/edit", bad)[0], 400, bad)
         self.assertEqual(jobs.get(self.root, job["id"])["schedule"], "daily 09:00")
+        jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="other", message="m",
+                    schedule="every 6h", cap=1)
+        self.assertEqual(self.post(f"/api/jobs/{job['id']}/edit", {"ws": WS, "name": "Other"})[0], 400)  # one name per workspace
 
     def test_renew_endpoint_checks_target(self):
         job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
