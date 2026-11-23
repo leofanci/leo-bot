@@ -39,10 +39,12 @@ GENERATION = 0
 LEVELS = ("off", "read", "write", "act")
 MODES = ("bot", "my_chrome")
 DEFAULT_SITES = {
-    "linkedin.com": {"mode": None, "daily": 20},
-    "instagram.com": {"mode": None, "daily": 10},
+    "linkedin.com": {"mode": None, "daily": 20, "gap": 120},
+    "instagram.com": {"mode": None, "daily": 10, "gap": 180},
 }
 MAX_DAILY = 500
+DEFAULT_GAP = 30  # seconds between two sends on one site when its row sets none
+MAX_GAP = 3600
 EPOCH_RE = re.compile(r"[0-9a-f]{6}")
 
 
@@ -140,8 +142,23 @@ def sites_from(data):
         out[host] = {
             "mode": mode if mode in MODES else None,
             "daily": daily if isinstance(daily, int) and not isinstance(daily, bool) and 1 <= daily <= MAX_DAILY else None,
+            "gap": row["gap"] if _good_gap(row.get("gap")) else None,
         }
     return out
+
+
+def _good_gap(gap):
+    return isinstance(gap, int) and not isinstance(gap, bool) and 0 <= gap <= MAX_GAP
+
+
+def gap_of(site, root=bots.ROOT, listed=None):
+    """Seconds a send on `site` waits after the last one there (any bot, any workspace): the
+    site's own gap, else the shipped one for that site, else DEFAULT_GAP."""
+    row = (sites(root) if listed is None else listed).get(site) if site else None
+    if row and row.get("gap") is not None:
+        return row["gap"]
+    shipped = (DEFAULT_SITES.get(site) or {}).get("gap") if site else None
+    return shipped if shipped is not None else DEFAULT_GAP
 
 
 def _host(value):
@@ -225,8 +242,9 @@ def site_proxies_from(data):
     return out
 
 
-def set_site(host, mode, daily, root=bots.ROOT, new=False, proxy=None):
-    """Set a site's mode, daily limit and proxy (None: no proxy). `new`: adding it, refused
+def set_site(host, mode, daily, root=bots.ROOT, new=False, proxy=None, gap=None):
+    """Set a site's mode, daily limit, gap between sends in seconds (None: the default) and
+    proxy (None: no proxy). `new`: adding it, refused
     when it is listed already (so an add never wipes an existing row). A proxy is refused on a
     site bound to My Chrome: only the bot browser uses it."""
     name = _host(host)
@@ -236,10 +254,12 @@ def set_site(host, mode, daily, root=bots.ROOT, new=False, proxy=None):
         raise ValueError("unknown mode")
     if daily is not None and (isinstance(daily, bool) or not isinstance(daily, int) or not 1 <= daily <= MAX_DAILY):
         raise ValueError("daily must be 1 to %d" % MAX_DAILY)
+    if gap is not None and not _good_gap(gap):
+        raise ValueError("seconds between sends must be 0 to %d" % MAX_GAP)
     proxy = _proxy(proxy)
     if proxy and mode == "my_chrome":
         raise ValueError(PROXY_ONLY_BOT)
-    row = {"mode": mode, "daily": daily}
+    row = {"mode": mode, "daily": daily, "gap": gap}
     if proxy:
         row["proxy"] = proxy
 

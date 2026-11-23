@@ -2724,12 +2724,13 @@ function browserModeLabel(mode){
 function browserOptionsHtml(values, label, current){
   return values.map(v => `<option value="${esc(v)}"${v === current ? " selected" : ""}>${esc(label(v))}</option>`).join("");
 }
-// One row of the sites table: the site, where it opens (empty: each bot's own choice), its daily limit.
+// One row of the sites table: the site, where it opens (empty: each bot's own choice), its daily limit, its gap between sends.
 function browserSiteRowHtml(s, maxDaily){
   const opens = [["", "Bot's choice"], ["bot", "Bot browser"], ["my_chrome", "My Chrome"]];
   return `<div class="post brw-site" data-site="${esc(s.site)}"><div class="t"><b>${esc(s.site)}</b></div>
     <label>Opens in <select data-site-mode>${opens.map(([v, l]) => `<option value="${v}"${(s.mode || "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
     <label>Daily limit <input data-site-daily type="number" min="1" max="${+maxDaily || 500}" step="1" inputmode="numeric" placeholder="None" value="${s.daily ? esc(String(s.daily)) : ""}" aria-label="Daily limit for ${esc(s.site)} (empty: none)"></label>
+    <label>Seconds between sends <input data-site-gap type="number" min="0" max="3600" step="1" inputmode="numeric" placeholder="${esc(String(s.gap_effective ?? 30))}" value="${s.gap != null ? esc(String(s.gap)) : ""}" aria-label="Seconds between two sends on ${esc(s.site)}, by any bot (empty: ${esc(String(s.gap_effective ?? 30))})"></label>
     ${s.mode === "my_chrome" ? "" : s.proxy
       ? `<span class="brw-proxy"><small>Proxy: ${esc(s.proxy)}</small><button class="more" data-site-proxy-rm>Remove proxy</button></span>`
       : `<label>Proxy <input data-site-proxy type="password" placeholder="http://proxy.example:3128" autocomplete="new-password" spellcheck="false" aria-label="Proxy for ${esc(s.site)}, bot browser only, an http address with user:password@ before the host if it needs one (empty: none)"></label>`}
@@ -3074,13 +3075,16 @@ async function renderBrowserSettings(){
     });
     box.querySelectorAll(".brw-site").forEach(row => {
       const site = row.dataset.site, mode = row.querySelector("[data-site-mode]"), daily = row.querySelector("[data-site-daily]");
-      const save = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null });
+      const gap = row.querySelector("[data-site-gap]");
+      const fields = () => ({ mode: mode.value || null, daily: daily.value.trim() || null, gap: gap.value.trim() || null });
+      const save = () => saveSite(site, fields());
       mode.onchange = save;
       daily.onchange = save;
+      gap.onchange = save;
       const proxy = row.querySelector("[data-site-proxy]");
-      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: proxy.value.trim() }); };
+      if (proxy) proxy.onchange = () => { if (proxy.value.trim()) saveSite(site, { ...fields(), proxy: proxy.value.trim() }); };
       const proxyRm = row.querySelector("[data-site-proxy-rm]");
-      if (proxyRm) proxyRm.onclick = () => saveSite(site, { mode: mode.value || null, daily: daily.value.trim() || null, proxy: null });
+      if (proxyRm) proxyRm.onclick = () => saveSite(site, { ...fields(), proxy: null });
       row.querySelector("[data-site-rm]").onclick = ev => {
         const b = ev.currentTarget;
         if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again: it then has no daily limit"; return; }
@@ -3377,6 +3381,9 @@ async function renderIntegrations(){
     const acctRow = (slug, a) => `<div class="integ-acct">
         <span class="integ-acct-name" data-rename="${esc(a.id)}" title="Rename" tabindex="0">${esc(a.label || a.id)}</span>
         <span class="integ-ws">${(d.workspaces || []).map(w => `<label><input type="checkbox" data-pick="${esc(a.id)}" data-ws="${esc(w.id)}"${acctPicked(d.picked, w.id, slug, a.id) ? " checked" : ""}> ${esc(w.name)}</label>`).join("")}</span>
+        <label class="integ-cap" title="Messages, replies and posts this account may send a day, across every bot and workspace">Sends per day
+          <input type="number" min="1" max="500" step="1" data-send-cap="${esc(a.id)}" placeholder="${esc(String(d.default_send_cap || 50))}"
+            value="${(d.send_caps || {})[a.id] && (d.send_caps || {})[a.id] !== d.default_send_cap ? esc(String(d.send_caps[a.id])) : ""}"></label>
         <button class="btn sm ghost integ-disc" data-disconnect="${esc(a.id)}">Disconnect</button></div>`;
     const appRow = (slug, meta) => {
       const m = meta || d.apps_meta?.[slug] || { slug, name: slug };
@@ -3458,6 +3465,22 @@ async function renderIntegrations(){
           (d.picked ||= {})[r.ws] = r.picked;
         } catch (err) { cb.checked = !cb.checked; toast("✗ " + err.message); }
         cb.disabled = false;
+      });
+      root.querySelectorAll("[data-send-cap]").forEach(inp => inp.onchange = async () => {
+        const id = inp.dataset.sendCap, raw = inp.value.trim();
+        const daily = raw === "" ? null : Number(raw);
+        inp.disabled = true;
+        try {
+          const r = await jpost("/api/integrations/send-cap", { account: id, daily });
+          (d.send_caps ||= {})[id] = r.daily;
+          inp.value = r.daily === d.default_send_cap ? "" : String(r.daily);
+          toast(`✓ ${r.daily} sends a day`);
+        } catch (err) {
+          const was = (d.send_caps || {})[id];
+          inp.value = was && was !== d.default_send_cap ? String(was) : "";
+          toast("✗ " + err.message);
+        }
+        inp.disabled = false;
       });
       root.querySelectorAll("[data-rename]").forEach(el => {
         const edit = () => {

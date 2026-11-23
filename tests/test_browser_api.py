@@ -251,11 +251,19 @@ class Settings(Base):
     def test_sites_add_change_remove(self):
         code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "my_chrome", "daily": "7"})
         self.assertEqual(code, 200, data)
-        self.assertIn({"site": HOST, "mode": "my_chrome", "daily": 7, "proxy": None}, data["sites"])
-        for bad in ({"daily": 0}, {"daily": 501}, {"daily": "lots"}, {"daily": True}, {"mode": "tab"}):
+        self.assertIn({"site": HOST, "mode": "my_chrome", "daily": 7, "gap": None, "gap_effective": 30, "proxy": None},
+                      data["sites"])
+        data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "my_chrome", "daily": 7, "gap": "45"})[1]
+        self.assertIn({"site": HOST, "mode": "my_chrome", "daily": 7, "gap": 45, "gap_effective": 45, "proxy": None},
+                      data["sites"])
+        self.assertIn({"site": "linkedin.com", "mode": None, "daily": 20, "gap": 120, "gap_effective": 120,
+                       "proxy": None}, data["sites"])
+        for bad in ({"daily": 0}, {"daily": 501}, {"daily": "lots"}, {"daily": True}, {"mode": "tab"},
+                    {"gap": -1}, {"gap": 3601}, {"gap": "soon"}, {"gap": True}):
             self.assertEqual(request("POST", "/api/browser/settings", {"site": HOST, "mode": None, **bad})[0], 400, bad)
         data = request("POST", "/api/browser/settings", {"site": HOST, "mode": "", "daily": ""})[1]
-        self.assertIn({"site": HOST, "mode": None, "daily": None, "proxy": None}, data["sites"])
+        self.assertIn({"site": HOST, "mode": None, "daily": None, "gap": None, "gap_effective": 30, "proxy": None},
+                      data["sites"])
         code, data = request("POST", "/api/browser/settings", {"site": HOST, "mode": None, "daily": None, "add": True})
         self.assertEqual(code, 400, data)  # an add never wipes a listed row
         self.assertIn("already listed", data["error"])

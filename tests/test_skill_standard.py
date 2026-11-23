@@ -8,7 +8,7 @@ from core import paths
 REWRITTEN = (
     "competitor-scan", "icp-research", "pricing-strategy", "launch-plan", "positioning",
     # Domain bots (add-ons).
-    "discovery-call", "prospect-list", "deal-review", "objection-handling",
+    "discovery-call", "prospect-list", "deal-review", "objection-handling", "outreach-draft", "reply-triage",
     "unit-economics", "runway-plan", "contract-check",
     "support-triage", "faq-builder", "feedback-synthesis",
     "weekly-plan", "process-doc", "vendor-compare",

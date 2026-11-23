@@ -10,7 +10,7 @@ A loop is a scheduled job: one bot, one skill, one message. A bad loop costs mon
 ## 1. Is a loop the right tool?
 - One-off work: do it now. Work that waits on a date: a `once` schedule.
 - A repeating check that often finds nothing: a loop with a check, so quiet runs cost nothing.
-- A shipped template whose purpose matches can be the job's skill, for its own bot only: `weekly-review-loop` (@cos), `signal-sweep` (@research), `pipeline-watch` (@sales), `runway-check` (@finance), `feedback-digest` (@support), `daily-plan` (@ops), `hiring-watch` (@people). Its body sets what a run does: never use one for other work. Otherwise use one of the bot's own skills.
+- A shipped template whose purpose matches can be the job's skill, for its own bot only: `weekly-review-loop` (@cos), `signal-sweep` (@research), `pipeline-watch` and `reply-watch` (@sales), `runway-check` (@finance), `feedback-digest` (@support), `daily-plan` (@ops), `hiring-watch` (@people). Its body sets what a run does: never use one for other work. Otherwise use one of the bot's own skills.
 
 ## 2. Pick the loop type
 - **Time**: runs on a cadence (a weekly review).

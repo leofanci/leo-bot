@@ -121,6 +121,10 @@ FIELD_NO_PLAN = ("A field on this page holds text, so this click could send it, 
 NEW_SITE = ("{host} is not a site the owner listed or approved a send to, and a page can steer where you go. "
             "Call leobot_plan_sends with the page address and the exact text, then stop: the owner approves it in "
             "Approvals. Nothing was sent.")
+MAX_WAIT = 120  # a send due within this many seconds waits for its turn; a later one is refused
+TOO_SOON = ("{site} takes one send every {gap} seconds. The next one can go at {at}. Nothing was sent. "
+            "Send it then, or in a later run.")
+MOVED_WHILE_WAITING = "The page changed while this send waited for its turn. Nothing was sent. Open it again."
 CAPPED = ("{site} reached today's limit of {daily} sends. Nothing was sent. Try again tomorrow or ask the owner "
           "to raise the limit in Settings, Browser.")
 REPORT_ONLY = "This scheduled job only reports, so it does not send. Nothing was sent."
@@ -706,14 +710,27 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     if refusal:
         return _text(rid, refusal), sid
     daily = (browser.sites(root).get(site) or {}).get("daily") if site else None
-    planned = setting["level"] == "write"
+    # A job run or a workflow step sends only approved plan items, even at "Acts on its own".
+    planned = setting["level"] == "write" or bool(ctx.get("hold_sends"))
     # Acts on its own sends without a plan only where the owner said it may: a site listed in
     # Settings, Browser, or one an approved plan already sent to (core/destinations.py). A page can
     # steer the bot anywhere, so a new site waits for one approved plan.
     new_site = not planned and not site and bool(destinations.unknown(ctx["ws"], destinations.site(url), root))
-    status, rec = approvals.claim_send(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
-                                       bot=ctx["bot"], person=ctx.get("person"), url=url, text=typed,
-                                       daily=daily, planned=planned or new_site)
+    gap = browser.gap_of(site, root)
+    for attempt in (0, 1):
+        status, rec = approvals.claim_send(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
+                                           bot=ctx["bot"], person=ctx.get("person"), url=url, text=typed,
+                                           daily=daily, planned=planned or new_site, gap=gap)
+        if status != "wait":
+            break
+        if attempt or rec > MAX_WAIT:
+            at = time.strftime("%H:%M", time.localtime(time.time() + rec))
+            return _text(rid, TOO_SOON.format(site=site or browser.host_of(url) or url, gap=gap, at=at)), sid
+        # Paced: wait out this site's gap, then claim once more. The send counts (approvals.LOCK)
+        # are free meanwhile; this browser's lock stays held, so nothing else types or clicks here.
+        time.sleep(rec)
+        if _current(upstream) != url:  # the owner moved the tab (My Chrome) while it waited
+            return _text(rid, MOVED_WHILE_WAITING), sid
     if status == "capped":
         return _text(rid, CAPPED.format(site=site, daily=daily)), sid
     if status != "ok":

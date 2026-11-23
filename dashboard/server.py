@@ -642,6 +642,9 @@ _SKILL_ROUTES = [
     ("product-build",      r"product roadmap|build status|feature roadmap|plan (the )?features"),
     ("gtm-assessment",     r"assess\w*|where (do|does) (we|this) stand|pace call|gtm assessment"),
     # Add-on domain bots (off by default): tagged routing skips these while their bot is off.
+    # Before prospect-list and support-triage: "replies from prospects" and "cold emails to leads" are outreach.
+    ("reply-triage",       r"\b(sort|triage|go through|read|answer|handle)\b.{0,30}\brepl(y|ies)\b|\brepl(y|ies)\b.{0,40}\b(prospects?|leads?|outreach|campaign)\b|what came back from (the |my |our )?(outreach|campaign)"),
+    ("outreach-draft",     r"\boutreach\b|cold (emails?|messages?|dms?)|(write|draft)\b.{0,30}\b(messages?|emails?|dms?) (to|for) (the |these |this |my |our )?(prospects?|leads?|list)"),
     ("discovery-call",     r"discovery call|sales call|call (script|prep)|demo prep|what (should|do) i (ask|say) (on|in) (the|a|my) (call|demo)"),
     ("prospect-list",      r"prospect\w*|lead list|list of (leads|people to contact)|target accounts?|find (me )?leads"),
     ("deal-review",        r"\bdeals?\b|sales pipeline|pipeline review"),
@@ -1683,13 +1686,15 @@ def _browser_view(ws=None):
     with `ws`, that workspace's bot levels and modes. Owner only (the caller checked)."""
     with _BROWSER_INSTALL_LOCK:
         install = dict(_BROWSER_INSTALL)
-    proxies = browser.site_proxies(ROOT)
+    proxies, listed = browser.site_proxies(ROOT), browser.sites(ROOT)
     out = {"engine": {**browser_engine.status(), "version": browser_engine.VERSION,
                       "installing": install["running"], "last_install": install["last"]},
            "levels": list(browser.LEVELS), "modes": list(browser.MODES), "max_daily": browser.MAX_DAILY,
            # A site's proxy is shown masked (core/browser.mask_proxy): its password never leaves here.
-           "sites": [{"site": host, **row, "proxy": browser.mask_proxy(proxies.get(host))}
-                     for host, row in sorted(browser.sites(ROOT).items())],
+           "sites": [{"site": host, **row, "gap_effective": browser.gap_of(host, ROOT, listed),
+                      "proxy": browser.mask_proxy(proxies.get(host))}
+                     for host, row in sorted(listed.items())],
+           "default_gap": browser.DEFAULT_GAP, "max_gap": browser.MAX_GAP,
            # On a server, My Chrome is the owner's own Chrome lent by their runner (browser_lent).
            "chrome": (bool(runners.HUB.lenders("owner")) if DEPLOYMENT == "server"
                       else browser_upstream.find_chrome_debug_url() is not None),
@@ -1707,6 +1712,16 @@ def _browser_bot(body):
     if bot_id not in bots.load_defs():
         raise ValueError(f"unknown bot: {bot_id}")
     return ws, bot_id
+
+
+def _browser_gap(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str) and value.strip().isdecimal():
+        value = int(value.strip())
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"seconds between sends must be a whole number from 0 to {browser.MAX_GAP}, or empty")
+    return value
 
 
 def _browser_daily(value):
@@ -2577,6 +2592,8 @@ def _integrations_view():
         except composio.ComposioError:
             view["offline"] = True
     view["picked"] = {w["id"]: integrations.accounts_for(w["id"], ROOT) for w in workspaces}
+    view["send_caps"] = integrations.send_caps(ROOT)
+    view["default_send_cap"] = integrations.DEFAULT_SEND_CAP
     return view
 
 
@@ -2910,9 +2927,14 @@ def _approve_app_action(aid, arguments=None):
         raise _AppRefused(f"that {toolkit} account is no longer picked for this workspace")
     if account not in live:
         raise _AppRefused(f"that {toolkit} account is not connected")
+    daily = integrations.send_cap(account, ROOT)
     try:
-        claimed = approvals.claim(aid, ROOT)
+        claimed = approvals.claim(aid, ROOT, daily=daily, account=account)
     except ValueError as e:
+        if str(e) == "capped":
+            label = (integrations.known(ROOT).get(account) or {}).get("label") or account
+            raise _AppRefused(f"{label} reached today's limit of {daily} sends; approve it again tomorrow "
+                              "or raise the limit in Apps") from None
         raise _AppRefused(str(e)) from None
     # Run what was claimed, not the copy read before: a second edit in between must not slip through.
     action = claimed.get("action") or action
@@ -3442,7 +3464,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     mode = body.get("mode") or None
                     browser.set_site(site, mode, _browser_daily(body.get("daily")), ROOT, new=bool(body.get("add")),
-                                     proxy=_browser_site_proxy(site, body))
+                                     proxy=_browser_site_proxy(site, body), gap=_browser_gap(body.get("gap")))
                 return self._send(200, _browser_view())
             ws, bot_id = _browser_bot(body)
             browser.set_bot(ws, bot_id, body.get("level"), body.get("mode"), ROOT)
@@ -4118,6 +4140,9 @@ class Handler(BaseHTTPRequestHandler):
         live = viewer.setdefault("live", {}) if job else {}
         job_cap = (job["id"], job["cap"]) if job and job.get("cap") else None  # a cap is optional
         job_mode = jobs.mode_of(job) if job else None
+        # A job run or a workflow step holds every send for its own click, even on a grant that
+        # sends without asking: approving a loop or a plan never approves what is inside it.
+        hold_sends = bool(job) or bool(viewer.get("workflow"))
         if job:
             chat_id = None
             live["status"] = "refused"  # until the model turn starts: every early return
@@ -4674,7 +4699,7 @@ class Handler(BaseHTTPRequestHandler):
                 kw.update({"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report",
+                           "report": job_mode == "report", "hold_sends": hold_sends,
                            "taint": turn,  # reads mark it; actions wait once it holds outside content
                            # the first app call marks the thread: no web search after app data
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
@@ -4686,7 +4711,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = browser.with_epoch(ws, lambda: _workspace_exists(ws), lambda _e: BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report",
+                           "report": job_mode == "report", "hold_sends": hold_sends,
                            # On a server, My Chrome is this sender's own Chrome via their runner only.
                            "runner_owner": sender, "shared": shared,
                            "taint": turn}), ROOT)
@@ -5941,6 +5966,10 @@ class Handler(BaseHTTPRequestHandler):
                         return self._send(502, {"ok": False, "error": str(e)})
                     integrations.set_label(account, alias, ROOT)
                     return self._send(200, {"account": account, "label": alias})
+                if path == "/api/integrations/send-cap":
+                    account, daily = body.get("account"), body.get("daily")
+                    return self._send(200, {"account": account,
+                                            "daily": integrations.set_send_cap(account, daily, ROOT)})
                 if path == "/api/integrations/grants":
                     ws = _strict_ws(body.get("ws"))
                     bot_id = str(body.get("bot") or "")

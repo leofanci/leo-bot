@@ -93,6 +93,9 @@ class Gate(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        gap = mock.patch.object(browser, "DEFAULT_GAP", 0)  # pacing has its own tests (test_send_caps)
+        gap.start()
+        self.addCleanup(gap.stop)
         browser.set_site("acme.test", None, 20, self.root)
         browser.set_site("demo.test", "my_chrome", None, self.root)
         self.page = u("acme.test/messages/42")
@@ -287,6 +290,18 @@ class Gate(unittest.TestCase):
         self.assertEqual(row["action"]["arguments"], {"url": self.page, "text": "Hi", "site": "acme.test"})
         # typed reset after the send: the next click is a plain click
         self.assertEqual(text_of(self.handle(call(P + "click"))), "ok")
+
+    def test_hold_sends_needs_a_plan_on_act_level(self):
+        # A job run or a workflow step: even "Acts on its own" sends only what the owner approved.
+        self.level("act")
+        self.handle(call(P + "fill", text="Hi"), hold_sends=True)
+        self.assertEqual(text_of(self.handle(call(P + "click"), hold_sends=True)), browser_relay.NO_PLAN)
+        self.assertEqual(self.up.calls(), [P + "fill"])
+        self.handle(call(browser_relay.PLAN_TOOL, sends=[{"url": self.page, "text": "Hi"}]), hold_sends=True)
+        rows = [r for r in approvals.pending(self.root) if r["action"]["toolkit"] == approvals.BROWSER]
+        approvals.approve_send(rows[0]["id"], self.root)
+        self.assertEqual(text_of(self.handle(call(P + "click"), hold_sends=True)), "ok")
+        self.assertEqual(self.up.calls(), [P + "fill", P + "click"])
 
     def test_act_on_a_new_site_needs_a_plan_then_learns_it(self):
         other = u("other.test/form")
@@ -740,6 +755,9 @@ class FinalReview(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        gap = mock.patch.object(browser, "DEFAULT_GAP", 0)  # pacing has its own tests (test_send_caps)
+        gap.start()
+        self.addCleanup(gap.stop)
         browser.set_site("acme.test", None, 20, self.root)
         browser.set_site("demo.test", "my_chrome", None, self.root)
         self.page = u("acme.test/messages/42")

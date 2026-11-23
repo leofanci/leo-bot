@@ -33,6 +33,8 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _ACCOUNT_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 LINK_WS = "_link"  # the session that only makes connect links; never a bot's
 MAX_ACCOUNTS = 10  # Composio's multi-account cap per toolkit and session
+DEFAULT_SEND_CAP = 50  # sends a day per connected account when the owner set none
+MAX_SEND_CAP = 500
 
 
 def _path(root):
@@ -144,6 +146,7 @@ def forget_account(account_id, root=bots.ROOT):
     """Drop a disconnected account from the known list and every workspace's ticks."""
     def fn(d):
         (d.get("known") or {}).pop(account_id, None)
+        (d.get("send_caps") or {}).pop(account_id, None)
         for picks in (d.get("accounts") or {}).values():
             for tk in list(picks):
                 picks[tk] = [i for i in picks[tk] if i != account_id]
@@ -171,6 +174,37 @@ def set_label(account_id, label, root=bots.ROOT):
         if row:
             row["label"] = label
     _update(root, fn)
+
+
+def send_cap(account, root=bots.ROOT):
+    """Sends a day this account may make, across every bot and workspace (the account is what
+    an app flags, not the workspace)."""
+    cap = (load(root).get("send_caps") or {}).get(account)
+    return cap if isinstance(cap, int) and not isinstance(cap, bool) and 1 <= cap <= MAX_SEND_CAP \
+        else DEFAULT_SEND_CAP
+
+
+def set_send_cap(account, daily, root=bots.ROOT):
+    """Set (or with None reset to the default) one known account's daily send cap."""
+    if daily is not None and (not isinstance(daily, int) or isinstance(daily, bool)
+                              or not 1 <= daily <= MAX_SEND_CAP):
+        raise ValueError(f"sends per day is a whole number from 1 to {MAX_SEND_CAP}")
+
+    def fn(d):
+        if account not in (d.get("known") or {}):
+            raise ValueError("unknown account: reload Integrations")
+        caps = d.setdefault("send_caps", {})
+        if daily is None:
+            caps.pop(account, None)
+        else:
+            caps[account] = daily
+    _update(root, fn)
+    return send_cap(account, root)
+
+
+def send_caps(root=bots.ROOT):
+    """{account id: its daily send cap} for every known account, the default filled in."""
+    return {aid: send_cap(aid, root) for aid in known(root)}
 
 
 def known(root=bots.ROOT):

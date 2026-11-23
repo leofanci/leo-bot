@@ -69,6 +69,11 @@ class DomainBots(unittest.TestCase):
             ("sales", "build me a list of prospects to contact"): "prospect-list",
             ("sales", "which deals in the pipeline should I chase"): "deal-review",
             ("sales", "they said it is too expensive, how do I answer that objection"): "objection-handling",
+            ("sales", "draft the outreach messages for this list"): "outreach-draft",
+            ("sales", "write cold emails to these prospects"): "outreach-draft",
+            ("sales", "sort these replies"): "reply-triage",
+            ("sales", "what came back from the outreach campaign"): "reply-triage",
+            ("sales", "build me a list of prospects to contact"): "prospect-list",
             ("finance", "how long is my runway"): "runway-plan",
             ("finance", "what are our unit economics, CAC and LTV"): "unit-economics",
             ("finance", "review this contract before I sign"): "contract-check",
@@ -90,6 +95,8 @@ class DomainBots(unittest.TestCase):
         self.assertEqual(server._suggest_skill("how much should we charge for the pro tier"), "pricing-strategy")
         self.assertEqual(server._suggest_skill("who are our competitors"), "competitor-scan")
         self.assertEqual(server._suggest_skill("plan the launch sequence"), "launch-plan")
+        self.assertEqual(server._suggest_skill("sort these support tickets"), "support-triage")
+        self.assertEqual(server._suggest_skill("find me leads in the area"), "prospect-list")
 
     def test_every_new_skill_is_explicit(self):
         for bid in NEW:
@@ -105,8 +112,8 @@ class DomainBots(unittest.TestCase):
 
 
 class DomainLibrary(unittest.TestCase):
-    WORKFLOWS = ("deal-prep", "price-to-runway", "feedback-to-test", "process-setup", "hire-plan")
-    LOOPS = {"pipeline-watch": "sales", "runway-check": "finance", "feedback-digest": "support",
+    WORKFLOWS = ("deal-prep", "price-to-runway", "feedback-to-test", "process-setup", "hire-plan", "outreach")
+    LOOPS = {"pipeline-watch": "sales", "reply-watch": "sales", "runway-check": "finance", "feedback-digest": "support",
              "daily-plan": "ops", "hiring-watch": "people"}
 
     def test_workflows_parse_and_run_with_their_bots_on(self):
@@ -127,6 +134,20 @@ class DomainLibrary(unittest.TestCase):
                     text = (Path(__file__).resolve().parent.parent / "skills" / name / "SKILL.md").read_text()
                     for line in ("## Stop when", "## Always ask first", "Sending", "Spending", "Deleting"):
                         self.assertIn(line, text)
+
+    def test_outreach_holds_every_send_behind_its_last_gate(self):
+        wf = workflows.load("outreach")
+        self.assertEqual([(s.skill, s.bot, bool(s.gate)) for s in wf.steps],
+                         [("prospect-list", "sales", False), ("outreach-draft", "sales", False),
+                          ("outreach-draft", "sales", True)])
+        self.assertEqual([s.checker for s in wf.steps], ["research", "cmo", None])
+        self.assertIn("never approves a send", (Path(__file__).resolve().parent.parent / "skills" / "outreach"
+                                                / "SKILL.md").read_text())
+
+    def test_sales_card_holds_six_skills(self):
+        self.assertEqual(list(bots.load_defs()["sales"].skills),
+                         ["discovery-call", "prospect-list", "outreach-draft", "reply-triage", "deal-review",
+                          "objection-handling"])
 
     def test_workflow_refused_while_its_bot_is_off(self):
         with tempfile.TemporaryDirectory() as tmp:

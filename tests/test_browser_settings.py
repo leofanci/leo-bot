@@ -18,7 +18,7 @@ class Settings(unittest.TestCase):
 
     def test_defaults_off_and_bot(self):
         self.assertEqual(browser.bot_setting("demo", "b1", self.root), {"level": "off", "mode": "bot"})
-        self.assertEqual(browser.sites(self.root)["linkedin.com"], {"mode": None, "daily": 20})
+        self.assertEqual(browser.sites(self.root)["linkedin.com"], {"mode": None, "daily": 20, "gap": 120})
         browser.set_bot("demo", "b1", "read", "my_chrome", self.root)
         self.assertEqual(browser.bot_setting("demo", "b1", self.root), {"level": "read", "mode": "my_chrome"})
         self.assertEqual(browser.bot_setting("demo", "b2", self.root), {"level": "off", "mode": "bot"})
@@ -118,7 +118,7 @@ class Settings(unittest.TestCase):
             self.assertEqual(browser.bot_setting("demo", "b1", self.root)["level"], "read", raw)
             path.write_text(raw)
             browser.set_site("acme.test", "bot", 5, self.root)
-            self.assertEqual(browser.sites(self.root)["acme.test"], {"mode": "bot", "daily": 5}, raw)
+            self.assertEqual(browser.sites(self.root)["acme.test"], {"mode": "bot", "daily": 5, "gap": None}, raw)
 
     def test_forget_workspace_skips_write_when_nothing_removed(self):
         browser.forget_workspace("demo", self.root)
@@ -129,9 +129,9 @@ class Settings(unittest.TestCase):
             with self.assertRaises(ValueError):
                 browser.set_site("acme.com", None, bad, self.root)
         browser.set_site("Acme.COM:8080", "bot", 500, self.root)
-        self.assertEqual(browser.sites(self.root)["acme.com"], {"mode": "bot", "daily": 500})
+        self.assertEqual(browser.sites(self.root)["acme.com"], {"mode": "bot", "daily": 500, "gap": None})
         browser.set_site("acme.com", None, None, self.root)
-        self.assertEqual(browser.sites(self.root)["acme.com"], {"mode": None, "daily": None})
+        self.assertEqual(browser.sites(self.root)["acme.com"], {"mode": None, "daily": None, "gap": None})
         self.assertIn("linkedin.com", browser.sites(self.root))
         with self.assertRaises(ValueError):
             browser.set_site("acme.com", "tor", 5, self.root)

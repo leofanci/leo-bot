@@ -3,6 +3,7 @@ import io
 import json
 import os
 import tempfile
+import time
 import unittest
 from email.message import Message
 from pathlib import Path
@@ -182,6 +183,19 @@ class IntegrationsApi(Base):
             self.assertEqual(request("POST", "/api/integrations/disconnect", {"account": "ca_g1"})[0], 200)
         self.assertEqual(integrations.accounts_for("hq", self.root), {})
 
+    def test_send_cap_endpoint(self):
+        code, data, _, _ = request("POST", "/api/integrations/send-cap", {"account": "ca_g1", "daily": 12})
+        self.assertEqual((code, data), (200, {"account": "ca_g1", "daily": 12}))
+        self.assertEqual(integrations.send_cap("ca_g1", self.root), 12)
+        for bad in ({"account": "ca_g1", "daily": 0}, {"account": "ca_g1", "daily": 501},
+                    {"account": "ca_g1", "daily": "9"}, {"account": "ca_nope", "daily": 5}):
+            self.assertEqual(request("POST", "/api/integrations/send-cap", bad)[0], 400, bad)
+        self.assertEqual(request("POST", "/api/integrations/send-cap", {"account": "ca_g1", "daily": 3},
+                                 origin=False)[0], 403)
+        self.assertEqual(request("GET", "/api/integrations")[1]["send_caps"]["ca_g1"], 12)
+        code, data, _, _ = request("POST", "/api/integrations/send-cap", {"account": "ca_g1", "daily": None})
+        self.assertEqual((code, data["daily"]), (200, 50))
+
     def test_rename_requires_origin(self):
         with mock.patch.object(server.composio, "rename_account") as ren:
             self.assertEqual(request("POST", "/api/integrations/rename",
@@ -358,6 +372,25 @@ class Approve(Base):
             code, data, _, _ = request("POST", self.path + "/approve", {})
         self.assertEqual((code, data["status"]), (200, "done"))
         ex.assert_called_once()
+
+    def test_approve_over_cap_stays_pending(self):
+        integrations.set_send_cap("ca_g1", 1, self.root)
+        done = approvals.start_app_run(self.root, ws="acme", room=None, chat=None, bot="cos", person="ceo",
+                                       toolkit="gmail", slug="GMAIL_REPLY_TO_THREAD", arguments={},
+                                       account="ca_g1", daily=1)
+        approvals.end_app_run(done["id"], "done", "Ran on its own.", self.root)
+        with mock.patch.object(server.composio, "execute") as ex:
+            code, data, _, _ = request("POST", self.path + "/approve", {})
+        self.assertEqual(code, 409)
+        self.assertIn("reached today's limit of 1 sends", data["error"])
+        ex.assert_not_called()
+        self.assertEqual(approvals.get(self.rec["id"], self.root)["status"], "pending")
+        integrations.set_send_cap("ca_g1", 2, self.root)
+        with mock.patch.object(server.composio, "execute", return_value={"successful": True, "data": {}}):
+            self.assertEqual(request("POST", self.path + "/approve", {})[0], 200)
+        row = approvals.get(self.rec["id"], self.root)
+        self.assertEqual((row["status"], row["action"]["account"]), ("done", "ca_g1"))
+        self.assertEqual(approvals.count_app_sends(approvals.load(self.root), "ca_g1", time.time()), 2)
 
     def test_approve_refused_after_grant_removed(self):
         integrations.set_grant("hq", "cos", {}, self.root)

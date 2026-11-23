@@ -26,7 +26,7 @@ import secrets
 import threading
 import time
 
-from core import action_log, app_rules, approvals, bots, composio, destinations, integrations
+from core import action_log, app_preview, app_rules, approvals, bots, composio, destinations, integrations
 
 MAX_AGE = 1800  # hard cap; a token normally dies with its chat request
 METHODS = ("initialize", "ping", "tools/list", "tools/call")
@@ -49,6 +49,8 @@ REPORT_ONLY = '"{slug}" is not a read, and this scheduled job only reports. This
 UNREADABLE = "This call could not be read as a list of app tools. It was not performed."
 NO_ACCOUNT = ('"{slug}": {toolkit} has no account picked in this workspace. Ask the owner to connect {toolkit} '
               'in Apps, then stop. This call was not performed.')
+CAPPED = ("Not sent: {title}. {account} reached today's limit of {daily} sends. Try again tomorrow or ask "
+          "the owner to raise it in Apps.")
 PICK_ACCOUNT = ('"{slug}": set "account" on the tool to one of this workspace\'s {toolkit} accounts: '
                 '{choices}. This call was not performed.')
 
@@ -199,6 +201,9 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
                 fresh = destinations.unknown(ctx["ws"], dests, root)
             if fresh:
                 verdict = "hold"
+            elif ctx.get("hold_sends") and tk and app_rules.is_send(c["tool_slug"], tk):
+                # A job run or a workflow step: approving the plan never approves its sends.
+                verdict = "hold"
         if verdict == "refuse":
             # An app Leo Bot knows but this bot may not use here: the owner can fix that in Apps or Team.
             known = tk and tk not in app_rules.BLOCKED_TOOLKITS
@@ -210,11 +215,24 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
         if refusal:
             notes.append(refusal)
         elif verdict == "read" or (verdict == "run" and not ctx.get("report")):
+            rec = None
+            if verdict == "run":
+                # Started before it is forwarded: the account's daily send cap is taken here, once.
+                rec = approvals.start_app_run(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"),
+                                              bot=ctx["bot"], person=ctx["person"], toolkit=tk,
+                                              slug=c["tool_slug"], arguments=c["arguments"], account=account,
+                                              daily=integrations.send_cap(account, root))
+                if rec is None:
+                    label = (integrations.known(root).get(account) or {}).get("label") or account
+                    title = app_preview.build(c["tool_slug"], c["arguments"], tk, account=label)["title"]
+                    notes.append(CAPPED.format(title=title, account=label,
+                                               daily=integrations.send_cap(account, root)))
+                    continue
             # The account travels only when there is a choice: one account is the pin.
             reads.append({"tool_slug": c["tool_slug"], "arguments": c["arguments"],
                           **({"account": account} if len(picks[tk]) > 1 else {})})
-            if verdict == "run":
-                runs.append((tk, c, account, len(reads) - 1, None if outside else dests))
+            if rec is not None:
+                runs.append((rec, tk, c, account, len(reads) - 1, None if outside else dests))
         elif ctx.get("report"):  # a Report only job: nothing waits for a click, nothing goes out
             notes.append(REPORT_ONLY.format(slug=c["tool_slug"]))
         else:
@@ -291,16 +309,14 @@ def _forward_runs(rebuilt, sid, upstream, ctx, runs, notes, root):
         line = approvals.STALE_NOTE
     per_tool = _outcomes(reply["result"]) if ok else {}
     ran, failed = [], []
-    for tk, c, account, idx, clean_dests in runs:
+    for started, tk, c, account, idx, clean_dests in runs:
         if line is None and idx in per_tool and per_tool[idx]:
             status, result = "failed", f"Failed: {per_tool[idx]}"
         elif line is None:
             status, result = "done", "Ran on its own."
         else:
             status, result = "failed", line
-        rec = approvals.log_app_run(root, ws=ctx["ws"], room=ctx.get("room"), chat=ctx.get("chat"), bot=ctx["bot"],
-                                    person=ctx["person"], toolkit=tk, slug=c["tool_slug"], arguments=c["arguments"],
-                                    account=account, status=status, result=result)
+        rec = approvals.end_app_run(started["id"], status, result, root)
         action_log.record(root, "app_run", ws=ctx["ws"], bot=ctx["bot"], person=ctx.get("person"),
                           chat=ctx.get("chat"), slug=c["tool_slug"], account=account, status=status,
                           arguments=c["arguments"])
