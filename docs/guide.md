@@ -103,6 +103,7 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 - The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
 - Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
+- The default team brings `/idea-to-experiment` and `/team-launch-plan` (@gtm drafts a launch plan, @research and @cmo advise, @product checks).
 - The add-on bots bring one workflow each: `/deal-prep` and `/outreach` (@sales), `/price-to-runway` (@finance), `/feedback-to-test` (@support), `/process-setup` (@ops) and `/hire-plan` (@people). Switch the bot on first.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
 

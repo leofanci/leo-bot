@@ -84,6 +84,13 @@ class Templates(unittest.TestCase):
         self.assertTrue(wf.steps[3].gate)
         self.assertEqual(workflows.problems(wf, venture_team()), [])
         self.assertTrue(workflows.problems(wf, bots.team()))  # HQ starts with cos only
+        team = workflows.load("team-launch-plan")
+        self.assertIsNotNone(team)
+        self.assertEqual(len(team.steps), 1)
+        step = team.steps[0]
+        self.assertEqual((step.skill, step.bot, step.checker, step.gate, step.consult),
+                         ("launch-plan", "gtm", "product", True, ("research", "cmo")))
+        self.assertEqual(workflows.problems(team, venture_team()), [])
 
     def test_parse_consult(self):
         base = "1. skill: experiment-design | bot: product | output: test | gate: no | checker: gtm"
