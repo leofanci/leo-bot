@@ -10,7 +10,7 @@ Start in your own private thread with `/outreach <who you sell to, what you sell
 
 ## Steps
 1. skill: prospect-list | bot: sales | output: a list of 10 to 25 sourced prospects, each with its source link and signal | gate: no | checker: research
-2. skill: outreach-draft | bot: sales | output: one draft per row in the list, in each row's Draft cell, and the angle used | gate: no | checker: cmo
+2. skill: outreach-draft | bot: sales | output: one draft per prospect in the thread, and the angle used | gate: no | checker: cmo
 3. skill: outreach-draft | bot: sales | output: every message planned as its own held send, each waiting in Approvals; nothing sent | gate: approval
 
 ## Stop when
