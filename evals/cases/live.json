@@ -37,5 +37,20 @@
    "expect": {"bot": "social", "mentions": ["Apps"], "approval": false, "max_chars": 1500}},
   {"id": "research-report-searches-the-web-without-asking",
    "msg": "@research we need a final report on the biggest bottleneck in archaeology right now. find current trends, including what people say on social media",
-   "expect": {"bot": "research", "web": true, "mentions": ["archaeolog"]}}
+   "expect": {"bot": "research", "web": true, "mentions": ["archaeolog"]}},
+  {"id": "skill-competitor-scan-memo",
+   "msg": "@research /competitor-scan map our competitors and how we should play them. acme sells appointment scheduling software to small dental clinics (1 to 5 chairs) in one country. Solo founder, no paid budget, 12 paying clinics at 40 per month each. Buyers compare it with paper books and big practice suites. Reply in chat, do not save.",
+   "expect": {"bot": "research", "skill": "competitor-scan", "mentions": ["recommend"], "max_chars": 7000}},
+  {"id": "skill-icp-research-memo",
+   "msg": "@research /icp-research which customer segment should we focus on first? acme sells appointment scheduling software to small dental clinics (1 to 5 chairs) in one country. Solo founder, no paid budget, 12 paying clinics at 40 per month each. Buyers compare it with paper books and big practice suites. Reply in chat, do not save.",
+   "expect": {"bot": "research", "skill": "icp-research", "mentions": ["recommend"], "max_chars": 7000}},
+  {"id": "skill-pricing-strategy-memo",
+   "msg": "@cmo /pricing-strategy what should we charge next year? acme sells appointment scheduling software to small dental clinics (1 to 5 chairs) in one country. Solo founder, no paid budget, 12 paying clinics at 40 per month each. Buyers compare it with paper books and big practice suites. Reply in chat, do not save.",
+   "expect": {"bot": "cmo", "skill": "pricing-strategy", "mentions": ["recommend"], "max_chars": 7000}},
+  {"id": "skill-launch-plan-memo",
+   "msg": "@gtm /launch-plan plan the public launch of our new online booking page. acme sells appointment scheduling software to small dental clinics (1 to 5 chairs) in one country. Solo founder, no paid budget, 12 paying clinics at 40 per month each. Buyers compare it with paper books and big practice suites. Reply in chat, do not save.",
+   "expect": {"bot": "gtm", "skill": "launch-plan", "mentions": ["recommend"], "max_chars": 7000}},
+  {"id": "skill-positioning-memo",
+   "msg": "@cmo /positioning how should we position acme? acme sells appointment scheduling software to small dental clinics (1 to 5 chairs) in one country. Solo founder, no paid budget, 12 paying clinics at 40 per month each. Buyers compare it with paper books and big practice suites. Reply in chat, do not save.",
+   "expect": {"bot": "cmo", "skill": "positioning", "mentions": ["recommend"], "max_chars": 7000}}
 ]

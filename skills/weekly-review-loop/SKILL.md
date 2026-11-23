@@ -14,7 +14,7 @@ A time loop for @cos. Set it up with `--skill weekly-review-loop --schedule "mon
 Weekly, Monday 09:00. Portfolio health moves over days, not hours; faster runs repeat themselves.
 
 ## Acts when
-Every scheduled run. If nothing changed since the last run (no new memo, experiment result, evidence entry or card), report that in one line and stop.
+Every scheduled run. If nothing changed since the last run (no new memo, experiment result, evidence entry or card), report that in one line and end this run (the loop keeps going).
 
 ## Purpose
 Keep the owner's week pointed at the three priorities that matter most, and say plainly what is stalled.

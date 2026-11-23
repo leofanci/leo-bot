@@ -64,6 +64,22 @@ Each project expands into six sections:
 
 ---
 
+## Add-on bots
+
+Five domain bots ship switched off in every workspace. Switch one on in the workspace's Team when you need it:
+
+| Bot | Skills |
+|---|---|
+| @sales, Sales Lead | discovery-call, prospect-list, deal-review, objection-handling |
+| @finance, Finance Lead | unit-economics, runway-plan, contract-check |
+| @support, Support Lead | support-triage, faq-builder, feedback-synthesis |
+| @ops, Operations Lead | weekly-plan, process-doc, vendor-compare |
+| @people, People Lead | role-scope, interview-plan, onboarding-plan |
+
+- While an add-on bot is off, its skills are on no bot's card, so they cost nothing per message. Typing `/<skill>` still runs it, as @cos.
+- They draft and recommend. Sending, paying, signing, buying and posting stay your actions, or wait for your approval.
+- *contract-check*, *runway-plan* and *unit-economics* are not legal, tax or investment advice. They flag what to confirm with a professional.
+
 ## Bots passing work on
 
 In chat a bot can pass the work to a teammate with a `HANDOFF @handle: <task>` line, or ask one for a read-only view with `CONSULT @handle: <question>`. The teammate that gets the work may pass it on again, so one message can travel along a chain of bots (for example research, then marketing, then social). Every link shows in the thread (`from @bot · hop 2`), and your next untagged message goes to the last bot.
@@ -86,6 +102,7 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 - The run pauses on a card, a step still weak after its retry, a failed turn, Stop, a closed tab, or the cost cap. The bar above the message box shows the step and why it waits. Continue picks it up; Stop workflow ends it.
 - Settings, General, *Cost per workflow run*: dollars one run may spend over all its steps. 0 means no cap.
 - Workflows run only in your own private threads, one run per thread. A thread invited people can see, an invited person's message or a scheduled job never starts one.
+- The add-on bots bring one workflow each: `/deal-prep` (@sales), `/price-to-runway` (@finance), `/feedback-to-test` (@support), `/process-setup` (@ops) and `/hire-plan` (@people). Switch the bot on first.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
 
 ## Loops
@@ -99,6 +116,7 @@ A loop is a scheduled job: one bot, one skill and one message, run on a schedule
 - A loop never starts a workflow. It can suggest one with a `START: /<workflow> <brief>` line. You then get a *Start* button that opens a new thread with that message typed in for you to send.
 - Before proposing a loop, a bot loads the *loop-design* skill: it picks the loop type and cadence, writes down the stop condition and what the notepad keeps, and shows you the design first. Each item a loop works on gets at most 3 tries; after that the loop stops and lists it for you.
 - Two loop templates ship with Leo Bot. *weekly-review-loop* (@cos, Mondays) compares the week with last week's priorities. *signal-sweep* (@research, daily) reports only new outside signals that touch a decision. A template runs only as the bot it was made for.
+- The add-on bots bring one template each: *pipeline-watch* (@sales, daily, wakes on the deals list), *runway-check* (@finance, Mondays), *feedback-digest* (@support, Fridays), *daily-plan* (@ops, weekday mornings) and *hiring-watch* (@people, daily, wakes on the candidate list).
 - The Loops screen shows each loop's mode, cap, schedule, stop condition, expiry, last and next run, cost over 7 days and its notepad (*State*). It lets you pause, edit, renew or delete each loop.
 
 ## The content pipeline (two stages)

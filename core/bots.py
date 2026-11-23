@@ -14,7 +14,9 @@ switches its own bots on/off and keeps its own memory. User data, gitignored:
                                     workspace, "slug/bot" for one (owner-only: bots never write it)
 
 Every skill always has exactly one owner: a switched-off bot's skills roll up
-to its nearest active manager. `cos` is the root and is always on.
+to its nearest active manager. `cos` is the root and is always on. An add-on bot
+(`addon: yes`: a domain like sales or finance) starts off everywhere and, while off,
+its skills stay off every card: only an explicit /skill reaches them, run by `cos`.
 """
 import json
 import os
@@ -48,6 +50,7 @@ class Bot:
     body: str = ""
     active: bool = True
     covering: list = field(default_factory=list)
+    addon: bool = False
 
 
 def _parse(text):
@@ -79,6 +82,7 @@ def load_defs(root=paths.CODE):
             skills=skills,
             default_skill=fm.get("default_skill") or (skills[0] if skills else ""),
             body=body,
+            addon=fm.get("addon", "").lower() in ("yes", "true"),
         )
     return out
 
@@ -152,11 +156,13 @@ class Team:
             b.active = b.id == ROOT_BOT or state.get(b.id, True)
         self._owner = {}
         for b in defs.values():
+            if b.addon and not b.active:  # off add-on: no menu carries its skills (owner() → cos)
+                continue
             for s in b.skills:
                 self._owner[s] = self._roll_up(b.id)
         for b in defs.values():
             b.covering = [o.id for o in defs.values()
-                          if not o.active and o.skills
+                          if not o.active and not o.addon and o.skills
                           and self._roll_up(o.id) == b.id]
 
     def manager(self, bot_id):
@@ -186,6 +192,10 @@ class Team:
     def owner(self, skill):
         """Active bot that answers for this skill (unknown skills → cos)."""
         return self._owner.get(skill, ROOT_BOT)
+
+    def hidden_skills(self):
+        """Skills of switched-off add-on bots: on no card, matched by no wording."""
+        return frozenset(s for b in self.bots.values() if b.addon and not b.active for s in b.skills)
 
     def skills_of(self, bot_id):
         """Effective skills: own first, then those covered for switched-off reports."""

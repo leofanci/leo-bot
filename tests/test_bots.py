@@ -13,7 +13,7 @@ import dashboard.server as server
 SKILLS = {d.name for d in (Path(paths.CODE) / "skills").iterdir()
           if (d / "SKILL.md").exists() and "\nkind: workflow\n" not in (d / "SKILL.md").read_text()
           and "\nkind: loop\n" not in (d / "SKILL.md").read_text()} - bots.SHARED_SKILLS
-# A venture with profiles and a linked app: its smart default switches every bot on.
+# A venture with profiles and a linked app: its smart default switches every core bot on.
 VENTURE = {"slug": "acme", "kind": "venture", "profiles": [{"slug": "profile-a"}],
            "folders": [{"id": "f1", "path": "/tmp/acme-app", "name": "app", "access": "read"}]}
 
@@ -60,7 +60,8 @@ class Team(unittest.TestCase):
 
     def test_smart_defaults_by_project_type(self):
         on = lambda t: sorted(b.id for b in t.bots.values() if b.active)  # noqa: E731
-        self.assertEqual(on(self.team()), sorted(bots.load_defs()))
+        # Add-on domain bots (sales, finance, ...) start off even here.
+        self.assertEqual(on(self.team()), sorted(b for b, d in bots.load_defs().items() if not d.addon))
         self.assertEqual(on(bots.team(self.root)), ["cos"])  # HQ: CEO office
         brand = {"slug": "acme", "kind": "brand", "profiles": [], "folders": []}
         self.assertEqual(on(bots.team(self.root, "acme", brand)), ["cmo", "cos", "social"])

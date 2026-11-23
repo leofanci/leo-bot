@@ -14,7 +14,7 @@ A proactive loop for @research in one workspace. Set it up with `--skill signal-
 Daily, 08:00. Market signals move in days. Use a weekly schedule for a quiet market.
 
 ## Acts when
-Every run looks. It reports only signals that are new since the notepad's Recent noise and Watch list. Nothing new: one line, then stop.
+Every run looks. It reports only signals that are new since the notepad's Recent noise and Watch list. Nothing new: one line, then end this run (the loop keeps going).
 
 ## Purpose
 Catch the few outside signals that should change a decision in this workspace, without flooding the owner.
