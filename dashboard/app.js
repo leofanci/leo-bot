@@ -5950,8 +5950,19 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (activeChatId !== a.chat) { statusEl.textContent = "That thread is no longer open here"; return; }
     if (answer === "approved") send("Yes, approved.", { approval: "approved" });
   }
+  // A loop offered a workflow (its START line): a new thread in this workspace's #general with
+  // `/workflow brief` typed in. The owner reads it and sends it; nothing starts by itself.
+  async function startWorkflow(offer){
+    if (!offer || busy) return busyNote();
+    await selectRoom(`${_WS}/general`);
+    newThread();
+    input.value = `/${offer.name}${offer.brief ? " " + offer.brief : ""}`;
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
   window.ChatRooms = {
     select: selectRoom,
+    startWorkflow,
     openThread,
     newThread: () => newThread(),
     current: () => activeRoomId,
@@ -6516,6 +6527,14 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
         openDeliverable({ ...m.deliverables[+b.dataset.deliv], bot: botId }));
       main.appendChild(box);
     }
+    if (m.workflow_offer?.name) {
+      const bar = document.createElement("div");
+      bar.className = "approval-bar";
+      bar.innerHTML = `<span class="ap-sum">This loop suggests a workflow: /${esc(m.workflow_offer.name)}</span>
+        <button class="btn sm primary" data-wf-offer>Start /${esc(m.workflow_offer.name)}</button>`;
+      bar.querySelector("[data-wf-offer]").onclick = () => startWorkflow(m.workflow_offer);
+      main.appendChild(bar);
+    }
     if (m.approval && _APPROVALS.some(a => a.id === (m.approval.id || m.approval))) {
       const a = typeof m.approval === "object" ? m.approval : _APPROVALS.find(x => x.id === m.approval);
       const bar = document.createElement("div");
@@ -6587,7 +6606,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     row.querySelector(".msg-main").appendChild(box);
   }
   // Function declarations only (hoisted): showChat, defined above, calls these.
-  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length); }
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length || m.workflow_offer); }
   function reactPicker(){   // built on first use; its row and anchor live on the function
     if (reactPicker.el) return reactPicker.el;
     const el = reactPicker.el = document.createElement("div");

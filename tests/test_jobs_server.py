@@ -2,6 +2,7 @@
 import io
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -318,6 +319,34 @@ class JobTurn(unittest.TestCase):
         self.assertEqual(len(self.asks), 3)
         self.assertEqual(out["status"], "done")
         self.assertTrue(jobs.get(self.root, job["id"])["enabled"])
+
+    def offer_run(self, reply, wf=None, problems=()):
+        self.reply = reply
+        loaded = types.SimpleNamespace(name="launch-plan", steps=[]) if wf is None else wf
+        with mock.patch.object(server.workflows, "load", side_effect=lambda n: loaded if n == "launch-plan" else None), \
+                mock.patch.object(server.workflows, "problems", return_value=list(problems)):
+            out = self.run_job(mode="report")
+        return server.chat_store.load(out["chat"])["messages"][-1]
+
+    def test_job_start_line_becomes_offer(self):
+        m = self.offer_run("Signals are in.\nSTART: /launch-plan new pricing page, @cmo first")
+        self.assertEqual(m.get("workflow_offer"), {"name": "launch-plan", "brief": "new pricing page, @cmo first"})
+        self.assertNotIn("START:", m["content"])
+        self.assertIn("Signals are in.", m["content"])
+
+    def test_job_start_unknown_workflow_notice(self):
+        m = self.offer_run("Go.\nSTART: /nope do it")
+        self.assertNotIn("workflow_offer", m)
+        self.assertNotIn("START:", m["content"])
+        self.assertTrue(any("/nope" in n for n in m.get("notices", [])))
+        m = self.offer_run("Go.\nSTART: /launch-plan do it", problems=["step 1: @gtm is switched off here"])
+        self.assertNotIn("workflow_offer", m)
+        self.assertTrue(any("switched off" in n for n in m.get("notices", [])))
+
+    def test_start_line_outside_job_left_alone(self):
+        self.assertIsNone(server._extract_workflow_start("no marker here")[1])
+        text, got = server._extract_workflow_start("a\nSTART: /launch-plan  brief  ")
+        self.assertEqual((text, got), ("a", ("launch-plan", "brief")))
 
     def test_notepad_is_in_every_run(self):
         self.run_job(notes="Sent 12 of 30. Replies: 2.")

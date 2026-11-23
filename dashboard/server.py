@@ -1982,6 +1982,19 @@ JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was m
 _LOOP_DONE_RE = re.compile(r"^[ \t>*_-]*LOOP[ \t]+DONE[*_ \t]*:[*_ \t]*(.*?)[ \t*_]*$", re.M | re.I)
 
 
+# A job's own bot offers the owner a workflow to start: one line `START: /<workflow> <brief>`.
+_START_RE = re.compile(r"^[ \t>*_-]*START[*_ \t]*:[*_ \t]*/([a-z0-9][a-z0-9-]*)(?:[ \t]+(.*?))?[ \t*_]*$", re.M | re.I)
+
+
+def _extract_workflow_start(text):
+    """(text without START lines, (workflow, brief) of the first or None)."""
+    found = _START_RE.findall(text or "")
+    if not found:
+        return text or "", None
+    name, brief = found[0]
+    return _START_RE.sub("", text or "").rstrip(), (name.lower(), " ".join((brief or "").split()))
+
+
 def _extract_loop_done(text):
     """(text without LOOP DONE lines, why or None). A bare line still counts: why is "" then."""
     found = _LOOP_DONE_RE.findall(text or "")
@@ -4879,6 +4892,26 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"clean": clean, "msg": i})
                     if m["bot"] == job["bot"] and not m.get("asked_by") and loop_done is None:
                         loop_done = why or "its stop condition holds"
+                offer = None  # a loop never starts a workflow: it offers the owner a Start button
+                for i, m in enumerate(msgs):
+                    clean, got = _extract_workflow_start(m["content"])
+                    if got is None:
+                        continue
+                    m["content"] = clean
+                    emit({"clean": clean, "msg": i})
+                    if m["bot"] == job["bot"] and not m.get("asked_by") and offer is None:
+                        offer = (i, got)
+                if offer:
+                    i, (name, brief) = offer
+                    wf = workflows.load(name)
+                    bad = ([f"no workflow /{name}"] if not wf else workflows.problems(wf, team))
+                    if bad:
+                        note = f"Could not offer /{name}: {bad[0]}"
+                        msgs[i].setdefault("notices", []).append(note)
+                        emit({"notice": note, "msg": i})
+                    else:
+                        msgs[i]["workflow_offer"] = {"name": wf.name, "brief": brief[:workflow_turns.BRIEF_MAX]}
+                        emit({"workflow_offer": msgs[i]["workflow_offer"], "msg": i})
                 if loop_done is not None:
                     notice(f"This loop met its stop condition and turned itself off: {loop_done[:200]}. "
                            "Turn it back on in Loops.")
