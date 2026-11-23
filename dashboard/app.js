@@ -2273,6 +2273,7 @@ async function renderTeam(){
   let eng = null;  // /api/engines: each bot's engine, model, access and instructions (owner only)
   let pv = null, link = "";
   let jobList = [];
+  let chainLim = null;  // /api/chain: this workspace's own hops and cost per message (owner only)
   const person = isPerson();
   const opened = new Set();  // bots whose details are open: kept across redraws
   // Where the spend went: top models, skills and engines, the last 7 days, cache reads.
@@ -2348,9 +2349,10 @@ async function renderTeam(){
       + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>${spendDetails(costs)}` : ""}
         <div class="rowc">${on.map(onRow).join("")}</div>
         ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}
-        ${person ? "" : jobsSection()}`;
+        ${person ? "" : jobsSection()}${person ? "" : chainSection()}`;
     wirePeople();
     wireJobs();
+    wireChain();
     $("#team-list").querySelectorAll("[data-bot-more]").forEach(btn => btn.onclick = () => {
       const row = btn.closest(".team-row"), detail = row.querySelector(".team-detail"), id = btn.dataset.botMore;
       const open = detail.hidden;
@@ -2405,6 +2407,30 @@ async function renderTeam(){
     return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
       <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. Cap: dollars per 24 hours, empty for no cap. To change the schedule, message or skill, ask the bot in chat.</div>
       <div class="rowc">${jobList.map(row).join("")}</div>`;
+  };
+  // Bot chains in this workspace (owner only): empty inherits Settings, General.
+  const chainSection = () => {
+    if (!chainLim) return "";
+    const st = chainLim.settings || {};
+    const hopsPh = st.hops ? `Settings: ${st.hops}` : "Settings: no limit";
+    const costPh = st.cost ? `Settings: $${st.cost}` : "Settings: no cap";
+    return `<h4 class="team-sub">Bot chains here</h4>
+      <div class="help">How far bots may pass one message along in this workspace. Empty uses Settings, General. 0 = no limit.</div>
+      <div class="eng-choice"><label><span>Hops per message</span> <input id="ws-chain-hops" type="number" min="0" step="1" inputmode="numeric"
+          value="${chainLim.hops ?? ""}" placeholder="${esc(hopsPh)}" aria-label="Hops per message in this workspace"></label></div>
+      <div class="eng-choice"><label><span>Cost per message</span> <input id="ws-chain-cost" type="number" min="0" step="0.01" inputmode="decimal"
+          value="${chainLim.cost ?? ""}" placeholder="${esc(costPh)}" aria-label="Chain cost cap per message in this workspace, dollars"></label></div>`;
+  };
+  const wireChain = () => {
+    const hops = $("#ws-chain-hops"), cost = $("#ws-chain-cost");
+    if (!hops || !cost) return;
+    const val = el => el.value.trim() === "" ? null : Number(el.value);
+    const save = async () => {
+      try { chainLim = await jpost("/api/chain", { ws: _WS, hops: val(hops), cost: val(cost) }); toast("Chain limits saved ✓"); }
+      catch (e) { toast("✗ " + e.message); }
+      draw();
+    };
+    hops.onchange = save; cost.onchange = save;
   };
   const wireJobs = () => {
     const box = $("#team-list");
@@ -2471,6 +2497,7 @@ async function renderTeam(){
     brw = await api(`/api/browser/settings?ws=${encodeURIComponent(_WS)}`).catch(() => null);
     eng = await api("/api/engines").catch(() => null);
     jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
+    chainLim = await api(`/api/chain?ws=${encodeURIComponent(_WS)}`).catch(() => null);
   }
   if (stillOn()) { draw(); watchInstall(); }
 }

@@ -2559,6 +2559,13 @@ def _catalog_search(q):
     return {"apps": hits[:CATALOG_LIMIT]}
 
 
+def _chain_view(ws):
+    """One workspace's own chain limits (None: inherits) and the Settings values it inherits."""
+    own = chain.overrides(ROOT).get(ws) or {"hops": None, "cost": None}
+    v = general.view()
+    return {"ws": ws, **own, "settings": {"hops": v["chain_hops"], "cost": v["chain_cost"]}}
+
+
 def _jobs_view(ws):
     """The Team screen's jobs: every one from HQ, a workspace's own elsewhere."""
     out = []
@@ -4761,7 +4768,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # A chain: each target may pass the work on again, within the owner's limits (Settings,
             # General; none by default), the daily caps, Stop, and a pause when two bots ping-pong.
-            max_hops, max_cost = chain.limits()
+            max_hops, max_cost = chain.limits(ws, ROOT)
             path, hops, from_bot = [bot_id], 0, bot_id
             while handoff and not cap_hit:
                 if not chain.within_hops(hops, max_hops):
@@ -5229,6 +5236,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/jobs":
                 ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 return self._send(200, _jobs_view(ws))
+            if path == "/api/chain":  # this workspace's own chain limits, and what Settings gives
+                ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                return self._send(200, _chain_view(ws))
             if path == "/api/workflow":  # the open thread's workflow run, or {}
                 chat = (parse_qs(urlparse(self.path).query).get("chat") or [""])[0]
                 return self._send(200, workflow_turns.current(ROOT, chat))
@@ -5709,6 +5719,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._jobs_post(path, body)
+            if path == "/api/chain":  # owner only: one workspace's hops and cost per message
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                try:
+                    ws = _strict_ws(body.get("ws"))
+                    chain.set_override(ROOT, ws, body.get("hops"), body.get("cost"))
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, _chain_view(ws))
             if path in ("/api/runners", "/api/runners/revoke"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
