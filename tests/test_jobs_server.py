@@ -295,7 +295,7 @@ class JobTurn(unittest.TestCase):
 
     def test_loop_done_turns_off(self):
         job = self.saved_job(mode="report")
-        self.reply = "Sized at 40k.\nLOOP DONE: the market is sized"
+        self.reply = "Sized at 40k.\nLOOP DONE: the market is sized."
         out = server.run_job(job, self.srv)
         self.assertEqual(out["status"], "finished")
         self.assertFalse(jobs.get(self.root, job["id"])["enabled"])
@@ -304,6 +304,7 @@ class JobTurn(unittest.TestCase):
         self.assertNotIn("LOOP DONE", last["content"])
         self.assertIn("Sized at 40k.", last["content"])
         self.assertTrue(any("stop condition" in n for n in last.get("notices", [])))
+        self.assertTrue(any("the market is sized. Turn" in n for n in last.get("notices", [])))  # one period
 
     def test_loop_done_in_consult_answer_ignored(self):
         bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
