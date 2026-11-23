@@ -14,7 +14,7 @@ A turn loop for @people on one candidate list. Set it up with `--skill hiring-wa
 Daily, 09:00, with the list check: quiet days cost nothing.
 
 ## Acts when
-The candidate list changed, or a candidate waited more than 3 working days for a step. Otherwise one line, then stop.
+The candidate list changed, or a candidate waited more than 3 working days for a step. Otherwise one line, then end this run (the loop keeps going).
 
 ## Purpose
 No candidate waits without an answer, and every one goes through the same steps.

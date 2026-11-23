@@ -14,7 +14,7 @@ A turn loop for @sales on one deals list. Set it up with `--skill pipeline-watch
 Daily, 09:00, with the list check: a day with no change still runs once a week to catch deals going stale.
 
 ## Acts when
-The list changed since the last run, or a deal crossed the stale line (no contact in 14 days, or the owner's number). Otherwise one line, then stop.
+The list changed since the last run, or a deal crossed the stale line (no contact in 14 days, or the owner's number). Otherwise one line, then end this run (the loop keeps going).
 
 ## Purpose
 No deal dies of silence: every live deal has a next step and a date.

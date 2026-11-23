@@ -14,7 +14,7 @@ A time loop for @ops. Set it up with `--skill daily-plan --schedule "mon,tue,wed
 Weekdays, 08:00, before the day starts.
 
 ## Acts when
-Every scheduled run. A day with nothing booked and no open outcome: one line, then stop.
+Every scheduled run. A day with nothing booked and no open outcome: one line, then end this run (the loop keeps going).
 
 ## Purpose
 The owner starts each day knowing the one thing that matters most and when it gets done.

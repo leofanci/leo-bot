@@ -14,7 +14,7 @@ A time loop for @finance. Set it up with `--skill runway-check --schedule "mon 0
 Weekly, Monday 09:00. Cash moves over weeks; a daily check repeats itself.
 
 ## Acts when
-The owner's numbers changed since the last run, or the decision date is within 8 weeks. Otherwise one line, then stop.
+The owner's numbers changed since the last run, or the decision date is within 8 weeks. Otherwise one line, then end this run (the loop keeps going).
 
 ## Purpose
 The owner never learns about a cash problem late.

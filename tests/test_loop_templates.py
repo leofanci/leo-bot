@@ -26,6 +26,14 @@ class Format(unittest.TestCase):
                 self.assertTrue(tpl["bot"] and tpl["schedule"] and tpl["description"])
                 self.assertIn("3", tpl["body"].split("## State", 1)[1].split("\n## ", 1)[0])  # attempt cap
 
+    def test_quiet_run_never_reads_as_loop_done(self):
+        # A real run read "nothing new: one line, then stop" as its stop condition and turned off.
+        for name in SHIPPED:
+            acts = loop_templates.load(name)["body"].split("## Acts when", 1)[1].split("\n## ", 1)[0]
+            self.assertNotRegex(acts, r"\bstop\b", name)
+            self.assertIn("loop keeps", acts, name)
+        self.assertIn("A quiet run", server.JOB_STOP)
+
     def test_missing_part_reported(self):
         self.assertEqual(loop_templates.problems(_text()), [])
         self.assertEqual(loop_templates.problems(_text(drop="Self-check")), ["no ## Self-check part"])

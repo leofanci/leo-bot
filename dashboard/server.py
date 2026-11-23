@@ -2021,7 +2021,8 @@ JOB_OFFER = ("\n\nTo suggest that the owner start a workflow ({names}; nothing e
              "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself.")
 JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
             "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
-            "and the owner sees why. Never write that line otherwise.")
+            "and the owner sees why. A quiet run (nothing new, nothing to do) is not the stop condition: "
+            "say so in one line and leave the loop on. Never write that line otherwise.")
 # A job's own bot ends its reply with this when its stop condition holds (JOB_STOP).
 _LOOP_DONE_RE = re.compile(r"^[ \t>*_-]*LOOP[ \t]+DONE[*_ \t]*:[*_ \t]*(.*?)[ \t*_]*$", re.M | re.I)
 

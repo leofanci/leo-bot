@@ -14,7 +14,7 @@ A proactive loop for @support. Set it up with `--skill feedback-digest --schedul
 Weekly, Friday 16:00. Themes need a week of feedback to show.
 
 ## Acts when
-New feedback arrived since the last run. Nothing new: one line, then stop.
+New feedback arrived since the last run. Nothing new: one line, then end this run (the loop keeps going).
 
 ## Purpose
 Product hears what customers say every week, as themes with counts, not as single loud messages.
