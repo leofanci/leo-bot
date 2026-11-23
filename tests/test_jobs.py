@@ -227,6 +227,52 @@ class Store(unittest.TestCase):
         (self.root / jobs.LIVE_RELPATH).write_text("not json")
         self.assertEqual(jobs.live_spent(self.root, "j1"), 0.0)
 
+    def test_stop_cleans(self):
+        job = self.make(stop="  the list   is empty ")
+        self.assertEqual(job["stop"], "the list is empty")
+        self.assertEqual(self.make(name="other")["stop"], "")
+        with self.assertRaises(ValueError):
+            self.make(name="third", stop="x" * (jobs.STOP_MAX + 1))
+        self.assertEqual(jobs.update(self.root, job["id"], stop="done")["stop"], "done")
+
+    def test_expire_due_turns_off_and_marks_expired(self):
+        now = time.time()
+        old = self.make(expires=now - 1)
+        fresh = self.make(name="fresh", expires=now + 3600)
+        self.assertEqual(jobs.expire_due(self.root, now), [old["id"]])
+        got = jobs.get(self.root, old["id"])
+        self.assertEqual((got["enabled"], got["last_status"]), (False, "expired"))
+        self.assertTrue(jobs.get(self.root, fresh["id"])["enabled"])
+        self.assertEqual(jobs.expire_due(self.root, now), [])  # off already
+
+    def test_old_job_without_expires_never_expires(self):
+        job = self.make()
+        self.assertIsNone(job["expires"])
+        rows = json.loads((self.root / jobs.RELPATH).read_text())
+        rows["jobs"][0].pop("expires")  # saved before loops had an expiry
+        (self.root / jobs.RELPATH).write_text(json.dumps(rows))
+        self.assertEqual(jobs.expire_due(self.root, time.time() + 10 ** 9), [])
+        self.assertTrue(jobs.get(self.root, job["id"])["enabled"])
+
+    def test_renew_does_not_run_missed_slots(self):
+        now = time.time()
+        job = self.make(schedule="daily 09:00", expires=now - 3 * 86400)
+        jobs.update(self.root, job["id"], enabled=False)
+        start = now - 5 * 86400  # its last run, before it expired 3 days ago
+        jobs.mark_start(self.root, job["id"], start)  # off: not marked
+        rows = json.loads((self.root / jobs.RELPATH).read_text())
+        rows["jobs"][0]["last_run"] = start
+        (self.root / jobs.RELPATH).write_text(json.dumps(rows))
+        got = jobs.renew(self.root, job["id"], now, 30)
+        self.assertTrue(got["enabled"])
+        self.assertAlmostEqual(got["expires"], now + 30 * 86400)
+        self.assertTrue(jobs.is_due(got, now))  # one run at the next check
+        ran = jobs.mark_start(self.root, job["id"], now)
+        self.assertFalse(jobs.is_due(ran, now + 60))  # not again for each missed day
+        self.assertIsNone(jobs.renew(self.root, job["id"], now, 0)["expires"])
+        with self.assertRaises(LookupError):
+            jobs.renew(self.root, "missing1", now, 30)
+
     def test_view_resolves_mode_and_next_run(self):
         job = self.make()
         self.assertEqual(jobs.view({**job, "mode": "bogus"})["mode"], "approval")
@@ -320,7 +366,19 @@ class Osctl(unittest.TestCase):
         env = {"LEOBOT_WORKSPACE": "acme", "LEOBOT_CHAT": "c1", **(env or {})}
         return self.run_osctl("propose-job", "--bot", bot, "--skill", skill, "--name", "weekly",
                               "--message", "review the week", "--schedule", "mon 09:00", "--cap", "0.5",
+                              "--stop", "the review is saved",
                               *extra, env=env)
+
+    def test_propose_job_with_an_own_check(self):
+        out = self.propose("--check-own", "approvals")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(jobs.take_proposals(self.root, "c1")[0]["fields"]["check"], {"own": "approvals", "id": None})
+        (self.root / "projects" / "acme" / "lists").mkdir()
+        (self.root / "projects" / "acme" / "lists" / "ls2.json").write_text('{"id": "ls2", "version": 1, "rows": []}')
+        self.assertTrue(self.propose("--check-own", "list", "--check-id", "ls2")["ok"])
+        for extra in (("--check-own", "list"), ("--check-own", "list", "--check-id", "ls7"),  # none / not here
+                      ("--check-id", "ls2"), ("--check-own", "approvals", "--check-action", "GMAIL_FETCH_EMAILS")):
+            self.assertFalse(self.propose(*extra)["ok"], extra)
 
     def test_propose_job_with_a_check(self):
         out = self.propose("--check-app", "gmail", "--check-action", "GMAIL_FETCH_EMAILS",

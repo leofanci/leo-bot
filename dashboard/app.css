@@ -629,6 +629,11 @@ summary.pf-head::-webkit-details-marker{display:none}
 .team-row .more,.team-row .go,.job-row select,.job-row input{align-self:center}
 .job-row input[data-job-cap]{width:7.5em}
 .job-row .t{flex:1 1 220px;min-width:0}
+.loop-edit{flex:1 1 100%;display:grid;gap:var(--ui-space-2);margin-top:var(--ui-space-2)}
+.loop-field{display:grid;gap:2px}
+.loop-field input,.loop-field textarea{width:100%;box-sizing:border-box}
+.loop-edit .btn{justify-self:start}
+.loop-notes{flex:1 1 100%;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;margin:var(--ui-space-2) 0 0;padding:var(--ui-space-2);background:var(--ui-color-surface-muted);border-radius:6px;max-height:320px;overflow:auto}
 .job-row .more.armed{color:var(--ui-color-danger)}
 .team-more[aria-expanded="true"]{background:var(--ui-color-hover);color:var(--ui-color-text)}
 .team-detail{flex-basis:100%;margin:var(--ui-space-2) 0 0 42px;padding-top:var(--ui-space-3);border-top:1px solid var(--ui-color-border-subtle);display:grid;gap:var(--ui-space-3)}

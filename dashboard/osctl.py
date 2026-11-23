@@ -482,12 +482,19 @@ def _build_parser():
     p.add_argument("--message")
     p.add_argument("--schedule", help='"every 30m", "daily 09:00", "mon,thu 09:00" or "once 2026-12-01 09:00"')
     p.add_argument("--cap", help="dollars per 24 hours for this job; 0 or omit for no cap")
-    p.add_argument("--mode", choices=jobs.MODES, help="approval (default), auto or report")
+    p.add_argument("--mode", choices=jobs.MODES, help="approval, auto or report; omit for the owner's default "
+                                                       "(Report only unless they changed it)")
+    p.add_argument("--stop", help="when the job has done its work (needed for a new job); a run that finds it "
+                                  "met ends its reply with one line LOOP DONE: <why>")
     p.add_argument("--project", help="workspace slug for a new job; omit for this workspace")
     p.add_argument("--check-app", help="run only when this connected app has something new (with --check-action)")
     p.add_argument("--check-action", help="a READ action slug of that app, e.g. GMAIL_FETCH_EMAILS; "
                                           "'none' on a change: run on the schedule alone")
     p.add_argument("--check-args", help="that action's arguments as a JSON object")
+    p.add_argument("--check-own", choices=jobs.OWN_SOURCES,
+                   help="run only when this changes in Leo Bot itself: approvals (cards waiting), "
+                        "list (with --check-id ls<N>), memos or experiments")
+    p.add_argument("--check-id", help="with --check-own list: the list id")
 
     def _propose_job(a):
         chat = (os.environ.get("LEOBOT_CHAT") or "").strip()
@@ -499,10 +506,16 @@ def _build_parser():
         if a.job and (a.bot or a.project not in (None, _workspace())):  # _guard fills --project
             raise fileops.ActionError("a job keeps its bot and workspace: propose a new job instead")
         op = "delete" if a.delete else "update" if a.job else "create"
-        names = ("name", "message", "schedule", "cap", "skill", "mode") if op == "update" else (
-            ("bot", "skill", "name", "message", "schedule", "cap", "mode") if op == "create" else ())
+        names = ("name", "message", "schedule", "cap", "skill", "mode", "stop") if op == "update" else (
+            ("bot", "skill", "name", "message", "schedule", "cap", "mode", "stop") if op == "create" else ())
         fields = {k: getattr(a, k) for k in names if getattr(a, k) is not None}
-        if a.check_action and op != "delete":
+        if a.check_own and (a.check_action or a.check_app or a.check_args):
+            raise fileops.ActionError("a job checks one thing: --check-own or --check-action, not both")
+        if a.check_id and not a.check_own:
+            raise fileops.ActionError("--check-id needs --check-own list")
+        if a.check_own and op != "delete":
+            fields["check"] = {"own": a.check_own, **({"id": a.check_id} if a.check_id else {})}
+        elif a.check_action and op != "delete":
             if a.check_action.lower() == "none":
                 fields["check"] = ""
             else:

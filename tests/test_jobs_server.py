@@ -2,6 +2,7 @@
 import io
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -238,6 +239,25 @@ class JobTurn(unittest.TestCase):
         self.assertEqual((out["status"], len(self.asks)), ("waiting", 2))
         self.assertNotEqual(jobs.get(self.root, jid)["check_seen"], seen)
 
+    def test_job_quiet_when_own_data_unchanged(self):
+        jid = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="cards", message="m",
+                          schedule="every 5m", cap=None, check={"own": "approvals"})["id"]
+        job = lambda: jobs.get(self.root, jid)  # noqa: E731
+        self.reply = "Nothing to chase."
+        self.assertEqual(server.run_job(job(), self.srv)["status"], "done")
+        self.assertIn("cards waiting for you", self.asks[0]["text"])
+        out = server.run_job(job(), self.srv)
+        self.assertEqual((out["status"], out["cost"], len(self.asks)), ("quiet", 0.0, 1))  # no model turn
+        approvals.add(self.root, ws=WS, room=f"{WS}/general", chat="c9", bot="cmo", summary="save it")
+        self.assertEqual(server.run_job(job(), self.srv)["status"], "done")
+        self.assertEqual(len(self.asks), 2)
+
+    def test_own_check_on_missing_list_fails_without_model(self):
+        out = self.run_job(check={"own": "list", "id": "ls9"})
+        self.assertEqual(out["status"], "failed")
+        self.assertIn("no list ls9", out["detail"])
+        self.assertEqual(self.asks, [])
+
     def test_failed_check_runs_nothing(self):
         out, _ = self.checked(server.composio.ComposioError("no gmail account is connected for acme"))
         self.assertEqual(out["status"], "failed")
@@ -260,6 +280,73 @@ class JobTurn(unittest.TestCase):
         self.assertEqual([a["outside"] for a in self.asks], [False, True])
         self.run_job(notes="", notes_outside=True)  # an empty notepad carries nothing
         self.assertFalse(self.asks[2]["outside"])
+
+    def saved_job(self, **kw):
+        return jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                           message="review the week", schedule="mon 09:00", cap=0.5,
+                           stop="the market is sized", **kw)
+
+    def test_stop_condition_is_in_the_prompt(self):
+        server.run_job(self.saved_job(mode="report"), self.srv)
+        self.assertIn("the market is sized", self.asks[0]["text"])
+        self.assertIn("LOOP DONE:", self.asks[0]["text"])
+        self.run_job()  # a job saved before loops had a stop condition: no LOOP DONE line asked
+        self.assertNotIn("LOOP DONE:", self.asks[1]["text"])
+
+    def test_loop_done_turns_off(self):
+        job = self.saved_job(mode="report")
+        self.reply = "Sized at 40k.\nLOOP DONE: the market is sized"
+        out = server.run_job(job, self.srv)
+        self.assertEqual(out["status"], "finished")
+        self.assertFalse(jobs.get(self.root, job["id"])["enabled"])
+        rec = server.chat_store.load(out["chat"])
+        last = rec["messages"][-1]
+        self.assertNotIn("LOOP DONE", last["content"])
+        self.assertIn("Sized at 40k.", last["content"])
+        self.assertTrue(any("stop condition" in n for n in last.get("notices", [])))
+
+    def test_loop_done_in_consult_answer_ignored(self):
+        bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
+        job = self.saved_job(mode="report")
+        replies = iter(["CONSULT @research: is it sized?", "LOOP DONE: sized", "Not yet, still sizing."])
+
+        def ask(sess, text, **kw):
+            self.asks.append({"sess": sess, "text": text})
+            yield ("delta", next(replies))
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = server.run_job(job, self.srv)
+        self.assertEqual(len(self.asks), 3)
+        self.assertEqual(out["status"], "done")
+        self.assertTrue(jobs.get(self.root, job["id"])["enabled"])
+
+    def offer_run(self, reply, wf=None, problems=()):
+        self.reply = reply
+        loaded = types.SimpleNamespace(name="launch-plan", steps=[]) if wf is None else wf
+        with mock.patch.object(server.workflows, "load", side_effect=lambda n: loaded if n == "launch-plan" else None), \
+                mock.patch.object(server.workflows, "problems", return_value=list(problems)):
+            out = self.run_job(mode="report")
+        return server.chat_store.load(out["chat"])["messages"][-1]
+
+    def test_job_start_line_becomes_offer(self):
+        m = self.offer_run("Signals are in.\nSTART: /launch-plan new pricing page, @cmo first")
+        self.assertEqual(m.get("workflow_offer"), {"name": "launch-plan", "brief": "new pricing page, @cmo first"})
+        self.assertNotIn("START:", m["content"])
+        self.assertIn("Signals are in.", m["content"])
+
+    def test_job_start_unknown_workflow_notice(self):
+        m = self.offer_run("Go.\nSTART: /nope do it")
+        self.assertNotIn("workflow_offer", m)
+        self.assertNotIn("START:", m["content"])
+        self.assertTrue(any("/nope" in n for n in m.get("notices", [])))
+        m = self.offer_run("Go.\nSTART: /launch-plan do it", problems=["step 1: @gtm is switched off here"])
+        self.assertNotIn("workflow_offer", m)
+        self.assertTrue(any("switched off" in n for n in m.get("notices", [])))
+
+    def test_start_line_outside_job_left_alone(self):
+        self.assertIsNone(server._extract_workflow_start("no marker here")[1])
+        text, got = server._extract_workflow_start("a\nSTART: /launch-plan  brief  ")
+        self.assertEqual((text, got), ("a", ("launch-plan", "brief")))
 
     def test_notepad_is_in_every_run(self):
         self.run_job(notes="Sent 12 of 30. Replies: 2.")
@@ -296,14 +383,34 @@ class JobTurn(unittest.TestCase):
             self.run_job(mode="auto", message="draft the weekly email")
         self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
 
-    def test_job_turn_never_hands_off(self):
+    def test_job_hands_off_in_its_mode(self):
+        bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
+        replies = iter(["Research should size it.\nHANDOFF @research: size the market",
+                        "Market sized."])
+        test = self
+
+        def ask(sess, text, **kw):
+            test.asks.append({"sess": sess, "text": text, "readonly": sess.readonly, "kw": kw})
+            yield ("delta", next(replies))
+            yield ("done", {"cost": 0.01})
+        with mock.patch.object(server.chat_session.ChatSession, "ask", ask):
+            out = self.run_job(mode="report")
+        self.assertEqual(len(self.asks), 2)
+        self.assertTrue(self.asks[1]["readonly"])  # the hop runs in the job's mode
+        self.assertEqual(self.asks[1]["sess"].job_mode, "report")
+        rec = server.chat_store.load(out["chat"])
+        hop = rec["messages"][-1]
+        self.assertEqual(hop["bot"], "research")
+        self.assertEqual(hop.get("handoff_from"), "cmo")
+        self.assertNotIn("HANDOFF", rec["messages"][0]["content"])
+
+    def test_job_hop_counts_against_job_cap(self):
         bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
         self.reply = "Research should size it.\nHANDOFF @research: size the market"
-        out = self.run_job(mode="auto")
+        self.events = [("delta", self.reply), ("done", {"cost": 0.02})]
+        out = self.run_job(cap=0.01, mode="auto")
         self.assertEqual(len(self.asks), 1)
-        rec = server.chat_store.load(out["chat"])
-        self.assertNotIn("HANDOFF", rec["messages"][-1]["content"])
-        self.assertTrue(any("does not hand off" in n for n in rec["messages"][-1].get("notices", [])))
+        self.assertEqual(out["status"], "capped")
 
     def test_job_turn_searches_the_web(self):
         # A research job runs unattended end to end: web search on, fetch hosts none (below).
@@ -469,7 +576,7 @@ class JobTurn(unittest.TestCase):
 
     NEW = {"op": "create", "fields": {"bot": "cmo", "skill": "positioning", "name": "weekly",
                                       "message": "review the week", "schedule": "mon 09:00", "cap": 0.5,
-                                      "mode": "auto"}}
+                                      "mode": "auto", "stop": "the review is saved"}}
 
     def post(self, path, body):
         h = server.Handler.__new__(server.Handler)
@@ -586,6 +693,45 @@ class JobTurn(unittest.TestCase):
         self.assertFalse(jobs.get(self.root, mine["id"])["enabled"])
         self.post(f"/api/jobs/{other['id']}/delete", {"ws": "hq"})
         self.assertIsNone(jobs.get(self.root, other["id"]))
+
+    def test_edit_endpoint_cleans_fields(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1, stop="old")
+        code, body = self.post(f"/api/jobs/{job['id']}/edit",
+                               {"ws": WS, "schedule": "Daily 09:00", "stop": " list  empty ", "message": "new"})
+        self.assertEqual(code, 200)
+        got = jobs.get(self.root, job["id"])
+        self.assertEqual((got["schedule"], got["stop"], got["message"]), ("daily 09:00", "list empty", "new"))
+        for bad in ({"ws": WS, "schedule": "whenever"}, {"ws": WS, "name": ""}, {"ws": WS},
+                    {"ws": WS, "mode": "auto"}, {"ws": WS, "stop": "x" * 301}):
+            self.assertEqual(self.post(f"/api/jobs/{job['id']}/edit", bad)[0], 400, bad)
+        self.assertEqual(jobs.get(self.root, job["id"])["schedule"], "daily 09:00")
+        jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="other", message="m",
+                    schedule="every 6h", cap=1)
+        self.assertEqual(self.post(f"/api/jobs/{job['id']}/edit", {"ws": WS, "name": "Other"})[0], 400)  # one name per workspace
+
+    def test_renew_endpoint_checks_target(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1, expires=time.time() - 10)
+        jobs.expire_due(self.root, time.time())
+        with mock.patch.object(server.general, "view", return_value={"loop_days": 30}):
+            bots.set_active("cmo", False, self.root, WS, {"slug": WS, "kind": "venture"})
+            self.assertEqual(self.post(f"/api/jobs/{job['id']}/renew", {"ws": WS})[0], 409)
+            self.assertFalse(jobs.get(self.root, job["id"])["enabled"])
+            bots.set_active("cmo", True, self.root, WS, {"slug": WS, "kind": "venture"})
+            code, body = self.post(f"/api/jobs/{job['id']}/renew", {"ws": WS})
+        self.assertEqual(code, 200)
+        got = jobs.get(self.root, job["id"])
+        self.assertTrue(got["enabled"])
+        self.assertAlmostEqual(got["expires"], time.time() + 30 * 86400, delta=60)
+
+    def test_jobs_view_has_cost_7d(self):
+        job = jobs.create(self.root, ws=WS, bot="cmo", skill="positioning", name="weekly",
+                          message="m", schedule="every 6h", cap=1)
+        self.assertEqual(server._jobs_view(WS)["jobs"][0]["cost_7d"], 0.0)
+        out = server.run_job(job, self.srv)
+        self.assertEqual(out["status"], "waiting")
+        self.assertAlmostEqual(server._jobs_view(WS)["jobs"][0]["cost_7d"], 0.01)
 
     def test_invited_person_has_no_job_routes(self):
         h = server.Handler.__new__(server.Handler)

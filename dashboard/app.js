@@ -199,6 +199,7 @@ const ROUTES = [
   [/^\/calendar$/,                              ()       => { setState("calendar"); renderTimeline(); }],
   [/^\/day\/(\d{4}-\d{2}-\d{2})$/,              ([d])    => { setState("day",{day:d}); renderDay(d); }],
   [/^\/operations$/,                            ()       => { setState("operations"); renderOperations(); }],
+  [/^\/loops$/,                                 ()       => { setState("loops"); renderLoops(); }],
   [/^\/team$/,                                  ()       => { setState("team"); renderTeam(); }],
   [/^\/approvals$/,                             ()       => { setState("approvals"); renderApprovals(); }],
   [/^\/settings(?:\/(general|engines|bots|integrations|browser|access))?$/, ([t]) => { setState("settings",{tab:t||"general"}); renderSettings(t||"general"); }],
@@ -2130,6 +2131,7 @@ async function refreshViews(){
   if (v === "day") return renderDay(STATE.day);
   if (v === "operations") return renderOperations();
   if (v === "team") return renderTeam();
+  if (v === "loops") return renderLoops();
   if (v === "approvals") return renderApprovals();
   if (v === "settings") return renderSettings(STATE.tab);
   if (v === "folders") return renderFolders();
@@ -2273,6 +2275,7 @@ async function renderTeam(){
   let eng = null;  // /api/engines: each bot's engine, model, access and instructions (owner only)
   let pv = null, link = "";
   let jobList = [];
+  let chainLim = null;  // /api/chain: this workspace's own hops and cost per message (owner only)
   const person = isPerson();
   const opened = new Set();  // bots whose details are open: kept across redraws
   // Where the spend went: top models, skills and engines, the last 7 days, cache reads.
@@ -2348,9 +2351,9 @@ async function renderTeam(){
       + `${!person && t.turns ? `<div class="team-total">${_WS === "hq" ? "All workspaces, last" : "Last"} ${costs.days} days: ${t.turns} ${t.turns === 1 ? "reply" : "replies"} · ${fmtUsage(t.tokens, t.cost)} (est.)</div>${spendDetails(costs)}` : ""}
         <div class="rowc">${on.map(onRow).join("")}</div>
         ${off.length ? `<h4 class="team-sub">Switched off · ${off.length}</h4><div class="rowc">${off.map(offRow).join("")}</div>` : ""}${pv ? "</section>" : ""}
-        ${person ? "" : jobsSection()}`;
+        ${person ? "" : jobsSection()}${person ? "" : chainSection()}`;
     wirePeople();
-    wireJobs();
+    wireChain();
     $("#team-list").querySelectorAll("[data-bot-more]").forEach(btn => btn.onclick = () => {
       const row = btn.closest(".team-row"), detail = row.querySelector(".team-detail"), id = btn.dataset.botMore;
       const open = detail.hidden;
@@ -2390,42 +2393,34 @@ async function renderTeam(){
       } catch (e) { toast("✗ " + e.message); }
     });
   };
-  // Scheduled jobs (owner only): mode, on/off and delete here; the rest through a bot's card.
-  const jobsSection = () => {
-    if (!jobList.length) return "";
-    const now = Date.now() / 1000;
-    const row = j => `<div class="post team-row job-row${j.enabled ? "" : " off"}" data-job="${esc(j.id)}">
-        <div class="t"><b>${esc(j.name)}</b>
-          <small class="team-meta">${esc(jobMetaText(j, wsById(j.workspace)?.name || j.workspace, now))}${j.last_chat ? ` · <a href="#" data-job-open>Open</a>` : ""}</small></div>
-        <input data-job-cap type="number" min="0" step="0.5" inputmode="decimal" placeholder="No cap" value="${j.cap ? esc(String(j.cap)) : ""}" aria-label="Cap, dollars per 24 hours (empty: no cap)" title="Dollars per 24 hours; empty for no cap">
-        <select data-job-mode aria-label="Mode">${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${j.mode === m ? " selected" : ""}>${label}</option>`).join("")}</select>
-        <button class="more" data-job-on="${j.enabled ? "0" : "1"}">${j.enabled ? "Turn off" : "Turn on"}</button>
-        <button class="more" data-job-rm>Delete</button>
-      </div>`;
-    return `<h4 class="team-sub">Scheduled jobs · ${jobList.length}</h4>
-      <div class="help">Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Report only: reads and reports. Cap: dollars per 24 hours, empty for no cap. To change the schedule, message or skill, ask the bot in chat.</div>
-      <div class="rowc">${jobList.map(row).join("")}</div>`;
+  // Loops (scheduled jobs) are managed on their own screen.
+  const jobsSection = () => jobList.length
+    ? `<h4 class="team-sub">Loops · ${jobList.length}</h4>
+      <div class="help">Scheduled work your bots run. <a href="#/loops">Manage loops</a>: mode, schedule, stop condition, expiry, cost.</div>`
+    : "";
+  // Bot chains in this workspace (owner only): empty inherits Settings, General.
+  const chainSection = () => {
+    if (!chainLim) return "";
+    const st = chainLim.settings || {};
+    const hopsPh = st.hops ? `Settings: ${st.hops}` : "Settings: no limit";
+    const costPh = st.cost ? `Settings: $${st.cost}` : "Settings: no cap";
+    return `<h4 class="team-sub">Bot chains here</h4>
+      <div class="help">How far bots may pass one message along in this workspace. Empty uses Settings, General. 0 = no limit.</div>
+      <div class="eng-choice"><label><span>Hops per message</span> <input id="ws-chain-hops" type="number" min="0" step="1" inputmode="numeric"
+          value="${chainLim.hops ?? ""}" placeholder="${esc(hopsPh)}" aria-label="Hops per message in this workspace"></label></div>
+      <div class="eng-choice"><label><span>Cost per message</span> <input id="ws-chain-cost" type="number" min="0" step="0.01" inputmode="decimal"
+          value="${chainLim.cost ?? ""}" placeholder="${esc(costPh)}" aria-label="Chain cost cap per message in this workspace, dollars"></label></div>`;
   };
-  const wireJobs = () => {
-    const box = $("#team-list");
-    const jobOf = el => jobList.find(j => j.id === el.closest("[data-job]")?.dataset.job);
-    const change = async (j, verb, body) => {
-      try { jobList = (await jpost(`/api/jobs/${encodeURIComponent(j.id)}/${verb}`, { ws: _WS, ...body })).jobs || []; }
+  const wireChain = () => {
+    const hops = $("#ws-chain-hops"), cost = $("#ws-chain-cost");
+    if (!hops || !cost) return;
+    const val = el => el.value.trim() === "" ? null : Number(el.value);
+    const save = async () => {
+      try { chainLim = await jpost("/api/chain", { ws: _WS, hops: val(hops), cost: val(cost) }); toast("Chain limits saved ✓"); }
       catch (e) { toast("✗ " + e.message); }
       draw();
     };
-    box.querySelectorAll("[data-job-mode]").forEach(sel => sel.onchange = () => change(jobOf(sel), "mode", { mode: sel.value }));
-    box.querySelectorAll("[data-job-cap]").forEach(inp => inp.onchange = () => change(jobOf(inp), "cap", { cap: inp.value.trim() }));
-    box.querySelectorAll("[data-job-on]").forEach(b => b.onclick = () => change(jobOf(b), "enabled", { enabled: b.dataset.jobOn === "1" }));
-    box.querySelectorAll("[data-job-rm]").forEach(b => b.onclick = () => {
-      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to delete"; return; }
-      change(jobOf(b), "delete", {});
-    });
-    box.querySelectorAll("[data-job-open]").forEach(a => a.onclick = ev => {
-      ev.preventDefault();
-      const j = jobOf(a);
-      window.ChatRooms?.openThread({ chat: j.last_chat, ws: j.workspace, room: j.room });
-    });
+    hops.onchange = save; cost.onchange = save;
   };
   const wirePeople = () => {
     const box = $("#team-list");
@@ -2471,8 +2466,80 @@ async function renderTeam(){
     brw = await api(`/api/browser/settings?ws=${encodeURIComponent(_WS)}`).catch(() => null);
     eng = await api("/api/engines").catch(() => null);
     jobList = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
+    chainLim = await api(`/api/chain?ws=${encodeURIComponent(_WS)}`).catch(() => null);
   }
   if (stillOn()) { draw(); watchInstall(); }
+}
+
+// ── Loops: every scheduled job of this workspace (HQ: all), owner only. Mode (promote), cap,
+// schedule, message, stop condition, expiry with Renew, last and next run, 7-day cost, notepad.
+async function renderLoops(){
+  const stillOn = routeGuard();
+  let list = [], open = null, editing = null;
+  const when = ts => new Date(ts * 1000).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const money = v => v >= 0.01 ? `$${v.toFixed(2)}` : v > 0 ? `$${v.toFixed(4)}` : "$0";
+  const row = j => {
+    const now = Date.now() / 1000;
+    const exp = j.expires ? (j.expires <= now ? "expired" : `expires ${when(j.expires)}`) : "never expires";
+    const ed = editing === j.id;
+    const field = (k, label, v, area) => `<label class="loop-field"><span>${label}</span>${area
+      ? `<textarea data-edit="${k}" rows="3">${esc(v || "")}</textarea>` : `<input data-edit="${k}" value="${esc(v || "")}">`}</label>`;
+    return `<div class="post team-row job-row${j.enabled ? "" : " off"}" data-job="${esc(j.id)}">
+      <div class="t"><b>${esc(j.name)}</b>
+        <small class="team-meta">${esc(jobMetaText(j, wsById(j.workspace)?.name || j.workspace, now))} · 7 days: ${money(j.cost_7d || 0)}${j.last_chat ? ` · <a href="#" data-job-open>Open last run</a>` : ""}</small>
+        <small class="team-meta">Stops when: ${esc(j.stop || "not set")} · ${esc(exp)}${j.check ? ` · runs when ${esc(j.check.own ? ({ approvals: "cards waiting for you", list: `list ${j.check.id}` }[j.check.own] || j.check.own) : `${j.check.app} ${j.check.action}`)} change` : ""}</small></div>
+      <input data-job-cap type="number" min="0" step="0.5" inputmode="decimal" placeholder="No cap" value="${j.cap ? esc(String(j.cap)) : ""}" aria-label="Cap, dollars per 24 hours (empty: no cap)" title="Dollars per 24 hours; empty for no cap">
+      <select data-job-mode aria-label="Mode">${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${j.mode === m ? " selected" : ""}>${label}</option>`).join("")}</select>
+      ${(j.expires && j.expires <= now) || (!j.enabled && j.last_status === "expired") ? `<button class="go" data-job-renew>Renew</button>`
+        : `<button class="more" data-job-on="${j.enabled ? "0" : "1"}">${j.enabled ? "Pause" : "Turn on"}</button>`}
+      <button class="more" data-job-edit>${ed ? "Cancel" : "Edit"}</button>
+      <button class="more" data-job-notes>${open === j.id ? "Hide state" : "State"}</button>
+      <button class="more" data-job-rm>Delete</button>
+      ${ed ? `<div class="loop-edit">${field("name", "Name", j.name)}${field("schedule", "Schedule", j.schedule)}
+        ${field("stop", "Stops when", j.stop)}${field("message", "Message", j.message, true)}
+        <button class="btn sm primary" data-job-save>Save</button></div>` : ""}
+      ${open === j.id ? `<pre class="loop-notes">${esc(j.notes || "Empty: the bot keeps its notes here after each run.")}</pre>` : ""}
+    </div>`;
+  };
+  const draw = () => {
+    if (!stillOn()) return;
+    $("#loops-list").innerHTML = list.length ? `<div class="rowc">${list.map(row).join("")}</div>`
+      : `<div class="help">No loops yet. Ask a bot in your private thread to check something on a schedule.</div>`;
+    const box = $("#loops-list");
+    const jobOf = el => list.find(j => j.id === el.closest("[data-job]")?.dataset.job);
+    const change = async (j, verb, body) => {
+      try { list = (await jpost(`/api/jobs/${encodeURIComponent(j.id)}/${verb}`, { ws: _WS, ...body })).jobs || []; return true; }
+      catch (e) { toast("✗ " + e.message); return false; }
+      finally { draw(); }
+    };
+    box.querySelectorAll("[data-job-mode]").forEach(sel => sel.onchange = () => change(jobOf(sel), "mode", { mode: sel.value }));
+    box.querySelectorAll("[data-job-cap]").forEach(inp => inp.onchange = () => change(jobOf(inp), "cap", { cap: inp.value.trim() }));
+    box.querySelectorAll("[data-job-on]").forEach(b => b.onclick = () => change(jobOf(b), "enabled", { enabled: b.dataset.jobOn === "1" }));
+    box.querySelectorAll("[data-job-renew]").forEach(b => b.onclick = async () => { if (await change(jobOf(b), "renew", {})) toast("Renewed ✓"); });
+    box.querySelectorAll("[data-job-notes]").forEach(b => b.onclick = () => { const id = jobOf(b).id; open = open === id ? null : id; draw(); });
+    box.querySelectorAll("[data-job-edit]").forEach(b => b.onclick = () => { const id = jobOf(b).id; editing = editing === id ? null : id; draw(); });
+    box.querySelectorAll("[data-job-save]").forEach(b => b.onclick = async () => {
+      const r = b.closest("[data-job]"), body = {};
+      r.querySelectorAll("[data-edit]").forEach(el => { body[el.dataset.edit] = el.value; });
+      editing = null;
+      if (await change(jobOf(b), "edit", body)) toast("Saved ✓");
+    });
+    box.querySelectorAll("[data-job-rm]").forEach(b => b.onclick = () => {
+      if (!b.classList.contains("armed")) { b.classList.add("armed"); b.textContent = "Click again to delete"; return; }
+      change(jobOf(b), "delete", {});
+    });
+    box.querySelectorAll("[data-job-open]").forEach(a => a.onclick = ev => {
+      ev.preventDefault();
+      const j = jobOf(a);
+      window.ChatRooms?.openThread({ chat: j.last_chat, ws: j.workspace, room: j.room });
+    });
+  };
+  $("#main").innerHTML = `
+    <div class="topbar"><div><div class="crumbs">${esc(wsById(_WS)?.name || "HQ")} · <a href="#/team">Team</a></div><h1 class="title">Loops</h1></div></div>
+    <div class="scroll"><div class="help">Work your bots run on a schedule. A new loop starts in ${esc(JOB_MODES.report)} (Settings, General) and expires after a set time; renew it to keep it. Promote one to Approval or Auto yourself once you trust what it reports. A loop stops itself when its stop condition holds. Approval: saves wait for your click. Auto: saves in Leo Bot by itself; deletes, whole-document replaces, memory and app actions still wait. Cap: dollars per 24 hours, empty for no cap.</div>
+    <div id="loops-list"></div></div>`;
+  list = (await api(`/api/jobs?ws=${encodeURIComponent(_WS)}`).catch(() => ({}))).jobs || [];
+  draw();
 }
 
 // ── Approvals inbox: proposals bots are waiting on you for (HQ: every company).
@@ -2748,7 +2815,7 @@ function wireReceiptCard(el, r){
   const pause = el.querySelector('[data-r="pause"]');
   if (pause) pause.onclick = async () => {
     lock(true);
-    try { await jpost(`/api/jobs/${encodeURIComponent(r.job_id)}/enabled`, { ws: r.ws, enabled: false }); done("Paused. Turn it back on in Team, Background jobs."); }
+    try { await jpost(`/api/jobs/${encodeURIComponent(r.job_id)}/enabled`, { ws: r.ws, enabled: false }); done("Paused. Turn it back on in Loops."); }
     catch (e) { toast("✗ " + e.message); lock(false); }
   };
 }
@@ -3111,6 +3178,14 @@ async function renderGeneral(){
           value="${g.workflow_cost ? esc(String(g.workflow_cost)) : ""}" placeholder="No cap" aria-label="Cost per workflow run in dollars, 0 = no cap"></label>
         <small>Dollars one workflow run may spend over all its steps before it pauses. 0 = no cap.</small></div>
     </section>
+    <section class="integ-group"><h3>Loops</h3>
+      <div class="eng-choice"><label><span>New loops start in</span> <select id="gen-loop-mode" aria-label="Mode a new loop starts in">
+          ${Object.entries(JOB_MODES).map(([m, label]) => `<option value="${m}"${g.loop_mode === m ? " selected" : ""}>${label}</option>`).join("")}</select></label>
+        <small>A bot's new scheduled job starts in this mode unless its card says otherwise. You promote a loop yourself, in Loops.</small></div>
+      <div class="eng-choice"><label><span>Loops expire after</span> <input id="gen-loop-days" type="number" min="0" max="365" step="1" inputmode="numeric"
+          value="${esc(String(g.loop_days ?? 30))}" aria-label="Days until a new loop expires, 0 = never"></label>
+        <small>Days. A loop past this pauses and asks you to renew it. 0 = never expires.</small></div>
+    </section>
     <section class="integ-group"><h3>Time</h3>
       <div class="eng-choice"><label><span>Timezone</span> <select id="gen-tz" aria-label="Timezone">
           <option value="">This machine's${g.machine_timezone ? ` (${esc(g.machine_timezone)})` : ""}</option>
@@ -3133,6 +3208,12 @@ async function renderGeneral(){
   };
   $("#gen-chain-cost").onchange = async e => {
     if (!await save({ chain_cost: num(e.target.value) }, "Cost cap saved ✓")) e.target.value = g.chain_cost || "";
+  };
+  $("#gen-loop-mode").onchange = async e => {
+    if (!await save({ loop_mode: e.target.value }, "Loop mode saved ✓")) e.target.value = g.loop_mode;
+  };
+  $("#gen-loop-days").onchange = async e => {
+    if (!await save({ loop_days: num(e.target.value) }, "Loop expiry saved ✓")) e.target.value = g.loop_days;
   };
   $("#gen-wf-cost").onchange = async e => {
     if (!await save({ workflow_cost: num(e.target.value) }, "Workflow cap saved ✓")) e.target.value = g.workflow_cost || "";
@@ -5909,8 +5990,19 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (activeChatId !== a.chat) { statusEl.textContent = "That thread is no longer open here"; return; }
     if (answer === "approved") send("Yes, approved.", { approval: "approved" });
   }
+  // A loop offered a workflow (its START line): a new thread in this workspace's #general with
+  // `/workflow brief` typed in. The owner reads it and sends it; nothing starts by itself.
+  async function startWorkflow(offer){
+    if (!offer || busy) return busyNote();
+    await selectRoom(`${_WS}/general`);
+    newThread();
+    input.value = `/${offer.name}${offer.brief ? " " + offer.brief : ""}`;
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
   window.ChatRooms = {
     select: selectRoom,
+    startWorkflow,
     openThread,
     newThread: () => newThread(),
     current: () => activeRoomId,
@@ -6475,6 +6567,14 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
         openDeliverable({ ...m.deliverables[+b.dataset.deliv], bot: botId }));
       main.appendChild(box);
     }
+    if (m.workflow_offer?.name) {
+      const bar = document.createElement("div");
+      bar.className = "approval-bar";
+      bar.innerHTML = `<span class="ap-sum">This loop suggests a workflow: /${esc(m.workflow_offer.name)}</span>
+        <button class="btn sm primary" data-wf-offer>Start /${esc(m.workflow_offer.name)}</button>`;
+      bar.querySelector("[data-wf-offer]").onclick = () => startWorkflow(m.workflow_offer);
+      main.appendChild(bar);
+    }
     if (m.approval && _APPROVALS.some(a => a.id === (m.approval.id || m.approval))) {
       const a = typeof m.approval === "object" ? m.approval : _APPROVALS.find(x => x.id === m.approval);
       const bar = document.createElement("div");
@@ -6546,7 +6646,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     row.querySelector(".msg-main").appendChild(box);
   }
   // Function declarations only (hoisted): showChat, defined above, calls these.
-  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length); }
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length || m.workflow_offer); }
   function reactPicker(){   // built on first use; its row and anchor live on the function
     if (reactPicker.el) return reactPicker.el;
     const el = reactPicker.el = document.createElement("div");

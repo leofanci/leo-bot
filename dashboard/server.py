@@ -51,6 +51,7 @@ import deliverables      # noqa: E402
 from core import bots, datadir, general, memory, paths, updater, version  # noqa: E402
 from core import rooms   # noqa: E402
 from core import folders  # noqa: E402
+from core import own_checks  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import chain  # noqa: E402
@@ -1962,10 +1963,46 @@ def _job_notepad(job):
     notes = str(job.get("notes") or "").strip() or "(empty: this may be the first run)"
     text = JOB_NOTEPAD.format(max=jobs.NOTES_MAX, notes=notes)
     c = job.get("check")
-    if c:
+    if c and "own" in c:
+        text += (f"\n\nThis run started because {own_checks.label(c)} changed since the last run. "
+                 "Read it yourself to see what changed.")
+    elif c:
         text += (f"\n\nThis run started because {c.get('app')} {c.get('action')} answered something new since "
                  "the last run. Read it yourself to see what changed.")
-    return text
+    stop = str(job.get("stop") or "").strip()
+    if stop:
+        text += JOB_STOP.format(stop=stop)
+    return text + JOB_OFFER
+
+
+JOB_OFFER = ("\n\nTo suggest that the owner start a workflow (a skill set up as `kind: workflow`), end with one "
+             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself.")
+JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
+            "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
+            "and the owner sees why. Never write that line otherwise.")
+# A job's own bot ends its reply with this when its stop condition holds (JOB_STOP).
+_LOOP_DONE_RE = re.compile(r"^[ \t>*_-]*LOOP[ \t]+DONE[*_ \t]*:[*_ \t]*(.*?)[ \t*_]*$", re.M | re.I)
+
+
+# A job's own bot offers the owner a workflow to start: one line `START: /<workflow> <brief>`.
+_START_RE = re.compile(r"^[ \t>*_-]*START[*_ \t]*:[*_ \t]*/([a-z0-9][a-z0-9-]*)(?:[ \t]+(.*?))?[ \t*_]*$", re.M | re.I)
+
+
+def _extract_workflow_start(text):
+    """(text without START lines, (workflow, brief) of the first or None)."""
+    found = _START_RE.findall(text or "")
+    if not found:
+        return text or "", None
+    name, brief = found[0]
+    return _START_RE.sub("", text or "").rstrip(), (name.lower(), " ".join((brief or "").split()))
+
+
+def _extract_loop_done(text):
+    """(text without LOOP DONE lines, why or None). A bare line still counts: why is "" then."""
+    found = _LOOP_DONE_RE.findall(text or "")
+    if not found:
+        return text or "", None
+    return _LOOP_DONE_RE.sub("", text or "").rstrip(), found[0].strip()
 
 
 BROWSER_SHELL_OFF = shell_rules.BROWSER_SHELL_OFF
@@ -2068,7 +2105,7 @@ def run_job(job, srv):
         elif not rec and isinstance(ev.get("delta"), str):
             detail += ev["delta"]  # a zero-model reply (cap, engine): why it did not run
     status = live.get("status") or "failed"
-    if seen is not None and status in ("done", "waiting"):
+    if seen is not None and status in ("done", "waiting", "finished"):
         jobs.set_check_seen(ROOT, job["id"], seen)  # a failed run sees the same news again next time
     return {"status": status, "chat": chat if rec else None,
             "cost": float((rec or {}).get("cost") or 0), "detail": detail[:300]}
@@ -2079,6 +2116,14 @@ def _job_check(job):
     connected-app read held to a bot's own read rules (composio.read_metric)."""
     c = job["check"]
     ws = job.get("workspace") or bots.HQ
+    if "own" in c:  # Leo Bot's own data: no app, no bot rights involved
+        try:
+            return own_checks.digest(ROOT, ws, c.get("own"), c.get("id")), None
+        except ValueError as e:
+            return None, f"its check could not run: {e}"[:300]
+        except Exception as e:  # noqa: BLE001 - one job's check never stops the runner
+            traceback.print_exc()
+            return None, f"its check failed: {type(e).__name__}"
     try:
         out = composio.read_metric(c.get("app"), c.get("action"), c.get("args") or {}, ws, job["bot"], ROOT)
     except composio.ComposioError as e:
@@ -2559,14 +2604,27 @@ def _catalog_search(q):
     return {"apps": hits[:CATALOG_LIMIT]}
 
 
+def _chain_view(ws):
+    """One workspace's own chain limits (None: inherits) and the Settings values it inherits."""
+    own = chain.overrides(ROOT).get(ws) or {"hops": None, "cost": None}
+    v = general.view()
+    return {"ws": ws, **own, "settings": {"hops": v["chain_hops"], "cost": v["chain_cost"]}}
+
+
 def _jobs_view(ws):
     """The Team screen's jobs: every one from HQ, a workspace's own elsewhere."""
     out = []
+    try:  # what each job spent in the last 7 days, from the same records as Costs
+        spent = costs.summarize(bots.HQ, _spend_records(), set(), 7)["by_job"]
+    except Exception:  # noqa: BLE001 - the list still shows without its costs
+        traceback.print_exc()
+        spent = {}
     for j in jobs.load(ROOT):
         jws = j.get("workspace") or bots.HQ
         if ws != bots.HQ and jws != ws:
             continue
-        out.append({**jobs.view(j), "room": f"{jws}/dm-{j.get('bot')}"})
+        out.append({**jobs.view(j), "room": f"{jws}/dm-{j.get('bot')}",
+                    "cost_7d": round(float((spent.get(j["id"]) or {}).get("cost") or 0), 6)})
     return {"ws": ws, "jobs": out}
 
 
@@ -3832,8 +3890,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(403, {"error": "forbidden"})
 
     def _jobs_post(self, path, body):
-        """Owner only: a job's mode, cap, on/off and delete, from the Team screen. Everything else
-        about a job changes through a bot's proposal and its card."""
+        """Owner only, from the Loops screen: a job's mode, cap, on/off, delete, renew, and edits to
+        its name, message, schedule and stop condition. A bot changes a job only through a proposal."""
         jid, _, verb = path[len("/api/jobs/"):].partition("/")
         ws = _strict_ws(body.get("ws"))
         job = jobs.get(ROOT, jid)
@@ -3861,6 +3919,24 @@ class Handler(BaseHTTPRequestHandler):
             jobs.update(ROOT, jid, enabled=on)
         elif verb == "delete":
             jobs.delete(ROOT, jid)
+        elif verb == "edit":
+            fields = {k: body[k] for k in ("name", "message", "schedule", "stop") if k in body}
+            if not fields or set(body) - {"ws", "name", "message", "schedule", "stop"}:
+                return self._send(400, {"error": "edit: name, message, schedule or stop"})
+            try:
+                if "name" in fields:  # one name per workspace, as for a bot's proposal
+                    job_cards.name_free(jobs.load(ROOT), job.get("workspace"), jobs.clean("name", fields["name"]),
+                                         skip=jid)
+                jobs.update(ROOT, jid, **{k: "" if v is None and k == "stop" else v for k, v in fields.items()})
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+        elif verb == "renew":  # on again, expiring Settings' loop days from now; it must still be able to run
+            try:
+                job_cards.check_target(ROOT, job.get("workspace") or bots.HQ, job.get("bot"),
+                                       job.get("skill"), db.tree())
+            except ValueError as e:
+                return self._send(409, {"error": str(e)})
+            jobs.renew(ROOT, jid, time.time(), general.view()["loop_days"])
         else:
             return self._send(404, {"error": "unknown endpoint"})
         return self._send(200, _jobs_view(ws))
@@ -4601,6 +4677,7 @@ class Handler(BaseHTTPRequestHandler):
         minted = []
         turn_started = time.time()
         wf_out = {"card": False, "stopped": False, "failed": False}  # how this turn went, for a workflow
+        loop_done = None  # a job's LOOP DONE reason, once its own bot wrote one
         if job:
             live["status"] = "done"
             live["chat"] = getattr(sess, "session_id", None)
@@ -4637,7 +4714,7 @@ class Handler(BaseHTTPRequestHandler):
             if lead_text != msgs[0]["content"]:
                 msgs[0]["content"] = lead_text
                 emit({"clean": lead_text, "msg": 0})
-            if named_handoff and not handoff and not job:
+            if named_handoff and not handoff:
                 # The line is stripped from the reply: without this the user reads "passing it on" and
                 # nothing follows (teammate off, or not in this room).
                 notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
@@ -4665,11 +4742,6 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"clean": clean3, "msg": len(msgs) - 1})
                 handoff = handoff or h3
             writers = {0: may_write}
-            if handoff and job:
-                # A job is one bot's work in its approved mode: it never passes the run to a teammate.
-                notice(f"A scheduled job does not hand off: ask @{team.get(handoff[0]).handle} "
-                       "in a thread of your own.")
-                handoff = None
 
             def said_since(eid):
                 """This message's replies the engine `eid` has not seen, each labeled with its bot
@@ -4766,7 +4838,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # A chain: each target may pass the work on again, within the owner's limits (Settings,
             # General; none by default), the daily caps, Stop, and a pause when two bots ping-pong.
-            max_hops, max_cost = chain.limits()
+            max_hops, max_cost = chain.limits(ws, ROOT)
             path, hops, from_bot = [bot_id], 0, bot_id
             while handoff and not cap_hit:
                 if not chain.within_hops(hops, max_hops):
@@ -4837,6 +4909,38 @@ class Handler(BaseHTTPRequestHandler):
                     reacts.extend((m["bot"], e) for e in got)
             if reacts:
                 emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
+            if job:  # the job's own bot says its stop condition holds; a consulted teammate never ends it
+                for i, m in enumerate(msgs):
+                    clean, why = _extract_loop_done(m["content"])
+                    if why is None:
+                        continue
+                    m["content"] = clean
+                    emit({"clean": clean, "msg": i})
+                    if m["bot"] == job["bot"] and not m.get("asked_by") and loop_done is None:
+                        loop_done = why or "its stop condition holds"
+                offer = None  # a loop never starts a workflow: it offers the owner a Start button
+                for i, m in enumerate(msgs):
+                    clean, got = _extract_workflow_start(m["content"])
+                    if got is None:
+                        continue
+                    m["content"] = clean
+                    emit({"clean": clean, "msg": i})
+                    if m["bot"] == job["bot"] and not m.get("asked_by") and offer is None:
+                        offer = (i, got)
+                if offer:
+                    i, (name, brief) = offer
+                    wf = workflows.load(name)
+                    bad = ([f"no workflow /{name}"] if not wf else workflows.problems(wf, team))
+                    if bad:
+                        note = f"Could not offer /{name}: {bad[0]}"
+                        msgs[i].setdefault("notices", []).append(note)
+                        emit({"notice": note, "msg": i})
+                    else:
+                        msgs[i]["workflow_offer"] = {"name": wf.name, "brief": brief[:workflow_turns.BRIEF_MAX]}
+                        emit({"workflow_offer": msgs[i]["workflow_offer"], "msg": i})
+                if loop_done is not None:
+                    notice(f"This loop met its stop condition and turned itself off: {loop_done[:200]}. "
+                           "Turn it back on in Loops.")
             for m in msgs[1:]:  # a teammate never asks for approval or consults on its own
                 m["content"] = _extract_consults(approvals.extract(m["content"])[0], team)[0]
                 m["content"] = _HANDOFF_RE.sub("", m["content"]).rstrip() if _HANDOFF_RE.search(m["content"]) else m["content"]
@@ -4855,6 +4959,13 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if job and cap_hit and live.get("status") == "done":
                 live["status"] = "capped"
+            if job and loop_done is not None:
+                try:
+                    jobs.update(ROOT, job["id"], enabled=False)
+                    if live.get("status") in ("done", "waiting", "capped"):
+                        live["status"] = "finished"
+                except (LookupError, OSError, ValueError):  # deleted while it ran
+                    traceback.print_exc()
             if job:  # the turn's spend is saved below: no longer live
                 try:
                     jobs.set_live(ROOT, None, 0)
@@ -5234,6 +5345,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/jobs":
                 ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
                 return self._send(200, _jobs_view(ws))
+            if path == "/api/chain":  # this workspace's own chain limits, and what Settings gives
+                ws, _ = _resolve_workspace((parse_qs(urlparse(self.path).query).get("ws") or [None])[0], db.tree())
+                return self._send(200, _chain_view(ws))
             if path == "/api/workflow":  # the open thread's workflow run, or {}
                 chat = (parse_qs(urlparse(self.path).query).get("chat") or [""])[0]
                 return self._send(200, workflow_turns.current(ROOT, chat))
@@ -5714,6 +5828,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
                 return self._jobs_post(path, body)
+            if path == "/api/chain":  # owner only: one workspace's hops and cost per message
+                if not self._authorized(require_origin=True):
+                    return self._send(403, {"error": "forbidden"})
+                try:
+                    ws = _strict_ws(body.get("ws"))
+                    chain.set_override(ROOT, ws, body.get("hops"), body.get("cost"))
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
+                return self._send(200, _chain_view(ws))
             if path in ("/api/runners", "/api/runners/revoke"):
                 if not self._authorized(require_origin=True):
                     return self._send(403, {"error": "forbidden"})
