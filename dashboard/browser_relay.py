@@ -710,7 +710,8 @@ def _send(rid, name, arguments, sid, ctx, upstream, bkey, tt, typed, url, settin
     if refusal:
         return _text(rid, refusal), sid
     daily = (browser.sites(root).get(site) or {}).get("daily") if site else None
-    planned = setting["level"] == "write"
+    # A job run or a workflow step sends only approved plan items, even at "Acts on its own".
+    planned = setting["level"] == "write" or bool(ctx.get("hold_sends"))
     # Acts on its own sends without a plan only where the owner said it may: a site listed in
     # Settings, Browser, or one an approved plan already sent to (core/destinations.py). A page can
     # steer the bot anywhere, so a new site waits for one approved plan.

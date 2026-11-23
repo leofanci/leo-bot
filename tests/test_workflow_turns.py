@@ -111,6 +111,16 @@ class WorkflowTurns(unittest.TestCase):
         self.assertTrue(ev["label"].startswith("@research /icp-research Step 2 of 4"))
         self.assertEqual(self.run_rec()["chat"], CHAT)
 
+    def test_step_turn_holds_sends(self):
+        minted = []
+        real = server.apps_relay.TOKENS.mint
+        with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}):
+            self.ask("hello there", ["ok"])
+            self.ask("/idea-to-experiment acme sells widgets", ["The problem is real."])
+        self.assertEqual([bool(c.get("hold_sends")) for c in minted], [False, True])
+
     def test_tick_runs_checker_then_retry_then_pause(self):
         self.ask("/idea-to-experiment an idea", ["ok"])
         out, _ = self.tick(["Segments: small shops."])

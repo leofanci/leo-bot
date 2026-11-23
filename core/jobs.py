@@ -21,7 +21,9 @@ expires, as for every job saved before loops had one).
 
 Modes: `approval` (reads and drafts; every save waits for Approve), `auto` (creates and
 updates in Leo Bot by itself; deletes, memory and app writes still wait), `report` (reads
-and reports, saves nothing). A missing or unknown mode reads as `approval`.
+and reports, saves nothing). A missing or unknown mode reads as `approval`. In every mode a
+send (an app send, a browser send) waits as its own card even on a grant that sends without
+asking: approving a loop never approves what it sends (`hold_sends` in the relays).
 
 The file also holds a proposal outbox: `osctl propose-job` drops a bot's proposal there,
 keyed by its thread, and the server applies it when that turn ends (dashboard/job_cards.py),

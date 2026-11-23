@@ -384,6 +384,29 @@ class JobTurn(unittest.TestCase):
             self.run_job(mode="auto", message="draft the weekly email")
         self.assertEqual([bool(c.get("report")) for c in minted], [True, False])
 
+    def test_job_run_holds_sends_chat_turn_does_not(self):
+        minted = []
+        real = server.apps_relay.TOKENS.mint
+        with mock.patch.object(server.apps_relay.TOKENS, "mint", side_effect=lambda ctx: minted.append(ctx) or real(ctx)), \
+                mock.patch.object(server.integrations, "api_key", return_value="k"), \
+                mock.patch.object(server.integrations, "effective_grant", return_value={"gmail": True}):
+            self.run_job(mode="approval", message="answer the new replies")
+            self.run_job(mode="auto", message="answer the new replies")
+
+            def ask(sess, text, **kw):
+                yield ("delta", "ok")
+                yield ("done", {"cost": 0.01})
+            h = server.Handler.__new__(server.Handler)
+            h.wfile = io.BytesIO()
+            h.server = self.srv
+            h.send_response = h.send_header = h.end_headers = lambda *a, **k: None
+            with mock.patch.object(server.chat_session.ChatSession, "ask", ask), \
+                    mock.patch.object(server, "get_chat_session",
+                                      side_effect=lambda *a, **k: server.chat_session.ChatSession(repo_dir=".", rail="")):
+                h._handle_ask({"messages": [{"role": "user", "content": "answer the new replies"}],
+                               "room_id": f"{WS}/general"})
+        self.assertEqual([bool(c.get("hold_sends")) for c in minted], [True, True, False])
+
     def test_job_hands_off_in_its_mode(self):
         bots.set_active("research", True, self.root, WS, {"slug": WS, "kind": "venture"})
         replies = iter(["Research should size it.\nHANDOFF @research: size the market",

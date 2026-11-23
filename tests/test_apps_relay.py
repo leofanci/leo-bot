@@ -410,5 +410,48 @@ class ComposioUpstreamRetry(unittest.TestCase):
         self.assertEqual(reply, {"result": {}})
 
 
+class HoldSends(unittest.TestCase):
+    """A job run or a workflow step holds every send, even on a "Sends without asking" grant."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        integrations.set_grant("hq", "cos", {"gmail": "act", "googlecalendar": "act"}, self.root)
+        integrations.note_known([{"id": "ca_g1", "toolkit": "gmail", "label": "work"},
+                                 {"id": "ca_c1", "toolkit": "googlecalendar", "label": "cal"}], self.root)
+        self.up = FakeUpstream()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def handle(self, frame, **ctx):
+        reply, _ = apps_relay.handle(frame, {**CTX, "taint": taint.Turn(), **ctx}, None, self.up, self.root,
+                                     catalog=CAT, read_only=lambda slug: True)
+        return reply
+
+    def check_held(self, **ctx):
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com", "body": "hi"}}
+        reply = self.handle(multi(send), **ctx)
+        self.assertEqual(self.up.frames, [])
+        rows = [r for r in approvals.load(self.root) if r.get("kind") == approvals.APP]
+        self.assertEqual([(r["status"], r["action"]["slug"]) for r in rows], [("pending", "GMAIL_SEND_EMAIL")])
+        self.assertIn("Held for approval", text_of(reply))
+        event = {"tool_slug": "GOOGLECALENDAR_CREATE_EVENT", "arguments": {"summary": "call"}}
+        reply = self.handle(multi(event), **ctx)
+        self.assertEqual(len(self.up.frames), 1)
+        self.assertIn("Ran on its own", text_of(reply))
+
+    def test_workflow_step_holds_sends_on_act_grant(self):
+        self.check_held(hold_sends=True)
+
+    def test_job_run_holds_sends_on_act_grant(self):
+        self.check_held(hold_sends=True, report=False)
+
+    def test_chat_turn_sends_on_act_grant(self):
+        send = {"tool_slug": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "a@example.com", "body": "hi"}}
+        self.assertIn("Ran on its own", text_of(self.handle(multi(send))))
+        self.assertEqual(len(self.up.frames), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

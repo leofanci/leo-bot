@@ -642,6 +642,9 @@ _SKILL_ROUTES = [
     ("product-build",      r"product roadmap|build status|feature roadmap|plan (the )?features"),
     ("gtm-assessment",     r"assess\w*|where (do|does) (we|this) stand|pace call|gtm assessment"),
     # Add-on domain bots (off by default): tagged routing skips these while their bot is off.
+    # Before prospect-list and support-triage: "replies from prospects" and "cold emails to leads" are outreach.
+    ("reply-triage",       r"\b(sort|triage|go through|read|answer|handle)\b.{0,30}\brepl(y|ies)\b|\brepl(y|ies)\b.{0,40}\b(prospects?|leads?|outreach|campaign)\b|what came back from (the |my |our )?(outreach|campaign)"),
+    ("outreach-draft",     r"\boutreach\b|cold (emails?|messages?|dms?)|(write|draft)\b.{0,30}\b(messages?|emails?|dms?) (to|for) (the |these |this |my |our )?(prospects?|leads?|list)"),
     ("discovery-call",     r"discovery call|sales call|call (script|prep)|demo prep|what (should|do) i (ask|say) (on|in) (the|a|my) (call|demo)"),
     ("prospect-list",      r"prospect\w*|lead list|list of (leads|people to contact)|target accounts?|find (me )?leads"),
     ("deal-review",        r"\bdeals?\b|sales pipeline|pipeline review"),
@@ -4137,6 +4140,9 @@ class Handler(BaseHTTPRequestHandler):
         live = viewer.setdefault("live", {}) if job else {}
         job_cap = (job["id"], job["cap"]) if job and job.get("cap") else None  # a cap is optional
         job_mode = jobs.mode_of(job) if job else None
+        # A job run or a workflow step holds every send for its own click, even on a grant that
+        # sends without asking: approving a loop or a plan never approves what is inside it.
+        hold_sends = bool(job) or bool(viewer.get("workflow"))
         if job:
             chat_id = None
             live["status"] = "refused"  # until the model turn starts: every early return
@@ -4693,7 +4699,7 @@ class Handler(BaseHTTPRequestHandler):
                 kw.update({"apps_token": apps_relay.TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report",
+                           "report": job_mode == "report", "hold_sends": hold_sends,
                            "taint": turn,  # reads mark it; actions wait once it holds outside content
                            # the first app call marks the thread: no web search after app data
                            "on_call": lambda: setattr(sess, "apps_used", True)}),
@@ -4705,7 +4711,7 @@ class Handler(BaseHTTPRequestHandler):
                 tok = browser.with_epoch(ws, lambda: _workspace_exists(ws), lambda _e: BROWSER_TOKENS.mint(
                           {"ws": ws, "bot": st_.bot_id, "chat": getattr(sess, "session_id", None),
                            "room": (room or {}).get("id"), "person": bots.CEO,
-                           "report": job_mode == "report",
+                           "report": job_mode == "report", "hold_sends": hold_sends,
                            # On a server, My Chrome is this sender's own Chrome via their runner only.
                            "runner_owner": sender, "shared": shared,
                            "taint": turn}), ROOT)

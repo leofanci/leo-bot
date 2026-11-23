@@ -201,6 +201,9 @@ def _gate(frame, ctx, sid, upstream, root, catalog, read_only=None):
                 fresh = destinations.unknown(ctx["ws"], dests, root)
             if fresh:
                 verdict = "hold"
+            elif ctx.get("hold_sends") and tk and app_rules.is_send(c["tool_slug"], tk):
+                # A job run or a workflow step: approving the plan never approves its sends.
+                verdict = "hold"
         if verdict == "refuse":
             # An app Leo Bot knows but this bot may not use here: the owner can fix that in Apps or Team.
             known = tk and tk not in app_rules.BLOCKED_TOOLKITS
