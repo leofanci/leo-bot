@@ -1982,6 +1982,11 @@ JOB_NOTES = {
         "Nothing is saved: osctl writes and app actions that are not reads are refused, and an APPROVAL: "
         "line is ignored."),
 }
+# Claude Code allows osctl only as a plain command (claude_code.BASE_ALLOWED_TOOLS): anything wrapped
+# around it is refused, and a bot that gives up after that answers without the project's data.
+OSCTL_BASH_NOTE = ("## Running osctl\nRun each osctl command as its own Bash call, exactly "
+                   "`python3 -m dashboard.osctl <command> ...` from the folder you start in: no `cd`, no pipe "
+                   "(`| head`), no `2>&1`, no `;` or `&&`. Anything around it is refused. Read long output in full.")
 AGENTS_NOTE = ("## Sub-agents\nFor a big job with independent parts (research 30 people, check several sites, "
                "build and test separate pieces), start sub-agents with the Task tool so the parts run in "
                "parallel. Each gets your tools and rules; give each a complete brief and merge what they "
@@ -4364,7 +4369,7 @@ class Handler(BaseHTTPRequestHandler):
             elif engine.full_disk:
                 workspace = "\n\n".join(x for x in (workspace, CLI_NOTE) if x)
             if not locked and engine.id == chat_session.ClaudeCodeEngine.id:
-                workspace = "\n\n".join(x for x in (workspace, AGENTS_NOTE) if x)
+                workspace = "\n\n".join(x for x in (workspace, OSCTL_BASH_NOTE, AGENTS_NOTE) if x)
             if getattr(sess, "shell", False):
                 lvl, rv = SHELL_LEVELS.get(sess.level, SHELL_LEVELS["full"])
                 workspace = "\n\n".join(x for x in (workspace, SHELL_NOTE.format(
@@ -4671,7 +4676,10 @@ class Handler(BaseHTTPRequestHandler):
                 c_model = chat_session.CHAT_MODEL if c_pinned == "fast" else chat_session.ESCALATED_MODEL
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, shared=shared,
-                                      folders_block=linked_workspace_prompt(project_slug, c_rows))
+                                      folders_block="\n\n".join(x for x in (
+                                          linked_workspace_prompt(project_slug, c_rows),
+                                          OSCTL_BASH_NOTE if not locked and c.engine.id == chat_session.ClaudeCodeEngine.id
+                                          else "") if x))
             slot = person["id"] if person else ("job" if job else f"sess-{next(_EXTRA_SEQ)}")
             _EXTRA[slot] = c
             c_kw = {"read_dirs": c_read, "edit_dirs": ()}
