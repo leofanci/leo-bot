@@ -677,7 +677,11 @@ class ClaudeCodeEngine(Engine):
                 if kind == "done":
                     said = payload.get("result") or said
                     payload["context"] = context
-                    if run_usage.get("sub_seen"):  # sub-agents ran: never report less than counted
+                    if was_started:
+                        # A resumed session's total_cost_usd adds up every earlier turn (2.1.331):
+                        # this turn costs its own calls, or its usage when none streamed (None here).
+                        payload["cost"] = run_usage.get("cost")
+                    elif run_usage.get("sub_seen"):  # sub-agents ran: never report less than counted
                         payload["cost"] = max(float(payload.get("cost") or 0), run_usage.get("cost", 0.0))
                 if kind:
                     yield (kind, payload)
