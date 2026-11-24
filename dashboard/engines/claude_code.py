@@ -104,6 +104,8 @@ def call_usage(obj, run, model=None):
             call = run.pop("call", None) or {"model": model}
             parts = {**prices.usage(*(call.get(k) for k in _IN_KEYS), out), "cache_write_1h": call.get("hour", 0)}
             cost = prices.estimate(call["model"], parts)
+            if cost is None:  # a model PRICES lacks: this run's own total is not known
+                run["unpriced"] = True
             run["cost"] = run.get("cost", 0.0) + (cost or 0.0)
             return True
     return False
@@ -680,7 +682,7 @@ class ClaudeCodeEngine(Engine):
                     if was_started:
                         # A resumed session's total_cost_usd adds up every earlier turn (2.1.331):
                         # this turn costs its own calls, or its usage when none streamed (None here).
-                        payload["cost"] = run_usage.get("cost")
+                        payload["cost"] = None if run_usage.get("unpriced") else run_usage.get("cost")
                     elif run_usage.get("sub_seen"):  # sub-agents ran: never report less than counted
                         payload["cost"] = max(float(payload.get("cost") or 0), run_usage.get("cost", 0.0))
                 if kind:
