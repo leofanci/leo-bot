@@ -211,9 +211,10 @@ class Compare(unittest.TestCase):
 
     def test_load_checks_cases(self):
         cases = compare.load()
-        self.assertEqual(len(cases), 3)
+        self.assertEqual(len(cases), 6)
         for c in cases:
-            self.assertEqual(set(c), {"id", "workflow", "brief", "intake"})
+            self.assertEqual(set(c), {"id", "workflow", "baseline", "brief", "intake"})
+            self.assertEqual((c["workflow"], c["baseline"]), ("team-launch-debate", "team-launch-plan"))
             self.assertIn("acme", (c["brief"] + c["intake"]).lower())
         good = cases[0]
         bad = {"unknown key": [dict(good, extra=1)],
@@ -222,6 +223,8 @@ class Compare(unittest.TestCase):
                "duplicate id": [good, dict(good)],
                "unknown workflow": [dict(good, workflow="no-such-flow")],
                "not one step": [dict(good, workflow="idea-to-experiment")],
+               "baseline not one step": [dict(good, baseline="idea-to-experiment")],
+               "baseline is the workflow": [dict(good, baseline=good["workflow"])],
                "not a list": {"id": "x"}}
         with tempfile.TemporaryDirectory() as tmp:
             for why, data in bad.items():
@@ -309,11 +312,68 @@ class Compare(unittest.TestCase):
         self.assertIn("no plan", got["why"])
 
         arms["workflow"]["plan"] = "Another plan."
+        arms["baseline"] = {"status": "done", "why": "", "plan": "", "cost": 0.3}
         judge = mock.Mock(return_value=(json.dumps({"A": SCORES, "B": SCORES, "better": "A", "why": "w"}), 0.05))
         got = compare.judge_case(case, arms, judge)
-        judge.assert_called_once()
-        self.assertEqual(got["better"], got["order"][0])
-        self.assertEqual(got["judge_cost"], 0.05)
+        self.assertEqual(judge.call_count, 2)  # the single pair, both orders; the baseline had no plan
+        self.assertEqual(got["better"], "tie")  # "A" both times is a different arm each time
+        self.assertEqual(got["judge_cost"], 0.1)
+        self.assertEqual(got["pairs"]["baseline"]["better"], "none")
+        self.assertIn("no plan from the baseline arm", got["pairs"]["baseline"]["why"])
+
+    def test_pair_split_verdict_is_a_tie(self):
+        a, b = ({"better": "workflow", "scores": {"workflow": 22, "single": 18}, "why": "x"},
+                {"better": "single", "scores": {"workflow": 20, "single": 21}, "why": "y"})
+        got = compare.combine(a, b)
+        self.assertEqual((got["better"], got["scores"]), ("tie", {"workflow": 21.0, "single": 19.5}))
+        none = {"better": "none", "scores": {}, "why": ""}
+        self.assertEqual(compare.combine(a, none)["better"], "workflow")
+        self.assertEqual(compare.combine(none, none)["better"], "none")
+
+    def test_pair_agreed_verdict_wins_and_scores_average(self):
+        case = compare.load()[0]
+        arms = {a: {"plan": f"{a} plan", "cost": 0.1} for a in ("workflow", "single", "baseline")}
+        prompts = []
+
+        def judge(prompt):
+            prompts.append(prompt)
+            first = prompt.index("Plan A:") < prompt.index("workflow plan") < prompt.index("Plan B:")
+            return json.dumps({"A": dict(SCORES, risks=5) if first else SCORES,
+                               "B": SCORES if first else dict(SCORES, risks=5),
+                               "better": "A" if first else "B", "why": "w"}), 0.01
+        got = compare.judge_case(case, arms, judge)
+        self.assertEqual(len(prompts), 4)
+        self.assertNotEqual(prompts[0].index("workflow plan") < prompts[0].index("Plan B:"),
+                            prompts[1].index("workflow plan") < prompts[1].index("Plan B:"))
+        for rival in ("single", "baseline"):
+            self.assertEqual(got["pairs"][rival]["better"], "workflow")
+            self.assertEqual(got["pairs"][rival]["scores"], {"workflow": 22.0, rival: 20.0})
+        self.assertEqual(got["better"], "workflow")
+
+    def test_baseline_arm_runs_in_a_rotating_order(self):
+        cases = compare.load()
+        for c in cases:
+            self.assertEqual(sorted(compare.arm_order(c)), ["baseline", "single", "workflow"])
+        self.assertGreater(len({compare.arm_order(c)[0] for c in cases}), 1)
+        plain = {k: v for k, v in cases[0].items() if k != "baseline"}
+        self.assertEqual(sorted(compare.arm_order(plain)), ["single", "workflow"])
+        self.assertEqual(compare.rivals(plain), ["single"])
+
+    def test_summary_reports_gain_over_baseline(self):
+        def res(better, scores, wc=0.5, bc=0.3):
+            return {"id": "c", "better": "workflow", "scores": {}, "why": "",
+                    "arms": {"workflow": {"cost": wc}, "single": {"cost": 0.1}, "baseline": {"cost": bc}},
+                    "judge_cost": 0.02, "pairs": {"baseline": {"better": better, "scores": scores}}}
+        text = compare.summary([res("workflow", {"workflow": 22, "baseline": 20}),
+                                res("workflow", {"workflow": 21, "baseline": 21}),
+                                res("tie", {"workflow": 20, "baseline": 20})])
+        self.assertIn("Against baseline: workflow better in 2/3, baseline better in 0.", text)
+        self.assertIn("Mean score 21.0 vs 20.3/25", text)
+        self.assertIn("(1.7x)", text)
+        self.assertIn("+3.3 points per extra dollar a case", text)
+        self.assertIn("Gain over baseline: yes", text)
+        self.assertIn("Gain over baseline: no", compare.summary([res("tie", {}), res("baseline", {})]))
+        self.assertNotIn("baseline", compare.summary([{**res("tie", {}), "pairs": {}}]))
 
     def test_summary_gain_line(self):
         def res(better, wc=0.3, sc=0.1):

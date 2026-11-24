@@ -91,6 +91,11 @@ class Templates(unittest.TestCase):
         self.assertEqual((step.skill, step.bot, step.checker, step.gate, step.consult),
                          ("launch-plan", "gtm", "product", True, ("research", "cmo")))
         self.assertEqual(workflows.problems(team, venture_team()), [])
+        debate = workflows.load("team-launch-debate")
+        step = debate.steps[0]
+        self.assertEqual((step.bot, step.checker, step.gate, step.team, step.debate, step.consult),
+                         ("gtm", "product", True, True, 2, ("research", "cmo")))
+        self.assertEqual(workflows.problems(debate, venture_team()), [])
 
     def test_parse_consult(self):
         base = "1. skill: experiment-design | bot: product | output: test | gate: no | checker: gtm"
