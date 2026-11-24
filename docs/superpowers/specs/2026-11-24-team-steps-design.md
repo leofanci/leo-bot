@@ -56,6 +56,12 @@ A run still marked running whose record has not changed for 30 minutes reads as 
 
 Unchanged rules: consultants' replies are untrusted input with source labels; no advice or debate turn can save, act or raise a card; Stop workflow, the cost cap and daily caps apply to every turn; consultants keep their own read limits, never wider than the lead's.
 
+## Results (6 `acme` cases, Claude Code engine)
+
+- `team-launch-debate` against a single bot: better in 6/6, cost 2.2x.
+- `team-launch-debate` against phase 4 (`team-launch-plan`): better in 5/6, none worse, mean score 22.0 vs 18.3 out of 25, at 0.7x its cost. On these cases the lead chose to work alone every time; the gain comes from a full first output plus the checker.
+- Forced consults plus 2 debate rounds against `team-launch-debate`: better in 3/6, worse in 2, mean 20.5 vs 19.9, at 2.2x the cost. Debate ran (mostly AGREE in round 1) but did not earn its cost here, so the lead keeps the choice and the shipped template keeps `debate: 2` only for the cases where it does consult.
+
 ## Approaches considered
 
 1. **Blind advice from fresh sessions plus capped debate (chosen).** Phase 4's turn count when nobody objects; extra cost only where there is disagreement.
