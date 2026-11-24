@@ -348,6 +348,16 @@ class WorkflowTurns(unittest.TestCase):
         self.assertNotIn(f"under {workflow_turns.DRAFT_WORDS} words", revise)
         self.assertIn("in full", revise)
 
+    def test_revise_checks_contradictions_and_fit_itself(self):
+        # In the revise turn, not the checker: a checker rule sent every run through a second
+        # revise and check, about 50% more cost for the same plans.
+        wf = self.consult_flow()
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        text = workflow_turns._instructions(dict(run, phase="revise", consulted=2), wf)
+        self.assertIn("agrees", text)
+        self.assertIn("fits the team", text)
+        self.assertNotIn("fits the team", workflow_turns._instructions(dict(run, phase="check"), wf))
+
     def test_step_without_consults_has_no_draft_cap(self):
         text = ("---\nname: demo-solo\nkind: workflow\ndescription: Workflow. Demo.\n---\n\nIntro.\n\n"
                 "## Steps\n1. skill: experiment-design | bot: product | output: a test\n\n## Stop when\nDone.\n")
