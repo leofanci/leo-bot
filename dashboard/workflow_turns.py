@@ -306,6 +306,8 @@ def prepare(body, viewer, ws, team, room, shared, root):
         if cap > 0 and live["cost"] >= cap:
             return CAPPED
         bad = workflows.problems(wf, team)
+        why = workflows.run_problem(live, team)
+        bad = bad or ([f"Step {live['step'] + 1} debate: {why}."] if why else [])
         if bad:
             run = dict(live, status="paused", why=bad[0])
             workflows.save(root, run)

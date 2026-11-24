@@ -560,6 +560,16 @@ class WorkflowTurns(unittest.TestCase):
         shown = [m["content"] for m in rec["messages"] if m.get("bot") == "research"]
         self.assertTrue(shown and "ALSO" not in shown[-1])
 
+    def test_debater_switched_off_mid_run_pauses(self):
+        self.team_flow()
+        self.ask("/team-flow an idea", ["Draft.\nCONSULT @cmo: copy?", "Cmo advice.", "Full plan."])
+        bots.set_active("cmo", False, self.root, "acme", self.tree[0])
+        n = len(self.runs)
+        out, _ = self.tick()
+        self.assertIn("@cmo is switched off", out)
+        self.assertEqual(self.run_rec()["status"], "paused")
+        self.assertEqual(len(self.runs), n)
+
     def test_team_step_full_run_through_debate(self):
         self.team_flow(debate=2)
         self.ask("/team-flow an idea", ["Draft.\nCONSULT @research: big?", "Research advice.", "Full plan."])

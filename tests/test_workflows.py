@@ -454,6 +454,23 @@ class TeamSteps(unittest.TestCase):
         run = workflows.advance(DEBATED, run, out(replies=[("cmo", "AGREE")]), 0)
         self.assertEqual(run["phase"], "save")
 
+    def test_team_stage_retry_does_not_use_up_the_answer_retry(self):
+        run = workflows.advance(TEAM, self.run_of(TEAM), out(replies=[("product", "BLOCKED: thin")]), 0)
+        run = workflows.advance(TEAM, run, out(replies=[("product", "plan")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"]), ("check", False, ""))
+        run = workflows.advance(TEAM, run, out(replies=[("gtm", "WEAK: no dates")]), 0)
+        self.assertEqual((run["phase"], run["status"]), ("answer", "running"))
+
+    def test_run_problem_names_a_debater_switched_off(self):
+        class B:
+            def __init__(self, active):
+                self.active = active
+        team = type("T", (), {"get": lambda s, b: None if b == "nobody" else B(b != "cmo")})()
+        run = dict(self.run_of(TEAM), phase="debate", panel=["research", "cmo"], debated=1)
+        self.assertEqual(workflows.run_problem(run, team), "@cmo is switched off")
+        self.assertIsNone(workflows.run_problem(dict(run, debated=0), team))
+        self.assertIsNone(workflows.run_problem(dict(run, phase="check"), team))
+
     def test_objection_parser(self):
         self.assertEqual(workflows.objection("Fine.\n- **OBJECT:** the price is wrong"), "the price is wrong")
         self.assertIsNone(workflows.objection("AGREE"))

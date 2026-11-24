@@ -180,6 +180,16 @@ def problems(wf, team):
     return out
 
 
+def run_problem(run, team):
+    """Why the run's next turn cannot go now, or None: a debate turn whose bot left or was switched off
+    (a team step's consultants are picked during the run, so `problems` cannot see them)."""
+    if run.get("phase") != "debate":
+        return None
+    panel = run.get("panel") or []
+    i = int(run.get("debated") or 0)
+    return _bot_problem(team, panel[i]) if i < len(panel) else None
+
+
 # --- run record ---------------------------------------------------------------------------
 # One run per thread: root/team/workflow_runs/<chat>.json. Phases of the current step:
 #   stage   the step's bot does the work (a draft when the step has consults)
@@ -368,7 +378,7 @@ def _team_of(step, asked):
 
 def _go(wf, run, step, phase):
     nxt = _next_phase(step, phase, run)
-    if nxt == "consult" and phase == "stage":  # the draft is in: the revise phase gets its own retry
+    if phase == "stage" and (nxt == "consult" or step.team):  # the draft is in: the rewrite gets its own retry
         run.update(retried=False, notes="")
     if nxt:
         run.update(phase=nxt, card_phase="", status="running", why="")
