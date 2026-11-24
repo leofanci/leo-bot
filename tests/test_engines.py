@@ -131,6 +131,29 @@ class ClaudeDriver(unittest.TestCase):
         self.assertAlmostEqual(spent[0]["cost"], one)
         self.assertAlmostEqual(spent[1]["cost"], one + prices.estimate("claude-sonnet-5-5", prices.usage(3000, 0, 100, 20)))
 
+    def _turn_done(self, started, calls=True):
+        start = json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {
+            "usage": {"input_tokens": 1000, "cache_read_input_tokens": 0}}}})
+        delta = json.dumps({"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 20}}})
+        # A resumed session's total_cost_usd counts every earlier turn too (seen live with 2.1.331).
+        result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "total_cost_usd": 0.5,
+                             "usage": {"input_tokens": 1000, "output_tokens": 20}})
+        lines = f"{start}\n{delta}\n{result}" if calls else result
+        bin_ = self.stub(f"cat <<'X'\n{lines}\nX\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        sess._started = started
+        return [p for k, p in sess.engine.turn(sess, "hi", sess._policy(), "sonnet", cs.TurnTokens()) if k == "done"][-1]
+
+    def test_claude_code_resumed_turn_costs_its_own_calls(self):
+        done = self._turn_done(started=True)
+        self.assertAlmostEqual(done["cost"], prices.estimate("claude-sonnet-5-5", prices.usage(1000, 0, 0, 20)))
+
+    def test_claude_code_fresh_turn_keeps_the_cli_total(self):
+        self.assertEqual(self._turn_done(started=False)["cost"], 0.5)
+
+    def test_claude_code_resumed_turn_without_calls_leaves_cost_to_usage(self):
+        self.assertIsNone(self._turn_done(started=True, calls=False)["cost"])
+
     def test_claude_code_prices_each_call_by_the_model_it_names(self):
         run = {}
         start = {"type": "stream_event", "event": {"type": "message_start", "message": {
