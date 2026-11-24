@@ -270,6 +270,16 @@ class Compare(unittest.TestCase):
         self.assertEqual(len(orders), 2)
         self.assertEqual(compare.order_for("x"), compare.order_for("x"))
 
+    def test_arms_run_in_the_case_order(self):
+        # The first arm writes the shared prompt cache cold, the second reads it: alternate who pays.
+        ran = []
+        runs = {arm: (lambda a=arm: ran.append(a) or {"arm": a}) for arm in compare.ARMS}
+        for order in (["single", "workflow"], ["workflow", "single"]):
+            ran.clear()
+            out = compare.run_arms(order, runs)
+            self.assertEqual(ran, order)
+            self.assertEqual(out, {a: {"arm": a} for a in compare.ARMS})
+
     def test_verdict_maps_back(self):
         order = ["single", "workflow"]
         text = "Here you go:\n" + json.dumps({"A": SCORES, "B": dict(SCORES, risks=5), "better": "B",

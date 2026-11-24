@@ -336,6 +336,25 @@ class WorkflowTurns(unittest.TestCase):
         self.assertIn("Do not save anything", body["context"])  # the checker comes first
         self.assertIn("stands alone", body["context"])
 
+    def test_draft_and_advice_are_kept_short(self):
+        # Output tokens are most of a consult round's cost: the draft is a skeleton the revise
+        # turn writes out in full, and each piece of advice is capped.
+        wf = self.consult_flow()
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        self.assertIn(f"under {workflow_turns.DRAFT_WORDS} words", workflow_turns._instructions(run, wf))
+        self.assertIn(f"under {workflow_turns.ADVICE_WORDS} words",
+                      workflow_turns._instructions(dict(run, phase="consult"), wf))
+        revise = workflow_turns._instructions(dict(run, phase="revise", consulted=2), wf)
+        self.assertNotIn(f"under {workflow_turns.DRAFT_WORDS} words", revise)
+        self.assertIn("in full", revise)
+
+    def test_step_without_consults_has_no_draft_cap(self):
+        text = ("---\nname: demo-solo\nkind: workflow\ndescription: Workflow. Demo.\n---\n\nIntro.\n\n"
+                "## Steps\n1. skill: experiment-design | bot: product | output: a test\n\n## Stop when\nDone.\n")
+        wf = workflows.parse(text, "demo-solo")
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        self.assertNotIn(f"under {workflow_turns.DRAFT_WORDS} words", workflow_turns._instructions(run, wf))
+
     def test_full_consult_round_runs_through_the_server(self):
         self.consult_flow()
         out, _ = self.ask("/demo-flow an idea", ["Draft test."])
