@@ -1329,8 +1329,8 @@ def _extract_reacts(text):
     return (clean.rstrip() if got else text or ""), got
 
 
-def _plan_teammates(team, lead, handoff_from, user_msg, asks):
-    """[(bot_id, question, asked_by)]: the lead's consults, then co-tagged bots."""
+def _plan_teammates(team, lead, handoff_from, user_msg, asks, limit=MAX_TEAMMATES):
+    """[(bot_id, question, asked_by)]: the lead's consults, then co-tagged bots, at most `limit`."""
     out, seen = [], {lead}
     for b2, q in asks:
         if b2 not in seen:
@@ -1340,11 +1340,11 @@ def _plan_teammates(team, lead, handoff_from, user_msg, asks):
         if b2 not in seen and b2 != handoff_from:
             out.append((b2, user_msg, None))
             seen.add(b2)
-    return out[:MAX_TEAMMATES]
+    return out[:limit]
 
 
 def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, project_slug, shared=False,
-                     folders_block=""):
+                     folders_block="", workflow_note=""):
     parts = []
     try:
         parts.append(state_snapshot(projects, only=project_slug))
@@ -1359,20 +1359,23 @@ def _teammate_prompt(team, bot_id, asked_by, question, lead_said, projects, proj
            else f"## You were tagged\nThe user asked the team: {question}\n")
     if not lead and lead_said:
         ask += f"Your teammate already answered: {lead_said[:800]}\nAdd only what's new from your side.\n"
-    ask += ("Reply in 1-6 short lines, facts first. You are read-only right now: say what you'd "
-            "save and let them decide. Don't consult anyone.")
+    if workflow_note:  # a workflow team stage: the draft and how to advise on it (workflow_turns)
+        ask += workflow_note + "\nYou are read-only right now. Don't consult anyone yourself."
+    else:
+        ask += ("Reply in 1-6 short lines, facts first. You are read-only right now: say what you'd "
+                "save and let them decide. Don't consult anyone.")
     parts.append(ask)
     return "\n\n".join(parts)
 
 
-def _followup_prompt(team, answers):
+def _followup_prompt(team, answers, ask=None):
     def clean(text):
         text = _extract_consults(approvals.extract(text)[0], team)[0]
         return _HANDOFF_RE.sub("", text).strip()
     lines = [f"@{team.get(b).handle} ({team.get(b).name}): {clean(text) or '(no answer)'}"
              for b, text in answers]
     return ("## Your teammates answered\n" + "\n".join(lines)
-            + "\n\nContinue for the user in a few short lines. Don't consult again this turn.")
+            + "\n\n" + (ask or "Continue for the user in a few short lines. Don't consult again this turn."))
 
 
 def _resolve_workspace(ws, projects):
@@ -4202,6 +4205,7 @@ class Handler(BaseHTTPRequestHandler):
         # app actions or card.
         wf_advice = workflow_turns.advisory(wf_ctx)
         wf_solo = workflow_turns.solo(wf_ctx)  # a step with consults: the workflow asks, not the bot
+        wf_team = workflow_turns.team(wf_ctx)  # a team stage: the bot picks its consultants
         # The sender's own Mac when it is connected (apps stay on the server).
         sender = person["id"] if person else "owner"
 
@@ -4678,6 +4682,8 @@ class Handler(BaseHTTPRequestHandler):
                 c_model = chat_session.CHAT_MODEL if c_pinned == "fast" else chat_session.ESCALATED_MODEL
             prompt = _teammate_prompt(team, b2, asked_by, question, msgs[0]["content"],
                                       projects, project_slug or None, shared=shared,
+                                      workflow_note=workflow_turns.teammate_note(wf_ctx, msgs[0]["content"])
+                                      if wf_team else "",
                                       folders_block="\n\n".join(x for x in (
                                           linked_workspace_prompt(project_slug, c_rows),
                                           OSCTL_BASH_NOTE if not locked and c.engine.id == chat_session.ClaudeCodeEngine.id
@@ -4792,6 +4798,8 @@ class Handler(BaseHTTPRequestHandler):
             lead_text, asks = _extract_consults(lead_text, team)
             if wf_solo:
                 asks = []
+            elif wf_team:
+                asks = workflow_turns.team_asks(wf_ctx, asks, members)
             named_handoff = _names_other(lead_text, team, bot_id)
             lead_text, handoff = _extract_handoff(lead_text, team, speaker=bot_id, members=members)
             if wf_solo or wf_advice:  # the workflow decides who goes next, not this turn's bot
@@ -4804,7 +4812,12 @@ class Handler(BaseHTTPRequestHandler):
                 # nothing follows (teammate off, or not in this room).
                 notice("Could not pass this on: that teammate is not available here. Tag them yourself.")
             answers = []
-            for b2, question, asked_by in _plan_teammates(team, bot_id, handoff_from, user_msg, asks):
+            planned = _plan_teammates(team, bot_id, handoff_from, user_msg, asks,
+                                      limit=workflows.MAX_CONSULTS if wf_team else MAX_TEAMMATES)
+            i = 0
+            while i < len(planned):
+                b2, question, asked_by = planned[i]
+                i += 1
                 if not may_run():
                     break
                 emit({"msg_start": {**_bot_info(team, b2), "asked_by": asked_by,
@@ -4812,12 +4825,25 @@ class Handler(BaseHTTPRequestHandler):
                 m2 = {"bot": b2, "content": "", "asked_by": asked_by or "user"}
                 msgs.append(m2)
                 # The lead's follow-up reads the answer without its REACT line (m2 keeps it till below).
-                answers.append((b2, _extract_reacts(run_teammate(b2, question, asked_by, m2))[0]))
+                said = run_teammate(b2, question, asked_by, m2)
+                if wf_team:  # a consultant may bring in one more teammate, within the step's limit
+                    said, more = workflow_turns.also(said)
+                    shown = workflow_turns.also(m2["content"])[0]
+                    if shown != m2["content"]:
+                        m2["content"] = shown
+                        emit({"clean": shown, "msg": len(msgs) - 1})
+                    handles = {b.handle: b.id for b in team.bots.values() if b.active}
+                    extra = workflow_turns.team_asks(wf_ctx, [(handles[more[0]], more[1])], members) \
+                        if more and more[0] in handles else []
+                    if extra and extra[0][0] not in {p[0] for p in planned} and len(planned) < workflows.MAX_CONSULTS:
+                        planned.append((extra[0][0], extra[0][1] or question, b2))
+                answers.append((b2, _extract_reacts(said)[0]))
             if asks and answers and not cap_hit and may_run():
                 emit({"msg_start": {**_bot_info(team, bot_id), "followup": True}})
                 m3 = {"bot": bot_id, "content": ""}
                 msgs.append(m3)
-                run(sess, _followup_prompt(team, answers), model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
+                run(sess, _followup_prompt(team, answers, ask=workflow_turns.followup_note(wf_ctx) if wf_team else None),
+                    model, with_web, m3, **lead_kw, **folder_kw, **apps_kw)
                 ran_on(engine.id, len(msgs) - 1)
                 if not job:
                     _adopt_loaded_skill(sess)
@@ -5158,7 +5184,8 @@ class Handler(BaseHTTPRequestHandler):
                         "stopped": wf_out["stopped"] or bool(live.get("stopped")) or halt.halted(ROOT),
                         "failed": wf_out["failed"] or any(str(n).startswith("Run failed")
                                                           for m in msgs for n in m.get("notices") or ()),
-                        "replies": [(m.get("bot"), m.get("content") or "") for m in msgs]}, ROOT)
+                        "replies": [(m.get("bot"), m.get("content") or "") for m in msgs],
+                        "asked": [m.get("bot") for m in msgs if m.get("asked_by") not in (None, "user")]}, ROOT)
                 except Exception:  # noqa: BLE001 - the turn is still saved
                     traceback.print_exc()
                     ev = None

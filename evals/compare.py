@@ -1,11 +1,14 @@
-"""Compare a workflow with a single bot, on request only (it spends).
+"""Compare a workflow with a single bot, and optionally with a baseline workflow, on request only
+(it spends).
 
-Each case runs twice in a throwaway home, through the real server on a free local port: once as
-the workflow (`/<workflow> <brief>`, then the browser's next ticks until the run stops), once as
-the workflow's maker alone (`@<maker> /<skill> <brief>` in a fresh thread). The two arms run in
-the case's A/B order, so the arm that pays the cold prompt cache alternates. A strong model then
-scores the two plans blind, shown as Plan A and Plan B in an order seeded per case. Results go to
-<home>/evals/compare-*.json, never into the repo.
+Each case runs in a throwaway home, through the real server on a free local port: once as the
+workflow (`/<workflow> <brief>`, then the browser's next ticks until the run stops), once as the
+workflow's maker alone (`@<maker> /<skill> <brief>` in a fresh thread), and once as the case's
+`baseline` workflow when it names one. The arms run in an order seeded per case, so the arm that
+pays the cold prompt cache rotates. A strong model then scores each pair (the workflow against
+each other arm) blind, shown as Plan A and Plan B, twice with the order swapped: a pair's winner is
+the arm both calls picked, otherwise a tie. Results go to <home>/evals/compare-*.json, never into
+the repo.
 
     python -m evals --compare [--case ID ...] [--cases-file PATH] [--engine ID] [--yes]
 
@@ -26,7 +29,9 @@ from evals import live
 
 CASES = Path(__file__).parent / "cases" / "compare.json"
 KEYS = {"id", "workflow", "brief", "intake"}
+OPTIONAL = {"baseline"}
 ARMS = ("workflow", "single")
+RIVALS = ("single", "baseline")  # each judged against the workflow
 CRITERIA = ("specific", "grounded", "risks", "doable", "consistent")
 KEEP_RUNS = 20
 ROOM = "acme/general"
@@ -68,9 +73,9 @@ def load(path=CASES):
         raise ValueError("cases must be a JSON list")
     seen = set()
     for c in cases:
-        if not isinstance(c, dict) or set(c) != KEYS:
+        if not isinstance(c, dict) or not KEYS <= set(c) <= KEYS | OPTIONAL:
             got = sorted(c) if isinstance(c, dict) else type(c).__name__
-            raise ValueError(f"a case has keys {got}, not {sorted(KEYS)}")
+            raise ValueError(f"a case has keys {got}, not {sorted(KEYS)} (plus optional {sorted(OPTIONAL)})")
         if not isinstance(c["id"], str) or not _ID_RE.match(c["id"]):
             raise ValueError(f"bad case id: {c['id']!r}")
         if c["id"] in seen:
@@ -80,7 +85,23 @@ def load(path=CASES):
             if not isinstance(c[key], str) or not c[key].strip():
                 raise ValueError(f"{c['id']}: {key} is empty")
         _one_step(c["workflow"])
+        if "baseline" in c:
+            _one_step(c["baseline"])
+            if c["baseline"] == c["workflow"]:
+                raise ValueError(f"{c['id']}: the baseline is the workflow itself")
     return cases
+
+
+def rivals(case):
+    """The arms judged against the workflow in this case."""
+    return [r for r in RIVALS if r == "single" or r in case]
+
+
+def arm_order(case):
+    """Every arm of a case, in the order they run: rotated by a seed per case, the same every run."""
+    arms = ["workflow", *rivals(case)]
+    k = hashlib.sha256(f"arms:{case['id']}".encode()).digest()[0] % len(arms)
+    return arms[k:] + arms[:k]
 
 
 def drive(post, first, limit=12):
@@ -157,18 +178,47 @@ def verdict(text, order):
             "scores": {order[0]: a, order[1]: b}, "why": str(data.get("why") or "")[:1000]}
 
 
-def judge_case(case, arms, judge):
-    """One case's result. `judge(prompt)` returns (text, cost). An arm with no plan is marked
-    and the case is not judged."""
+def combine(first, second):
+    """Two calls on one pair, the plan order swapped: the arm both picked wins, otherwise a tie;
+    scores are the mean. A call that did not hold up leaves the other one's verdict."""
+    got = [v for v in (first, second) if v["better"] != "none"]
+    if not got:
+        return {"better": "none", "scores": {}, "why": ""}
+    if len(got) == 1:
+        return dict(got[0])
+    better = got[0]["better"] if got[0]["better"] == got[1]["better"] else "tie"
+    scores = {a: (got[0]["scores"][a] + got[1]["scores"][a]) / 2 for a in got[0]["scores"]}
+    return {"better": better, "scores": scores, "why": got[0]["why"]}
+
+
+def judge_pair(case, arms, rival, judge):
+    """The workflow against `rival`, judged twice with the order swapped."""
+    pair = ["workflow", rival]
     order = order_for(case["id"])
-    kept = {arm: dict(row, plan=(row.get("plan") or "")[:live.REPLY_KEEP]) for arm, row in arms.items()}
-    out = {"id": case["id"], "workflow": case["workflow"], "order": order, "arms": kept, "judge_cost": 0.0}
-    empty = [arm for arm in ARMS if not (arms.get(arm) or {}).get("plan", "").strip()]
+    order = pair if order[0] == "workflow" else pair[::-1]
+    empty = [arm for arm in pair if not (arms.get(arm) or {}).get("plan", "").strip()]
     if empty:
-        return {**out, "better": "none", "scores": {},
+        return {"better": "none", "scores": {}, "order": order, "judge_cost": 0.0,
                 "why": "no plan from " + " and ".join(f"the {a} arm" for a in empty)}
-    text, cost = judge(judge_prompt(case, {a: arms[a]["plan"] for a in ARMS}, order))
-    return {**out, **verdict(text, order), "judge_cost": float(cost or 0), "judge_reply": (text or "")[:2000]}
+    plans = {a: arms[a]["plan"] for a in pair}
+    calls, cost, replies = [], 0.0, []
+    for o in (order, order[::-1]):
+        text, c = judge(judge_prompt(case, plans, o))
+        calls.append(verdict(text, o))
+        cost += float(c or 0)
+        replies.append((text or "")[:2000])
+    return {**combine(*calls), "order": order, "judge_cost": round(cost, 6), "judge_replies": replies}
+
+
+def judge_case(case, arms, judge):
+    """One case's result. `judge(prompt)` returns (text, cost). A pair with an arm that has no plan
+    is marked and not judged. The top-level verdict is the workflow against the single bot."""
+    kept = {arm: dict(row, plan=(row.get("plan") or "")[:live.REPLY_KEEP]) for arm, row in arms.items()}
+    pairs = {r: judge_pair(case, arms, r, judge) for r in rivals(case)}
+    head = pairs["single"]
+    return {"id": case["id"], "workflow": case["workflow"], "baseline": case.get("baseline"),
+            "order": head["order"], "arms": kept, "better": head["better"], "scores": head["scores"],
+            "why": head["why"], "pairs": pairs, "judge_cost": round(sum(p["judge_cost"] for p in pairs.values()), 6)}
 
 
 def summary(results):
@@ -189,7 +239,32 @@ def summary(results):
     lines.append(f"Workflow better in {wins}/{len(results)}. Cost: workflow ${cost['workflow']:.4f}, "
                  f"single ${cost['single']:.4f} ({ratio}), judge ${judged:.4f}.")
     lines.append(f"Gain: {'yes' if results and wins * 2 > len(results) else 'no'}")
+    based = [r for r in results if "baseline" in (r.get("pairs") or {})]
+    if based:
+        lines.append(_baseline_lines(based))
     return "\n".join(lines)
+
+
+def _mean(xs):
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def _baseline_lines(results):
+    """The workflow against its baseline workflow: wins, mean score, cost and points per extra dollar."""
+    pairs = [r["pairs"]["baseline"] for r in results]
+    wins = sum(p["better"] == "workflow" for p in pairs)
+    losses = sum(p["better"] == "baseline" for p in pairs)
+    scored = [p["scores"] for p in pairs if p.get("scores")]
+    sw, sb = _mean([s["workflow"] for s in scored]), _mean([s["baseline"] for s in scored])
+    cw = sum(((r.get("arms") or {}).get("workflow") or {}).get("cost") or 0 for r in results)
+    cb = sum(((r.get("arms") or {}).get("baseline") or {}).get("cost") or 0 for r in results)
+    extra = (cw - cb) / len(results)
+    per = f"{(sw - sb) / extra:+.1f} points per extra dollar a case" if extra > 0 else "no extra cost"
+    ratio = f"{cw / cb:.1f}x" if cb else "n/a"
+    return "\n".join((
+        f"Against baseline: workflow better in {wins}/{len(pairs)}, baseline better in {losses}. "
+        f"Mean score {sw:.1f} vs {sb:.1f}/25. Cost: workflow ${cw:.4f}, baseline ${cb:.4f} ({ratio}); {per}.",
+        f"Gain over baseline: {'yes' if wins * 2 > len(pairs) else 'no'}"))
 
 
 def _runs_dir():
@@ -320,14 +395,20 @@ def _child(args):
                 continue
             step = _one_step(case["workflow"]).steps[0]
             _fixture(root, case)
+
+            def flow(name, case=case):
+                maker = _one_step(name).steps[0].bot
+                return lambda: _arm(client.post, {"messages": [{"role": "user", "content": f"/{name} {case['brief']}"}],
+                                                  "room_id": ROOM}, maker, True)
+            runs = {"workflow": flow(case["workflow"]),
+                    "single": lambda case=case, step=step: _arm(
+                        client.post, {"messages": [{"role": "user", "content":
+                                                    f"@{step.bot} /{step.skill} {case['brief']}"}],
+                                      "room_id": ROOM}, step.bot, False)}
+            if case.get("baseline"):
+                runs["baseline"] = flow(case["baseline"])
             try:
-                arms = run_arms(order_for(case["id"]), {
-                    "workflow": lambda: _arm(client.post, {"messages": [{"role": "user", "content":
-                                                                         f"/{case['workflow']} {case['brief']}"}],
-                                                           "room_id": ROOM}, step.bot, True),
-                    "single": lambda: _arm(client.post, {"messages": [{"role": "user", "content":
-                                                                       f"@{step.bot} /{step.skill} {case['brief']}"}],
-                                                         "room_id": ROOM}, step.bot, False)})
+                arms = run_arms(arm_order(case), runs)
                 result = judge_case(case, arms, _judge(root, step.bot))
             except Exception as e:  # noqa: BLE001 - one broken case must not lose the others
                 result = {"id": case["id"], "workflow": case["workflow"], "better": "none", "scores": {},
@@ -368,8 +449,8 @@ def main(argv=None):
         return 2
     engine = args.engine or registry.default_id(config.load(paths.DATA))
     if not args.yes:
-        answer = input(f"Compare runs {len(cases)} cases on {engine}: about 6 bot turns and one strong-model "
-                       "judge call each, billed to your account. Continue? [y/N] ")
+        answer = input(f"Compare runs {len(cases)} cases on {engine}: about 6 to 15 bot turns and 2 to 4 "
+                       "strong-model judge calls each, billed to your account. Continue? [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             print("Nothing was sent.")
             return 1

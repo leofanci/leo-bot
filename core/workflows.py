@@ -6,6 +6,10 @@ the per-thread run record and the pure state machine that decides what comes aft
 Step line (one numbered line per step, fields split by `|`, keys case-insensitive):
     1. skill: problem-validation | bot: product | output: problem verdict | gate: no | checker: research
     2. skill: launch-plan | bot: gtm | output: the plan | gate: approval | checker: product | consult: research, cmo
+    3. skill: launch-plan | bot: gtm | output: the plan | gate: approval | checker: product | team: yes | debate: 2
+
+`team: yes`: the step's bot picks its own consultants (a `consult:` list is then only a hint).
+`debate: N` (0 to 2): rounds in which the consultants agree with the revised output or object.
 """
 import json
 import os
@@ -18,6 +22,8 @@ from core import bots, general, skill_loads
 
 MAX_STEPS = 12
 MAX_CONSULTS = 3
+MAX_DEBATE = 2
+IDLE_SECONDS = 1800  # a running run with no step for this long reads as paused
 _STEPS_RE = re.compile(r"^##\s+Steps\s*$", re.M)
 _STEP_LINE_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -31,6 +37,8 @@ class Step:
     gate: bool          # True: the step ends in one APPROVAL: line (a card)
     checker: str | None
     consult: tuple = ()  # bots that advise on the draft, in order, before the maker revises
+    team: bool = False   # the step's bot picks its consultants itself; `consult` is then a hint
+    debate: int = 0      # rounds in which consultants AGREE or OBJECT to the revised output
 
 
 @dataclass(frozen=True)
@@ -93,7 +101,15 @@ def _parse_step(n, line):
         raise ValueError(f"step {n}: consult names a bot twice")
     if bot in consult or (checker and checker in consult):
         raise ValueError(f"step {n}: consult must name bots other than the maker and the checker")
-    return Step(skill, bot, fields["output"], gate == "approval", checker, consult)
+    team = fields.get("team", "no").lower()
+    if team not in ("yes", "no"):
+        raise ValueError(f"step {n}: team must be yes or no")
+    debate = fields.get("debate", "0")
+    if debate not in tuple(str(i) for i in range(MAX_DEBATE + 1)):
+        raise ValueError(f"step {n}: debate must be 0 to {MAX_DEBATE}")
+    if int(debate) and team == "no" and not consult:
+        raise ValueError(f"step {n}: debate needs team: yes or a consult list")
+    return Step(skill, bot, fields["output"], gate == "approval", checker, consult, team == "yes", int(debate))
 
 
 def parse(text, name):
@@ -157,11 +173,21 @@ def problems(wf, team):
             why = _bot_problem(team, s.checker)
             if why:
                 out.append(f"Step {n} checker: {why}.")
-        for c in s.consult:
+        for c in () if s.team else s.consult:  # a team step's list is only a hint
             why = _bot_problem(team, c)
             if why:
                 out.append(f"Step {n} consult: {why}.")
     return out
+
+
+def run_problem(run, team):
+    """Why the run's next turn cannot go now, or None: a debate turn whose bot left or was switched off
+    (a team step's consultants are picked during the run, so `problems` cannot see them)."""
+    if run.get("phase") != "debate":
+        return None
+    panel = run.get("panel") or []
+    i = int(run.get("debated") or 0)
+    return _bot_problem(team, panel[i]) if i < len(panel) else None
 
 
 # --- run record ---------------------------------------------------------------------------
@@ -169,6 +195,8 @@ def problems(wf, team):
 #   stage   the step's bot does the work (a draft when the step has consults)
 #   consult one turn per consultant, in order (`consulted` counts them): advice, read-only
 #   revise  the step's bot rewrites its draft with the advice
+#   debate  one turn per bot in `panel`: AGREE or OBJECT: <problem> on the revised output
+#   answer  the step's bot rewrites the output answering the objections (and a weak check's notes)
 #   check   the checker bot answers PASS or WEAK: <notes>
 #   save    approval gate with a checker: the step's bot proposes the save once the check passed
 #   approve waiting on a card raised in `card_phase`
@@ -184,7 +212,8 @@ def new_run(wf, brief, ws, room):
     now = time.time()
     return {"name": wf.name, "chat": None, "ws": ws, "room": room, "brief": brief, "step": 0,
             "phase": "stage", "card_phase": "", "consulted": 0, "retried": False, "notes": "", "status": "running",
-            "why": "", "cost": 0.0, "started": now, "updated": now}
+            "why": "", "cost": 0.0, "started": now, "updated": now,
+            "team": [], "round": 0, "panel": [], "debated": 0, "objections": [], "open": ""}
 
 
 def get(root, chat):
@@ -221,6 +250,14 @@ def drop_ws(root, ws):
             f.unlink(missing_ok=True)
 
 
+def idle(run, now=None):
+    """A running run untouched for IDLE_SECONDS, as a paused copy; any other run unchanged."""
+    now = time.time() if now is None else now
+    if run.get("status") == "running" and now - float(run.get("updated") or now) > IDLE_SECONDS:
+        return dict(run, status="paused", why=f"No step ran for {IDLE_SECONDS // 60} minutes.")
+    return run
+
+
 def cost_cap():
     """Settings, General, workflow_cost: dollars per run, 0.0 for no cap. Never raises."""
     try:
@@ -234,6 +271,21 @@ def cost_cap():
 _PASS_RE = re.compile(r"^PASS\b")
 _WEAK_RE = re.compile(r"^WEAK:\s*(.+)")
 _BLOCKED_RE = re.compile(r"^BLOCKED:\s*(.+)", re.M)
+_AGREE_RE = re.compile(r"^AGREE\b")
+_OBJECT_RE = re.compile(r"^OBJECT\b[*_ ]*:[*_ ]*(.+)")
+
+
+def objection(text):
+    """The problem in a debate reply's first verdict line, or None: AGREE, or no verdict at all,
+    counts as agreement (advice never blocks a step)."""
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("-> ").strip("*`_ ").strip()
+        if _AGREE_RE.match(line):
+            return None
+        m = _OBJECT_RE.match(line)
+        if m:
+            return m.group(1).strip().strip("*`_ ").strip() or None
+    return None
 
 
 def verdict(text):
@@ -256,7 +308,7 @@ def _last_reply(out, bot_id):
 
 def _step_done(wf, run):
     run.update(step=run["step"] + 1, phase="stage", card_phase="", consulted=0, retried=False, notes="",
-               status="running", why="")
+               status="running", why="", team=[], round=0, panel=[], debated=0, objections=[], open="")
     if run["step"] >= len(wf.steps):
         run["status"] = "done"
 
@@ -269,22 +321,64 @@ def _weak(run, n, notes, phase="stage"):
         run.update(phase=phase, notes=notes, status="paused", why=f"Step {n} is still weak: {notes}")
 
 
+def drafts_only(step):
+    """True when the step's work turns never save: the save comes in its own phase."""
+    return step.team or bool(step.debate)
+
+
+def weak_phase(step):
+    """The turn a WEAK check (or a BLOCKED rewrite) retries."""
+    if drafts_only(step):
+        return "answer"
+    return "revise" if step.consult else "stage"
+
+
+def _reviewed(step):
+    """The phase after the work is final, or None: the step is done."""
+    if step.checker:
+        return "check"
+    return "save" if step.gate and drafts_only(step) else None
+
+
 def _next_phase(step, phase, run):
     """The phase after `phase` went through (consults already counted), or None: the step is done."""
-    if phase == "stage" and step.consult:
+    if phase == "stage" and step.consult and not step.team:
         return "consult"
     if phase == "consult":
         return "consult" if int(run.get("consulted") or 0) < len(step.consult) else "revise"
-    if phase in ("stage", "revise"):
-        return "check" if step.checker else None
+    if phase in ("stage", "revise") and step.debate and run.get("team") and not run.get("round"):
+        run.update(round=1, panel=list(run["team"]), debated=0, objections=[], open="")
+        return "debate"
+    if phase == "debate":
+        if int(run.get("debated") or 0) < len(run.get("panel") or ()):
+            return "debate"
+        return "answer" if run.get("objections") else _reviewed(step)
+    if phase == "answer" and run.get("objections"):
+        if int(run.get("round") or 0) < step.debate:
+            run.update(round=int(run["round"]) + 1, panel=[b for b, _ in run["objections"]], debated=0,
+                       objections=[])
+            return "debate"
+        run.update(open="\n".join(f"@{b}: {t}" for b, t in run["objections"]), objections=[])
+        return _reviewed(step)
+    if phase in ("stage", "revise", "answer"):
+        return _reviewed(step)
     if phase == "check":
         return "save" if step.gate else None
     return None
 
 
+def _team_of(step, asked):
+    """The bots a team stage consulted, once each and at most MAX_CONSULTS."""
+    out = []
+    for b in asked or ():
+        if isinstance(b, str) and b and b not in out and b not in (step.bot, step.checker):
+            out.append(b)
+    return out[:MAX_CONSULTS]
+
+
 def _go(wf, run, step, phase):
     nxt = _next_phase(step, phase, run)
-    if nxt == "consult" and phase == "stage":  # the draft is in: the revise phase gets its own retry
+    if phase == "stage" and (nxt == "consult" or step.team):  # the draft is in: the rewrite gets its own retry
         run.update(retried=False, notes="")
     if nxt:
         run.update(phase=nxt, card_phase="", status="running", why="")
@@ -309,19 +403,34 @@ def advance(wf, run, out, cap):
             _go(wf, run, step, done)
     elif out.get("card"):
         run.update(phase="approve", card_phase=phase, status="paused", why="Waiting for your approval.")
-    elif phase in ("stage", "revise"):
+    elif phase in ("stage", "revise", "answer"):
         m = _BLOCKED_RE.search(_last_reply(out, step.bot))
         if m:
             _weak(run, n, m.group(1).strip(), phase)
         else:
+            if phase == "stage" and step.team:
+                run["team"] = _team_of(step, out.get("asked"))
+            elif phase == "revise" and step.debate:
+                run["team"] = list(step.consult)
+            if phase == "answer":
+                run["notes"] = ""  # handled: a later debate round's answer is not a second try
             _go(wf, run, step, phase)
+    elif phase == "debate":  # advice only: a missing verdict counts as agreement
+        panel = run.get("panel") or []
+        i = int(run.get("debated") or 0)
+        who = panel[min(i, len(panel) - 1)] if panel else None
+        problem = objection(_last_reply(out, who)) if who else None
+        if problem:
+            run["objections"] = [*(run.get("objections") or []), [who, problem[:600]]]
+        run["debated"] = i + 1
+        _go(wf, run, step, phase)
     elif phase == "consult":  # advice only: a consultant's BLOCKED line never stops the step
         run["consulted"] = int(run.get("consulted") or 0) + 1
         _go(wf, run, step, phase)
     elif phase == "check":
         ok, notes = verdict(_last_reply(out, step.checker))
         if not ok:
-            _weak(run, n, notes, "revise" if step.consult else "stage")
+            _weak(run, n, notes, weak_phase(step))
         else:
             _go(wf, run, step, phase)
     else:  # save
@@ -338,6 +447,6 @@ def resume(run):
     run = dict(run, status="running", why="")
     if run["phase"] == "approve":  # its card was answered no: Continue redoes that turn
         run.update(phase=run.get("card_phase") or "stage", card_phase="")
-    elif run["phase"] in ("stage", "revise") and run.get("retried") and run.get("notes"):
+    elif run["phase"] in ("stage", "revise", "answer") and run.get("retried") and run.get("notes"):
         run["retried"] = False  # paused still weak: Continue gives the step a fresh retry
     return run
