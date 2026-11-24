@@ -441,6 +441,142 @@ class WorkflowTurns(unittest.TestCase):
         self.assertNotIn("/positioning", text)
         self.assertTrue(text.endswith("..."))
 
+    def team_flow(self, debate=2):
+        """A one-step team workflow: @product leads and picks its consultants, @gtm checks."""
+        text = ("---\nname: team-flow\nkind: workflow\ndescription: Workflow. Demo.\n---\n\nIntro.\n\n"
+                "## Steps\n1. skill: experiment-design | bot: product | output: a test | gate: approval"
+                f" | checker: gtm | team: yes | debate: {debate} | consult: research\n\n## Stop when\nDone.\n")
+        wf = workflows.parse(text, "team-flow")
+        real = workflows.load
+        p = mock.patch.object(workflows, "load", side_effect=lambda n: wf if n == "team-flow" else real(n))
+        p.start()
+        self.addCleanup(p.stop)
+        return wf
+
+    def test_team_stage_instructions_offer_alone_or_consult(self):
+        wf = self.team_flow()
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        text = workflow_turns._instructions(run, wf)
+        self.assertIn("If you can do it well alone, write the full output and consult nobody", text)
+        self.assertIn("`CONSULT @handle:", text)
+        self.assertIn("Teammates who often help here: @research.", text)
+        self.assertIn("Do not save anything", text)
+        _, ctx = workflow_turns._turn({}, run, wf)
+        self.assertTrue(workflow_turns.team(ctx) and workflow_turns.advisory(ctx))
+        self.assertFalse(workflow_turns.solo(ctx))
+
+    def test_debate_and_answer_labels_and_instructions(self):
+        wf = self.team_flow()
+        run = dict(workflows.new_run(wf, "an idea", "acme", "acme/general"), phase="debate",
+                   team=["research", "cmo"], panel=["research", "cmo"], round=1, debated=1)
+        self.assertEqual(workflow_turns.label(run, wf), "@cmo Review step 1 of /team-flow")
+        text = workflow_turns._instructions(run, wf)
+        self.assertIn("AGREE, or OBJECT:", text)
+        _, ctx = workflow_turns._turn({}, run, wf)
+        self.assertEqual(ctx["route"][0], "cmo")
+        self.assertTrue(workflow_turns.advisory(ctx))
+        run = dict(run, phase="answer", objections=[["cmo", "the date is @research's call"]])
+        self.assertEqual(workflow_turns.label(run, wf), "@product Answer objections on step 1 of /team-flow")
+        text = workflow_turns._instructions(run, wf)
+        self.assertIn("- @cmo: the date is research's call", text)
+        self.assertIn("`Kept:`", text)
+        self.assertIn("Write the whole revised output in full", text)
+        _, ctx = workflow_turns._turn({}, run, wf)
+        self.assertTrue(workflow_turns.advisory(ctx) and workflow_turns.solo(ctx))
+        run = dict(run, objections=[], notes="no dates")
+        self.assertEqual(workflow_turns.label(run, wf), "@product Rewrite step 1 of /team-flow")
+        self.assertIn("The checker found this missing: no dates", workflow_turns._instructions(run, wf))
+
+    def test_open_objections_shown_to_checker(self):
+        wf = self.team_flow()
+        run = dict(workflows.new_run(wf, "an idea", "acme", "acme/general"), phase="check", open="@cmo: no budget")
+        self.assertIn("Objections still open after the team's debate", workflow_turns._instructions(run, wf))
+        self.assertIn("cmo: no budget", workflow_turns._instructions(run, wf))
+
+    def test_team_turns_save_only_in_save_phase(self):
+        wf = self.team_flow()
+        run = workflows.new_run(wf, "an idea", "acme", "acme/general")
+        for phase in ("stage", "debate", "answer", "check"):
+            _, ctx = workflow_turns._turn({}, dict(run, phase=phase, panel=["cmo"]), wf)
+            self.assertTrue(workflow_turns.advisory(ctx), phase)
+        _, ctx = workflow_turns._turn({}, dict(run, phase="save"), wf)
+        self.assertFalse(workflow_turns.advisory(ctx))
+
+    def test_current_pauses_an_idle_run(self):
+        self.ask("/idea-to-experiment acme sells widgets", ["The problem is real."])
+        workflows.save(self.root, self.run_rec())
+        f = self.root / "team" / "workflow_runs" / f"{CHAT}.json"
+        rec = json.loads(f.read_text())
+        f.write_text(json.dumps(dict(rec, updated=rec["updated"] - workflows.IDLE_SECONDS - 5)))
+        view = workflow_turns.current(self.root, CHAT)
+        self.assertEqual((view["status"], view["why"]), ("paused", "No step ran for 30 minutes."))
+        self.assertEqual(self.run_rec()["status"], "paused")
+        out, _ = self.tick(["Segments."])  # Continue picks it up
+        self.assertEqual(self.lead(out), "research")
+
+    def test_team_stage_runs_blind_consults_and_revises(self):
+        self.team_flow()
+        out, rec = self.ask("/team-flow an idea", [
+            "Draft plan.\nCONSULT @research: is the market big?\nCONSULT @cmo: what copy?",
+            "Research advice.", "Cmo advice.", "Full plan."])
+        texts = [r["text"] for r in self.runs]
+        self.assertEqual(len(texts), 4)
+        self.assertIn("Draft plan.", texts[1])
+        self.assertIn("is the market big?", texts[1])
+        self.assertIn("Draft plan.", texts[2])
+        self.assertNotIn("Research advice.", texts[2])  # blind: never another consultant's advice
+        self.assertIn("Your teammates answered your step 1 draft", texts[3])
+        self.assertIn("Research advice.", texts[3])
+        self.assertTrue(all(r["readonly"] for r in self.runs))
+        self.assertFalse([e for e in events(out) if "approval" in e])
+        run = self.run_rec()
+        self.assertEqual((run["phase"], run["team"], run["panel"]), ("debate", ["research", "cmo"], ["research", "cmo"]))
+        self.assertEqual(wf_event(out)["label"], "@research Review step 1 of /team-flow")
+
+    def test_team_stage_pool_drops_lead_checker_and_outsiders(self):
+        self.team_flow()
+        self.ask("/team-flow an idea", [
+            "Full plan.\nCONSULT @product: me?\nCONSULT @gtm: check early?\nCONSULT @nobody: hi"])
+        self.assertEqual(len(self.runs), 1)
+        self.assertEqual((self.run_rec()["phase"], self.run_rec()["team"]), ("check", []))
+        wf = workflows.load("team-flow")
+        ctx = {"wf": wf, "run": workflows.new_run(wf, "x", "acme", "acme/general")}
+        asks = [("research", "a"), ("cmo", "b"), ("cmo", "c"), ("cos", "d"), ("social", "e")]
+        self.assertEqual(workflow_turns.team_asks(ctx, asks, members=["product", "cmo", "cos"]),
+                         [("cmo", "b"), ("cos", "d")])
+        self.assertEqual([b for b, _ in workflow_turns.team_asks(ctx, asks)], ["research", "cmo", "cos"])
+
+    def test_also_adds_one_bot_and_stops_at_three(self):
+        self.team_flow()
+        out, rec = self.ask("/team-flow an idea", [
+            "Draft.\nCONSULT @research: big?\nCONSULT @cmo: copy?",
+            "Research advice.\nALSO @cos: who owns the budget\nALSO @cmo: again",
+            "Cmo advice.\nALSO @gtm: checker",
+            "Cos advice.\nALSO @social: more",
+            "Full plan."])
+        self.assertEqual(len(self.runs), 5)
+        self.assertIn("who owns the budget", self.runs[3]["text"])
+        self.assertEqual(self.run_rec()["team"], ["research", "cmo", "cos"])
+        shown = [m["content"] for m in rec["messages"] if m.get("bot") == "research"]
+        self.assertTrue(shown and "ALSO" not in shown[-1])
+
+    def test_team_step_full_run_through_debate(self):
+        self.team_flow(debate=2)
+        self.ask("/team-flow an idea", ["Draft.\nCONSULT @research: big?", "Research advice.", "Full plan."])
+        out, _ = self.tick(["OBJECT: the date is too early"])
+        self.assertEqual(self.lead(out), "research")
+        self.assertEqual(wf_event(out)["phase"], "answer")
+        out, _ = self.tick(["Plan with a later date."])
+        self.assertEqual(self.lead(out), "product")
+        self.assertIn("the date is too early", self.runs[-1]["text"])
+        out, _ = self.tick(["AGREE"])
+        self.assertEqual(wf_event(out)["phase"], "check")
+        out, _ = self.tick(["PASS"])
+        self.assertEqual(wf_event(out)["phase"], "save")
+        out, _ = self.tick(["Saving.\nAPPROVAL: create-memo the plan"])
+        self.assertTrue([e for e in events(out) if "approval" in e])
+        self.assertFalse(self.runs[-1]["readonly"])
+
 
 if __name__ == "__main__":
     unittest.main()

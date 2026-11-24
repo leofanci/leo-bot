@@ -193,7 +193,7 @@ class BotTurn(unittest.TestCase):
     def test_follow_up_never_reads_a_teammate_marker(self):
         real = server._followup_prompt
         seen = []
-        with mock.patch.object(server, "_followup_prompt", side_effect=lambda t, a: seen.append(a) or real(t, a)), \
+        with mock.patch.object(server, "_followup_prompt", side_effect=lambda t, a, **k: seen.append(a) or real(t, a, **k)), \
                 mock.patch.object(server, "_extract_reacts", wraps=server._extract_reacts) as spy:
             self.turn([[("delta", "CONSULT @research: rivals?"), ("done", {})],
                        [("delta", "Done."), ("done", {})]])
