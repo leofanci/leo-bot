@@ -151,6 +151,18 @@ class ClaudeDriver(unittest.TestCase):
     def test_claude_code_fresh_turn_keeps_the_cli_total(self):
         self.assertEqual(self._turn_done(started=False)["cost"], 0.5)
 
+    def test_claude_code_resumed_turn_on_unpriced_model_leaves_cost_to_usage(self):
+        start = json.dumps({"type": "stream_event", "event": {"type": "message_start", "message": {
+            "model": "claude-unknown-9", "usage": {"input_tokens": 1000}}}})
+        delta = json.dumps({"type": "stream_event", "event": {"type": "message_delta", "usage": {"output_tokens": 20}}})
+        result = json.dumps({"type": "result", "subtype": "success", "result": "ok", "total_cost_usd": 0.5,
+                             "usage": {"input_tokens": 1000, "output_tokens": 20}})
+        bin_ = self.stub(f"cat <<'X'\n{start}\n{delta}\n{result}\nX\n")
+        sess = cs.ChatSession(repo_dir=self.tmp.name, rail="R", claude_bin=bin_)
+        sess._started = True
+        done = [p for k, p in sess.engine.turn(sess, "hi", sess._policy(), "sonnet", cs.TurnTokens()) if k == "done"][-1]
+        self.assertIsNone(done["cost"])  # never 0.0: that would read as a free, metered reply
+
     def test_claude_code_resumed_turn_without_calls_leaves_cost_to_usage(self):
         self.assertIsNone(self._turn_done(started=True, calls=False)["cost"])
 
