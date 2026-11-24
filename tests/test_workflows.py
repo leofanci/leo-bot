@@ -128,9 +128,9 @@ class Templates(unittest.TestCase):
 
 
 
-def out(cost=0.0, card=False, answer=None, stopped=False, failed=False, replies=(), chat="c1"):
+def out(cost=0.0, card=False, answer=None, stopped=False, failed=False, replies=(), chat="c1", asked=()):
     return {"chat": chat, "cost": cost, "card": card, "answer": answer, "stopped": stopped,
-            "failed": failed, "replies": list(replies)}
+            "failed": failed, "replies": list(replies), "asked": list(asked)}
 
 
 PLAIN = workflows.parse(wf_text([
@@ -145,6 +145,15 @@ GATED_SOLO = workflows.parse(wf_text([
 CONSULTED = workflows.parse(wf_text([
     "1. skill: experiment-design | bot: product | output: test | gate: approval | checker: gtm"
     " | consult: research, cmo"]), "demo-flow")
+TEAM = workflows.parse(wf_text([
+    "1. skill: experiment-design | bot: product | output: test | gate: approval | checker: gtm"
+    " | team: yes | debate: 2 | consult: research"]), "demo-flow")
+TEAM_SOLO = workflows.parse(wf_text([
+    "1. skill: experiment-design | bot: product | output: test | gate: approval | team: yes | debate: 1"]),
+    "demo-flow")
+DEBATED = workflows.parse(wf_text([
+    "1. skill: experiment-design | bot: product | output: test | gate: approval"
+    " | consult: research, cmo | debate: 1"]), "demo-flow")
 CONSULTED_SOLO = workflows.parse(wf_text([
     "1. skill: experiment-design | bot: product | output: test | gate: approval | consult: research, cmo"]),
     "demo-flow")
@@ -357,6 +366,101 @@ class Runs(unittest.TestCase):
         before = dict(run)
         workflows.advance(PLAIN, run, out(cost=1), 0)
         self.assertEqual(run, before)
+
+
+class TeamSteps(unittest.TestCase):
+    def run_of(self, wf):
+        return workflows.new_run(wf, "an idea", "acme", "acme/general")
+
+    def test_parse_team_and_debate_fields(self):
+        step = TEAM.steps[0]
+        self.assertEqual((step.team, step.debate, step.consult), (True, 2, ("research",)))
+        plain = PLAIN.steps[0]
+        self.assertEqual((plain.team, plain.debate), (False, 0))
+        base = "1. skill: experiment-design | bot: product | output: test | gate: no"
+        for extra in (" | team: yes | debate: 3", " | debate: 1", " | team: maybe", " | team: yes | debate: x"):
+            with self.assertRaises(ValueError, msg=extra):
+                workflows.parse(wf_text([base + extra]), "x")
+
+    def test_team_hints_are_not_problems(self):
+        class Off:
+            def __init__(self, active):
+                self.active = active
+        team = type("T", (), {"get": lambda s, b: Off(b != "research"),
+                              "skills_of": lambda s, b: ["experiment-design"]})()
+        self.assertEqual(workflows.problems(TEAM, team), [])
+
+    def test_team_stage_records_asked_and_goes_to_debate(self):
+        run = workflows.advance(TEAM, self.run_of(TEAM), out(replies=[("product", "plan")],
+                                                             asked=["research", "cmo", "research"]), 0)
+        self.assertEqual((run["phase"], run["team"], run["panel"], run["round"], run["debated"]),
+                         ("debate", ["research", "cmo"], ["research", "cmo"], 1, 0))
+
+    def test_team_stage_alone_skips_debate(self):
+        run = workflows.advance(TEAM, self.run_of(TEAM), out(replies=[("product", "plan")]), 0)
+        self.assertEqual((run["phase"], run["team"]), ("check", []))
+        run = workflows.advance(TEAM_SOLO, self.run_of(TEAM_SOLO), out(replies=[("product", "plan")]), 0)
+        self.assertEqual(run["phase"], "save")
+
+    def test_team_stage_blocked_retries_stage(self):
+        run = workflows.advance(TEAM, self.run_of(TEAM), out(replies=[("product", "BLOCKED: no intake")],
+                                                             asked=["cmo"]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"]), ("stage", True, "no intake"))
+
+    def test_debate_objection_then_answer_then_objectors_only(self):
+        run = workflows.advance(TEAM, self.run_of(TEAM), out(replies=[("product", "plan")],
+                                                             asked=["research", "cmo"]), 0)
+        run = workflows.advance(TEAM, run, out(replies=[("research", "OBJECT: the date is too early")]), 0)
+        self.assertEqual((run["phase"], run["debated"]), ("debate", 1))
+        run = workflows.advance(TEAM, run, out(replies=[("cmo", "**AGREE**")]), 0)
+        self.assertEqual((run["phase"], run["objections"]), ("answer", [["research", "the date is too early"]]))
+        run = workflows.advance(TEAM, run, out(replies=[("product", "answered")]), 0)
+        self.assertEqual((run["phase"], run["round"], run["panel"], run["debated"], run["objections"]),
+                         ("debate", 2, ["research"], 0, []))
+        run = workflows.advance(TEAM, run, out(replies=[("research", "AGREE")]), 0)
+        self.assertEqual((run["phase"], run["open"]), ("check", ""))
+
+    def test_debate_reply_without_verdict_counts_as_agree(self):
+        run = dict(self.run_of(TEAM), phase="debate", team=["cmo"], panel=["cmo"], round=1)
+        run = workflows.advance(TEAM, run, out(replies=[("cmo", "Looks fine to me.")]), 0)
+        self.assertEqual((run["phase"], run["objections"]), ("check", []))
+
+    def test_last_round_open_objections_reach_check(self):
+        run = dict(self.run_of(TEAM), phase="debate", team=["cmo"], panel=["cmo"], round=2)
+        run = workflows.advance(TEAM, run, out(replies=[("cmo", "OBJECT: no budget line")]), 0)
+        self.assertEqual(run["phase"], "answer")
+        run = workflows.advance(TEAM, run, out(replies=[("product", "kept as is")]), 0)
+        self.assertEqual((run["phase"], run["open"]), ("check", "@cmo: no budget line"))
+
+    def test_weak_check_on_team_step_retries_answer(self):
+        run = dict(self.run_of(TEAM), phase="check", team=["cmo"], round=1)
+        run = workflows.advance(TEAM, run, out(replies=[("gtm", "WEAK: no dates")]), 0)
+        self.assertEqual((run["phase"], run["retried"], run["notes"]), ("answer", True, "no dates"))
+        run = workflows.advance(TEAM, run, out(replies=[("product", "fixed")]), 0)
+        self.assertEqual(run["phase"], "check")
+        run = workflows.advance(TEAM, run, out(replies=[("gtm", "WEAK: still no dates")]), 0)
+        self.assertEqual((run["phase"], run["status"]), ("answer", "paused"))
+
+    def test_fixed_consult_step_with_debate_saves_in_save_phase(self):
+        run = dict(self.run_of(DEBATED), phase="revise", consulted=2)
+        run = workflows.advance(DEBATED, run, out(replies=[("product", "revised")]), 0)
+        self.assertEqual((run["phase"], run["panel"]), ("debate", ["research", "cmo"]))
+        run = workflows.advance(DEBATED, run, out(replies=[("research", "AGREE")]), 0)
+        run = workflows.advance(DEBATED, run, out(replies=[("cmo", "AGREE")]), 0)
+        self.assertEqual(run["phase"], "save")
+
+    def test_objection_parser(self):
+        self.assertEqual(workflows.objection("Fine.\n- **OBJECT:** the price is wrong"), "the price is wrong")
+        self.assertIsNone(workflows.objection("AGREE"))
+        self.assertIsNone(workflows.objection("AGREE\nOBJECT: but also this"))  # AGREE first wins
+
+    def test_idle_run_reads_paused(self):
+        run = dict(self.run_of(TEAM), updated=1000.0)
+        self.assertEqual(workflows.idle(run, 1000.0 + workflows.IDLE_SECONDS - 1)["status"], "running")
+        got = workflows.idle(run, 1000.0 + workflows.IDLE_SECONDS + 1)
+        self.assertEqual((got["status"], got["why"]), ("paused", "No step ran for 30 minutes."))
+        self.assertEqual(run["status"], "running")
+        self.assertEqual(workflows.idle(dict(run, status="paused", why="x"), 10 ** 10)["why"], "x")
 
 
 if __name__ == "__main__":
