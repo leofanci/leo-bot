@@ -2,7 +2,8 @@
 
 Each case runs twice in a throwaway home, through the real server on a free local port: once as
 the workflow (`/<workflow> <brief>`, then the browser's next ticks until the run stops), once as
-the workflow's maker alone (`@<maker> /<skill> <brief>` in a fresh thread). A strong model then
+the workflow's maker alone (`@<maker> /<skill> <brief>` in a fresh thread). The two arms run in
+the case's A/B order, so the arm that pays the cold prompt cache alternates. A strong model then
 scores the two plans blind, shown as Plan A and Plan B in an order seeded per case. Results go to
 <home>/evals/compare-*.json, never into the repo.
 
@@ -107,6 +108,12 @@ def order_for(case_id):
     """The A/B order of a case: random, but the same every run of that case."""
     flip = hashlib.sha256(f"compare:{case_id}".encode()).digest()[0] & 1
     return list(reversed(ARMS)) if flip else list(ARMS)
+
+
+def run_arms(order, runs):
+    """Each arm's result, run in `order`: the first arm writes the shared prompt cache cold and
+    the second reads it, so the case order also decides which arm pays for that."""
+    return {arm: runs[arm]() for arm in order}
 
 
 def _blind(text):
@@ -314,13 +321,13 @@ def _child(args):
             step = _one_step(case["workflow"]).steps[0]
             _fixture(root, case)
             try:
-                arms = {
-                    "workflow": _arm(client.post, {"messages": [{"role": "user", "content":
-                                                                 f"/{case['workflow']} {case['brief']}"}],
-                                                   "room_id": ROOM}, step.bot, True),
-                    "single": _arm(client.post, {"messages": [{"role": "user", "content":
-                                                               f"@{step.bot} /{step.skill} {case['brief']}"}],
-                                                 "room_id": ROOM}, step.bot, False)}
+                arms = run_arms(order_for(case["id"]), {
+                    "workflow": lambda: _arm(client.post, {"messages": [{"role": "user", "content":
+                                                                         f"/{case['workflow']} {case['brief']}"}],
+                                                           "room_id": ROOM}, step.bot, True),
+                    "single": lambda: _arm(client.post, {"messages": [{"role": "user", "content":
+                                                                       f"@{step.bot} /{step.skill} {case['brief']}"}],
+                                                         "room_id": ROOM}, step.bot, False)})
                 result = judge_case(case, arms, _judge(root, step.bot))
             except Exception as e:  # noqa: BLE001 - one broken case must not lose the others
                 result = {"id": case["id"], "workflow": case["workflow"], "better": "none", "scores": {},
