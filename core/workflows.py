@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from core import bots, general, skill_loads
+from core import bots, general, paths, skill_loads
 
 MAX_STEPS = 12
 MAX_CONSULTS = 3
@@ -27,6 +27,8 @@ IDLE_SECONDS = 1800  # a running run with no step for this long reads as paused
 _STEPS_RE = re.compile(r"^##\s+Steps\s*$", re.M)
 _STEP_LINE_RE = re.compile(r"^\s*\d+\.\s+(.*)$")
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+SAVED_DIR = paths.DATA / "team" / "workflows"  # templates saved from a plan; never skills/ (updates replace it)
+RESERVED = frozenset({"plan"})  # /plan asks a bot for a plan
 
 
 @dataclass(frozen=True)
@@ -59,15 +61,25 @@ def _inside(base, *parts):
 
 
 def _is_workflow_file(name):
+    """(text, need_skill) of the workflow file called `name`, or None. A shipped skills/ folder of
+    that name always wins (workflow or not); otherwise a template saved in the data folder, whose
+    steps may leave out `skill:`."""
     from dashboard import fileops  # same frontmatter parser as skills
-    if not isinstance(name, str) or not _NAME_RE.match(name):
+    if not isinstance(name, str) or not _NAME_RE.match(name) or name in RESERVED:
         return None
-    f = _inside(skill_loads.SKILLS_DIR, name, "SKILL.md")
+    shipped = _inside(skill_loads.SKILLS_DIR, name, "SKILL.md")
+    if shipped is not None and shipped.exists():
+        f, need_skill = shipped, True
+    else:
+        f, need_skill = _inside(SAVED_DIR, f"{name}.md"), False
     if f is None or not f.is_file():
         return None
-    text = f.read_text(encoding="utf-8")
+    try:
+        text = f.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
     fm, _ = fileops._parse_frontmatter(text)
-    return text if fm.get("kind", "").strip().lower() == "workflow" else None
+    return (text, need_skill) if str(fm.get("kind", "")).strip().lower() == "workflow" else None
 
 
 def _parse_step(n, line, need_skill=True):
@@ -143,21 +155,57 @@ def parse_lines(lines, need_skill=True):
 
 def load(name):
     """The workflow called `name`, or None (missing, not kind: workflow, or broken)."""
-    text = _is_workflow_file(name)
-    if text is None:
+    got = _is_workflow_file(name)
+    if got is None:
         return None
     try:
-        return parse(text, name)
+        return parse(got[0], name, need_skill=got[1])
     except ValueError:
         return None
 
 
 def names():
-    """Every workflow that loads, sorted."""
-    d = skill_loads.SKILLS_DIR
-    if not d.is_dir():
-        return []
-    return sorted(p.name for p in d.iterdir() if load(p.name) is not None)
+    """Every workflow that loads, shipped and saved, sorted."""
+    found = set()
+    if skill_loads.SKILLS_DIR.is_dir():
+        found |= {p.name for p in skill_loads.SKILLS_DIR.iterdir()}
+    if SAVED_DIR.is_dir():
+        found |= {p.stem for p in SAVED_DIR.glob("*.md")}
+    return sorted(n for n in found if load(n) is not None)
+
+
+def of_run(run):
+    """The workflow a run follows: a drafted plan rebuilt from the steps in its record (its title is
+    never looked up as a file), or the file it was started from. None when it no longer holds up."""
+    if run.get("plan"):
+        lines = run.get("steps")
+        if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+            return None
+        try:
+            steps = parse_lines(lines, need_skill=False)
+        except ValueError:
+            return None
+        title = str(run.get("title") or run.get("name") or "")
+        return Workflow(title, str(run.get("brief") or ""), steps, "", plan=True, lines=tuple(lines))
+    return load(run.get("name"))
+
+
+def save_template(wf, name):
+    """Write a plan as a reusable workflow file in the data folder; a refusal line, or None when saved."""
+    if not isinstance(name, str) or not _NAME_RE.match(name):
+        return "Use lowercase letters, digits and dashes."
+    if name in RESERVED:
+        return f"/{name} is reserved."
+    f = _inside(SAVED_DIR, f"{name}.md")
+    if f is None or name in skill_loads.names() or name in names() or f.exists() \
+            or (skill_loads.SKILLS_DIR / name).exists():
+        return f"/{name} already exists."
+    desc = " ".join(str(wf.description or wf.name).split())
+    text = (f"---\nname: {name}\nkind: workflow\ndescription: {desc}\n---\n\n## Steps\n"
+            + "".join(f"{i}. {line}\n" for i, line in enumerate(wf.lines, 1)))
+    f.parent.mkdir(parents=True, exist_ok=True)
+    bots._atomic_write(f, text)
+    return None
 
 
 def _bot_problem(team, bot_id):
@@ -219,7 +267,8 @@ def _path(root, chat):
 
 def new_run(wf, brief, ws, room):
     now = time.time()
-    return {"name": wf.name, "chat": None, "ws": ws, "room": room, "brief": brief, "step": 0,
+    plan = {"plan": True, "title": wf.name, "steps": list(wf.lines)} if wf.plan else {}
+    return {**plan, "name": wf.name, "chat": None, "ws": ws, "room": room, "brief": brief, "step": 0,
             "phase": "stage", "card_phase": "", "consulted": 0, "retried": False, "notes": "", "status": "running",
             "why": "", "cost": 0.0, "started": now, "updated": now,
             "team": [], "round": 0, "panel": [], "debated": 0, "objections": [], "open": ""}

@@ -510,3 +510,88 @@ class TeamSteps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanRunsAndSavedTemplates(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = Path(self.tmp.name) / "team" / "workflows"
+        p = mock.patch.object(workflows, "SAVED_DIR", self.saved)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_plan_run_rebuilds_from_record(self):
+        from core import plans
+        wf = plans.parse("PLAN: Hire a designer\nbrief: b\n1. bot: product | output: role brief")
+        run = workflows.new_run(wf, "b", "acme", "acme/general")
+        self.assertEqual((run["plan"], run["name"], run["title"], run["steps"]),
+                         (True, "Hire a designer", "Hire a designer", list(wf.lines)))
+        again = workflows.of_run(run)
+        self.assertTrue(again.plan)
+        self.assertEqual(again.steps, wf.steps)
+        self.assertEqual(again.name, "Hire a designer")
+
+    def test_file_run_has_no_plan_fields_and_loads_file(self):
+        wf = workflows.load("idea-to-experiment")
+        run = workflows.new_run(wf, "b", "acme", "acme/general")
+        self.assertNotIn("plan", run)
+        self.assertEqual(workflows.of_run(run).steps, wf.steps)
+
+    def test_plan_title_never_loads_a_file(self):
+        from unittest import mock
+        with mock.patch.object(workflows, "load") as load:
+            workflows.of_run({"plan": True, "name": "launch-plan", "steps": ["bot: gtm | output: x"]})
+        load.assert_not_called()
+
+    def test_broken_plan_record_is_none(self):
+        self.assertIsNone(workflows.of_run({"plan": True, "name": "T", "steps": []}))
+        self.assertIsNone(workflows.of_run({"plan": True, "name": "T", "steps": "bot: gtm"}))
+
+    def test_save_and_load_template(self):
+        from core import plans
+        wf = plans.parse("PLAN: T\nbrief: Vendor pick\n1. bot: cto | output: shortlist")
+        self.assertIsNone(workflows.save_template(wf, "vendor-pick"))
+        got = workflows.load("vendor-pick")
+        self.assertEqual((got.description, got.steps[0].skill, got.steps[0].bot), ("Vendor pick", "", "cto"))
+        self.assertFalse(got.plan)
+        self.assertIn("vendor-pick", workflows.names())
+        self.assertIn("idea-to-experiment", workflows.names())
+
+    def test_save_refusals(self):
+        from core import plans
+        wf = plans.parse("PLAN: T\nbrief: b\n1. bot: cto | output: x")
+        self.assertEqual(workflows.save_template(wf, "plan"), "/plan is reserved.")
+        self.assertEqual(workflows.save_template(wf, "launch-plan"), "/launch-plan already exists.")
+        self.assertEqual(workflows.save_template(wf, "idea-to-experiment"), "/idea-to-experiment already exists.")
+        self.assertIn("lowercase", workflows.save_template(wf, "Bad Name"))
+        self.assertIn("lowercase", workflows.save_template(wf, "../x"))
+        self.assertIsNone(workflows.save_template(wf, "vendor-pick"))
+        self.assertEqual(workflows.save_template(wf, "vendor-pick"), "/vendor-pick already exists.")
+
+    def test_shipped_wins_and_broken_saved_skipped(self):
+        self.saved.mkdir(parents=True)
+        for name in ("launch-plan", "team-launch-plan"):  # a shipped skill, a shipped workflow
+            (self.saved / f"{name}.md").write_text("---\nkind: workflow\n---\n## Steps\n1. bot: cto | output: x\n")
+        (self.saved / "broken.md").write_text("---\nkind: workflow\n---\nno steps\n")
+        (self.saved / "notes.md").write_text("---\nname: notes\n---\n## Steps\n1. bot: cto | output: x\n")
+        self.assertIsNone(workflows.load("launch-plan"))  # a shipped name is never shadowed
+        self.assertNotEqual(workflows.load("team-launch-plan").steps[0].bot, "cto")
+        self.assertIsNone(workflows.load("broken"))
+        self.assertIsNone(workflows.load("notes"))  # not kind: workflow
+        names = workflows.names()
+        self.assertNotIn("broken", names)
+        self.assertNotIn("launch-plan", names)
+        self.assertEqual(names.count("team-launch-plan"), 1)
+
+    def test_plan_name_reserved(self):
+        from unittest import mock
+        from core import skill_loads
+        skills = Path(self.tmp.name) / "skills"
+        for n in ("plan", "demo-skill"):
+            (skills / n).mkdir(parents=True)
+            (skills / n / "SKILL.md").write_text("---\nname: x\n---\nbody\n")
+        with mock.patch.object(skill_loads, "SKILLS_DIR", skills):
+            self.assertEqual(skill_loads.names(), ["demo-skill", "workspace"])
+        self.assertIn("plan", workflows.RESERVED)

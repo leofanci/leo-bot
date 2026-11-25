@@ -29,7 +29,7 @@ RAIL_STUBS: dict[str, str] = {
 def names() -> list[str]:
     """Every skill a bot can load: one folder per skill under skills/, plus the rail stubs."""
     found = {d.name for d in SKILLS_DIR.iterdir() if (d / "SKILL.md").is_file()} if SKILLS_DIR.is_dir() else set()
-    return sorted(found | set(RAIL_STUBS))
+    return sorted((found | set(RAIL_STUBS)) - {"plan"})  # /plan asks a bot for a plan
 
 
 def body(name: str) -> str:
