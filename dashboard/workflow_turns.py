@@ -22,6 +22,64 @@ NO_PLAN = "No plan to start here."
 PLAN_STARTED = "This plan already started."
 PLAN_REJECTED = "This plan was rejected."
 _PLAN_LOCK = threading.Lock()  # one Approve at a time: a plan starts once
+PLAN_NOTICE = "The plan did not hold up: {why}"
+PLAN_EMPTY = "Say what the plan is for: /plan <request>."
+_SLASH_PLAN_RE = re.compile(r"^(\s*(?:@[\w-]+\s+)*)/plan(?:\s+(.*))?$", re.S | re.I)
+PLAN_RULE = (
+    "## Plans\n"
+    "When the owner asks for a plan, or the request needs the work of two or more teammates' areas, reply with "
+    "a plan instead of doing the work: one line on why a plan fits, then the block below. A request one bot "
+    "can do well, even one that ends in a save to approve, gets your own answer and no plan. The owner "
+    "approves the plan on a card; each step then runs as its own turn.\n"
+    "PLAN: <short title>\n"
+    "brief: <the request, written to stand alone: goal, audience, dates, constraints>\n"
+    "1. bot: <bot> | output: <what the step hands back> | gate: no\n"
+    "2. skill: <optional> | bot: <bot> | output: <...> | gate: approval | checker: <another bot>\n"
+    "Per step, optional: skill, checker (never the step's own bot), consult: <up to 3 bots>, team: yes, "
+    "debate: 1 or 2 (needs team: yes or consult). gate: approval only for a step that saves. At most "
+    f"{workflows.MAX_STEPS} steps.\n"
+    "Bots you may name: {bots}.")
+PLAN_ASKED = "The owner asked for a plan: answer with one PLAN block. Skills each bot may use in a step:\n{skills}"
+
+
+def plan_problems(wf, team, members=None):
+    """Why a drafted plan cannot run with this team, one line each; in a topic channel (`members`)
+    every bot it names must be in the channel."""
+    bad = workflows.problems(wf, team)
+    if members is None:
+        return bad
+    for n, st in enumerate(wf.steps, 1):
+        for role, who in (("", [st.bot]), (" checker", [st.checker] if st.checker else []),
+                          (" consult", [] if st.team else list(st.consult))):  # a team step's list is a hint
+            bad += [f"Step {n}{role}: @{b} is not in this channel." for b in who if b not in members]
+    return bad
+
+
+def slash_plan(text):
+    """(message without `/plan`, True) when the owner's message asks for a plan with /plan
+    (after any @handles), else (text, False)."""
+    m = _SLASH_PLAN_RE.match(text or "") if isinstance(text, str) else None
+    if not m:
+        return text, False
+    return (m.group(1) + (m.group(2) or "")).strip(), True
+
+
+def plan_rule(team, asked, members=None):
+    """The plan rule for an owner's chat turn (never a workflow step or an invited person's turn).
+    In a topic channel (`members`) it names that channel's bots only."""
+    from core import loop_templates
+    active = [b for b in team.bots.values() if b.active and (members is None or b.id in members)]
+    text = PLAN_RULE.format(bots=", ".join(f"@{b.id}" for b in active))
+    if not asked:
+        return text
+    flows = set(workflows.names())
+    rows = []
+    for b in active:
+        got = [x for x in team.skills_of(b.id) if x not in flows and x not in workflows.RESERVED
+               and x not in skill_loads.RAIL_STUBS and not loop_templates.load(x)]
+        rows.append(f"- @{b.id}: {', '.join(got) if got else '(none: own instructions only)'}")
+    return text + "\n" + PLAN_ASKED.format(skills="\n".join(rows))
+
 BRIEF_MAX = 2000
 ADVISORY = ("consult", "check", "debate", "answer")  # turns that advise, judge or rewrite a draft: read-only
 LABEL_BRIEF_MAX = 300

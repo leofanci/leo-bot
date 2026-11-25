@@ -37,6 +37,8 @@ class WorkflowTurns(unittest.TestCase):
         self.runs = []
         self.replies = []
         self.sess = self.make_session()
+        server.chat_store._DELETED.clear()  # a test that deletes its thread never hides a later one's
+        self.addCleanup(server.chat_store._DELETED.clear)
 
     def make_session(self):
         test = self
@@ -748,6 +750,91 @@ class WorkflowTurns(unittest.TestCase):
 
     def test_message_with_only_a_plan_is_kept(self):
         self.assertTrue(server.chat_store.kept({"plan": {"title": "T"}}))
+
+    GOOD = ("Needs research and gtm.\n\nPLAN: Pricing change\nbrief: New price for acme.\n"
+            "1. bot: research | output: rival prices\n2. bot: gtm | output: rollout | gate: approval | checker: product")
+
+    def last_bot_message(self, rec):
+        return [m for m in rec["messages"] if m.get("bot")][-1]
+
+    def test_lead_plan_becomes_card(self):
+        out, rec = self.ask("@gtm change our price", [self.GOOD])
+        ev = [e for e in events(out) if "plan" in e][-1]
+        self.assertEqual((ev["plan"]["title"], ev["plan"]["status"], ev["plan"]["bot"]),
+                         ("Pricing change", "offered", "gtm"))
+        saved = self.last_bot_message(rec)
+        self.assertNotIn("PLAN:", saved["content"])
+        self.assertEqual(saved["content"], "Needs research and gtm.")
+        self.assertEqual(saved["plan"]["brief"], "New price for acme.")
+        self.assertEqual(saved["plan"]["lines"][1].split("|")[0].strip(), "bot: gtm")
+        self.assertIsNone(saved["plan"]["run_chat"])
+        self.assertEqual(ev["msg"], 0)  # the turn's first reply
+        self.assertEqual(self.run_rec(), None)  # nothing runs before Approve
+
+    def test_bad_plan_shows_notice(self):
+        out, rec = self.ask("@gtm x", ["PLAN: T\nbrief: b\n1. bot: nobody | output: x"])
+        self.assertIn("The plan did not hold up: Step 1: @nobody is not on the team.", out)
+        saved = self.last_bot_message(rec)
+        self.assertNotIn("plan", saved)
+        self.assertIn("The plan did not hold up: Step 1: @nobody is not on the team.", saved["notices"])
+
+    def test_unparseable_plan_shows_notice(self):
+        out, rec = self.ask("@gtm x", ["Why.\nPLAN: T\n1. bot: gtm | output: x"])
+        self.assertIn("The plan did not hold up: no brief", out)
+        self.assertEqual(self.last_bot_message(rec)["content"], "Why.")
+
+    def test_teammate_plan_dropped(self):
+        out, rec = self.ask("@gtm x", ["CONSULT @research: rivals?", self.GOOD, "final"])
+        self.assertFalse([e for e in events(out) if "plan" in e])
+        self.assertFalse([m for m in rec["messages"] if "PLAN:" in (m.get("content") or "")])
+        self.assertFalse([m for m in rec["messages"] if m.get("plan")])
+
+    def test_step_turn_drops_plan(self):
+        self.save_plan_run("PLAN: T\nbrief: b\n1. bot: product | output: x\n2. bot: cmo | output: y")
+        out, rec = self.tick([self.GOOD])
+        self.assertFalse([e for e in events(out) if "plan" in e])
+        self.assertNotIn("PLAN:", self.last_bot_message(rec)["content"])
+        self.assertNotIn("did not hold up", out)
+
+    def test_rule_in_owner_turn_only(self):
+        self.ask("@gtm hello", ["hi"])
+        self.assertIn("PLAN: <short title>", self.runs[-1]["text"])
+        self.assertIn("@research", self.runs[-1]["text"])
+        self.assertNotIn("The owner asked for a plan", self.runs[-1]["text"])
+        self.save_plan_run("PLAN: T\nbrief: b\n1. bot: product | output: x")
+        self.tick(["ok"])
+        self.assertNotIn("PLAN: <short title>", self.runs[-1]["text"])
+
+    def test_slash_plan_asks_and_lists_skills(self):
+        out, rec = self.ask("/plan hire a designer", ["ok"])
+        text = self.runs[-1]["text"]
+        self.assertIn("The owner asked for a plan", text)
+        self.assertIn("hire a designer", text)
+        self.assertNotIn("/plan hire", text)
+        self.assertIn("launch-plan", text)  # a skill of an active bot
+        self.assertNotIn("idea-to-experiment", text.split("## Plans", 1)[1])  # a workflow, never a step
+
+    def test_slash_plan_keeps_the_mention(self):
+        out, _ = self.ask("@product /plan hire a designer", ["ok"])
+        self.assertEqual(self.lead(out), "product")
+        self.assertIn("The owner asked for a plan", self.runs[-1]["text"])
+
+    def test_slash_plan_empty(self):
+        out, _ = self.ask("/plan", ["ok"])
+        self.assertIn("Say what the plan is for: /plan <request>.", out)
+        self.assertEqual(self.runs, [])
+
+    def test_job_offer_mentions_plans(self):
+        self.assertIn("PLAN block", server.JOB_OFFER)
+
+    def test_topic_room_plan_names_members_only(self):
+        from core import rooms
+        rooms.save_topic("acme", "launch", ["gtm", "research"], "gtm", self.root)
+        out, rec = self.ask("@gtm x", [self.GOOD], room="acme/t-launch")
+        rule = self.runs[-1]["text"].split("## Plans", 1)[1]
+        self.assertIn("@research", rule)
+        self.assertNotIn("@cmo", rule)
+        self.assertIn("The plan did not hold up: Step 2 checker: @product is not in this channel.", out)
 
 
 if __name__ == "__main__":

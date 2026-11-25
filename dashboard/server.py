@@ -55,7 +55,7 @@ from core import own_checks  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import chain  # noqa: E402
-from core import workflows  # noqa: E402
+from core import plans, workflows  # noqa: E402
 from core import loop_templates  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
@@ -2041,7 +2041,8 @@ def _job_notepad(job):
 
 
 JOB_OFFER = ("\n\nTo suggest that the owner start a workflow ({names}; nothing else is one), end with one "
-             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself.")
+             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself. "
+             "You may instead end with a PLAN block (see Plans): it shows as a card the owner approves later.")
 JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
             "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
             "and the owner sees why. A quiet run (nothing new, nothing to do) is not the stop condition: "
@@ -4120,6 +4121,14 @@ class Handler(BaseHTTPRequestHandler):
         if not messages or messages[-1].get("role") != "user":
             return self._send(400, {"error": "no user message"})
         user_msg = messages[-1]["content"]
+        # Plans (dashboard/workflow_turns.py): an owner's chat turn, never a workflow step or an
+        # invited person's turn, may answer with a PLAN block; `/plan <request>` asks for one.
+        plan_turn = viewer.get("kind") in ("owner", "job") and not viewer.get("workflow")
+        plan_asked = False
+        if plan_turn and viewer.get("kind") == "owner" and isinstance(user_msg, str):
+            user_msg, plan_asked = workflow_turns.slash_plan(user_msg)
+            if plan_asked and not re.sub(r"@[\w-]+", "", user_msg).strip():
+                return self._sse_message(workflow_turns.PLAN_EMPTY)
 
         # Per-turn routing: explicit @bot or /skill tags; untagged turns load skills themselves.
         context = (body.get("context") or "").strip()
@@ -4424,6 +4433,8 @@ class Handler(BaseHTTPRequestHandler):
                 sess.pending_recap = chat_store.recap(saved_rec) or None
                 self.log_message("chat compact engine=%s context=%d", engine.id,
                                  compaction.last_context(saved_rec, engine.id))
+        if plan_turn:
+            context = "\n\n".join(x for x in (context, workflow_turns.plan_rule(team, plan_asked, members)) if x)
         text = compose_turn_prompt(
             user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
             context=context,
@@ -5024,6 +5035,31 @@ class Handler(BaseHTTPRequestHandler):
                     reacts.extend((m["bot"], e) for e in got)
             if reacts:
                 emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
+            # A PLAN block is cut from every reply; only the turn's own bot's first one, on a turn
+            # that is not a workflow step, becomes a card (or a notice when it does not hold up).
+            planned = False
+            for i, m in enumerate(msgs):
+                clean, block = plans.extract(m["content"])
+                if block is None:
+                    continue
+                m["content"] = clean
+                emit({"clean": clean, "msg": i})
+                if planned or not plan_turn or m["bot"] != bot_id or m.get("asked_by"):
+                    continue
+                planned = True
+                try:
+                    wf = plans.parse(block)
+                    bad = workflow_turns.plan_problems(wf, team, members)
+                except ValueError as e:
+                    bad = [str(e)]
+                if bad:
+                    note = workflow_turns.PLAN_NOTICE.format(why=bad[0])
+                    m.setdefault("notices", []).append(note)
+                    emit({"notice": note, "msg": i})
+                    continue
+                m["plan"] = {"title": wf.name, "brief": wf.description[:plans.BRIEF_MAX], "lines": list(wf.lines),
+                             "bot": bot_id, "status": "offered", "run_chat": None}
+                emit({"plan": m["plan"], "msg": i})
             if job:  # the job's own bot says its stop condition holds; a consulted teammate never ends it
                 for i, m in enumerate(msgs):
                     clean, why = _extract_loop_done(m["content"])
