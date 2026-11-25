@@ -1202,7 +1202,12 @@ def _skills_index():
         out.append({"name": fm.get("name", d.name),
                     "description": fm.get("description", ""),
                     "kind": fm.get("kind", "skill").strip().lower() or "skill"})
-    return out
+    shipped = {s["name"] for s in out}
+    for name in workflows.names():  # templates saved from a plan, in the data folder
+        wf = workflows.load(name)
+        if name not in shipped and wf:
+            out.append({"name": name, "description": wf.description, "kind": "workflow"})
+    return sorted(out, key=lambda s: s["name"])
 
 
 def _someone_elses_notes(rec):
@@ -4105,6 +4110,19 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             _unmark_busy(chat_id)
 
+    def _plan_post(self, path, body):
+        """Reject or Save as template on a plan card: owner only (an invited person never reaches here)."""
+        if not self._authorized(require_origin=True):
+            return self._send(403, {"error": "forbidden"})
+        chat, msg = body.get("chat"), body.get("msg")
+        rec = chat_store.load(chat) if isinstance(chat, str) and skill_loads._CHAT_RE.match(chat) else None
+        ws = _chat_workspace(rec) if rec else None
+        if path.endswith("/reject"):
+            got = workflow_turns.reject_plan(ROOT, ws, chat, msg)
+        else:
+            got = workflow_turns.save_plan(ROOT, ws, chat, msg, body.get("name"))
+        return self._send(200, got) if isinstance(got, dict) else self._send(400, {"error": got})
+
     def _sse_message(self, text):
         """A zero-model reply: one line in the thread, no model turn spent."""
         self.send_response(200)
@@ -6161,6 +6179,8 @@ class Handler(BaseHTTPRequestHandler):
                 with os.fdopen(fd, "wb") as f:
                     f.write(data)
                 return self._send(200, {"path": fpath})
+            if path in ("/api/workflow/plan/reject", "/api/workflow/plan/save"):
+                return self._plan_post(path, body)
             if path == "/api/workflow/stop":  # the run ends where it is; the thread stays
                 got = workflow_turns.stop(ROOT, body.get("chat") if isinstance(body.get("chat"), str) else "")
                 return self._send(200, got) if got else self._send(404, {"error": "no workflow in this thread"})

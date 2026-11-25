@@ -836,6 +836,92 @@ class WorkflowTurns(unittest.TestCase):
         self.assertNotIn("@cmo", rule)
         self.assertIn("The plan did not hold up: Step 2 checker: @product is not in this channel.", out)
 
+    def saved_dir(self):
+        d = self.root / "saved-workflows"
+        p = mock.patch.object(workflows, "SAVED_DIR", d)
+        p.start()
+        self.addCleanup(p.stop)
+        return d
+
+    def test_reject_once(self):
+        src = self.offer_plan()
+        self.assertEqual(workflow_turns.reject_plan(self.root, "acme", src, 1), {"ok": True, "bot": "gtm"})
+        self.assertEqual(self.plan_of(src)["status"], "rejected")
+        self.assertEqual(workflow_turns.reject_plan(self.root, "acme", src, 1), "This plan was rejected.")
+        out, _ = self.approve(src)
+        self.assertIn("This plan was rejected.", out)
+        self.assertEqual(workflow_turns.reject_plan(self.root, "acme", src, 0), "No plan to start here.")
+
+    def test_reject_after_start_refused(self):
+        src = self.offer_plan()
+        self.approve(src)
+        self.assertEqual(workflow_turns.reject_plan(self.root, "acme", src, 1), "This plan already started.")
+
+    def test_save_needs_started_and_writes_data_folder(self):
+        from core import skill_loads
+        saved = self.saved_dir()
+        src = self.offer_plan()
+        self.assertEqual(workflow_turns.save_plan(self.root, "acme", src, 1, "vendor-pick"),
+                         "This plan has not started yet.")
+        self.approve(src)
+        self.assertEqual(workflow_turns.save_plan(self.root, "acme", src, 1, "vendor-pick"),
+                         {"ok": True, "name": "vendor-pick"})
+        self.assertTrue((saved / "vendor-pick.md").is_file())
+        self.assertFalse((skill_loads.SKILLS_DIR / "vendor-pick").exists())
+        self.assertEqual(self.plan_of(src)["saved_as"], "vendor-pick")
+        self.assertEqual(workflow_turns.save_plan(self.root, "acme", src, 1, "vendor-pick"),
+                         "/vendor-pick already exists.")
+        self.assertEqual(workflow_turns.save_plan(self.root, "acme", src, 1, "plan"), "/plan is reserved.")
+
+    def test_saved_template_starts_with_slash(self):
+        self.saved_dir()
+        src = self.offer_plan()
+        self.approve(src)
+        workflow_turns.save_plan(self.root, "acme", src, 1, "vendor-pick")
+        workflows.drop(self.root, CHAT)
+        out, _ = self.ask("/vendor-pick pick a mail vendor", ["done"])
+        self.assertEqual(self.lead(out), "product")
+        self.assertEqual(wf_event(out)["name"], "vendor-pick")
+
+    def handler(self):
+        h = server.Handler.__new__(server.Handler)
+        sent = []
+        h._send = lambda code, obj: sent.append((code, obj))
+        return h, sent
+
+    def test_endpoints_owner_only(self):
+        src = self.offer_plan()
+        for path in ("/api/workflow/plan/reject", "/api/workflow/plan/save"):
+            h, sent = self.handler()
+            h._read_json = lambda: {"chat": src, "msg": 1, "name": "x"}
+            with mock.patch.object(server.db, "db_exists", return_value=True):
+                h._person_post(path, {"id": "p1", "name": "P", "ws": ["acme"]})
+            self.assertEqual(sent[0][0], 403)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+
+    def test_plan_endpoints_for_owner(self):
+        self.saved_dir()
+        src = self.offer_plan()
+        h, sent = self.handler()
+        h._authorized = lambda require_origin=False: True
+        h._plan_post("/api/workflow/plan/save", {"chat": src, "msg": 1, "name": "x"})
+        self.assertEqual(sent[-1], (400, {"error": "This plan has not started yet."}))
+        h._plan_post("/api/workflow/plan/reject", {"chat": src, "msg": 1})
+        self.assertEqual(sent[-1], (200, {"ok": True, "bot": "gtm"}))
+        h._plan_post("/api/workflow/plan/reject", {"chat": "../x", "msg": 1})
+        self.assertEqual(sent[-1], (400, {"error": "No plan to start here."}))
+        h._authorized = lambda require_origin=False: False
+        h._plan_post("/api/workflow/plan/reject", {"chat": src, "msg": 1})
+        self.assertEqual(sent[-1][0], 403)
+
+    def test_saved_template_in_skill_menu(self):
+        self.saved_dir()
+        src = self.offer_plan()
+        self.approve(src)
+        workflow_turns.save_plan(self.root, "acme", src, 1, "vendor-pick")
+        got = [s for s in server._skills_index() if s["name"] == "vendor-pick"]
+        self.assertEqual(got, [{"name": "vendor-pick", "description": "Hire a designer for acme.", "kind": "workflow"}])
+
 
 if __name__ == "__main__":
     unittest.main()

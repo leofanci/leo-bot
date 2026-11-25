@@ -6398,6 +6398,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (trigger === "/") {
       out.push({ type:"action", slug:"__attach", name:"Attach file…", meta:"upload a document" });
       out.push({ type:"tool",   slug:"web",      name:"Web search",   meta:"let the OS research online this turn" });
+      if (!isPerson()) out.push({ type:"skill", slug:"plan", name:"plan", meta:"ask for a plan: steps for the teammates this needs" });
       for (const s of _SKILLS)
         out.push({ type:"skill", slug:s.name, name:s.name,
                    meta:(s.kind === "workflow" ? "workflow · " : "") + (s.description||"").replace(/^Workflow\.\s*/, "").slice(0, 90) });
@@ -6598,6 +6599,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       bar.querySelector("[data-wf-offer]").onclick = () => startWorkflow(m.workflow_offer);
       main.appendChild(bar);
     }
+    if (m.plan?.title) main.appendChild(planCard(div, m));
     if (m.approval && _APPROVALS.some(a => a.id === (m.approval.id || m.approval))) {
       const a = typeof m.approval === "object" ? m.approval : _APPROVALS.find(x => x.id === m.approval);
       const bar = document.createElement("div");
@@ -6613,6 +6615,80 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
       });
       main.appendChild(bar);
     }
+  }
+
+  // A bot's drafted plan (dashboard/workflow_turns.py): Approve starts its run once, Reject sends the
+  // bot your note, a started plan can be saved as a template. Only the owner gets the buttons; the
+  // server reads the steps from the saved message, never from here.
+  function planStepLine(line){
+    const f = {};
+    line.split("|").forEach(p => { const k = p.indexOf(":"); if (k > 0) f[p.slice(0, k).trim().toLowerCase()] = p.slice(k + 1).trim(); });
+    const bot = (f.bot || "").replace(/^@/, "");
+    const bits = [`@${bot}`, f.skill && `/${f.skill.replace(/^\//, "")}`, f.output,
+      (f.gate || "").toLowerCase() === "approval" && "gate: approval", f.checker && `checker @${f.checker.replace(/^@/, "")}`,
+      f.consult && `consult ${f.consult}`, (f.team || "").toLowerCase() === "yes" && "team", f.debate && f.debate !== "0" && `debate ${f.debate}`];
+    return bits.filter(Boolean).join(" · ");
+  }
+  function planCard(row, m){
+    const p = m.plan, owner = !isPerson();
+    const box = document.createElement("div");
+    box.className = "approval-bar app-card plan-card";
+    const steps = (p.lines || []).map(l => `<li>${esc(planStepLine(l))}</li>`).join("");
+    let foot = "";
+    if (owner && p.status === "offered") {
+      foot = `<div class="app-btns"><button class="btn sm primary" type="button" data-plan="approve">Approve</button>
+        <button class="btn sm" type="button" data-plan="reject">Reject</button></div>
+        <div class="app-edit" hidden><label>What should change? (optional)<input type="text" maxlength="500" data-plan-note></label>
+        <div class="app-btns"><button class="btn sm" type="button" data-plan="send-reject">Send</button></div></div>`;
+    } else if (p.status === "started") {
+      foot = `<div class="app-result">Started${owner && p.run_chat ? ` · <button class="link-btn" type="button" data-plan="open">Open the run</button>` : ""}</div>`
+        + (owner && !p.saved_as ? `<div class="app-edit plan-save"><label>Save as template (name)<input type="text" maxlength="60" placeholder="vendor-pick" data-plan-name></label>
+          <div class="app-btns"><button class="btn sm" type="button" data-plan="save">Save</button></div></div>` : "")
+        + (p.saved_as ? `<div class="app-result">Saved as /${esc(p.saved_as)}</div>` : "");
+    } else if (p.status === "rejected") {
+      foot = `<div class="app-result">Rejected</div>`;
+    }
+    box.innerHTML = `<div class="app-card-h"><b>Plan: ${esc(p.title)}</b><small>${esc(p.brief || "")}</small></div>
+      <ol class="plan-steps">${steps}</ol>${foot}<div class="app-result" data-plan-msg hidden></div>`;
+    const say = t => { const el = box.querySelector("[data-plan-msg]"); el.textContent = t; el.hidden = !t; };
+    const ref = () => {
+      const i = Number(row.dataset.i);
+      if (!activeChatId || !Number.isInteger(i) || row.dataset.i === undefined) { say("Reload the thread, then try again."); return null; }
+      return { chat: activeChatId, msg: i };
+    };
+    const redraw = () => decorateReply(row, m);
+    box.querySelectorAll("[data-plan]").forEach(b => b.onclick = async () => {
+      const what = b.dataset.plan;
+      if (what === "open") {
+        // The run is in this thread, or in a new one in #general (see workflow_turns._approve).
+        if (p.run_chat === activeChatId) return;
+        return openThread({ ws: _WS, room: `${_WS}/general`, chat: p.run_chat });
+      }
+      if (busy) return busyNote();
+      if (what === "reject") { box.querySelector(".app-edit").hidden = false; box.querySelector("[data-plan-note]").focus(); return; }
+      const r = ref();
+      if (!r) return;
+      try {
+        if (what === "approve") {
+          // A DM, or a thread that already runs a workflow: the run gets a new thread in #general.
+          const room = roomById(activeRoomId);
+          if (room?.kind === "dm" || wfView) { await selectRoom(`${_WS}/general`); newThread(); }
+          send(`Approved plan: ${p.title}`, { workflow: "plan", plan_ref: r });
+        } else if (what === "send-reject") {
+          const got = await jpost("/api/workflow/plan/reject", r);
+          p.status = "rejected"; redraw();
+          const note = box.querySelector("[data-plan-note]")?.value.trim();
+          const handle = botById(got.bot)?.handle || got.bot;
+          send(`@${handle} ${note || "No plan: answer the request yourself."}`);
+        } else if (what === "save") {
+          const name = box.querySelector("[data-plan-name]").value.trim();
+          if (!name) return say("Give the template a name.");
+          const got = await jpost("/api/workflow/plan/save", { ...r, name });
+          p.saved_as = got.name; redraw();
+        }
+      } catch (e) { say(e.message); }
+    });
+    return box;
   }
 
   // One left-aligned row per message. Returns the body element (.b), which
@@ -6669,7 +6745,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     row.querySelector(".msg-main").appendChild(box);
   }
   // Function declarations only (hoisted): showChat, defined above, calls these.
-  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length || m.workflow_offer); }
+  function rowHasBody(m){ return m.role === "user" || !!(m.content || m.approval || m.deliverables?.length || m.notices?.length || m.workflow_offer || m.plan); }
   function reactPicker(){   // built on first use; its row and anchor live on the function
     if (reactPicker.el) return reactPicker.el;
     const el = reactPicker.el = document.createElement("div");
@@ -7121,6 +7197,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
             if (obj.reactions) paintReactions(userEl, obj.reactions);
             if (obj.workflow) wfNext = obj.workflow;
             if (obj.workflow_live) paintWorkflow(obj.workflow_live);   // step under way: Stop workflow works now
+            if (obj.plan) { const r = replyAt(obj.msg); r.meta.plan = obj.plan; r.bubble.closest(".msg").hidden = false; }
             if (obj.approval) {
               const r = replyAt(obj.msg);
               _APPROVALS.unshift(obj.approval); r.meta.approval = obj.approval; r.bubble.closest(".msg").hidden = false;

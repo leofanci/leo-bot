@@ -439,6 +439,55 @@ def _approve(body, viewer, ws, team, room, shared, root, general_shared):
     return body, ctx
 
 
+PLAN_NOT_STARTED = "This plan has not started yet."
+
+
+def _plan_at(chat, msg, ws):
+    """The plan dict on message `msg` of thread `chat` in workspace `ws` (any status), or None."""
+    import chat_store
+    if not isinstance(chat, str) or not skill_loads._CHAT_RE.match(chat):
+        return None
+    if not isinstance(msg, int) or isinstance(msg, bool) or msg < 1:
+        return None
+    rec = chat_store.load(chat)
+    if not rec or rooms.split_id(rec.get("room"))[0] != ws:
+        return None
+    msgs = rec.get("messages") or []
+    plan = msgs[msg].get("plan") if msg < len(msgs) and isinstance(msgs[msg], dict) else None
+    return plan if isinstance(plan, dict) else None
+
+
+def reject_plan(root, ws, chat, msg):
+    """The owner's Reject on a plan card: {"ok", "bot"} (the browser then sends the note to that bot),
+    or a refusal line. Works once, and never after Approve."""
+    with _PLAN_LOCK:
+        got = _stored_plan(chat, msg, ws) if _plan_at(chat, msg, ws) is not None else NO_PLAN
+        if isinstance(got, str):
+            return got
+        _set_plan(chat, msg, status="rejected")
+    return {"ok": True, "bot": got[1].get("bot")}
+
+
+def save_plan(root, ws, chat, msg, name):
+    """The owner's Save as template on a started plan's card (typing the name and pressing Save is the
+    approval): writes the data folder's workflow file. {"ok", "name"} or a refusal line."""
+    plan = _plan_at(chat, msg, ws)
+    if plan is None:
+        return NO_PLAN
+    if plan.get("status") != "started":
+        return PLAN_REJECTED if plan.get("status") == "rejected" else PLAN_NOT_STARTED
+    wf = plan_workflow(plan)
+    if wf is None:
+        return NO_PLAN
+    name = name.strip().lower() if isinstance(name, str) else name
+    with _PLAN_LOCK:
+        why = workflows.save_template(wf, name)
+        if why:
+            return why
+        _set_plan(chat, msg, saved_as=name)
+    return {"ok": True, "name": name}
+
+
 def release(ctx):
     """A started plan whose first turn never ran (the thread was busy): it can be approved again."""
     ref = (ctx or {}).get("plan_ref")

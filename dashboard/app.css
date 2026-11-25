@@ -810,6 +810,9 @@ summary.pf-head::-webkit-details-marker{display:none}
 .app-fields dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .app-btns{display:flex;gap:var(--ui-space-1-5)}
 .app-edit{display:grid;gap:var(--ui-space-2)}
+.app-edit[hidden]{display:none}
+.plan-steps{margin:0;padding-left:var(--ui-space-5);font-size:var(--ui-type-control);overflow-wrap:anywhere}
+.plan-steps li+li{margin-top:var(--ui-space-1)}
 .app-edit label{display:grid;gap:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}
 .app-edit input,.app-edit textarea{font:inherit;color:var(--ui-color-text-secondary)}
 .app-result{font-size:var(--ui-type-control)}
