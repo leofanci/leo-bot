@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import approvals, bots, workflows
+from core import approvals, bots, plans, workflows
 import dashboard.server as server
 from dashboard import workflow_turns
 
@@ -586,6 +586,49 @@ class WorkflowTurns(unittest.TestCase):
         out, _ = self.tick(["Saving.\nAPPROVAL: create-memo the plan"])
         self.assertTrue([e for e in events(out) if "approval" in e])
         self.assertFalse(self.runs[-1]["readonly"])
+
+    # --- drafted plans -------------------------------------------------------------------------
+
+    def save_plan_run(self, block, chat=CHAT):
+        wf = plans.parse(block)
+        run = dict(workflows.new_run(wf, wf.description, "acme", "acme/general"), chat=chat)
+        workflows.save(self.root, run)
+        return run
+
+    def test_plan_run_ticks_with_no_skill(self):
+        self.save_plan_run("PLAN: Hire a designer\nbrief: b\n1. bot: product | output: role brief\n"
+                           "2. bot: cmo | output: job post | gate: no")
+        out, _ = self.tick(["role brief done"])
+        self.assertEqual(self.lead(out), "product")
+        ev = wf_event(out)
+        self.assertEqual((ev["step"], ev["status"], ev["name"]), (2, "running", "Hire a designer"))
+        self.assertTrue(ev["label"].startswith("@cmo Step 2 of 2 of Hire a designer"))
+        self.assertNotIn("/", ev["label"])
+        self.assertIn("## Workflow Hire a designer, step 1 of 2", self.runs[-1]["text"])
+
+    def test_plan_step_routes_without_skill(self):
+        run = self.save_plan_run("PLAN: T\nbrief: b\n1. bot: product | output: x\n"
+                                 "2. skill: launch-plan | bot: gtm | output: y")
+        body, ctx = workflow_turns._turn({"messages": []}, run, workflows.of_run(run))
+        self.assertEqual(ctx["route"], ("product", None, False, None))
+        self.assertEqual(body["messages"][0]["content"], "@product Step 1 of 2 of T: b")
+        run2 = dict(run, step=1)
+        body, ctx = workflow_turns._turn({"messages": []}, run2, workflows.of_run(run2))
+        self.assertEqual(ctx["route"], ("gtm", "launch-plan", True, None))
+        self.assertEqual(body["messages"][0]["content"], "@gtm /launch-plan Step 2 of 2 of T")
+
+    def test_stop_and_current_on_plan_run(self):
+        self.save_plan_run("PLAN: T\nbrief: b\n1. bot: product | output: x")
+        self.assertEqual(workflow_turns.current(self.root, CHAT)["name"], "T")
+        self.assertIs(workflow_turns.current(self.root, CHAT)["plan"], True)
+        self.assertEqual(workflow_turns.stop(self.root, CHAT)["status"], "stopped")
+
+    def test_plan_run_paused_refusal_uses_title(self):
+        self.save_plan_run("PLAN: T\nbrief: b\n1. bot: cmo | output: x")
+        bots.set_active("cmo", False, self.root, "acme", self.tree[0])
+        out, _ = self.tick()
+        self.assertIn("T is paused: Step 1: @cmo is switched off.", out)
+        self.assertNotIn("/T", out)
 
 
 if __name__ == "__main__":

@@ -6116,7 +6116,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     wfBar.hidden = !wfView;
     if (!wfView) { wfBar.innerHTML = ""; return; }
     const state = wfView.status === "running" ? (busy ? "running" : "waiting to continue") : `paused: ${wfView.why || "waiting"}`;
-    wfBar.innerHTML = `<span class="wf-sum"><b>/${esc(wfView.name)}</b> · step ${wfView.step} of ${wfView.total} · ${esc(state)}</span>
+    wfBar.innerHTML = `<span class="wf-sum"><b>${wfView.plan ? "" : "/"}${esc(wfView.name)}</b> · step ${wfView.step} of ${wfView.total} · ${esc(state)}</span>
       <span class="wf-btns">${!busy ? `<button class="btn sm primary" type="button" data-wf="go">Continue</button>` : ""}
       <button class="btn sm" type="button" data-wf="stop">Stop workflow</button></span>`;
     wfBar.querySelector('[data-wf="go"]')?.addEventListener("click", wfContinue);
@@ -6129,7 +6129,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
     if (id === activeChatId && !busy) paintWorkflow(v);
   }
   function wfContinue(){
-    if (wfView && !busy) send(wfView.label || `Continue /${wfView.name}`, { workflow: "next" });
+    if (wfView && !busy) send(wfView.label || `Continue ${wfView.plan ? "" : "/"}${wfView.name}`, { workflow: "next" });
   }
   async function wfStop(){
     const id = activeChatId;
