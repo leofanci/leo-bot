@@ -1,5 +1,5 @@
-"""Compare a workflow with a single bot, and optionally with a baseline workflow, on request only
-(it spends).
+"""Compare a workflow with a single bot, and optionally with a baseline workflow or a plan a bot
+drafts itself, on request only (it spends).
 
 Each case runs in a throwaway home, through the real server on a free local port: once as the
 workflow (`/<workflow> <brief>`, then the browser's next ticks until the run stops), once as the
@@ -10,7 +10,12 @@ each other arm) blind, shown as Plan A and Plan B, twice with the order swapped:
 the arm both calls picked, otherwise a tie. Results go to <home>/evals/compare-*.json, never into
 the repo.
 
-    python -m evals --compare [--case ID ...] [--cases-file PATH] [--engine ID] [--yes]
+The plan arm (`--plan`, and always for a case with `lead` instead of `workflow`) sends
+`@<lead> /plan <brief>`, approves the drafted plan as the owner's card would, ticks its run to the
+end and judges the last step's output: against the single bot, and against the workflow when the
+case has one.
+
+    python -m evals --compare [--plan] [--case ID ...] [--cases-file PATH] [--engine ID] [--yes]
 
 `--cases-file` reads the same JSON shape from any path, for real tasks kept out of tracked files.
 """
@@ -28,8 +33,9 @@ from core import paths  # noqa: F401 - first, as in evals/live.py: the paths gua
 from evals import live
 
 CASES = Path(__file__).parent / "cases" / "compare.json"
-KEYS = {"id", "workflow", "brief", "intake"}
-OPTIONAL = {"baseline"}
+KEYS = {"id", "brief", "intake"}
+SUBJECTS = ("workflow", "lead")  # exactly one per case
+OPTIONAL = {"baseline"}  # needs `workflow`
 ARMS = ("workflow", "single")
 RIVALS = ("single", "baseline")  # each judged against the workflow
 CRITERIA = ("specific", "grounded", "risks", "doable", "consistent")
@@ -73,9 +79,11 @@ def load(path=CASES):
         raise ValueError("cases must be a JSON list")
     seen = set()
     for c in cases:
-        if not isinstance(c, dict) or not KEYS <= set(c) <= KEYS | OPTIONAL:
+        if (not isinstance(c, dict) or not KEYS <= set(c) <= KEYS | set(SUBJECTS) | OPTIONAL
+                or sum(k in c for k in SUBJECTS) != 1):
             got = sorted(c) if isinstance(c, dict) else type(c).__name__
-            raise ValueError(f"a case has keys {got}, not {sorted(KEYS)} (plus optional {sorted(OPTIONAL)})")
+            raise ValueError(f"a case has keys {got}, not {sorted(KEYS)} plus one of {list(SUBJECTS)} "
+                             f"(and optional {sorted(OPTIONAL)} with workflow)")
         if not isinstance(c["id"], str) or not _ID_RE.match(c["id"]):
             raise ValueError(f"bad case id: {c['id']!r}")
         if c["id"] in seen:
@@ -84,6 +92,13 @@ def load(path=CASES):
         for key in ("brief", "intake"):
             if not isinstance(c[key], str) or not c[key].strip():
                 raise ValueError(f"{c['id']}: {key} is empty")
+        if "lead" in c:
+            from core import bots
+            if c["lead"] not in bots.load_defs():
+                raise ValueError(f"{c['id']}: unknown lead bot {c['lead']!r}")
+            if "baseline" in c:
+                raise ValueError(f"{c['id']}: a baseline needs a workflow")
+            continue
         _one_step(c["workflow"])
         if "baseline" in c:
             _one_step(c["baseline"])
@@ -93,13 +108,32 @@ def load(path=CASES):
 
 
 def rivals(case):
-    """The arms judged against the workflow in this case."""
+    """The arms judged against the workflow in this case (none for a lead case)."""
+    if "workflow" not in case:
+        return []
     return [r for r in RIVALS if r == "single" or r in case]
 
 
-def arm_order(case):
+def pairs(case, with_plan=False):
+    """(subject, rival) pairs judged in this case: the workflow against its rivals, and the drafted
+    plan against the single bot and the workflow (with `--plan`; always for a lead case)."""
+    if "workflow" not in case:
+        return [("plan", "single")]
+    out = [("workflow", r) for r in rivals(case)]
+    return out + ([("plan", "single"), ("plan", "workflow")] if with_plan else [])
+
+
+def pair_key(subject, rival):
+    """Where a pair's verdict is kept: the rival's name for the workflow (as before plans), else subject:rival."""
+    return rival if subject == "workflow" else f"{subject}:{rival}"
+
+
+def arm_order(case, with_plan=False):
     """Every arm of a case, in the order they run: rotated by a seed per case, the same every run."""
-    arms = ["workflow", *rivals(case)]
+    arms = list(dict.fromkeys(a for p in pairs(case, with_plan) for a in p))
+    if "workflow" in arms:  # as before plans: the workflow first, then its rivals, then the plan
+        arms.remove("workflow")
+        arms.insert(0, "workflow")
     k = hashlib.sha256(f"arms:{case['id']}".encode()).digest()[0] % len(arms)
     return arms[k:] + arms[:k]
 
@@ -191,9 +225,9 @@ def combine(first, second):
     return {"better": better, "scores": scores, "why": got[0]["why"]}
 
 
-def judge_pair(case, arms, rival, judge):
-    """The workflow against `rival`, judged twice with the order swapped."""
-    pair = ["workflow", rival]
+def judge_pair(case, arms, rival, judge, subject="workflow"):
+    """`subject` against `rival`, judged twice with the order swapped."""
+    pair = [subject, rival]
     order = order_for(case["id"])
     order = pair if order[0] == "workflow" else pair[::-1]
     empty = [arm for arm in pair if not (arms.get(arm) or {}).get("plan", "").strip()]
@@ -210,18 +244,43 @@ def judge_pair(case, arms, rival, judge):
     return {**combine(*calls), "order": order, "judge_cost": round(cost, 6), "judge_replies": replies}
 
 
-def judge_case(case, arms, judge):
+def judge_case(case, arms, judge, with_plan=False):
     """One case's result. `judge(prompt)` returns (text, cost). A pair with an arm that has no plan
-    is marked and not judged. The top-level verdict is the workflow against the single bot."""
+    is marked and not judged. The top-level verdict is the workflow (or, in a lead case, the drafted
+    plan) against the single bot."""
     kept = {arm: dict(row, plan=(row.get("plan") or "")[:live.REPLY_KEEP]) for arm, row in arms.items()}
-    pairs = {r: judge_pair(case, arms, r, judge) for r in rivals(case)}
-    head = pairs["single"]
-    return {"id": case["id"], "workflow": case["workflow"], "baseline": case.get("baseline"),
-            "order": head["order"], "arms": kept, "better": head["better"], "scores": head["scores"],
-            "why": head["why"], "pairs": pairs, "judge_cost": round(sum(p["judge_cost"] for p in pairs.values()), 6)}
+    got = {pair_key(sub, r): judge_pair(case, arms, r, judge, sub) for sub, r in pairs(case, with_plan)}
+    head = got["single" if "workflow" in case else "plan:single"]
+    out = {"id": case["id"], "workflow": case.get("workflow"), "baseline": case.get("baseline"),
+           "order": head["order"], "arms": kept, "better": head["better"], "scores": head["scores"],
+           "why": head["why"], "pairs": got, "judge_cost": round(sum(p["judge_cost"] for p in got.values()), 6)}
+    if "lead" in case:
+        out["lead"] = case["lead"]
+    return out
 
 
 def summary(results):
+    flows = [r for r in results if not r.get("lead")]
+    lines = _workflow_lines(flows) if flows or not results else []
+    for key in sorted({k for r in results for k in (r.get("pairs") or {}) if ":" in k}):
+        lines.append(_pair_line([r for r in results if key in (r.get("pairs") or {})], *key.split(":")))
+    return "\n".join(lines)
+
+
+def _pair_line(results, subject, rival):
+    """One pair over the cases that judged it: wins, mean score, cost and cost ratio."""
+    ps = [r["pairs"][f"{subject}:{rival}"] for r in results]
+    wins, losses = sum(p["better"] == subject for p in ps), sum(p["better"] == rival for p in ps)
+    scored = [p["scores"] for p in ps if p.get("scores")]
+    ss, sr = _mean([s[subject] for s in scored]), _mean([s[rival] for s in scored])
+    cs = sum(((r.get("arms") or {}).get(subject) or {}).get("cost") or 0 for r in results)
+    cr = sum(((r.get("arms") or {}).get(rival) or {}).get("cost") or 0 for r in results)
+    ratio = f"{cs / cr:.1f}x" if cr else "n/a"
+    return (f"{subject} vs {rival}: {subject} better in {wins}/{len(ps)}, {rival} better in {losses}. "
+            f"Mean score {ss:.1f} vs {sr:.1f}/25. Cost: {subject} ${cs:.4f}, {rival} ${cr:.4f} ({ratio}).")
+
+
+def _workflow_lines(results):
     lines = []
     for r in results:
         arms = r.get("arms") or {}
@@ -242,7 +301,7 @@ def summary(results):
     based = [r for r in results if "baseline" in (r.get("pairs") or {})]
     if based:
         lines.append(_baseline_lines(based))
-    return "\n".join(lines)
+    return lines
 
 
 def _mean(xs):
@@ -347,6 +406,33 @@ def workflow_plan(messages, maker):
     return plan
 
 
+def plan_arm(post, case, lead, thread=None):
+    """The drafted-plan arm: `@<lead> /plan <brief>`, the plan approved as the owner's card does (the
+    server reads it from the saved message), its run ticked to the end, the last step's output judged."""
+    thread = thread or _thread
+    started = time.time()
+    events = post({"messages": [{"role": "user", "content": f"@{lead} /plan {case['brief']}"}], "room_id": ROOM})
+    src = next((e["chat_id"] for e in events if isinstance(e.get("chat_id"), str)), None)
+    drafted = thread(src)
+    at = next((i for i in range(len(drafted) - 1, -1, -1) if isinstance(drafted[i].get("plan"), dict)), None)
+    cost = sum(m.get("cost") or 0 for m in drafted)
+    if at is None or not any(isinstance(e.get("plan"), dict) for e in events):
+        return {"chat": src, "status": "failed", "why": "No plan was drafted.", "ticks": 0, "plan": "",
+                "cost": round(cost, 6), "turns": sum(1 for m in drafted if m.get("role") != "user"), "steps": 0,
+                "seconds": round(time.time() - started, 1)}
+    stored = drafted[at]["plan"]
+    lines = [x for x in stored.get("lines") or [] if isinstance(x, str)]
+    maker = next((f.split(":", 1)[1].strip().lstrip("@").lower() for f in (lines[-1] if lines else "").split("|")
+                  if f.strip().lower().startswith("bot:")), lead)
+    got = drive(post, {"messages": [{"role": "user", "content": f"Approved plan: {stored.get('title') or ''}"}],
+                       "room_id": ROOM, "chat_id": src, "workflow": "plan", "plan_ref": {"chat": src, "msg": at}})
+    msgs = [m for c in dict.fromkeys(c for c in (src, got["chat"]) if c) for m in thread(c)]
+    return {**got, "plan": workflow_plan(thread(got["chat"]), maker),
+            "cost": round(sum(m.get("cost") or 0 for m in msgs), 6),
+            "turns": sum(1 for m in msgs if m.get("role") != "user"), "steps": len(lines),
+            "seconds": round(time.time() - started, 1)}
+
+
 def _arm(post, first, maker, workflow):
     started = time.time()
     if workflow:
@@ -393,26 +479,33 @@ def _child(args):
         for case in load(args.cases_file):
             if args.case and case["id"] not in args.case:
                 continue
-            step = _one_step(case["workflow"]).steps[0]
             _fixture(root, case)
 
             def flow(name, case=case):
                 maker = _one_step(name).steps[0].bot
                 return lambda: _arm(client.post, {"messages": [{"role": "user", "content": f"/{name} {case['brief']}"}],
                                                   "room_id": ROOM}, maker, True)
-            runs = {"workflow": flow(case["workflow"]),
-                    "single": lambda case=case, step=step: _arm(
-                        client.post, {"messages": [{"role": "user", "content":
-                                                    f"@{step.bot} /{step.skill} {case['brief']}"}],
-                                      "room_id": ROOM}, step.bot, False)}
+            if "workflow" in case:  # the single bot is the workflow's maker with its skill
+                step = _one_step(case["workflow"]).steps[0]
+                lead, alone = step.bot, f"@{step.bot} /{step.skill} {case['brief']}"
+            else:
+                lead, alone = case["lead"], f"@{case['lead']} {case['brief']}"
+            runs = {"single": lambda lead=lead, alone=alone: _arm(
+                client.post, {"messages": [{"role": "user", "content": alone}], "room_id": ROOM}, lead, False),
+                "plan": lambda case=case, lead=lead: plan_arm(client.post, case, lead)}
+            if "workflow" in case:
+                runs["workflow"] = flow(case["workflow"])
             if case.get("baseline"):
                 runs["baseline"] = flow(case["baseline"])
             try:
-                arms = run_arms(arm_order(case), runs)
-                result = judge_case(case, arms, _judge(root, step.bot))
+                order = arm_order(case, args.plan)
+                arms = run_arms(order, {a: runs[a] for a in order})
+                result = judge_case(case, arms, _judge(root, lead), args.plan)
             except Exception as e:  # noqa: BLE001 - one broken case must not lose the others
-                result = {"id": case["id"], "workflow": case["workflow"], "better": "none", "scores": {},
+                result = {"id": case["id"], "workflow": case.get("workflow"), "better": "none", "scores": {},
                           "why": f"crashed: {type(e).__name__}: {e}", "arms": {}, "judge_cost": 0.0}
+                if "lead" in case:
+                    result["lead"] = case["lead"]
             results.append(result)
             print(f"{result['better']:>8} {case['id']}", file=sys.stderr, flush=True)
     finally:
@@ -424,9 +517,11 @@ def _child(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="python -m evals --compare",
-                                 description="Compare a workflow with its maker bot alone, judged blind.")
+                                 description="Compare a workflow, or a plan a bot drafts, with a bot alone, judged blind.")
     ap.add_argument("--engine", help="engine id to use (default: your default engine)")
     ap.add_argument("--case", action="append", help="run only this case id (repeatable)")
+    ap.add_argument("--plan", action="store_true",
+                    help="also run a plan the lead bot drafts (/plan), against the single bot and the workflow")
     ap.add_argument("--cases-file", default=str(CASES), help="cases JSON (default: the shipped acme cases)")
     ap.add_argument("--yes", action="store_true", help="do not ask before spending")
     ap.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
@@ -460,6 +555,8 @@ def main(argv=None):
                "--cases-file", args.cases_file]
         for c in args.case or ():
             cmd += ["--case", c]
+        if args.plan:
+            cmd.append("--plan")
         proc = subprocess.run(cmd, cwd=str(paths.CODE), env={**os.environ, "LEOBOT_HOME": home})
         if proc.returncode != 0 or not out.exists():
             print(f"The compare run on {engine} stopped before it finished; see the error above.", file=sys.stderr)

@@ -210,7 +210,7 @@ class Compare(unittest.TestCase):
         return path
 
     def test_load_checks_cases(self):
-        cases = compare.load()
+        cases = [c for c in compare.load() if "workflow" in c]
         self.assertEqual(len(cases), 6)
         for c in cases:
             self.assertEqual(set(c), {"id", "workflow", "baseline", "brief", "intake"})
@@ -351,7 +351,7 @@ class Compare(unittest.TestCase):
         self.assertEqual(got["better"], "workflow")
 
     def test_baseline_arm_runs_in_a_rotating_order(self):
-        cases = compare.load()
+        cases = [c for c in compare.load() if "workflow" in c]
         for c in cases:
             self.assertEqual(sorted(compare.arm_order(c)), ["baseline", "single", "workflow"])
         self.assertGreater(len({compare.arm_order(c)[0] for c in cases}), 1)
@@ -425,13 +425,137 @@ class Compare(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(seen["engine"], "codex")
         self.assertIn("--cases-file", seen["cmd"])
+        self.assertNotIn("--plan", seen["cmd"])
         self.assertIn("Gain: yes", out.getvalue())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(compare, "_runs_dir", return_value=Path(tmp)), \
+                mock.patch.object(compare.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(compare.main(["--plan", "--case", "acme-price-change", "--yes"]), 0)
+        self.assertIn("--plan", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--case") + 1], "acme-price-change")
 
     def test_evals_entry_routes_compare(self):
         import evals.__main__ as entry
         with mock.patch.object(compare, "main", return_value=0) as m:
             self.assertEqual(entry.main(["--compare", "--yes"]), 0)
         m.assert_called_once_with(["--yes"])
+
+
+class ComparePlans(unittest.TestCase):
+    """The drafted-plan arm: `/plan <brief>` to a lead bot, the plan approved, its run judged."""
+
+    def write(self, tmp, cases):
+        path = Path(tmp) / "cases.json"
+        path.write_text(json.dumps(cases))
+        return path
+
+    def test_lead_cases_load(self):
+        leads = [c for c in compare.load() if "lead" in c]
+        self.assertEqual(sorted(c["id"] for c in leads), ["acme-first-hire", "acme-price-change", "acme-vendor-pick"])
+        for c in leads:
+            self.assertEqual(set(c), {"id", "lead", "brief", "intake"})
+            self.assertIn("acme", (c["brief"] + c["intake"]).lower())
+        good = leads[0]
+        wf = next(c for c in compare.load() if "workflow" in c)
+        bad = {"both": [dict(good, workflow=wf["workflow"])],
+               "neither": [{k: v for k, v in good.items() if k != "lead"}],
+               "baseline without workflow": [dict(good, baseline=wf["baseline"])],
+               "unknown lead": [dict(good, lead="nobody")]}
+        with tempfile.TemporaryDirectory() as tmp:
+            for why, data in bad.items():
+                with self.subTest(why), self.assertRaises(ValueError):
+                    compare.load(self.write(tmp, data))
+
+    def test_pairs_per_case_shape(self):
+        wf = next(c for c in compare.load() if "workflow" in c)
+        lead = next(c for c in compare.load() if "lead" in c)
+        plain = {k: v for k, v in wf.items() if k != "baseline"}
+        self.assertEqual(compare.pairs(wf, False), [("workflow", "single"), ("workflow", "baseline")])
+        self.assertEqual(compare.pairs(plain, False), [("workflow", "single")])
+        self.assertEqual(compare.pairs(wf, True), [("workflow", "single"), ("workflow", "baseline"),
+                                                   ("plan", "single"), ("plan", "workflow")])
+        self.assertEqual(compare.pairs(lead, False), [("plan", "single")])
+        self.assertEqual(compare.pairs(lead, True), [("plan", "single")])
+        self.assertEqual(sorted(compare.arm_order(wf, True)), ["baseline", "plan", "single", "workflow"])
+        self.assertEqual(sorted(compare.arm_order(lead)), ["plan", "single"])
+        self.assertEqual(compare.arm_order(wf), compare.arm_order(wf, False))  # unchanged without --plan
+
+    def plan_events(self):
+        return [{"chat_id": "c1"}, {"plan": {"title": "T", "lines": ["bot: research | output: x",
+                                                                    "bot: gtm | output: the plan"]}, "msg": 0}]
+
+    def test_plan_arm_approves_and_judges_last_step(self):
+        sent = []
+        threads = {"c1": [{"role": "user", "content": "@product /plan x"},
+                          {"role": "assistant", "bot": "product", "content": "why", "cost": 0.02,
+                           "plan": {"title": "T", "lines": ["bot: research | output: x", "bot: gtm | output: the plan"]}},
+                          {"role": "user", "content": "@research Step 1 of 2 of T: x"},
+                          {"role": "assistant", "bot": "research", "content": "prices", "cost": 0.05},
+                          {"role": "user", "content": "@gtm Step 2 of 2 of T"},
+                          {"role": "assistant", "bot": "gtm", "content": "The final plan.", "cost": 0.1}]}
+        replies = [self.plan_events(),
+                   [{"workflow": {"chat": "c1", "next": True, "status": "running", "label": "@gtm Step 2", "why": ""}}],
+                   [{"workflow": {"chat": "c1", "next": False, "status": "done", "label": "", "why": ""}}]]
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        case = {"id": "c", "lead": "product", "brief": "Hire someone for acme.", "intake": "x"}
+        got = compare.plan_arm(post, case, "product", thread=lambda chat: threads.get(chat, []))
+        self.assertEqual(sent[0]["messages"][0]["content"], "@product /plan Hire someone for acme.")
+        self.assertEqual((sent[1]["workflow"], sent[1]["plan_ref"]), ("plan", {"chat": "c1", "msg": 1}))
+        self.assertEqual(sent[2]["workflow"], "next")
+        self.assertEqual((got["status"], got["plan"], got["cost"], got["steps"]), ("done", "The final plan.", 0.17, 2))
+
+    def test_plan_arm_with_no_plan(self):
+        got = compare.plan_arm(lambda p: [{"chat_id": "c1"}, {"delta": "answer"}],
+                               {"id": "c", "lead": "cmo", "brief": "b", "intake": "x"}, "cmo",
+                               thread=lambda chat: [{"role": "assistant", "bot": "cmo", "content": "answer", "cost": 0.01}])
+        self.assertEqual((got["status"], got["why"], got["plan"]), ("failed", "No plan was drafted.", ""))
+        self.assertEqual(got["cost"], 0.01)
+
+    def test_judge_case_lead_and_plan_pairs(self):
+        lead = next(c for c in compare.load() if "lead" in c)
+        arms = {a: {"plan": f"{a} plan", "cost": 0.1} for a in ("plan", "single")}
+
+        def judge(prompt):  # prefers the drafted plan, then the workflow
+            best = next(t for t in ("plan plan", "workflow plan", "single plan") if t in prompt)
+            first = prompt.index("Plan A:") < prompt.index(best) < prompt.index("Plan B:")
+            return json.dumps({"A": dict(SCORES, risks=5) if first else SCORES,
+                               "B": SCORES if first else dict(SCORES, risks=5),
+                               "better": "A" if first else "B", "why": "w"}), 0.01
+        got = compare.judge_case(lead, arms, judge)
+        self.assertEqual((got["better"], got["lead"], got["workflow"]), ("plan", lead["lead"], None))
+        self.assertEqual(got["pairs"]["plan:single"]["scores"], {"plan": 22.0, "single": 20.0})
+        wf = next(c for c in compare.load() if "workflow" in c)
+        arms = {a: {"plan": f"{a} plan", "cost": 0.1} for a in ("workflow", "single", "baseline", "plan")}
+        got = compare.judge_case(wf, arms, judge, with_plan=True)
+        self.assertEqual(sorted(got["pairs"]), ["baseline", "plan:single", "plan:workflow", "single"])
+        self.assertEqual(got["pairs"]["plan:workflow"]["better"], "plan")
+
+    def test_summary_lists_plan_pairs(self):
+        def res(better, scores):
+            return {"id": "c", "lead": "cmo", "workflow": None, "better": better, "scores": scores, "why": "",
+                    "arms": {"plan": {"cost": 0.4}, "single": {"cost": 0.1}}, "judge_cost": 0.02,
+                    "pairs": {"plan:single": {"better": better, "scores": scores}}}
+        text = compare.summary([res("plan", {"plan": 22, "single": 20}), res("single", {"plan": 18, "single": 20})])
+        self.assertIn("plan vs single: plan better in 1/2, single better in 1. Mean score 20.0 vs 20.0/25. "
+                      "Cost: plan $0.8000, single $0.2000 (4.0x).", text)
+        self.assertNotIn("Workflow better", text)
+
+    def test_turn_outcome_reports_a_plan(self):
+        good = ("Needs two areas.\nPLAN: Pricing change\nbrief: New price for acme.\n"
+                "1. bot: cmo | output: rival prices\n2. bot: cos | output: rollout")
+        case = {"id": "x", "msg": "@cmo change our price", "reply": good, "expect": {"plan": True}}
+        self.assertEqual(turns.check(case, turns.run(case)), [])
+        case = {"id": "x", "msg": "@cmo a tagline", "reply": "Acme: get paid.", "expect": {"plan": False}}
+        self.assertEqual(turns.check(case, turns.run(case)), [])
+
+    def test_live_cases_expect_no_unprompted_plan(self):
+        no_plan = [c for c in json.loads(live.CASES.read_text()) if (c.get("expect") or {}).get("plan") is False]
+        self.assertEqual(len(no_plan), 3)
+        self.assertEqual(sorted(c["msg"].split()[0] for c in no_plan), ["@cmo", "@gtm", "@research"])
 
 
 class Cli(unittest.TestCase):

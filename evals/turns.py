@@ -33,7 +33,7 @@ CASES = Path(__file__).parent / "cases" / "turns.json"
 WS = "acme"
 THREAD_ID = "e7a10000-0000-4000-8000-000000000000"  # chat_store takes UUID-shaped ids only
 _EQUAL = ("bot", "skill", "handoff_from", "handoff", "loaded", "tier", "reason", "web", "gate", "approval",
-          "teammates", "followup", "reactions", "edit", "runs")
+          "teammates", "followup", "reactions", "edit", "runs", "plan")
 _TEXT = {"reply_has": "reply", "reply_lacks": "reply", "prompt_has": "prompt",
          "prompt_lacks": "prompt", "teammate_prompt_has": "teammate_prompt",
          "teammate_prompt_lacks": "teammate_prompt"}
@@ -257,6 +257,9 @@ def run(case, live_root=None):
         "followup": any(s.get("followup") for s in starts),
         "reactions": [r.get("emoji") for e in events for r in e.get("reactions") or []],
         "edit": bool(lead and lead["edit_dirs"]),
+        # The lead proposed a plan: a card, or a block that did not hold up (still a proposal).
+        "plan": any(isinstance(e.get("plan"), dict) or str(e.get("notice") or "").startswith("The plan did not hold up")
+                    for e in events),
         "runs": len(runs),
         "reply": recorded.get("content", deltas) if runs else deltas,
         "prompt": lead["prompt"] if lead else "",
