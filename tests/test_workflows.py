@@ -75,6 +75,29 @@ class Templates(unittest.TestCase):
             with self.subTest(why), self.assertRaises(ValueError):
                 workflows.parse(text, "x")
 
+    def test_shipped_file_still_needs_skill(self):
+        with self.assertRaises(ValueError):
+            workflows.parse(wf_text(["1. bot: gtm | output: x | gate: no"]), "demo-flow")
+
+    def test_parse_fills_lines(self):
+        wf = workflows.parse(wf_text(TWO), "demo-flow")
+        self.assertEqual(wf.lines, (TWO[0][3:], TWO[1][3:]))
+        self.assertFalse(wf.plan)
+
+    def test_parse_lines_optional_skill(self):
+        steps = workflows.parse_lines(["bot: gtm | output: x"], need_skill=False)
+        self.assertEqual(steps[0].skill, "")
+        with self.assertRaises(ValueError):
+            workflows.parse_lines(["bot: gtm | output: x"])
+        with self.assertRaises(ValueError) as e:
+            workflows.parse_lines([], need_skill=False)
+        self.assertIn("the Steps list is empty", str(e.exception))
+
+    def test_problems_skip_empty_skill(self):
+        from core import plans
+        wf = plans.parse("PLAN: T\nbrief: b\n1. bot: gtm | output: x")
+        self.assertEqual(workflows.problems(wf, FakeTeam()), [])
+
     def test_shipped_template_loads(self):
         wf = workflows.load("idea-to-experiment")
         self.assertIsNotNone(wf)

@@ -47,6 +47,8 @@ class Workflow:
     description: str
     steps: tuple
     body: str           # the file body without the steps list
+    plan: bool = False  # drafted by a bot in a reply: its steps live in the run record, never in a file
+    lines: tuple = ()   # the raw step lines, without the `N. ` prefix
 
 
 def _inside(base, *parts):
@@ -68,25 +70,27 @@ def _is_workflow_file(name):
     return text if fm.get("kind", "").strip().lower() == "workflow" else None
 
 
-def _parse_step(n, line):
+def _parse_step(n, line, need_skill=True):
     fields = {}
     for part in line.split("|"):
         k, sep, v = part.partition(":")
         if sep:
             fields[k.strip().lower()] = v.strip()
-    for key in ("skill", "bot", "output"):
+    for key in ("skill", "bot", "output") if need_skill else ("bot", "output"):
         if not fields.get(key):
             raise ValueError(f"step {n} has no {key}")
     gate = fields.get("gate", "no").lower()
     if gate not in ("no", "approval"):
         raise ValueError(f"step {n}: gate must be no or approval")
-    skill, bot = fields["skill"].lower(), fields["bot"].lower().lstrip("@")
-    if skill not in skill_loads.names():
+    skill, bot = (fields.get("skill") or "").lower().lstrip("/"), fields["bot"].lower().lstrip("@")
+    if not skill:
+        pass  # a drafted plan's step may run from the bot's own instructions
+    elif skill not in skill_loads.names():
         raise ValueError(f"step {n}: unknown skill {skill}")
     if _is_workflow_file(skill) is not None:
         raise ValueError(f"step {n}: {skill} is a workflow, not a skill")
     from core import loop_templates
-    if loop_templates.load(skill):
+    if skill and loop_templates.load(skill):
         raise ValueError(f"step {n}: {skill} is a loop, not a skill")
     checker = (fields.get("checker") or "").lower().lstrip("@") or None
     if checker == bot:
@@ -112,7 +116,7 @@ def _parse_step(n, line):
     return Step(skill, bot, fields["output"], gate == "approval", checker, consult, team == "yes", int(debate))
 
 
-def parse(text, name):
+def parse(text, name, need_skill=True):
     """Workflow from a SKILL.md text; ValueError with a one-line reason when it does not hold up."""
     from dashboard import fileops
     fm, body = fileops._parse_frontmatter(text)
@@ -122,14 +126,19 @@ def parse(text, name):
     rest = body[m.end():]
     nxt = re.search(r"^##\s", rest, re.M)
     block, after = (rest[:nxt.start()], rest[nxt.start():]) if nxt else (rest, "")
-    lines = [s.group(1) for s in map(_STEP_LINE_RE.match, block.splitlines()) if s]
+    lines = [s.group(1).strip() for s in map(_STEP_LINE_RE.match, block.splitlines()) if s]
+    steps = parse_lines(lines, need_skill)
+    clean = (body[:m.start()].rstrip() + "\n\n" + after.strip()).strip()
+    return Workflow(fm.get("name", name) or name, fm.get("description", ""), steps, clean, lines=tuple(lines))
+
+
+def parse_lines(lines, need_skill=True):
+    """Steps from raw step lines (no `N. ` prefix); ValueError with a one-line reason."""
     if not lines:
         raise ValueError("the Steps list is empty")
     if len(lines) > MAX_STEPS:
         raise ValueError(f"more than {MAX_STEPS} steps")
-    steps = tuple(_parse_step(i, line) for i, line in enumerate(lines, 1))
-    clean = (body[:m.start()].rstrip() + "\n\n" + after.strip()).strip()
-    return Workflow(fm.get("name", name) or name, fm.get("description", ""), steps, clean)
+    return tuple(_parse_step(i, line, need_skill) for i, line in enumerate(lines, 1))
 
 
 def load(name):
@@ -167,7 +176,7 @@ def problems(wf, team):
         why = _bot_problem(team, s.bot)
         if why:
             out.append(f"Step {n}: {why}.")
-        elif s.skill not in team.skills_of(s.bot):
+        elif s.skill and s.skill not in team.skills_of(s.bot):
             out.append(f"Step {n}: @{s.bot} does not have /{s.skill}.")
         if s.checker:
             why = _bot_problem(team, s.checker)
