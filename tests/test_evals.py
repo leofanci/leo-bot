@@ -544,6 +544,16 @@ class ComparePlans(unittest.TestCase):
                       "Cost: plan $0.8000, single $0.2000 (4.0x).", text)
         self.assertNotIn("Workflow better", text)
 
+    def test_spend_prompt_names_the_plan_arm(self):
+        asked = []
+        with mock.patch("builtins.input", side_effect=lambda q: asked.append(q) or "n"), \
+                mock.patch.object(compare.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+            compare.main(["--plan", "--case", "acme-soft-launch"])
+            compare.main(["--case", "acme-soft-launch"])
+        run.assert_not_called()
+        self.assertIn("drafted plan", asked[0])
+        self.assertNotIn("drafted plan", asked[1])
+
     def test_turn_outcome_reports_a_plan(self):
         good = ("Needs two areas.\nPLAN: Pricing change\nbrief: New price for acme.\n"
                 "1. bot: cmo | output: rival prices\n2. bot: cos | output: rollout")

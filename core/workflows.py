@@ -200,7 +200,7 @@ def save_template(wf, name):
     if f is None or name in skill_loads.names() or name in names() or f.exists() \
             or (skill_loads.SKILLS_DIR / name).exists():
         return f"/{name} already exists."
-    desc = " ".join(str(wf.description or wf.name).split())
+    desc = re.sub(r"-{3,}", "-", " ".join(str(wf.description or wf.name).split()))  # never a frontmatter fence
     text = (f"---\nname: {name}\nkind: workflow\ndescription: {desc}\n---\n\n## Steps\n"
             + "".join(f"{i}. {line}\n" for i, line in enumerate(wf.lines, 1)))
     f.parent.mkdir(parents=True, exist_ok=True)

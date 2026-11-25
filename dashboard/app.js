@@ -6555,7 +6555,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function decorateReply(div, m){
     const main = div.querySelector(".msg-main");
     main.querySelector(".deliv-list")?.remove();
-    main.querySelector(".approval-bar")?.remove();
+    main.querySelectorAll(".approval-bar").forEach(e => e.remove());
     main.querySelector(".msg-notices")?.remove();
     if (m.notices?.length) {   // spending cap notes, saved on the reply
       const box = document.createElement("div");
@@ -6684,7 +6684,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
           const name = box.querySelector("[data-plan-name]").value.trim();
           if (!name) return say("Give the template a name.");
           const got = await jpost("/api/workflow/plan/save", { ...r, name });
-          p.saved_as = got.name; redraw();
+          p.saved_as = got.name;
+          if (!_SKILLS.some(x => x.name === got.name)) _SKILLS.push({ name: got.name, description: p.brief || "", kind: "workflow" });
+          redraw();
         }
       } catch (e) { say(e.message); }
     });
@@ -6838,7 +6840,9 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   const CONSULT_LINE_RE = /^[ \t>*_-]*CONSULT[*_ \t]+@[a-z][a-z0-9-]*[*_ \t]*:.*$/gim;
   // server.py _REACT_RE: a line holding nothing but emoji
   const REACT_LINE_RE = /^[ \t>*_-]*REACT[*_ \t]*:(?:[ \t,*_]|\p{Extended_Pictographic}|\p{Emoji_Component}|‍)+$/gimu;
-  const hideMarkers = text => text.replace(APPROVAL_LINE_RE, "").replace(CONSULT_LINE_RE, "").replace(REACT_LINE_RE, "").trimEnd();
+  // core/plans.py: a PLAN block ends the reply, so everything from its head line on is hidden.
+  const PLAN_BLOCK_RE = /^[ \t>#*_-]*PLAN[*_ \t]*:[\s\S]*$/m;
+  const hideMarkers = text => text.replace(APPROVAL_LINE_RE, "").replace(CONSULT_LINE_RE, "").replace(REACT_LINE_RE, "").replace(PLAN_BLOCK_RE, "").trimEnd();
   const CONTINUATION_RE = /\b(yes|yep|yeah|ok|okay|sure|go ahead|save|commit|do it|approved|looks good|next tab|proceed|continue|save all)\b/i;
   const CTX_PORTFOLIO_KW = /\b(all posts|other posts|how many posts|list posts|what posts|calendar|timeline|projects?|profiles?|portfolio)\b/i;
 

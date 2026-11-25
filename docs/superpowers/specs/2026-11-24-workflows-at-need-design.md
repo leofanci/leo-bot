@@ -17,7 +17,7 @@ Measure of success: accuracy minus cost. A drafted plan should beat a single bot
 - An unprompted proposal replaces the answer: the reply is the plan plus one line on why a plan fits. On Reject the bot answers alone. The work is never paid for twice.
 - One plan card per draft: Approve starts the run; Reject takes a short note and the drafting bot redrafts.
 - The run's steps live in the run record, so a drafted plan never needs a file in `skills/`.
-- Optional "Save as template": writes a workflow file from a plan into the data folder, behind its own approval.
+- Optional "Save as template": writes a workflow file from a plan into the data folder. The owner's Save click (with the name) is the approval.
 - An eval that compares drafted plans against a single bot and against shipped templates.
 
 ## Non-goals
@@ -73,14 +73,14 @@ brief: <the request, written to stand alone: goal, audience, dates, constraints>
 
 ## Triggers in the bot's instructions
 
-- Every chat turn that is not a workflow step and not a job run gets a short rule: when to propose a plan (the owner asks for one, or the request needs two or more teammates' areas), that an unprompted plan replaces the answer, the plan format, the active bots it may name, and the skills each has.
+- Every owner chat turn and job run that is not a workflow step gets a short rule (never an invited person's turn): when to propose a plan (the owner asks for one, or the request needs two or more teammates' areas), that an unprompted plan replaces the answer, the plan format, the active bots it may name, and the skills each has.
 - `/plan` is reserved: no skill or workflow may take that name.
 - `/plan <request>` routes like any message to the addressed or routed bot, with the rule that it must answer with a plan.
 - Scheduled jobs keep their `START: /<workflow>` offer. A job's bot may also propose a plan; it then shows as a card the owner approves later, and never starts by itself.
 
 ## Save as template
 
-- A started plan's card offers "Save as template". The owner gives a name; the server writes `<data>/team/workflows/<name>.md` (`~/.leobot/data` by default) with `kind: workflow`, the brief as description, and the steps. This raises its own approval card.
+- A started plan's card offers "Save as template". The owner gives a name; the server writes `<data>/team/workflows/<name>.md` (`~/.leobot/data` by default) with `kind: workflow`, the brief as description, and the steps. Only the owner sees the button and it writes nothing else, so the click is the approval: no second card.
 - Never `skills/`: it is the tracked code folder and updates replace it.
 - `workflows.load` and `workflows.names` read both `skills/` and the data folder. A shipped name wins on a clash, and saving under a shipped or existing name is refused.
 - Saved templates may keep steps with no skill: `skill:` is optional in data-folder workflow files, required in shipped ones.
@@ -96,7 +96,7 @@ brief: <the request, written to stand alone: goal, audience, dates, constraints>
 ## Safety
 
 - Plan blocks from teammates, tool output, web pages or app reads never become cards. Only the owning bot's own reply text counts, and it is parsed like any other control line.
-- The brief stored in the run is the owner's message, passed to each step as quoted data, as today.
+- The brief stored in the run is the one the drafting bot wrote and the owner approved on the card. Steps get it as quoted data labelled as drafted by a bot, never as instructions. A plan drafted after outside content (a web page, app data) carries that mark into its run, so the run keeps the same limits wherever it starts.
 - The plan names only bots on the team. Each step runs with that bot's own access and caps, never wider.
 - Shared threads never run a plan.
 

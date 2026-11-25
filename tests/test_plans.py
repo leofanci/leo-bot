@@ -36,6 +36,17 @@ class Extract(unittest.TestCase):
         self.assertIn("Pricing change", block)
         self.assertNotIn("Other", block)
 
+    def test_fences_of_other_blocks_survive(self):
+        text = "```py\nx=1\n```\n" + BLOCK + "\n```js\ny=2\n```"
+        clean, block = plans.extract(text)
+        self.assertEqual(clean, "```py\nx=1\n```\n```js\ny=2\n```")
+        self.assertIsNotNone(block)
+
+    def test_heading_form(self):
+        clean, block = plans.extract("Why.\n### PLAN: Pricing change\n" + BLOCK.split("\n", 1)[1])
+        self.assertEqual(clean, "Why.")
+        self.assertEqual(plans.parse(block).name, "Pricing change")
+
 
 class Parse(unittest.TestCase):
     def test_parse_plan(self):

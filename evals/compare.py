@@ -544,8 +544,11 @@ def main(argv=None):
         return 2
     engine = args.engine or registry.default_id(config.load(paths.DATA))
     if not args.yes:
+        plan = any("lead" in c for c in cases) or args.plan
+        extra = (" plus a drafted plan run (about 3 to 12 more bot turns and 2 to 4 more judge calls)"
+                 if plan else "")
         answer = input(f"Compare runs {len(cases)} cases on {engine}: about 6 to 15 bot turns and 2 to 4 "
-                       "strong-model judge calls each, billed to your account. Continue? [y/N] ")
+                       f"strong-model judge calls each{extra}, billed to your account. Continue? [y/N] ")
         if answer.strip().lower() not in ("y", "yes"):
             print("Nothing was sent.")
             return 1

@@ -15,7 +15,7 @@ from core import workflows
 
 BRIEF_MAX = 2000
 TITLE_MAX = 80
-_HEAD_RE = re.compile(r"^[ \t>*_-]*PLAN[*_ \t]*:[*_ \t]*(.*)$")
+_HEAD_RE = re.compile(r"^[ \t>#*_-]*PLAN[*_ \t]*:[*_ \t]*(.*)$")
 _BRIEF_RE = re.compile(r"^[ \t>*_-]*brief[*_ \t]*:[*_ \t]*(.*)$", re.I)
 _FENCE_RE = re.compile(r"^\s*(```|~~~)[\w-]*\s*$")
 
@@ -52,7 +52,8 @@ def extract(text):
         nxt = end + 1
         while nxt < len(lines) and not lines[nxt].strip():
             nxt += 1
-        if prev >= 0 and _FENCE_RE.match(keep[prev]) and nxt < len(lines) and _FENCE_RE.match(lines[nxt]):
+        opener = prev >= 0 and sum(bool(_FENCE_RE.match(x)) for x in keep[:prev + 1]) % 2 == 1
+        if opener and _FENCE_RE.match(keep[prev]) and nxt < len(lines) and _FENCE_RE.match(lines[nxt]):
             del keep[prev:]
             end = nxt
         i = end + 1

@@ -559,6 +559,15 @@ class PlanRunsAndSavedTemplates(unittest.TestCase):
         self.assertIn("vendor-pick", workflows.names())
         self.assertIn("idea-to-experiment", workflows.names())
 
+    def test_saved_brief_with_frontmatter_fence(self):
+        from core import plans
+        wf = plans.parse("PLAN: T\nbrief: Pick a vendor --- then switch\n1. bot: cto | output: shortlist")
+        self.assertIsNone(workflows.save_template(wf, "vendor-pick"))
+        got = workflows.load("vendor-pick")
+        self.assertEqual(got.body, "")
+        self.assertIn("Pick a vendor", got.description)
+        self.assertIn("then switch", got.description)
+
     def test_save_refusals(self):
         from core import plans
         wf = plans.parse("PLAN: T\nbrief: b\n1. bot: cto | output: x")

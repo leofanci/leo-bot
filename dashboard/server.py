@@ -4109,6 +4109,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._ask_turn(body, viewer)
         finally:
             _unmark_busy(chat_id)
+            workflow_turns.release(viewer.get("workflow"))  # refused or failed before its step began
 
     def _plan_post(self, path, body):
         """Reject or Save as template on a plan card: owner only (an invited person never reaches here)."""
@@ -4433,6 +4434,8 @@ class Handler(BaseHTTPRequestHandler):
                           or bool(job and jobs.notes_outside(jobs.get(ROOT, job["id"]) or job)),
                           who={"ws": ws, "chat": chat_id,
                                "person": (person or {}).get("id"), "job": (job or {}).get("id")})
+        if wf_ctx and wf_ctx.get("outside"):  # a plan drafted after outside content: its run carries it
+            turn.saw_outside()
         files_scan = provenance.scan(ROOT, ws)  # what this request changes is labeled if it is tainted
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
@@ -5076,7 +5079,7 @@ class Handler(BaseHTTPRequestHandler):
                     emit({"notice": note, "msg": i})
                     continue
                 m["plan"] = {"title": wf.name, "brief": wf.description[:plans.BRIEF_MAX], "lines": list(wf.lines),
-                             "bot": bot_id, "status": "offered", "run_chat": None}
+                             "bot": bot_id, "status": "offered", "run_chat": None, "outside": bool(turn.outside)}
                 emit({"plan": m["plan"], "msg": i})
             if job:  # the job's own bot says its stop condition holds; a consulted teammate never ends it
                 for i, m in enumerate(msgs):
