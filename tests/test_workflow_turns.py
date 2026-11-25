@@ -922,6 +922,13 @@ class WorkflowTurns(unittest.TestCase):
         got = [s for s in server._skills_index() if s["name"] == "vendor-pick"]
         self.assertEqual(got, [{"name": "vendor-pick", "description": "Hire a designer for acme.", "kind": "workflow"}])
 
+    def test_plan_card_survives_app_card_repaint(self):
+        # renderAppCards removes every .app-card in the thread: the plan card must not be one.
+        src = (Path(server.__file__).parent / "app.js").read_text(encoding="utf-8")
+        line = next(x for x in src.splitlines() if "plan-card" in x and "className" in x)
+        self.assertNotIn("app-card", line.split("//")[0])
+        self.assertIn('stream.querySelectorAll(".app-card")', src)
+
 
 if __name__ == "__main__":
     unittest.main()

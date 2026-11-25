@@ -811,6 +811,7 @@ summary.pf-head::-webkit-details-marker{display:none}
 .app-btns{display:flex;gap:var(--ui-space-1-5)}
 .app-edit{display:grid;gap:var(--ui-space-2)}
 .app-edit[hidden]{display:none}
+.approval-bar.plan-card{flex-direction:column;align-items:stretch}
 .plan-steps{margin:0;padding-left:var(--ui-space-5);font-size:var(--ui-type-control);overflow-wrap:anywhere}
 .plan-steps li+li{margin-top:var(--ui-space-1)}
 .app-edit label{display:grid;gap:var(--ui-space-1);font-size:var(--ui-type-label);color:var(--ui-color-text-muted)}

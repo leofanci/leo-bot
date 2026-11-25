@@ -6632,7 +6632,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
   function planCard(row, m){
     const p = m.plan, owner = !isPerson();
     const box = document.createElement("div");
-    box.className = "approval-bar app-card plan-card";
+    box.className = "approval-bar plan-card";   // not .app-card: renderAppCards clears those
     const steps = (p.lines || []).map(l => `<li>${esc(planStepLine(l))}</li>`).join("");
     let foot = "";
     if (owner && p.status === "offered") {
@@ -6641,7 +6641,7 @@ async function renderConfirmDeleteChannel(channelSlug, profileSlug){
         <div class="app-edit" hidden><label>What should change? (optional)<input type="text" maxlength="500" data-plan-note></label>
         <div class="app-btns"><button class="btn sm" type="button" data-plan="send-reject">Send</button></div></div>`;
     } else if (p.status === "started") {
-      foot = `<div class="app-result">Started${owner && p.run_chat ? ` · <button class="link-btn" type="button" data-plan="open">Open the run</button>` : ""}</div>`
+      foot = `<div class="app-result">Started${owner && p.run_chat && p.run_chat !== activeChatId ? ` · <button class="link-btn" type="button" data-plan="open">Open the run</button>` : ""}</div>`
         + (owner && !p.saved_as ? `<div class="app-edit plan-save"><label>Save as template (name)<input type="text" maxlength="60" placeholder="vendor-pick" data-plan-name></label>
           <div class="app-btns"><button class="btn sm" type="button" data-plan="save">Save</button></div></div>` : "")
         + (p.saved_as ? `<div class="app-result">Saved as /${esc(p.saved_as)}</div>` : "");
