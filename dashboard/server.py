@@ -4087,7 +4087,9 @@ class Handler(BaseHTTPRequestHandler):
             room = (rooms.get_room(str(body.get("room_id") or ""), team, ROOT)
                     or rooms.get_room(f"{ws}/general", team, ROOT))
             shared = viewer.get("kind") != "owner" or _shared_room(ws, room)
-            got = workflow_turns.prepare(body, viewer, ws, team, room, shared, ROOT)
+            general_shared = (body.get("workflow") == "plan"
+                              and _shared_room(ws, rooms.get_room(f"{ws}/general", team, ROOT)))
+            got = workflow_turns.prepare(body, viewer, ws, team, room, shared, ROOT, general_shared=general_shared)
             if isinstance(got, str):
                 return self._sse_message(got)
             body, wf_ctx = got
@@ -4095,6 +4097,7 @@ class Handler(BaseHTTPRequestHandler):
                 viewer = {**viewer, "workflow": wf_ctx}
         chat_id = body.get("chat_id") if isinstance(body.get("chat_id"), str) else None
         if not _mark_busy(chat_id):
+            workflow_turns.release(viewer.get("workflow"))  # an Approve that never ran stays open
             return self._send(409, {"error": BUSY_MSG})
         try:
             return self._ask_turn(body, viewer)

@@ -630,6 +630,125 @@ class WorkflowTurns(unittest.TestCase):
         self.assertIn("T is paused: Step 1: @cmo is switched off.", out)
         self.assertNotIn("/T", out)
 
+    SRC = "0123abcd-0000-4000-8000-0000000000aa"
+
+    def offer_plan(self, lines=("bot: product | output: role brief",), room="acme/general", chat=CHAT,
+                   status="offered"):
+        plan = {"title": "T", "brief": "Hire a designer for acme.", "lines": list(lines), "bot": "gtm",
+                "status": status, "run_chat": None}
+        server.chat_store.save({"id": chat, "room": room, "messages": [
+            {"role": "user", "content": "@gtm hire a designer"},
+            {"role": "assistant", "bot": "gtm", "content": "Needs two areas.", "plan": plan}]})
+        return chat
+
+    def approve(self, src, replies=("done",), msg=1, **kw):
+        rec = server.chat_store.load(src)
+        return self.ask("Approved plan: T", list(replies), room=kw.pop("room", rec["room"]), chat_id=src,
+                        workflow="plan", plan_ref={"chat": src, "msg": msg}, **kw)
+
+    def plan_of(self, src):
+        return server.chat_store.load(src)["messages"][1]["plan"]
+
+    def test_approve_starts_once(self):
+        src = self.offer_plan()
+        out, _ = self.approve(src)
+        self.assertEqual(self.lead(out), "product")
+        self.assertEqual(wf_event(out)["name"], "T")
+        self.assertEqual(self.run_rec()["steps"], ["bot: product | output: role brief"])
+        self.assertEqual(self.run_rec()["brief"], "Hire a designer for acme.")
+        self.assertEqual((self.plan_of(src)["status"], self.plan_of(src)["run_chat"]), ("started", CHAT))
+        n = len(self.runs)
+        again, _ = self.approve(src)
+        self.assertIn("This plan already started.", again)
+        self.assertEqual(len(self.runs), n)
+
+    def test_approve_refused_for_switched_off_bot_keeps_offer(self):
+        src = self.offer_plan(lines=["bot: cmo | output: x"])
+        bots.set_active("cmo", False, self.root, "acme", self.tree[0])
+        out, _ = self.approve(src)
+        self.assertIn("T cannot start here:", out)
+        self.assertIn("@cmo is switched off", out)
+        self.assertIn("Switch them on", out)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+        self.assertEqual(self.runs, [])
+
+    def test_approve_not_owner(self):
+        src = self.offer_plan()
+        with mock.patch.object(server.rooms, "can_see", return_value=True), \
+                mock.patch.object(server.rooms, "chat_visible", return_value=True):
+            out, _ = self.approve(src, viewer={"kind": "person", "id": "p1", "ws": ["acme"]})
+        self.assertIn(workflow_turns.PRIVATE_ONLY, out)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+
+    def test_approve_from_dm_starts_new_thread_in_general(self):
+        src = self.offer_plan(room="acme/dm-gtm", chat=self.SRC)
+        out, _ = self.approve(src)
+        ev = wf_event(out)
+        self.assertEqual(ev["chat"], CHAT)  # the new thread (the test session's id), not the DM
+        self.assertEqual(self.plan_of(src)["run_chat"], CHAT)
+        self.assertEqual(self.run_rec()["room"], "acme/general")
+
+    def test_approve_in_thread_with_live_run_starts_new_thread(self):
+        self.save_plan_run("PLAN: Other\nbrief: b\n1. bot: product | output: x", chat=self.SRC)
+        src = self.offer_plan(chat=self.SRC)
+        body = {"workflow": "plan", "plan_ref": {"chat": src, "msg": 1}, "chat_id": src, "room_id": "acme/general",
+                "messages": [{"role": "user", "content": "Approved plan: T"}]}
+        team = bots.team(self.root, "acme", self.tree[0])
+        got, ctx = workflow_turns.prepare(body, server.OWNER, "acme", team, {"id": "acme/general", "kind": "channel"},
+                                          False, self.root)
+        self.assertIsNone(got["chat_id"])
+        self.assertEqual(got["room_id"], "acme/general")
+        self.assertNotIn("plan_ref", got)
+        self.assertEqual(ctx["plan_ref"], (src, 1))
+
+    def test_approve_bad_refs(self):
+        src = self.offer_plan()
+        team = bots.team(self.root, "acme", self.tree[0])
+        room = {"id": "acme/general", "kind": "channel"}
+        for ref, why in (({"chat": "../x", "msg": 1}, "No plan to start here."),
+                         ({"chat": src, "msg": 0}, "No plan to start here."),
+                         ({"chat": src, "msg": -1}, "No plan to start here."),
+                         ({"chat": src, "msg": "1"}, "No plan to start here."),
+                         ({"chat": src, "msg": 9}, "No plan to start here."),
+                         ("x", "No plan to start here.")):
+            body = {"workflow": "plan", "plan_ref": ref, "messages": []}
+            self.assertEqual(workflow_turns.prepare(body, server.OWNER, "acme", team, room, False, self.root), why)
+        other = workflow_turns.prepare({"workflow": "plan", "plan_ref": {"chat": src, "msg": 1}, "messages": []},
+                                       server.OWNER, "demo", team, room, False, self.root)
+        self.assertEqual(other, "No plan to start here.")  # another workspace's thread
+        self.offer_plan(status="rejected")
+        self.assertEqual(workflow_turns.prepare({"workflow": "plan", "plan_ref": {"chat": src, "msg": 1},
+                                                 "messages": []}, server.OWNER, "acme", team, room, False,
+                                                self.root), "This plan was rejected.")
+
+    def test_approve_refused_when_general_is_shared(self):
+        src = self.offer_plan(room="acme/dm-gtm", chat=self.SRC)
+        body = {"workflow": "plan", "plan_ref": {"chat": src, "msg": 1}, "chat_id": src, "room_id": "acme/dm-gtm",
+                "messages": []}
+        team = bots.team(self.root, "acme", self.tree[0])
+        got = workflow_turns.prepare(body, server.OWNER, "acme", team, {"id": "acme/dm-gtm", "kind": "dm"},
+                                     False, self.root, general_shared=True)
+        self.assertEqual(got, workflow_turns.PRIVATE_ONLY)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+
+    def test_approve_on_busy_thread_stays_offered(self):
+        src = self.offer_plan()
+        with mock.patch.object(server, "_mark_busy", return_value=False), \
+                mock.patch.object(server.Handler, "_send", lambda self, code, data: None):
+            self.approve(src)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+        self.assertEqual(self.runs, [])
+
+    def test_approve_from_dm_refused_when_general_shared(self):
+        src = self.offer_plan(room="acme/dm-gtm", chat=self.SRC)
+        with mock.patch.object(server, "_shared_room", side_effect=lambda ws, room: (room or {}).get("id") == "acme/general"):
+            out, _ = self.approve(src)
+        self.assertIn(workflow_turns.PRIVATE_ONLY, out)
+        self.assertEqual(self.plan_of(src)["status"], "offered")
+
+    def test_message_with_only_a_plan_is_kept(self):
+        self.assertTrue(server.chat_store.kept({"plan": {"title": "T"}}))
+
 
 if __name__ == "__main__":
     unittest.main()

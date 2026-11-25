@@ -8,8 +8,9 @@ the start message, or the browser's `workflow: "next"` tick, into that turn's bo
 act: a card, a step still weak or blocked after one retry, the run's cost cap, Stop or a failure.
 """
 import re
+import threading
 
-from core import approvals, workflows
+from core import approvals, rooms, skill_loads, workflows
 
 PRIVATE_ONLY = "Workflows run in your own private threads."
 NO_DM = "Start a workflow in a channel, not a direct message: its steps go to several bots."
@@ -17,6 +18,10 @@ ANSWER_CARD = "Approve or reject the card first."
 CAPPED = ("This run reached its cost cap (Settings, General, workflow cost). "
           "Raise the cap, then Continue.")
 SWITCH_ON = "\nSwitch them on in this workspace's Team, then start again."
+NO_PLAN = "No plan to start here."
+PLAN_STARTED = "This plan already started."
+PLAN_REJECTED = "This plan was rejected."
+_PLAN_LOCK = threading.Lock()  # one Approve at a time: a plan starts once
 BRIEF_MAX = 2000
 ADVISORY = ("consult", "check", "debate", "answer")  # turns that advise, judge or rewrite a draft: read-only
 LABEL_BRIEF_MAX = 300
@@ -127,7 +132,7 @@ def followup_note(ctx):
 def involved(body, root):
     """True when this message may touch a workflow: a start, a tick, or any turn in a thread that
     has a run. Everything else skips the workflow path entirely."""
-    if body.get("workflow") == "next" or _start(body):
+    if body.get("workflow") in ("next", "plan") or _start(body):
         return True
     chat = body.get("chat_id")
     return isinstance(chat, str) and workflows.get(root, chat) is not None
@@ -283,8 +288,110 @@ def _turn(body, run, wf):
                  "solo": work and not team_stage and (bool(step.consult) or workflows.drafts_only(step))}
 
 
-def prepare(body, viewer, ws, team, room, shared, root):
+def _plan_ref(body):
+    """(source chat, message index) from an Approve body, or None when malformed."""
+    ref = body.get("plan_ref")
+    if not isinstance(ref, dict):
+        return None
+    chat, msg = ref.get("chat"), ref.get("msg")
+    if not isinstance(chat, str) or not skill_loads._CHAT_RE.match(chat):
+        return None
+    if not isinstance(msg, int) or isinstance(msg, bool) or msg < 1:
+        return None
+    return chat, msg
+
+
+def _stored_plan(chat, msg, ws):
+    """(record, plan dict) of a plan stored on message `msg` of thread `chat` in workspace `ws`, or a refusal."""
+    import chat_store  # the server's copy (dashboard/ on sys.path): same lock as its turn saves
+    rec = chat_store.load(chat)
+    if not rec or rooms.split_id(rec.get("room"))[0] != ws:
+        return NO_PLAN
+    msgs = rec.get("messages") or []
+    plan = msgs[msg].get("plan") if msg < len(msgs) and isinstance(msgs[msg], dict) else None
+    if not isinstance(plan, dict):
+        return NO_PLAN
+    if plan.get("status") == "started":
+        return PLAN_STARTED
+    if plan.get("status") == "rejected":
+        return PLAN_REJECTED
+    return (rec, plan) if plan.get("status") == "offered" else NO_PLAN
+
+
+def plan_workflow(plan):
+    """The stored plan as a Workflow, or None when it no longer parses."""
+    lines = plan.get("lines")
+    if not isinstance(lines, list) or not all(isinstance(x, str) for x in lines):
+        return None
+    try:
+        steps = workflows.parse_lines(lines, need_skill=False)
+    except ValueError:
+        return None
+    return workflows.Workflow(str(plan.get("title") or "Plan"), str(plan.get("brief") or ""), steps, "",
+                              plan=True, lines=tuple(lines))
+
+
+def _set_plan(chat, msg, **fields):
+    """Update the plan on a stored message in place (under the chat store's lock)."""
+    import chat_store  # the server's copy (dashboard/ on sys.path): same lock as its turn saves
+    with chat_store.locked():
+        rec = chat_store.load(chat)
+        msgs = (rec or {}).get("messages") or []
+        if msg < len(msgs) and isinstance(msgs[msg].get("plan"), dict):
+            msgs[msg]["plan"].update(fields)
+            chat_store.save(rec)
+
+
+def _approve(body, viewer, ws, team, room, shared, root, general_shared):
+    """The owner's Approve on a plan card: the run's first turn, read from the stored message."""
+    if viewer.get("kind") != "owner":
+        return PRIVATE_ONLY
+    ref = _plan_ref(body)
+    if not ref:
+        return NO_PLAN
+    src, msg = ref
+    got = _stored_plan(src, msg, ws)
+    if isinstance(got, str):
+        return got
+    rec, plan = got
+    wf = plan_workflow(plan)
+    if wf is None:
+        return NO_PLAN
+    bad = workflows.problems(wf, team)
+    if bad:
+        hint = SWITCH_ON if any("switched off" in b for b in bad) else ""
+        return f"{title(wf)} cannot start here:\n" + "\n".join(f"- {b}" for b in bad) + hint
+    live = workflows.get(root, src)
+    live = workflows.idle(live) if live else None
+    here = (not shared and (room or {}).get("kind") != "dm" and rec.get("room") == (room or {}).get("id")
+            and body.get("chat_id") == src and not (live and live["status"] in ("running", "paused")))
+    body = {k: v for k, v in body.items() if k != "plan_ref"}
+    if not here:
+        if general_shared:
+            return PRIVATE_ONLY
+        body.update(chat_id=None, room_id=f"{ws}/general")
+        room = {"id": f"{ws}/general", "kind": "channel"}
+    with _PLAN_LOCK:
+        now = _stored_plan(src, msg, ws)
+        if isinstance(now, str):
+            return now
+        _set_plan(src, msg, status="started")
+    body, ctx = _turn(body, workflows.new_run(wf, wf.description[:BRIEF_MAX], ws, room["id"]), wf)
+    ctx["plan_ref"] = (src, msg)
+    return body, ctx
+
+
+def release(ctx):
+    """A started plan whose first turn never ran (the thread was busy): it can be approved again."""
+    ref = (ctx or {}).get("plan_ref")
+    if ref:
+        _set_plan(ref[0], ref[1], status="offered", run_chat=None)
+
+
+def prepare(body, viewer, ws, team, room, shared, root, general_shared=False):
     """(body to run, ctx or None), or a refusal line for the thread (no model turn)."""
+    if body.get("workflow") == "plan":
+        return _approve(body, viewer, ws, team, room, shared, root, general_shared)
     tick = body.get("workflow") == "next"
     start = _start(body)
     chat = body.get("chat_id") if isinstance(body.get("chat_id"), str) else None
@@ -340,6 +447,8 @@ def begin(ctx, chat, root):
         run = dict(run, chat=chat)
         workflows.save(root, run)
         ctx["run"] = run  # only once saved: finish re-reads a run that has its thread
+        if ctx.get("plan_ref"):
+            _set_plan(*ctx["plan_ref"], run_chat=chat)
     return {"workflow_live": dict(view(run, wf), next=False)}
 
 
