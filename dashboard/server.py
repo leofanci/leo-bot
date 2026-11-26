@@ -4228,6 +4228,10 @@ class Handler(BaseHTTPRequestHandler):
         if (cb and cb.active and (members is None or cb.id in members) and (room or {}).get("kind") != "dm"
                 and not _explicit_skill(user_msg) and not team.mentioned(user_msg)):
             route = (cb.id, *route[1:])
+        # /plan: the tagged lead drafts with no skill loaded; a skill's own instructions would
+        # crowd out the plan block, and its owner never takes the turn over.
+        if plan_asked:
+            route = (team.mentioned(user_msg) or route[0], None, False, None)
         # A workflow step goes to the bot its template names, whatever the label's wording matches.
         wf_ctx = viewer.get("workflow")
         if wf_ctx and wf_ctx.get("route"):

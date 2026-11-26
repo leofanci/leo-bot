@@ -819,6 +819,14 @@ class WorkflowTurns(unittest.TestCase):
         self.assertEqual(self.lead(out), "product")
         self.assertIn("The owner asked for a plan", self.runs[-1]["text"])
 
+    def test_slash_plan_loads_no_skill(self):
+        # A skill's own instructions (a weekly plan, a launch plan) would crowd out the plan block.
+        out, _ = self.ask("@gtm /plan write and build a launch plan for the new tier", ["ok"])
+        bot = next(e["bot"] for e in events(out) if "bot" in e)
+        self.assertEqual((bot["id"], bot["skill"]), ("gtm", None))
+        out, _ = self.ask("@gtm write and build a launch plan for the new tier", ["ok"])
+        self.assertIsNotNone(next(e["bot"] for e in events(out) if "bot" in e)["skill"])  # without /plan it does
+
     def test_slash_plan_empty(self):
         out, _ = self.ask("/plan", ["ok"])
         self.assertIn("Say what the plan is for: /plan <request>.", out)
