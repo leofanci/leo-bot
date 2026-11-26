@@ -550,6 +550,17 @@ class ComparePlans(unittest.TestCase):
         got = compare.plan_arm(post, case, "product", thread=lambda chat: threads.get(chat, []))
         self.assertEqual((got["plan"], got["reached"]), ("prices", "1/2"))
 
+    def test_plan_arm_tick_limit_scales_with_steps(self):
+        seen = {}
+        threads = {"c1": [{"role": "assistant", "bot": "product", "content": "why",
+                           "plan": {"title": "T", "lines": ["bot: gtm | output: x"] * 6}}]}
+        events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 0}]
+        with mock.patch.object(compare, "drive", side_effect=lambda post, first, limit=12: seen.update(limit=limit)
+                               or {"chat": "c1", "status": "done", "why": "", "ticks": 0}):
+            compare.plan_arm(lambda p: events, {"id": "c", "lead": "product", "brief": "b", "intake": "x"}, "product",
+                             thread=lambda chat: threads.get(chat, []))
+        self.assertGreaterEqual(seen["limit"], 6 * compare.TICKS_PER_STEP)
+
     def test_plan_arm_with_no_plan(self):
         got = compare.plan_arm(lambda p: [{"chat_id": "c1"}, {"delta": "answer"}],
                                {"id": "c", "lead": "cmo", "brief": "b", "intake": "x"}, "cmo",
@@ -567,6 +578,7 @@ class ComparePlans(unittest.TestCase):
         self.assertEqual(compare.alone(wf), f"@{step.bot} /{step.skill} {wf['brief']}")
         from dashboard import workflow_turns
         self.assertIn("asks for your own answer", workflow_turns.PLAN_RULE)
+        self.assertIn("The last step hands back the whole result the owner asked for", workflow_turns.PLAN_RULE)
 
     def test_single_arm_that_drafts_a_plan_fails(self):
         events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 1}]

@@ -41,6 +41,7 @@ RIVALS = ("single", "baseline")  # each judged against the workflow
 APPROVED = "Yes, approved."  # what the browser sends for Approve on a card
 OWN_ANSWER = "Answer this yourself in this reply, with no plan."
 DRAFTED_INSTEAD = "Drafted a plan instead of answering."
+TICKS_PER_STEP = 6  # a plan step can take a stage, consults, a check, a revise, a recheck and a save card
 CRITERIA = ("specific", "grounded", "risks", "doable", "consistent")
 KEEP_RUNS = 20
 ROOM = "acme/general"
@@ -444,7 +445,8 @@ def plan_arm(post, case, lead, thread=None):
     stored = drafted[at]["plan"]
     lines = [x for x in stored.get("lines") or [] if isinstance(x, str)]
     got = drive(post, {"messages": [{"role": "user", "content": f"Approved plan: {stored.get('title') or ''}"}],
-                       "room_id": ROOM, "chat_id": src, "workflow": "plan", "plan_ref": {"chat": src, "msg": at}})
+                       "room_id": ROOM, "chat_id": src, "workflow": "plan", "plan_ref": {"chat": src, "msg": at}},
+                limit=max(12, TICKS_PER_STEP * len(lines)))
     # The step the run reached (its last when it finished): a run stopped early is judged on what it made.
     reached = min(max(int(got.get("step") or len(lines) or 1), 1), max(len(lines), 1))
     line = lines[reached - 1] if lines else ""

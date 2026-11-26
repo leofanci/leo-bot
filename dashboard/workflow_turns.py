@@ -37,7 +37,8 @@ PLAN_RULE = (
     "1. bot: <bot> | output: <what the step hands back> | gate: no\n"
     "2. skill: <optional> | bot: <bot> | output: <...> | gate: approval | checker: <another bot>\n"
     "Per step, optional: skill, checker (never the step's own bot), consult: <up to 3 bots>, team: yes, "
-    "debate: 1 or 2 (needs team: yes or consult). gate: approval only for a step that saves. At most "
+    "debate: 1 or 2 (needs team: yes or consult). gate: approval only for a step that saves. The last step "
+    "hands back the whole result the owner asked for, built on the earlier steps. At most "
     f"{workflows.MAX_STEPS} steps.\n"
     "Bots you may name: {bots}.")
 PLAN_ASKED = "The owner asked for a plan: answer with one PLAN block. Skills each bot may use in a step:\n{skills}"
