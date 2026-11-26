@@ -106,8 +106,21 @@ A workflow is a fixed sequence of skills, each run by a named bot. Start one in 
 - The default team brings `/idea-to-experiment`, `/team-launch-plan` (@gtm drafts a launch plan, @research and @cmo advise, @product checks) and `/team-launch-debate` (@gtm asks only the teammates it needs, each advises without seeing the others, they agree or object for up to two rounds, @product checks).
 - A step line may say `team: yes`: its bot decides whether to work alone or which teammates to consult (at most 3; a teammate may bring in one more), and a `consult:` list becomes a hint. `debate: 1` or `2` adds rounds where the consultants reply AGREE or OBJECT to the full output and the bot answers only the objections. Every advice, debate and draft turn is read-only; the save comes in its own turn.
 - The add-on bots bring one workflow each: `/deal-prep` and `/outreach` (@sales), `/price-to-runway` (@finance), `/feedback-to-test` (@support), `/process-setup` (@ops) and `/hire-plan` (@people). Switch the bot on first.
-- `leobot eval --compare` (or `python -m evals --compare`) checks whether a one-step workflow beats its maker bot working alone, and a case's `baseline` workflow when it names one. It runs each case every way in a throwaway home on your default engine, then a strong model scores each pair of plans twice, in both orders, without knowing which is which: a pair's winner is the plan both calls picked. It spends, so it asks first. Results are saved in `~/.leobot/evals/`. The shipped cases are made up; `--cases-file <path>` runs your own cases from a file kept outside the repo.
+- `leobot eval --compare` (or `python -m evals --compare`) checks whether a one-step workflow beats its maker bot working alone, and a case's `baseline` workflow when it names one. It runs each case every way in a throwaway home on your default engine, then a strong model scores each pair of plans twice, in both orders, without knowing which is which: a pair's winner is the plan both calls picked. It spends, so it asks first. Results are saved in `~/.leobot/evals/`. The shipped cases are made up; `--cases-file <path>` runs your own cases from a file kept outside the repo. `--plan` adds a plan the maker bot drafts itself (`/plan`, approved automatically), judged against the bot alone and against the workflow; a case with `lead` instead of `workflow` always compares a drafted plan with that bot alone.
 - A workflow is a skill file with `kind: workflow` and a `## Steps` list (`skills/idea-to-experiment/SKILL.md` is the reference). It cannot start when a step's bot is switched off (switch it on in the workspace's Team) or lacks the step's skill. Stop workflow works from step 1 on.
+
+### Plans: workflows built for one request
+
+You do not need a workflow file for a request that needs several teammates. The bot drafts the steps itself and you approve them.
+
+- Ask for one with `/plan <request>` (after a bot's handle too: `@gtm /plan a price change for May`), or in plain words. A bot also proposes a plan on its own when the request needs two or more teammates' areas. That plan replaces its answer: one line on why, then the plan. A request one bot can do well gets a normal answer.
+- The plan shows as a card under the reply: a title, the brief the steps work from, and one line per step (bot, skill if any, output, gate, checker, consults). Only you see its buttons.
+- **Approve** starts the run, once. It runs in the same thread when that is your private thread, otherwise in a new thread in #general. Everything after that is a normal workflow run: the bar, Continue, Stop workflow, the cost cap, and every gated step still asks with its own card. Approving a plan approves no save and no send.
+- **Reject** takes an optional note. It goes to the bot as your next message: the bot redrafts the plan, or answers the request alone.
+- A plan that names a bot not on the team (or not in this channel), a switched-off bot, or a checker equal to the step's bot shows "The plan did not hold up" with the reason, and no card.
+- A plan's step may leave out `skill:`: the bot then works from its own instructions.
+- **Save as template**, on a started plan's card: give a name and press Save. The plan becomes `~/.leobot/data/team/workflows/<name>.md`, and `/<name> <brief>` starts it like any workflow. Shipped workflows and skills keep their names: a saved one cannot take a name in use, nor `plan`.
+- A scheduled job's bot may also end with a plan. It waits as a card for you; it never starts by itself.
 
 ## Loops
 

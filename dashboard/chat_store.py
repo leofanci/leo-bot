@@ -280,7 +280,7 @@ def recap(rec, engine_id=None):
 def kept(m):
     """A message with no text still worth saving: it holds an approval, deliverables, spend
     or a cap notice."""
-    return any(m.get(k) for k in ("approval", "deliverables", "tokens", "cost", "notices", "workflow_offer"))
+    return any(m.get(k) for k in ("approval", "deliverables", "tokens", "cost", "notices", "workflow_offer", "plan"))
 
 
 def _paths(value):

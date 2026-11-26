@@ -210,7 +210,7 @@ class Compare(unittest.TestCase):
         return path
 
     def test_load_checks_cases(self):
-        cases = compare.load()
+        cases = [c for c in compare.load() if "workflow" in c]
         self.assertEqual(len(cases), 6)
         for c in cases:
             self.assertEqual(set(c), {"id", "workflow", "baseline", "brief", "intake"})
@@ -257,6 +257,26 @@ class Compare(unittest.TestCase):
         self.assertEqual((got["ticks"], got["status"], len(sent)), (4, "running", 5))
         got = compare.drive(lambda p: [{"error": "internal error"}], {"messages": []})
         self.assertEqual((got["status"], got["ticks"]), ("failed", 0))
+
+    def test_drive_approves_a_step_card_while_steps_remain(self):
+        # The owner approves a middle step's save card and the run goes on; the last step's card ends it.
+        sent = []
+        wait = {"next": False, "status": "paused", "phase": "approve", "label": "", "why": "Waiting for your approval."}
+        replies = [[{"chat_id": "c1"}, {"workflow": dict(wait, chat="c1", step=1, total=2)}],
+                   [{"workflow": {"chat": "c1", "next": True, "status": "running", "phase": "stage",
+                                  "step": 2, "total": 2, "label": "@gtm Step 2", "why": ""}}],
+                   [{"workflow": dict(wait, chat="c1", step=2, total=2)}]]
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        got = compare.drive(post, {"messages": [{"role": "user", "content": "/x go"}], "room_id": "acme/general"})
+        self.assertEqual(got, {"chat": "c1", "status": "paused", "why": "Waiting for your approval.", "ticks": 2,
+                               "step": 2, "total": 2})
+        self.assertEqual((sent[1]["approval"], sent[1]["chat_id"], sent[1]["room_id"]), ("approved", "c1", "acme/general"))
+        self.assertNotIn("workflow", sent[1])
+        self.assertEqual(sent[1]["messages"][0]["content"], compare.APPROVED)
+        self.assertEqual(sent[2]["workflow"], "next")
 
     def test_judge_prompt_is_blind_and_order_varies(self):
         case = compare.load()[0]
@@ -351,7 +371,7 @@ class Compare(unittest.TestCase):
         self.assertEqual(got["better"], "workflow")
 
     def test_baseline_arm_runs_in_a_rotating_order(self):
-        cases = compare.load()
+        cases = [c for c in compare.load() if "workflow" in c]
         for c in cases:
             self.assertEqual(sorted(compare.arm_order(c)), ["baseline", "single", "workflow"])
         self.assertGreater(len({compare.arm_order(c)[0] for c in cases}), 1)
@@ -425,7 +445,15 @@ class Compare(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(seen["engine"], "codex")
         self.assertIn("--cases-file", seen["cmd"])
+        self.assertNotIn("--plan", seen["cmd"])
         self.assertIn("Gain: yes", out.getvalue())
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(compare, "_runs_dir", return_value=Path(tmp)), \
+                mock.patch.object(compare.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(compare.main(["--plan", "--case", "acme-price-change", "--yes"]), 0)
+        self.assertIn("--plan", seen["cmd"])
+        self.assertEqual(seen["cmd"][seen["cmd"].index("--case") + 1], "acme-price-change")
 
     def test_evals_entry_routes_compare(self):
         import evals.__main__ as entry
@@ -434,7 +462,200 @@ class Compare(unittest.TestCase):
         m.assert_called_once_with(["--yes"])
 
 
+class ComparePlans(unittest.TestCase):
+    """The drafted-plan arm: `/plan <brief>` to a lead bot, the plan approved, its run judged."""
+
+    def write(self, tmp, cases):
+        path = Path(tmp) / "cases.json"
+        path.write_text(json.dumps(cases))
+        return path
+
+    def test_lead_cases_load(self):
+        leads = [c for c in compare.load() if "lead" in c]
+        self.assertEqual(sorted(c["id"] for c in leads), ["acme-first-hire", "acme-price-change", "acme-vendor-pick"])
+        for c in leads:
+            self.assertEqual(set(c), {"id", "lead", "brief", "intake"})
+            self.assertIn("acme", (c["brief"] + c["intake"]).lower())
+        good = leads[0]
+        wf = next(c for c in compare.load() if "workflow" in c)
+        bad = {"both": [dict(good, workflow=wf["workflow"])],
+               "neither": [{k: v for k, v in good.items() if k != "lead"}],
+               "baseline without workflow": [dict(good, baseline=wf["baseline"])],
+               "unknown lead": [dict(good, lead="nobody")]}
+        with tempfile.TemporaryDirectory() as tmp:
+            for why, data in bad.items():
+                with self.subTest(why), self.assertRaises(ValueError):
+                    compare.load(self.write(tmp, data))
+
+    def test_pairs_per_case_shape(self):
+        wf = next(c for c in compare.load() if "workflow" in c)
+        lead = next(c for c in compare.load() if "lead" in c)
+        plain = {k: v for k, v in wf.items() if k != "baseline"}
+        self.assertEqual(compare.pairs(wf, False), [("workflow", "single"), ("workflow", "baseline")])
+        self.assertEqual(compare.pairs(plain, False), [("workflow", "single")])
+        self.assertEqual(compare.pairs(wf, True), [("workflow", "single"), ("workflow", "baseline"),
+                                                   ("plan", "single"), ("plan", "workflow")])
+        self.assertEqual(compare.pairs(lead, False), [("plan", "single")])
+        self.assertEqual(compare.pairs(lead, True), [("plan", "single")])
+        self.assertEqual(sorted(compare.arm_order(wf, True)), ["baseline", "plan", "single", "workflow"])
+        self.assertEqual(sorted(compare.arm_order(lead)), ["plan", "single"])
+        self.assertEqual(compare.arm_order(wf), compare.arm_order(wf, False))  # unchanged without --plan
+
+    def plan_events(self):
+        return [{"chat_id": "c1"}, {"plan": {"title": "T", "lines": ["bot: research | output: x",
+                                                                    "bot: gtm | output: the plan"]}, "msg": 0}]
+
+    def test_plan_arm_approves_and_judges_last_step(self):
+        sent = []
+        threads = {"c1": [{"role": "user", "content": "@product /plan x"},
+                          {"role": "assistant", "bot": "product", "content": "why", "cost": 0.02,
+                           "plan": {"title": "T", "lines": ["bot: research | output: x", "bot: gtm | output: the plan"]}},
+                          {"role": "user", "content": "@research Step 1 of 2 of T: x"},
+                          {"role": "assistant", "bot": "research", "content": "prices", "cost": 0.05},
+                          {"role": "user", "content": "@gtm Step 2 of 2 of T"},
+                          {"role": "assistant", "bot": "gtm", "content": "The final plan.", "cost": 0.1}]}
+        replies = [self.plan_events(),
+                   [{"workflow": {"chat": "c1", "next": True, "status": "running", "label": "@gtm Step 2", "why": ""}}],
+                   [{"workflow": {"chat": "c1", "next": False, "status": "done", "label": "", "why": ""}}]]
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        case = {"id": "c", "lead": "product", "brief": "Hire someone for acme.", "intake": "x"}
+        got = compare.plan_arm(post, case, "product", thread=lambda chat: threads.get(chat, []))
+        self.assertEqual(sent[0]["messages"][0]["content"], "@product /plan Hire someone for acme.")
+        self.assertEqual((sent[1]["workflow"], sent[1]["plan_ref"]), ("plan", {"chat": "c1", "msg": 1}))
+        self.assertEqual(sent[2]["workflow"], "next")
+        self.assertEqual((got["status"], got["plan"], got["cost"], got["steps"]), ("done", "The final plan.", 0.17, 2))
+
+    def test_plan_arm_judges_the_step_its_run_reached(self):
+        # Stopped weak at step 1 of 2: the judge sees step 1's output, not an empty last step;
+        # a reply to an approved card is never the output.
+        threads = {"c1": [{"role": "user", "content": "@product /plan x"},
+                          {"role": "assistant", "bot": "product", "content": "why", "cost": 0.02,
+                           "plan": {"title": "T", "lines": ["bot: research | output: x", "bot: gtm | output: the plan"]}},
+                          {"role": "user", "content": "@research Step 1 of 2 of T: x"},
+                          {"role": "assistant", "bot": "research", "content": "prices", "cost": 0.05},
+                          {"role": "user", "content": compare.APPROVED},
+                          {"role": "assistant", "bot": "research", "content": "Saved.", "cost": 0.01}]}
+        replies = [self.plan_events(),
+                   [{"workflow": {"chat": "c1", "next": False, "status": "paused", "phase": "stage", "step": 1,
+                                  "total": 2, "label": "", "why": "Step 1 is still weak: no data."}}]]
+        sent = []
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        case = {"id": "c", "lead": "product", "brief": "b", "intake": "x"}
+        got = compare.plan_arm(post, case, "product", thread=lambda chat: threads.get(chat, []))
+        self.assertEqual((got["plan"], got["reached"]), ("prices", "1/2"))
+
+    def test_plan_arm_tick_limit_scales_with_steps(self):
+        seen = {}
+        threads = {"c1": [{"role": "assistant", "bot": "product", "content": "why",
+                           "plan": {"title": "T", "lines": ["bot: gtm | output: x"] * 6}}]}
+        events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 0}]
+        with mock.patch.object(compare, "drive", side_effect=lambda post, first, limit=12: seen.update(limit=limit)
+                               or {"chat": "c1", "status": "done", "why": "", "ticks": 0}):
+            compare.plan_arm(lambda p: events, {"id": "c", "lead": "product", "brief": "b", "intake": "x"}, "product",
+                             thread=lambda chat: threads.get(chat, []))
+        self.assertGreaterEqual(seen["limit"], 6 * compare.TICKS_PER_STEP)
+
+    def test_plan_arm_with_no_plan(self):
+        got = compare.plan_arm(lambda p: [{"chat_id": "c1"}, {"delta": "answer"}],
+                               {"id": "c", "lead": "cmo", "brief": "b", "intake": "x"}, "cmo",
+                               thread=lambda chat: [{"role": "assistant", "bot": "cmo", "content": "answer", "cost": 0.01,
+                                                     "notices": ["The plan did not hold up: no brief"]}])
+        self.assertEqual((got["status"], got["plan"]), ("failed", ""))
+        self.assertEqual(got["why"], "No plan was drafted. The plan did not hold up: no brief. @cmo replied: answer")
+        self.assertEqual(got["cost"], 0.01)
+
+    def test_single_arm_asks_for_the_bots_own_answer(self):
+        lead = next(c for c in compare.load() if "lead" in c)
+        self.assertEqual(compare.alone(lead), f"@{lead['lead']} {lead['brief']}\n\n{compare.OWN_ANSWER}")
+        wf = next(c for c in compare.load() if "workflow" in c)
+        step = compare._one_step(wf["workflow"]).steps[0]
+        self.assertEqual(compare.alone(wf), f"@{step.bot} /{step.skill} {wf['brief']}")
+        from dashboard import workflow_turns
+        self.assertIn("asks for your own answer", workflow_turns.PLAN_RULE)
+        self.assertIn("The last step hands back the whole result the owner asked for", workflow_turns.PLAN_RULE)
+        self.assertIn("even when one bot could do the work", workflow_turns.PLAN_ASKED)
+        self.assertIn("unless the owner asks for a plan", workflow_turns.PLAN_RULE)
+
+    def test_single_arm_that_drafts_a_plan_fails(self):
+        events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 1}]
+        with mock.patch.object(compare, "_thread", return_value=[{"bot": "cmo", "content": "why", "cost": 0.01}]):
+            got = compare._arm(lambda p: events, {"messages": []}, "cmo", False)
+        self.assertEqual((got["status"], got["why"], got["plan"]), ("failed", compare.DRAFTED_INSTEAD, ""))
+
+    def test_fixture_switches_the_lead_on(self):
+        from core import bots
+        case = {"id": "c", "lead": "cto", "brief": "b", "intake": "# Acme\n"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("index.build"):
+            compare._fixture(Path(tmp), case)
+            self.assertTrue(bots.team(Path(tmp), compare.WS).bots["cto"].active)
+
+    def test_judge_case_lead_and_plan_pairs(self):
+        lead = next(c for c in compare.load() if "lead" in c)
+        arms = {a: {"plan": f"{a} plan", "cost": 0.1} for a in ("plan", "single")}
+
+        def judge(prompt):  # prefers the drafted plan, then the workflow
+            best = next(t for t in ("plan plan", "workflow plan", "single plan") if t in prompt)
+            first = prompt.index("Plan A:") < prompt.index(best) < prompt.index("Plan B:")
+            return json.dumps({"A": dict(SCORES, risks=5) if first else SCORES,
+                               "B": SCORES if first else dict(SCORES, risks=5),
+                               "better": "A" if first else "B", "why": "w"}), 0.01
+        got = compare.judge_case(lead, arms, judge)
+        self.assertEqual((got["better"], got["lead"], got["workflow"]), ("plan", lead["lead"], None))
+        self.assertEqual(got["pairs"]["plan:single"]["scores"], {"plan": 22.0, "single": 20.0})
+        wf = next(c for c in compare.load() if "workflow" in c)
+        arms = {a: {"plan": f"{a} plan", "cost": 0.1} for a in ("workflow", "single", "baseline", "plan")}
+        got = compare.judge_case(wf, arms, judge, with_plan=True)
+        self.assertEqual(sorted(got["pairs"]), ["baseline", "plan:single", "plan:workflow", "single"])
+        self.assertEqual(got["pairs"]["plan:workflow"]["better"], "plan")
+
+    def test_summary_lists_plan_pairs(self):
+        def res(better, scores):
+            return {"id": "c", "lead": "cmo", "workflow": None, "better": better, "scores": scores, "why": "",
+                    "arms": {"plan": {"cost": 0.4}, "single": {"cost": 0.1}}, "judge_cost": 0.02,
+                    "pairs": {"plan:single": {"better": better, "scores": scores}}}
+        text = compare.summary([res("plan", {"plan": 22, "single": 20}), res("single", {"plan": 18, "single": 20})])
+        self.assertIn("plan vs single: plan better in 1/2, single better in 1. Mean score 20.0 vs 20.0/25. "
+                      "Cost: plan $0.8000, single $0.2000 (4.0x).", text)
+        self.assertNotIn("Workflow better", text)
+
+    def test_spend_prompt_names_the_plan_arm(self):
+        asked = []
+        with mock.patch("builtins.input", side_effect=lambda q: asked.append(q) or "n"), \
+                mock.patch.object(compare.subprocess, "run") as run, contextlib.redirect_stdout(io.StringIO()):
+            compare.main(["--plan", "--case", "acme-soft-launch"])
+            compare.main(["--case", "acme-soft-launch"])
+        run.assert_not_called()
+        self.assertIn("drafted plan", asked[0])
+        self.assertNotIn("drafted plan", asked[1])
+
+    def test_turn_outcome_reports_a_plan(self):
+        good = ("Needs two areas.\nPLAN: Pricing change\nbrief: New price for acme.\n"
+                "1. bot: cmo | output: rival prices\n2. bot: cos | output: rollout")
+        case = {"id": "x", "msg": "@cmo change our price", "reply": good, "expect": {"plan": True}}
+        self.assertEqual(turns.check(case, turns.run(case)), [])
+        case = {"id": "x", "msg": "@cmo a tagline", "reply": "Acme: get paid.", "expect": {"plan": False}}
+        self.assertEqual(turns.check(case, turns.run(case)), [])
+
+    def test_live_cases_expect_no_unprompted_plan(self):
+        no_plan = [c for c in json.loads(live.CASES.read_text()) if (c.get("expect") or {}).get("plan") is False]
+        self.assertEqual(len(no_plan), 3)
+        self.assertEqual(sorted(c["msg"].split()[0] for c in no_plan), ["@cmo", "@gtm", "@research"])
+
+
 class Cli(unittest.TestCase):
+    def test_usage_names_plan_flag(self):
+        from evals import __main__ as entry
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(entry.main(["--bogus"]), 2)
+        self.assertIn("--compare [--plan]", err.getvalue())
+
     def test_live_flags_need_live(self):
         args = leobot.build_parser().parse_args(["eval", "--engine", "claude-code"])
         self.assertEqual(leobot.cmd_eval(args), 2)
@@ -453,8 +674,13 @@ class Cli(unittest.TestCase):
         self.assertEqual(cmd[1:4], ["-m", "evals", "--compare"])
         self.assertEqual(Path(cmd[cmd.index("--cases-file") + 1]), Path("x.json").resolve())
         self.assertEqual(cmd[-1], "--yes")
+        args = leobot.build_parser().parse_args(["eval", "--compare", "--plan", "--yes"])
+        with mock.patch.object(leobot.subprocess, "call", return_value=0) as call:
+            self.assertEqual(leobot.cmd_eval(args), 0)
+        self.assertEqual(call.call_args[0][0][3:5], ["--compare", "--plan"])
         with contextlib.redirect_stderr(io.StringIO()):
             for argv in (["eval", "--live", "--compare"], ["eval", "--cases-file", "x.json"],
+                         ["eval", "--plan"], ["eval", "--live", "--plan"],
                          ["eval", "--compare", "--engine", "all"]):
                 self.assertEqual(leobot.cmd_eval(leobot.build_parser().parse_args(argv)), 2)
 

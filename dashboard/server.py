@@ -55,7 +55,7 @@ from core import own_checks  # noqa: E402
 from core import action_log, approvals, destinations, halt, jobs, skill_loads  # noqa: E402
 from core import avatars, canvases  # noqa: E402
 from core import chain  # noqa: E402
-from core import workflows  # noqa: E402
+from core import plans, workflows  # noqa: E402
 from core import loop_templates  # noqa: E402
 from core import canvas_store  # noqa: E402
 from core import app_rules, browser, browser_engine, composio, integrations, people, ws_logos  # noqa: E402
@@ -1202,7 +1202,12 @@ def _skills_index():
         out.append({"name": fm.get("name", d.name),
                     "description": fm.get("description", ""),
                     "kind": fm.get("kind", "skill").strip().lower() or "skill"})
-    return out
+    shipped = {s["name"] for s in out}
+    for name in workflows.names():  # templates saved from a plan, in the data folder
+        wf = workflows.load(name)
+        if name not in shipped and wf:
+            out.append({"name": name, "description": wf.description, "kind": "workflow"})
+    return sorted(out, key=lambda s: s["name"])
 
 
 def _someone_elses_notes(rec):
@@ -2041,7 +2046,8 @@ def _job_notepad(job):
 
 
 JOB_OFFER = ("\n\nTo suggest that the owner start a workflow ({names}; nothing else is one), end with one "
-             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself.")
+             "line `START: /<workflow> <brief>`: the owner gets a Start button; nothing starts by itself. "
+             "You may instead end with a PLAN block (see Plans): it shows as a card the owner approves later.")
 JOB_STOP = ("\n\n## When this loop stops\nStop condition (set when the job was made): {stop}\n"
             "When it holds, end your reply with one line `LOOP DONE: <why>`: the job turns itself off "
             "and the owner sees why. A quiet run (nothing new, nothing to do) is not the stop condition: "
@@ -4087,7 +4093,9 @@ class Handler(BaseHTTPRequestHandler):
             room = (rooms.get_room(str(body.get("room_id") or ""), team, ROOT)
                     or rooms.get_room(f"{ws}/general", team, ROOT))
             shared = viewer.get("kind") != "owner" or _shared_room(ws, room)
-            got = workflow_turns.prepare(body, viewer, ws, team, room, shared, ROOT)
+            general_shared = (body.get("workflow") == "plan"
+                              and _shared_room(ws, rooms.get_room(f"{ws}/general", team, ROOT)))
+            got = workflow_turns.prepare(body, viewer, ws, team, room, shared, ROOT, general_shared=general_shared)
             if isinstance(got, str):
                 return self._sse_message(got)
             body, wf_ctx = got
@@ -4095,11 +4103,26 @@ class Handler(BaseHTTPRequestHandler):
                 viewer = {**viewer, "workflow": wf_ctx}
         chat_id = body.get("chat_id") if isinstance(body.get("chat_id"), str) else None
         if not _mark_busy(chat_id):
+            workflow_turns.release(viewer.get("workflow"))  # an Approve that never ran stays open
             return self._send(409, {"error": BUSY_MSG})
         try:
             return self._ask_turn(body, viewer)
         finally:
             _unmark_busy(chat_id)
+            workflow_turns.release(viewer.get("workflow"))  # refused or failed before its step began
+
+    def _plan_post(self, path, body):
+        """Reject or Save as template on a plan card: owner only (an invited person never reaches here)."""
+        if not self._authorized(require_origin=True):
+            return self._send(403, {"error": "forbidden"})
+        chat, msg = body.get("chat"), body.get("msg")
+        rec = chat_store.load(chat) if isinstance(chat, str) and skill_loads._CHAT_RE.match(chat) else None
+        ws = _chat_workspace(rec) if rec else None
+        if path.endswith("/reject"):
+            got = workflow_turns.reject_plan(ROOT, ws, chat, msg)
+        else:
+            got = workflow_turns.save_plan(ROOT, ws, chat, msg, body.get("name"))
+        return self._send(200, got) if isinstance(got, dict) else self._send(400, {"error": got})
 
     def _sse_message(self, text):
         """A zero-model reply: one line in the thread, no model turn spent."""
@@ -4117,6 +4140,14 @@ class Handler(BaseHTTPRequestHandler):
         if not messages or messages[-1].get("role") != "user":
             return self._send(400, {"error": "no user message"})
         user_msg = messages[-1]["content"]
+        # Plans (dashboard/workflow_turns.py): an owner's chat turn, never a workflow step or an
+        # invited person's turn, may answer with a PLAN block; `/plan <request>` asks for one.
+        plan_turn = viewer.get("kind") in ("owner", "job") and not viewer.get("workflow")
+        plan_asked = False
+        if plan_turn and viewer.get("kind") == "owner" and isinstance(user_msg, str):
+            user_msg, plan_asked = workflow_turns.slash_plan(user_msg)
+            if plan_asked and not re.sub(r"@[\w-]+", "", user_msg).strip():
+                return self._sse_message(workflow_turns.PLAN_EMPTY)
 
         # Per-turn routing: explicit @bot or /skill tags; untagged turns load skills themselves.
         context = (body.get("context") or "").strip()
@@ -4197,6 +4228,10 @@ class Handler(BaseHTTPRequestHandler):
         if (cb and cb.active and (members is None or cb.id in members) and (room or {}).get("kind") != "dm"
                 and not _explicit_skill(user_msg) and not team.mentioned(user_msg)):
             route = (cb.id, *route[1:])
+        # /plan: the tagged lead drafts with no skill loaded; a skill's own instructions would
+        # crowd out the plan block, and its owner never takes the turn over.
+        if plan_asked:
+            route = (team.mentioned(user_msg) or route[0], None, False, None)
         # A workflow step goes to the bot its template names, whatever the label's wording matches.
         wf_ctx = viewer.get("workflow")
         if wf_ctx and wf_ctx.get("route"):
@@ -4296,6 +4331,8 @@ class Handler(BaseHTTPRequestHandler):
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
             model, reason = _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                editing=bool(may_edit and edit_dirs))
+            if plan_asked and route_[0] == route[0]:  # /plan: drafting the plan is the hard part
+                model, reason = chat_session.ESCALATED_MODEL, "plan"
             # The owner pinned this bot's model (Team, Details; Settings, Bots): no tiering.
             pinned = engine_config.model(ws, bot_id, ROOT)
             if pinned:
@@ -4403,6 +4440,8 @@ class Handler(BaseHTTPRequestHandler):
                           or bool(job and jobs.notes_outside(jobs.get(ROOT, job["id"]) or job)),
                           who={"ws": ws, "chat": chat_id,
                                "person": (person or {}).get("id"), "job": (job or {}).get("id")})
+        if wf_ctx and wf_ctx.get("outside"):  # a plan drafted after outside content: its run carries it
+            turn.saw_outside()
         files_scan = provenance.scan(ROOT, ws)  # what this request changes is labeled if it is tainted
         st = _turn_setup(route, caps=_lead_caps)
         if isinstance(st, str):
@@ -4421,8 +4460,13 @@ class Handler(BaseHTTPRequestHandler):
                 sess.pending_recap = chat_store.recap(saved_rec) or None
                 self.log_message("chat compact engine=%s context=%d", engine.id,
                                  compaction.last_context(saved_rec, engine.id))
+        if plan_turn:
+            context = "\n\n".join(x for x in (context, workflow_turns.plan_rule(team, plan_asked, members)) if x)
+        # /plan: the ask rides in the owner's own message too; the rule in the context alone let
+        # a bot answer the request itself.
+        asked_msg = f"{user_msg}\n\n{workflow_turns.PLAN_ASK_LINE}" if plan_asked else user_msg
         text = compose_turn_prompt(
-            user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
+            user_msg=(_speaker_note(person, ws) + asked_msg) if person else asked_msg,
             context=context,
             skill=skill,
             session=sess,
@@ -5021,6 +5065,31 @@ class Handler(BaseHTTPRequestHandler):
                     reacts.extend((m["bot"], e) for e in got)
             if reacts:
                 emit({"reactions": [{"emoji": e, "bot": b} for b, e in dict.fromkeys(reacts)]})
+            # A PLAN block is cut from every reply; only the turn's own bot's first one, on a turn
+            # that is not a workflow step, becomes a card (or a notice when it does not hold up).
+            planned = False
+            for i, m in enumerate(msgs):
+                clean, block = plans.extract(m["content"])
+                if block is None:
+                    continue
+                m["content"] = clean
+                emit({"clean": clean, "msg": i})
+                if planned or not plan_turn or m["bot"] != bot_id or m.get("asked_by"):
+                    continue
+                planned = True
+                try:
+                    wf = plans.parse(block)
+                    bad = workflow_turns.plan_problems(wf, team, members)
+                except ValueError as e:
+                    bad = [str(e)]
+                if bad:
+                    note = workflow_turns.PLAN_NOTICE.format(why=bad[0])
+                    m.setdefault("notices", []).append(note)
+                    emit({"notice": note, "msg": i})
+                    continue
+                m["plan"] = {"title": wf.name, "brief": wf.description[:plans.BRIEF_MAX], "lines": list(wf.lines),
+                             "bot": bot_id, "status": "offered", "run_chat": None, "outside": bool(turn.outside)}
+                emit({"plan": m["plan"], "msg": i})
             if job:  # the job's own bot says its stop condition holds; a consulted teammate never ends it
                 for i, m in enumerate(msgs):
                     clean, why = _extract_loop_done(m["content"])
@@ -6122,6 +6191,8 @@ class Handler(BaseHTTPRequestHandler):
                 with os.fdopen(fd, "wb") as f:
                     f.write(data)
                 return self._send(200, {"path": fpath})
+            if path in ("/api/workflow/plan/reject", "/api/workflow/plan/save"):
+                return self._plan_post(path, body)
             if path == "/api/workflow/stop":  # the run ends where it is; the thread stays
                 got = workflow_turns.stop(ROOT, body.get("chat") if isinstance(body.get("chat"), str) else "")
                 return self._send(200, got) if got else self._send(404, {"error": "no workflow in this thread"})

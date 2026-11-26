@@ -16,7 +16,7 @@ def main(argv):
         return compare.main([a for a in argv if a != "--compare"])
     if argv:
         print("usage: python -m evals [--live [--engine ID] [--case ID ...] [--yes]]\n"
-              "       python -m evals --compare [--engine ID] [--case ID ...] [--cases-file PATH] [--yes]",
+              "       python -m evals --compare [--plan] [--engine ID] [--case ID ...] [--cases-file PATH] [--yes]",
               file=sys.stderr)
         return 2
     # Offline evals never touch the real home folder: a temp one, set before anything imports paths.

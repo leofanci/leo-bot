@@ -940,11 +940,16 @@ def cmd_eval(args) -> int:
     if args.cases_file and not args.compare:
         print("--cases-file goes with --compare.", file=sys.stderr)
         return 2
+    if args.plan and not args.compare:
+        print("--plan goes with --compare.", file=sys.stderr)
+        return 2
     if args.compare and args.engine == "all":
         print("--compare runs on one engine: name it, or leave --engine out for your default.", file=sys.stderr)
         return 2
     if args.live or args.compare:
         cmd.append("--live" if args.live else "--compare")
+        if args.plan:
+            cmd.append("--plan")
         if args.cases_file:
             cmd += ["--cases-file", str(Path(args.cases_file).resolve())]
         if args.engine:
@@ -1063,6 +1068,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--case", action="append", help="with --live: run only this case (repeatable)")
     p.add_argument("--compare", action="store_true",
                    help="run a workflow and its maker bot alone on the same cases, judged blind (spends)")
+    p.add_argument("--plan", action="store_true",
+                   help="with --compare: also judge a plan the lead drafts against the single bot and the workflow")
     p.add_argument("--cases-file", help="with --compare: a cases JSON of your own (default: the shipped ones)")
     p.add_argument("--yes", action="store_true", help="with --live or --compare: do not ask before spending")
     return ap
