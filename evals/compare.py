@@ -38,6 +38,9 @@ SUBJECTS = ("workflow", "lead")  # exactly one per case
 OPTIONAL = {"baseline"}  # needs `workflow`
 ARMS = ("workflow", "single")
 RIVALS = ("single", "baseline")  # each judged against the workflow
+APPROVED = "Yes, approved."  # what the browser sends for Approve on a card
+OWN_ANSWER = "Answer this yourself in this reply, with no plan."
+DRAFTED_INSTEAD = "Drafted a plan instead of answering."
 CRITERIA = ("specific", "grounded", "risks", "doable", "consistent")
 KEEP_RUNS = 20
 ROOM = "acme/general"
@@ -139,9 +142,12 @@ def arm_order(case, with_plan=False):
 
 
 def drive(post, first, limit=12):
-    """Send `first`, then the browser's next ticks while the run says next, at most `limit`.
-    `post(payload)` returns the turn's events. Returns {"chat", "status", "why", "ticks"}."""
-    events, ticks, chat, status, why = post(first), 0, first.get("chat_id"), "failed", ""
+    """Send `first`, then the browser's next ticks while the run says next, at most `limit`. A middle
+    step's save card is approved as the owner would (the run goes on); the last step's card ends it.
+    `post(payload)` returns the turn's events. Returns {"chat", "status", "why", "ticks"}, plus the
+    run's "step" and "total" when the server reports them."""
+    events, ticks, chat, status, why, at = post(first), 0, first.get("chat_id"), "failed", "", {}
+    base = {k: v for k, v in first.items() if k not in ("messages", "workflow", "plan_ref")}
     while True:
         chat = next((e["chat_id"] for e in events if isinstance(e.get("chat_id"), str)), chat)
         wf = next((e["workflow"] for e in reversed(events) if isinstance(e.get("workflow"), dict)), None)
@@ -150,13 +156,20 @@ def drive(post, first, limit=12):
             status = "failed"
             break
         chat, status, why = wf.get("chat") or chat, wf.get("status"), wf.get("why") or ""
-        if not wf.get("next") or ticks >= limit:
+        at = {k: wf[k] for k in ("step", "total") if k in wf}
+        middle_card = (wf.get("phase") == "approve" and status == "paused"
+                       and isinstance(wf.get("step"), int) and isinstance(wf.get("total"), int)
+                       and wf["step"] < wf["total"])
+        if not (wf.get("next") or middle_card) or ticks >= limit:
             break
         ticks += 1
-        events = post({**{k: v for k, v in first.items() if k != "messages"},
-                       "messages": [{"role": "user", "content": wf.get("label") or "Continue"}],
-                       "chat_id": chat, "workflow": "next"})
-    return {"chat": chat, "status": status, "why": why, "ticks": ticks}
+        if middle_card:
+            events = post({**base, "messages": [{"role": "user", "content": APPROVED}], "chat_id": chat,
+                           "approval": "approved"})
+        else:
+            events = post({**base, "messages": [{"role": "user", "content": wf.get("label") or "Continue"}],
+                           "chat_id": chat, "workflow": "next"})
+    return {"chat": chat, "status": status, "why": why, "ticks": ticks, **at}
 
 
 def order_for(case_id):
@@ -387,6 +400,9 @@ def _fixture(root, case):
     (proj / "strategy" / "intake.md").write_text(case["intake"].strip() + "\n", encoding="utf-8")
     with contextlib.redirect_stdout(io.StringIO()):
         index.build(root)
+    if case.get("lead"):  # a lead off by default (cto needs a linked folder) is switched on, as the owner would
+        from core import bots
+        bots.set_active(case["lead"], True, root, WS)
 
 
 def _thread(chat):
@@ -396,12 +412,13 @@ def _thread(chat):
 
 
 def workflow_plan(messages, maker):
-    """The maker's last reply before its save turn: the plan as the checker last saw it."""
+    """The maker's last reply before its save turn: the plan as the checker last saw it. A reply
+    to an approved card (a save) is never the plan."""
     label, plan = "", ""
     for m in messages:
         if m.get("role") == "user":
             label = m.get("content") or ""
-        elif m.get("bot") == maker and not label.startswith(f"@{maker} Save step"):
+        elif m.get("bot") == maker and not label.startswith(f"@{maker} Save step") and label != APPROVED:
             plan = m.get("content") or plan
     return plan
 
@@ -417,20 +434,35 @@ def plan_arm(post, case, lead, thread=None):
     at = next((i for i in range(len(drafted) - 1, -1, -1) if isinstance(drafted[i].get("plan"), dict)), None)
     cost = sum(m.get("cost") or 0 for m in drafted)
     if at is None or not any(isinstance(e.get("plan"), dict) for e in events):
-        return {"chat": src, "status": "failed", "why": "No plan was drafted.", "ticks": 0, "plan": "",
+        said = next((m for m in reversed(drafted) if m.get("bot") == lead), {})
+        notes = [str(n).rstrip(".") + "." for m in drafted for n in m.get("notices") or ()]
+        reply = " ".join((said.get("content") or "").split())[:300]
+        why = " ".join(["No plan was drafted.", *notes, f"@{lead} replied: {reply}" if reply else ""]).strip()
+        return {"chat": src, "status": "failed", "why": why, "ticks": 0, "plan": "",
                 "cost": round(cost, 6), "turns": sum(1 for m in drafted if m.get("role") != "user"), "steps": 0,
                 "seconds": round(time.time() - started, 1)}
     stored = drafted[at]["plan"]
     lines = [x for x in stored.get("lines") or [] if isinstance(x, str)]
-    maker = next((f.split(":", 1)[1].strip().lstrip("@").lower() for f in (lines[-1] if lines else "").split("|")
-                  if f.strip().lower().startswith("bot:")), lead)
     got = drive(post, {"messages": [{"role": "user", "content": f"Approved plan: {stored.get('title') or ''}"}],
                        "room_id": ROOM, "chat_id": src, "workflow": "plan", "plan_ref": {"chat": src, "msg": at}})
+    # The step the run reached (its last when it finished): a run stopped early is judged on what it made.
+    reached = min(max(int(got.get("step") or len(lines) or 1), 1), max(len(lines), 1))
+    line = lines[reached - 1] if lines else ""
+    maker = next((f.split(":", 1)[1].strip().lstrip("@").lower() for f in line.split("|")
+                  if f.strip().lower().startswith("bot:")), lead)
     msgs = [m for c in dict.fromkeys(c for c in (src, got["chat"]) if c) for m in thread(c)]
-    return {**got, "plan": workflow_plan(thread(got["chat"]), maker),
+    return {**got, "plan": workflow_plan(thread(got["chat"]), maker), "reached": f"{reached}/{len(lines)}",
             "cost": round(sum(m.get("cost") or 0 for m in msgs), 6),
             "turns": sum(1 for m in msgs if m.get("role") != "user"), "steps": len(lines),
             "seconds": round(time.time() - started, 1)}
+
+
+def alone(case):
+    """The single arm's message: the workflow's maker with its skill, or the lead asked for its own answer."""
+    if "workflow" in case:
+        step = _one_step(case["workflow"]).steps[0]
+        return f"@{step.bot} /{step.skill} {case['brief']}"
+    return f"@{case['lead']} {case['brief']}\n\n{OWN_ANSWER}"
 
 
 def _arm(post, first, maker, workflow):
@@ -441,9 +473,11 @@ def _arm(post, first, maker, workflow):
         events = post(first)
         chat = next((e["chat_id"] for e in events if isinstance(e.get("chat_id"), str)), None)
         err = next((str(e["error"]) for e in events if e.get("error")), "")
+        if not err and any(isinstance(e.get("plan"), dict) for e in events):
+            err = DRAFTED_INSTEAD
         got = {"chat": chat, "status": "failed" if err or not chat else "done", "why": err, "ticks": 0}
     msgs = _thread(got["chat"])
-    plan = workflow_plan(msgs, maker) if workflow else next(
+    plan = workflow_plan(msgs, maker) if workflow else "" if got["why"] == DRAFTED_INSTEAD else next(
         (m.get("content") or "" for m in reversed(msgs) if m.get("bot") == maker), "")
     return {**got, "plan": plan, "cost": round(sum(m.get("cost") or 0 for m in msgs), 6),
             "turns": sum(1 for m in msgs if m.get("role") != "user"),
@@ -485,13 +519,10 @@ def _child(args):
                 maker = _one_step(name).steps[0].bot
                 return lambda: _arm(client.post, {"messages": [{"role": "user", "content": f"/{name} {case['brief']}"}],
                                                   "room_id": ROOM}, maker, True)
-            if "workflow" in case:  # the single bot is the workflow's maker with its skill
-                step = _one_step(case["workflow"]).steps[0]
-                lead, alone = step.bot, f"@{step.bot} /{step.skill} {case['brief']}"
-            else:
-                lead, alone = case["lead"], f"@{case['lead']} {case['brief']}"
-            runs = {"single": lambda lead=lead, alone=alone: _arm(
-                client.post, {"messages": [{"role": "user", "content": alone}], "room_id": ROOM}, lead, False),
+            # the single bot: the workflow's maker with its skill, or the case's lead
+            lead = _one_step(case["workflow"]).steps[0].bot if "workflow" in case else case["lead"]
+            runs = {"single": lambda lead=lead, case=case: _arm(
+                client.post, {"messages": [{"role": "user", "content": alone(case)}], "room_id": ROOM}, lead, False),
                 "plan": lambda case=case, lead=lead: plan_arm(client.post, case, lead)}
             if "workflow" in case:
                 runs["workflow"] = flow(case["workflow"])

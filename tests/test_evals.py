@@ -258,6 +258,26 @@ class Compare(unittest.TestCase):
         got = compare.drive(lambda p: [{"error": "internal error"}], {"messages": []})
         self.assertEqual((got["status"], got["ticks"]), ("failed", 0))
 
+    def test_drive_approves_a_step_card_while_steps_remain(self):
+        # The owner approves a middle step's save card and the run goes on; the last step's card ends it.
+        sent = []
+        wait = {"next": False, "status": "paused", "phase": "approve", "label": "", "why": "Waiting for your approval."}
+        replies = [[{"chat_id": "c1"}, {"workflow": dict(wait, chat="c1", step=1, total=2)}],
+                   [{"workflow": {"chat": "c1", "next": True, "status": "running", "phase": "stage",
+                                  "step": 2, "total": 2, "label": "@gtm Step 2", "why": ""}}],
+                   [{"workflow": dict(wait, chat="c1", step=2, total=2)}]]
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        got = compare.drive(post, {"messages": [{"role": "user", "content": "/x go"}], "room_id": "acme/general"})
+        self.assertEqual(got, {"chat": "c1", "status": "paused", "why": "Waiting for your approval.", "ticks": 2,
+                               "step": 2, "total": 2})
+        self.assertEqual((sent[1]["approval"], sent[1]["chat_id"], sent[1]["room_id"]), ("approved", "c1", "acme/general"))
+        self.assertNotIn("workflow", sent[1])
+        self.assertEqual(sent[1]["messages"][0]["content"], compare.APPROVED)
+        self.assertEqual(sent[2]["workflow"], "next")
+
     def test_judge_prompt_is_blind_and_order_varies(self):
         case = compare.load()[0]
         plans = {"workflow": "Goal: 40 signups by 2027-01-15. @research said the segment is small.",
@@ -508,12 +528,58 @@ class ComparePlans(unittest.TestCase):
         self.assertEqual(sent[2]["workflow"], "next")
         self.assertEqual((got["status"], got["plan"], got["cost"], got["steps"]), ("done", "The final plan.", 0.17, 2))
 
+    def test_plan_arm_judges_the_step_its_run_reached(self):
+        # Stopped weak at step 1 of 2: the judge sees step 1's output, not an empty last step;
+        # a reply to an approved card is never the output.
+        threads = {"c1": [{"role": "user", "content": "@product /plan x"},
+                          {"role": "assistant", "bot": "product", "content": "why", "cost": 0.02,
+                           "plan": {"title": "T", "lines": ["bot: research | output: x", "bot: gtm | output: the plan"]}},
+                          {"role": "user", "content": "@research Step 1 of 2 of T: x"},
+                          {"role": "assistant", "bot": "research", "content": "prices", "cost": 0.05},
+                          {"role": "user", "content": compare.APPROVED},
+                          {"role": "assistant", "bot": "research", "content": "Saved.", "cost": 0.01}]}
+        replies = [self.plan_events(),
+                   [{"workflow": {"chat": "c1", "next": False, "status": "paused", "phase": "stage", "step": 1,
+                                  "total": 2, "label": "", "why": "Step 1 is still weak: no data."}}]]
+        sent = []
+
+        def post(payload):
+            sent.append(payload)
+            return replies[len(sent) - 1]
+        case = {"id": "c", "lead": "product", "brief": "b", "intake": "x"}
+        got = compare.plan_arm(post, case, "product", thread=lambda chat: threads.get(chat, []))
+        self.assertEqual((got["plan"], got["reached"]), ("prices", "1/2"))
+
     def test_plan_arm_with_no_plan(self):
         got = compare.plan_arm(lambda p: [{"chat_id": "c1"}, {"delta": "answer"}],
                                {"id": "c", "lead": "cmo", "brief": "b", "intake": "x"}, "cmo",
-                               thread=lambda chat: [{"role": "assistant", "bot": "cmo", "content": "answer", "cost": 0.01}])
-        self.assertEqual((got["status"], got["why"], got["plan"]), ("failed", "No plan was drafted.", ""))
+                               thread=lambda chat: [{"role": "assistant", "bot": "cmo", "content": "answer", "cost": 0.01,
+                                                     "notices": ["The plan did not hold up: no brief"]}])
+        self.assertEqual((got["status"], got["plan"]), ("failed", ""))
+        self.assertEqual(got["why"], "No plan was drafted. The plan did not hold up: no brief. @cmo replied: answer")
         self.assertEqual(got["cost"], 0.01)
+
+    def test_single_arm_asks_for_the_bots_own_answer(self):
+        lead = next(c for c in compare.load() if "lead" in c)
+        self.assertEqual(compare.alone(lead), f"@{lead['lead']} {lead['brief']}\n\n{compare.OWN_ANSWER}")
+        wf = next(c for c in compare.load() if "workflow" in c)
+        step = compare._one_step(wf["workflow"]).steps[0]
+        self.assertEqual(compare.alone(wf), f"@{step.bot} /{step.skill} {wf['brief']}")
+        from dashboard import workflow_turns
+        self.assertIn("asks for your own answer", workflow_turns.PLAN_RULE)
+
+    def test_single_arm_that_drafts_a_plan_fails(self):
+        events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 1}]
+        with mock.patch.object(compare, "_thread", return_value=[{"bot": "cmo", "content": "why", "cost": 0.01}]):
+            got = compare._arm(lambda p: events, {"messages": []}, "cmo", False)
+        self.assertEqual((got["status"], got["why"], got["plan"]), ("failed", compare.DRAFTED_INSTEAD, ""))
+
+    def test_fixture_switches_the_lead_on(self):
+        from core import bots
+        case = {"id": "c", "lead": "cto", "brief": "b", "intake": "# Acme\n"}
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("index.build"):
+            compare._fixture(Path(tmp), case)
+            self.assertTrue(bots.team(Path(tmp), compare.WS).bots["cto"].active)
 
     def test_judge_case_lead_and_plan_pairs(self):
         lead = next(c for c in compare.load() if "lead" in c)
