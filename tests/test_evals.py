@@ -569,6 +569,13 @@ class ComparePlans(unittest.TestCase):
 
 
 class Cli(unittest.TestCase):
+    def test_usage_names_plan_flag(self):
+        from evals import __main__ as entry
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(entry.main(["--bogus"]), 2)
+        self.assertIn("--compare [--plan]", err.getvalue())
+
     def test_live_flags_need_live(self):
         args = leobot.build_parser().parse_args(["eval", "--engine", "claude-code"])
         self.assertEqual(leobot.cmd_eval(args), 2)
@@ -587,8 +594,13 @@ class Cli(unittest.TestCase):
         self.assertEqual(cmd[1:4], ["-m", "evals", "--compare"])
         self.assertEqual(Path(cmd[cmd.index("--cases-file") + 1]), Path("x.json").resolve())
         self.assertEqual(cmd[-1], "--yes")
+        args = leobot.build_parser().parse_args(["eval", "--compare", "--plan", "--yes"])
+        with mock.patch.object(leobot.subprocess, "call", return_value=0) as call:
+            self.assertEqual(leobot.cmd_eval(args), 0)
+        self.assertEqual(call.call_args[0][0][3:5], ["--compare", "--plan"])
         with contextlib.redirect_stderr(io.StringIO()):
             for argv in (["eval", "--live", "--compare"], ["eval", "--cases-file", "x.json"],
+                         ["eval", "--plan"], ["eval", "--live", "--plan"],
                          ["eval", "--compare", "--engine", "all"]):
                 self.assertEqual(leobot.cmd_eval(leobot.build_parser().parse_args(argv)), 2)
 
