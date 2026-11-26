@@ -827,6 +827,14 @@ class WorkflowTurns(unittest.TestCase):
         out, _ = self.ask("@gtm write and build a launch plan for the new tier", ["ok"])
         self.assertIsNotNone(next(e["bot"] for e in events(out) if "bot" in e)["skill"])  # without /plan it does
 
+    def test_slash_plan_takes_the_stronger_model(self):
+        # Drafting a plan is the hard part of the request: never the cheap no-skill tier.
+        with mock.patch.object(server.Handler, "log_message") as log:
+            self.ask("@gtm /plan what should we do next quarter", ["ok"])
+        line = next(c.args for c in log.call_args_list if c.args and str(c.args[0]).startswith("chat turn"))
+        fields = dict(zip((t.split("=")[0] for t in line[0].split()[2:]), line[1:]))
+        self.assertEqual(fields["model"], server.chat_session.ESCALATED_MODEL)
+
     def test_slash_plan_empty(self):
         out, _ = self.ask("/plan", ["ok"])
         self.assertIn("Say what the plan is for: /plan <request>.", out)

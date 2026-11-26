@@ -4331,6 +4331,8 @@ class Handler(BaseHTTPRequestHandler):
             with_web = web_asked or _needs_web(user_msg, skill, private=not locked)
             model, reason = _pick_model_reason(skill, web_asked, user_msg, sess, explicit=bool(explicit),
                                                editing=bool(may_edit and edit_dirs))
+            if plan_asked and route_[0] == route[0]:  # /plan: drafting the plan is the hard part
+                model, reason = chat_session.ESCALATED_MODEL, "plan"
             # The owner pinned this bot's model (Team, Details; Settings, Bots): no tiering.
             pinned = engine_config.model(ws, bot_id, ROOT)
             if pinned:
