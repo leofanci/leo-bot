@@ -196,9 +196,9 @@ def save_template(wf, name):
         return "Use lowercase letters, digits and dashes."
     if name in RESERVED:
         return f"/{name} is reserved."
-    f = _inside(SAVED_DIR, f"{name}.md")
-    if f is None or name in skill_loads.names() or name in names() or f.exists() \
-            or (skill_loads.SKILLS_DIR / name).exists():
+    f, shipped = _inside(SAVED_DIR, f"{name}.md"), _inside(skill_loads.SKILLS_DIR, name)
+    if f is None or shipped is None or name in skill_loads.names() or name in names() or f.exists() \
+            or shipped.exists():
         return f"/{name} already exists."
     desc = re.sub(r"-{3,}", "-", " ".join(str(wf.description or wf.name).split()))  # never a frontmatter fence
     text = (f"---\nname: {name}\nkind: workflow\ndescription: {desc}\n---\n\n## Steps\n"

@@ -3,8 +3,9 @@ the pure step state machine the server drives."""
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from core import bots, paths, workflows
+from core import bots, paths, skill_loads, workflows
 
 
 def wf_text(steps, head="---\nname: demo-flow\nkind: workflow\ndescription: Workflow. Demo.\n---\n"):
@@ -578,6 +579,14 @@ class PlanRunsAndSavedTemplates(unittest.TestCase):
         self.assertIn("lowercase", workflows.save_template(wf, "../x"))
         self.assertIsNone(workflows.save_template(wf, "vendor-pick"))
         self.assertEqual(workflows.save_template(wf, "vendor-pick"), "/vendor-pick already exists.")
+
+    def test_save_refuses_a_bare_shipped_folder(self):
+        from core import plans
+        wf = plans.parse("PLAN: T\nbrief: b\n1. bot: cto | output: x")
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "half-made").mkdir()  # a skills/ folder with no SKILL.md yet
+            with mock.patch.object(skill_loads, "SKILLS_DIR", Path(tmp)):
+                self.assertEqual(workflows.save_template(wf, "half-made"), "/half-made already exists.")
 
     def test_shipped_wins_and_broken_saved_skipped(self):
         self.saved.mkdir(parents=True)
