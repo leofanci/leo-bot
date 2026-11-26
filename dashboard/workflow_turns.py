@@ -42,6 +42,7 @@ PLAN_RULE = (
     "hands back the whole result the owner asked for, built on the earlier steps. At most "
     f"{workflows.MAX_STEPS} steps.\n"
     "Bots you may name: {bots}.")
+PLAN_ASK_LINE = "(I ask for a plan: reply with one PLAN block, not the work itself.)"
 PLAN_ASKED = ("The owner asked for a plan: answer with one PLAN block, even when one bot could do the work "
               "(a one-step plan is fine). Skills each bot may use in a step:\n{skills}")
 

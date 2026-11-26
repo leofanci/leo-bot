@@ -827,6 +827,15 @@ class WorkflowTurns(unittest.TestCase):
         out, _ = self.ask("@gtm write and build a launch plan for the new tier", ["ok"])
         self.assertIsNotNone(next(e["bot"] for e in events(out) if "bot" in e)["skill"])  # without /plan it does
 
+    def test_slash_plan_asks_in_the_owner_message(self):
+        # The request itself carries the ask: a rule in the context alone lets the bot do the work.
+        self.ask("@product /plan should we raise the price", ["ok"])
+        text = self.runs[-1]["text"]
+        tail = text[text.index("should we raise the price"):]
+        self.assertIn(workflow_turns.PLAN_ASK_LINE, tail)
+        self.ask("@product should we raise the price", ["ok"])
+        self.assertNotIn(workflow_turns.PLAN_ASK_LINE, self.runs[-1]["text"])
+
     def test_slash_plan_takes_the_stronger_model(self):
         # Drafting a plan is the hard part of the request: never the cheap no-skill tier.
         with mock.patch.object(server.Handler, "log_message") as log:

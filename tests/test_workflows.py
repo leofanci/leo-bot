@@ -85,6 +85,12 @@ class Templates(unittest.TestCase):
         self.assertEqual(wf.lines, (TWO[0][3:], TWO[1][3:]))
         self.assertFalse(wf.plan)
 
+    def test_checker_none_means_no_checker(self):
+        # A drafted plan writes `checker: none` for a step nobody checks, never a bot called none.
+        for word in ("none", "-", "no", "n/a"):
+            steps = workflows.parse_lines([f"bot: gtm | output: x | checker: {word}"], need_skill=False)
+            self.assertIsNone(steps[0].checker, word)
+
     def test_parse_lines_optional_skill(self):
         steps = workflows.parse_lines(["bot: gtm | output: x"], need_skill=False)
         self.assertEqual(steps[0].skill, "")

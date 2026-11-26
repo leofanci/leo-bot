@@ -82,6 +82,9 @@ def _is_workflow_file(name):
     return (text, need_skill) if str(fm.get("kind", "")).strip().lower() == "workflow" else None
 
 
+NO_CHECKER = ("none", "no", "-", "n/a")
+
+
 def _parse_step(n, line, need_skill=True):
     fields = {}
     for part in line.split("|"):
@@ -105,6 +108,8 @@ def _parse_step(n, line, need_skill=True):
     if skill and loop_templates.load(skill):
         raise ValueError(f"step {n}: {skill} is a loop, not a skill")
     checker = (fields.get("checker") or "").lower().lstrip("@") or None
+    if checker in NO_CHECKER:  # a drafted plan's way of saying nobody checks this step
+        checker = None
     if checker == bot:
         raise ValueError(f"step {n}: the checker must be a different bot from the maker")
     consult = tuple(c.strip().lower().lstrip("@") for c in fields.get("consult", "").split(","))

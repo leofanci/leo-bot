@@ -4462,8 +4462,11 @@ class Handler(BaseHTTPRequestHandler):
                                  compaction.last_context(saved_rec, engine.id))
         if plan_turn:
             context = "\n\n".join(x for x in (context, workflow_turns.plan_rule(team, plan_asked, members)) if x)
+        # /plan: the ask rides in the owner's own message too; the rule in the context alone let
+        # a bot answer the request itself.
+        asked_msg = f"{user_msg}\n\n{workflow_turns.PLAN_ASK_LINE}" if plan_asked else user_msg
         text = compose_turn_prompt(
-            user_msg=(_speaker_note(person, ws) + user_msg) if person else user_msg,
+            user_msg=(_speaker_note(person, ws) + asked_msg) if person else asked_msg,
             context=context,
             skill=skill,
             session=sess,
