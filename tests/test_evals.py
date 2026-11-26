@@ -579,6 +579,8 @@ class ComparePlans(unittest.TestCase):
         from dashboard import workflow_turns
         self.assertIn("asks for your own answer", workflow_turns.PLAN_RULE)
         self.assertIn("The last step hands back the whole result the owner asked for", workflow_turns.PLAN_RULE)
+        self.assertIn("even when one bot could do the work", workflow_turns.PLAN_ASKED)
+        self.assertIn("unless the owner asks for a plan", workflow_turns.PLAN_RULE)
 
     def test_single_arm_that_drafts_a_plan_fails(self):
         events = [{"chat_id": "c1"}, {"plan": {"title": "T"}, "msg": 1}]

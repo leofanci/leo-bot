@@ -29,7 +29,8 @@ PLAN_RULE = (
     "## Plans\n"
     "When the owner asks for a plan, or the request needs the work of two or more teammates' areas, reply with "
     "a plan instead of doing the work: one line on why a plan fits, then the block below. A request one bot "
-    "can do well, even one that ends in a save to approve, gets your own answer and no plan, and so does a "
+    "can do well, even one that ends in a save to approve, gets your own answer and no plan unless the owner "
+    "asks for a plan, and so does a "
     "request where the owner asks for your own answer. The owner "
     "approves the plan on a card; each step then runs as its own turn.\n"
     "PLAN: <short title>\n"
@@ -41,7 +42,8 @@ PLAN_RULE = (
     "hands back the whole result the owner asked for, built on the earlier steps. At most "
     f"{workflows.MAX_STEPS} steps.\n"
     "Bots you may name: {bots}.")
-PLAN_ASKED = "The owner asked for a plan: answer with one PLAN block. Skills each bot may use in a step:\n{skills}"
+PLAN_ASKED = ("The owner asked for a plan: answer with one PLAN block, even when one bot could do the work "
+              "(a one-step plan is fine). Skills each bot may use in a step:\n{skills}")
 
 
 def plan_problems(wf, team, members=None):
